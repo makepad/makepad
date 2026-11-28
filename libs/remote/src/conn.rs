@@ -168,10 +168,12 @@ struct Chan {
     q: VecDeque<Queued>,
     off: usize,
     queued: usize,
-    tx: Sender<(Event, bool)>,
+    tx: Sender<(Event, usize)>,
     ungranted: usize,
     served: u64,
     reasm: Vec<u8>,
+    advanced: usize, // reassembly bytes already returned as credit
+    unread: usize, // complete DATA bytes still with the receiver
     max_message: usize,
     partial: bool,
     echo: bool,
@@ -192,6 +194,17 @@ enum Queued {
 }
 
 impl Chan {
+    /// Only borrow credit for the current record when the wire window is exhausted.
+    /// Once a window of complete records is waiting, its consumer must make room.
+    fn advance_partial(&mut self) -> usize {
+        if self.partial && !self.echo && self.recv_credit == 0 && self.unread < INITIAL_CREDIT {
+            let bytes = self.reasm.len() - self.advanced;
+            self.advanced = self.reasm.len();
+            return bytes;
+        }
+        0
+    }
+
     fn enqueue(&mut self, msg: Vec<u8>) {
         if msg.is_empty() {
             if let Some(Queued::Empty(n)) = self.q.back_mut() {
@@ -268,13 +281,13 @@ impl State {
         self.ctrl.push_back(Control::Frame(Frame { chan, kind, flags, payload }));
     }
 
-    fn insert(&mut self, id: u16, service: &str, max_message: usize, tx: Sender<(Event, bool)>, hold: bool, admission: Option<Arc<str>>) -> u64 {
+    fn insert(&mut self, id: u16, service: &str, max_message: usize, tx: Sender<(Event, usize)>, hold: bool, admission: Option<Arc<str>>) -> u64 {
         self.generation += 1;
         let generation = self.generation;
         self.chans.insert(id, Chan {
             generation, prio: priority(service), credit: INITIAL_CREDIT, recv_credit: INITIAL_CREDIT,
             q: VecDeque::new(), off: 0, queued: 0, tx, ungranted: 0, served: 0,
-            reasm: Vec::new(), max_message, partial: false, echo: false, hold, awaiting_ok: !hold,
+            reasm: Vec::new(), advanced: 0, unread: 0, max_message, partial: false, echo: false, hold, awaiting_ok: !hold,
             close_after: None, _admission: admission,
         });
         generation
@@ -546,7 +559,7 @@ impl Conn {
         *self.0.reason.lock().unwrap() = reason.to_string();
         let chans = std::mem::take(&mut self.0.st.lock().unwrap().chans);
         for (_, c) in chans {
-            let _ = c.tx.send((Event::Closed(code, reason.to_string()), false));
+            let _ = c.tx.send((Event::Closed(code, reason.to_string()), 0));
         }
         self.0.work.notify_all();
         self.0.space.notify_all();
@@ -673,7 +686,7 @@ impl Conn {
                         c.max_message = c.max_message.min(limit);
                         caps = rest;
                     }
-                    let _ = c.tx.send((Event::Opened(String::from_utf8_lossy(caps).into_owned()), false));
+                    let _ = c.tx.send((Event::Opened(String::from_utf8_lossy(caps).into_owned()), 0));
                 }
             }
             kind::DATA => {
@@ -690,7 +703,7 @@ impl Conn {
                     let size = c.reasm.len().saturating_add(n);
                     if size > c.max_message {
                         let reason = format!("channel {} message is {size} bytes; the limit is {}", f.chan, c.max_message);
-                        let _ = c.tx.send((Event::Closed(CLOSE_PROTOCOL, reason.clone()), false));
+                        let _ = c.tx.send((Event::Closed(CLOSE_PROTOCOL, reason.clone()), 0));
                         st.chans.remove(&f.chan);
                         st.push_close(f.chan, CLOSE_PROTOCOL, &reason);
                         drop(st);
@@ -700,22 +713,21 @@ impl Conn {
                     }
                     let more = f.flags & FLAG_MORE != 0;
                     let fragmented = more || c.partial;
-                    // Only a message that can exceed the remaining window needs intermediate
-                    // grants. Strict short messages keep their credit until the consumer drains.
-                    let precredit = fragmented && !c.echo && (!self.0.options.strict || c.max_message > INITIAL_CREDIT - GRANT_AT);
                     let data = if fragmented {
                         c.reasm.extend_from_slice(&f.payload);
                         c.partial = more;
                         (!more).then(|| std::mem::take(&mut c.reasm))
                     } else { Some(f.payload) };
-                    if precredit {
-                        credit = Some(n);
+                    if more {
+                        credit = Some(c.advance_partial());
                     }
                     if let Some(data) = data {
                         if c.echo {
                             c.enqueue(data);
                         } else {
-                            let _ = c.tx.send((Event::Data(data), precredit));
+                            let owed = data.len() - std::mem::take(&mut c.advanced);
+                            c.unread += data.len();
+                            let _ = c.tx.send((Event::Data(data), owed));
                         }
                     }
                 }
@@ -744,7 +756,7 @@ impl Conn {
                 }
                 let mut st = self.0.st.lock().unwrap();
                 if let Some(c) = st.chans.remove(&f.chan) {
-                    let _ = c.tx.send((Event::Closed(code, reason), false));
+                    let _ = c.tx.send((Event::Closed(code, reason), 0));
                     drop(st);
                     self.0.space.notify_all();
                 }
@@ -997,8 +1009,8 @@ impl ChannelTx {
 /// Receiving data grants the sender more credit.
 pub struct Channel {
     tx: ChannelTx,
-    /// (event, its credit was already granted when its fragments arrived)
-    rx: Receiver<(Event, bool)>,
+    /// (event, bytes to return as credit when consumed)
+    rx: Receiver<(Event, usize)>,
     close_on_drop: bool,
 }
 
@@ -1036,11 +1048,13 @@ impl Channel {
         self.tx.close(code, reason)
     }
 
-    fn got(&self, (e, granted): (Event, bool)) -> Event {
-        if let (Event::Data(d), false) = (&e, granted) {
+    fn got(&self, (e, owed): (Event, usize)) -> Event {
+        if let Event::Data(d) = &e {
             let mut st = self.conn().0.st.lock().unwrap();
-            if self.tx.current(&mut st).is_some() {
-                Conn::credit(&mut st, self.id(), d.len());
+            if let Some(c) = self.tx.current(&mut st) {
+                c.unread -= d.len();
+                let advance = c.advance_partial();
+                Conn::credit(&mut st, self.id(), owed + advance);
                 drop(st);
                 self.conn().0.work.notify_one();
             }
@@ -1098,6 +1112,50 @@ mod tests {
         assert!(st.pick(STRICT_SLICE).is_none(), "excess PINGs left work for the writer");
         assert!(st.queue_pong([2; 8], sent + PONG_INTERVAL));
         assert_eq!(st.pick(STRICT_SLICE).unwrap().payload, [2; 8]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fragmented_records_wait_for_the_consumer() {
+        let ep = crate::Endpoint::new("test");
+        let (tx, rx) = channel();
+        ep.register("frames", 1, Arc::new(move |_, open| {
+            tx.send(open.channel).unwrap();
+            Ok(())
+        }));
+        let (client, server) = crate::tests::pair_served(&ep);
+        let sender = client.open("frames", "").unwrap();
+        let receiver = rx.recv().unwrap();
+        let size = INITIAL_CREDIT * 2;
+        sender.send(vec![1; size]).unwrap();
+        // Synchronize on the reader completing the record, without consuming it.
+        loop {
+            let mut st = server.0.st.lock().unwrap();
+            let c = receiver.tx.current(&mut st).unwrap();
+            if c.unread >= size {
+                assert_eq!(c.unread, size);
+                assert_eq!(c.recv_credit + c.ungranted, 0);
+                assert!(!st.ctrl.iter().any(|ctl| matches!(ctl, Control::Grant { id, .. } if *id == receiver.id())));
+                break;
+            }
+            drop(st);
+            std::thread::yield_now();
+        }
+        sender.try_send(vec![2; size]).unwrap();
+        sender.try_send(vec![3; size]).unwrap();
+        let Err(SendError::Full(fourth)) = sender.try_send(vec![4; size]) else {
+            panic!("unread fragmented records must stop the writer");
+        };
+        let drain = std::thread::spawn(move || {
+            for value in 1..=4 {
+                let Some(Event::Data(bytes)) = receiver.recv() else { panic!("stream ended early") };
+                assert_eq!(bytes, vec![value; size], "record {value} arrived whole and in order");
+            }
+        });
+        sender.send(fourth).unwrap();
+        drain.join().unwrap();
+        client.close("done");
+        server.close("done");
     }
 
     #[test]

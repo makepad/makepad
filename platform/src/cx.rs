@@ -992,6 +992,7 @@ impl Cx {
     pub fn new(event_handler: Box<dyn FnMut(&mut Cx, &Event)>) -> Self {
         crate::thread::ui_hang::initialize();
         makepad_core_util::ui_thread::mark_ui_thread();
+        crate::ui_progress::register_ui_thread();
         #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
         if !crate::restart::hosted() {
             crate::os::termination_signal::install();
@@ -1032,8 +1033,8 @@ impl Cx {
 
         #[cfg(not(target_arch = "wasm32"))]
         {
-            // `--remote` / MAKEPAD_REMOTE=1: the process's makepad-remote endpoint, for every
-            // process that has a `Cx`
+            // the process's makepad-remote endpoint, when the one rule asks for it
+            // (`makepad_remote::ask`: `--remote`, MAKEPAD_REMOTE, the per-user setting)
             crate::remote::start_if_requested();
         }
 
@@ -1454,6 +1455,7 @@ static FIRST_PRESENT_SEEN: std::sync::atomic::AtomicBool = std::sync::atomic::At
 /// The first window frame's resource gate, shared with the present callback.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod first_frame_hold {
+    use crate::ui_progress::{hold, UiProgressState, GLOBAL_UI_PROGRESS};
     use std::sync::{atomic::{AtomicUsize, Ordering}, OnceLock};
 
     struct Hold {
@@ -1463,33 +1465,82 @@ pub(crate) mod first_frame_hold {
         max_pipelines: AtomicUsize,
     }
 
-    static HOLD: OnceLock<Hold> = OnceLock::new();
-    // None seals an unheld first frame so later windows cannot start a hold.
-    static PASSED: OnceLock<Option<u64>> = OnceLock::new();
+    struct State {
+        hold: OnceLock<Hold>,
+        // None seals an unheld first frame so later windows cannot start a hold.
+        passed: OnceLock<Option<u64>>,
+    }
+
+    impl State {
+        const fn new() -> Self {
+            Self { hold: OnceLock::new(), passed: OnceLock::new() }
+        }
+
+        fn deferred(&self, progress: &UiProgressState, glyphs: usize, pipelines: usize) {
+            if self.passed.get().is_some() { return; }
+            progress.set_hold(hold::FIRST_FRAME, true);
+            let hold = self.hold.get_or_init(|| Hold {
+                deferred_at: makepad_hal::clock_ns(),
+                glyphs,
+                pipelines,
+                max_pipelines: AtomicUsize::new(pipelines),
+            });
+            hold.max_pipelines.fetch_max(pipelines, Ordering::Relaxed);
+        }
+
+        fn passed(&self, progress: &UiProgressState) {
+            self.passed.get_or_init(|| self.hold.get().map(|_| makepad_hal::clock_ns()));
+            progress.set_hold(hold::FIRST_FRAME, false);
+        }
+
+        fn summary(&self) -> Option<(f64, usize, usize)> {
+            let passed_at = (*self.passed.get()?)?;
+            let hold = self.hold.get()?;
+            Some((
+                passed_at.saturating_sub(hold.deferred_at) as f64 / 1_000_000.0,
+                hold.max_pipelines.load(Ordering::Relaxed).max(hold.pipelines),
+                hold.glyphs,
+            ))
+        }
+    }
+
+    static GLOBAL: State = State::new();
 
     pub(crate) fn deferred(glyphs: usize, pipelines: usize) {
-        if PASSED.get().is_some() { return; }
-        let hold = HOLD.get_or_init(|| Hold {
-            deferred_at: makepad_hal::clock_ns(),
-            glyphs,
-            pipelines,
-            max_pipelines: AtomicUsize::new(pipelines),
-        });
-        hold.max_pipelines.fetch_max(pipelines, Ordering::Relaxed);
+        GLOBAL.deferred(&GLOBAL_UI_PROGRESS, glyphs, pipelines);
     }
 
     pub(crate) fn passed() {
-        PASSED.get_or_init(|| HOLD.get().map(|_| makepad_hal::clock_ns()));
+        GLOBAL.passed(&GLOBAL_UI_PROGRESS);
     }
 
     pub(super) fn summary() -> Option<(f64, usize, usize)> {
-        let passed_at = (*PASSED.get()?)?;
-        let hold = HOLD.get()?;
-        Some((
-            passed_at.saturating_sub(hold.deferred_at) as f64 / 1_000_000.0,
-            hold.max_pipelines.load(Ordering::Relaxed).max(hold.pipelines),
-            hold.glyphs,
-        ))
+        GLOBAL.summary()
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn ui_loop_writes_first_frame_hold_until_passed() {
+        let gate = State::new();
+        let progress = UiProgressState::new();
+        let held = || progress.snapshot().holds & hold::FIRST_FRAME != 0;
+        gate.deferred(&progress, 1, 2);
+        assert!(held(), "deferring the first frame must publish its hold");
+        gate.deferred(&progress, 0, 5);
+        assert!(held(), "repeated deferrals keep the hold published");
+        gate.passed(&progress);
+        assert!(!held(), "passing the first frame must clear its hold");
+        gate.deferred(&progress, 0, 1);
+        assert!(!held(), "later deferrals must leave the first frame released");
+        let (_, max_pipelines, glyphs) = gate.summary().expect("held first frame records a summary");
+        assert_eq!((max_pipelines, glyphs), (5, 1));
+
+        let unheld = State::new();
+        let unheld_progress = UiProgressState::new();
+        unheld.passed(&unheld_progress);
+        unheld.deferred(&unheld_progress, 1, 1);
+        assert_eq!(unheld_progress.snapshot().holds & hold::FIRST_FRAME, 0, "an unheld first frame seals later deferrals");
+        assert_eq!(unheld.summary(), None);
     }
 }
 

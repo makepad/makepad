@@ -109,7 +109,7 @@ impl Sink for Vulkan {
             let image = match &plane.storage {
                 Storage::Dma(dma) => import_plane(self.dev.clone(), plane, dma.clone())?,
                 Storage::Bytes(_) => {
-                    if let Some(t) = self.tex.get(&(s.id, id.index)).filter(|t| {
+                    if let Some(t) = self.tex.get(s.id, id.index).filter(|t| {
                         t.gen == id.gen
                             && t.image.desc.format == plane.format
                             && t.image.desc.w == plane.width
@@ -141,10 +141,15 @@ impl Sink for Vulkan {
                     {
                         return Err("video plane byte count differs from its extent".into());
                     }
-                    let staging = batch.put(bytes)?;
+                    let started = crate::clock_ns();
+                    let staged = batch.put(bytes);
+                    s.stats.upload_ns += crate::clock_ns().saturating_sub(started);
+                    let staging = staged?;
+                    s.stats.upload_bytes += bytes.len() as u64;
                     copies.push((image.clone(), staging.buffer, staging.at));
                 }
             }
+            let started = crate::clock_ns();
             for (image, staging, offset) in copies {
                 image.transition(batch.cb, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
                 let copy = vk::BufferImageCopy::default()
@@ -171,6 +176,7 @@ impl Sink for Vulkan {
                 image.transition(batch.cb, image.sampled_layout());
                 batch.images.push(image);
             }
+            s.stats.upload_ns += crate::clock_ns().saturating_sub(started);
         }
         for ((&id, plane), image) in targets.iter().zip(&frame.planes).zip(images) {
             let mut desc = descriptor(plane);
@@ -180,7 +186,7 @@ impl Sink for Vulkan {
                 .map_err(|_| "stale video texture")?
                 .val = desc.clone();
             self.tex
-                .insert((s.id, id.index), Texture { gen: id.gen, image });
+                .insert(s.id, id.index, Texture { gen: id.gen, image, painted: 0 });
             row(s, id, &desc);
         }
         Ok(true)
@@ -189,10 +195,10 @@ impl Sink for Vulkan {
         for id in ids {
             if self
                 .tex
-                .get(&(s.id, id.index))
+                .get(s.id, id.index)
                 .is_some_and(|t| t.gen == id.gen)
             {
-                self.tex.remove(&(s.id, id.index));
+                self.tex.remove(s.id, id.index);
             }
             if let Ok(entry) = s.textures.get_mut(s.id, id) {
                 entry.val.bytes = 0;

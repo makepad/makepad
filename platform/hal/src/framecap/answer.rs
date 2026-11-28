@@ -496,6 +496,7 @@ fn scanout(_: &Req) -> Result<String, String> {
 // ------------------------------------------------------------------ the commands
 
 /// `cap ...`; true when this was a capture command.
+#[relax_api::relax_api(loader = "the loader serves the frame-capture inspect commands: JIT code has no use for it")]
 pub fn dispatch(req: &Req, out: &mut Out) -> bool {
     if req.cmd != "cap" {
         return false;
@@ -701,14 +702,28 @@ fn draw_text(c: &Arc<Capture>, req: &Req) -> Result<String, String> {
     }
     t.push_str(&format!("| draw list | {}list {}, item {} |\n", match c.s(d.list_name) { "" => String::new(), n => format!("{n}, ") }, d.list, d.item));
     t.push_str(&format!("| pass | P{} {} |\n", d.pass, pass_name(c, d.pass as usize)));
-    let inst = if d.inst_kind == Inst::INLINE { format!("{} inline ({})", instances(d), kb(d.inst_data.len() as u64)) } else { format!("{} from buffer B{}", instances(d), c.buffers.iter().position(|b| b.id == d.inst_id).map_or("?".into(), |b| b.to_string())) };
+    let inst = if d.inst_id.is_none() {
+        format!("{} without instance data", instances(d))
+    } else {
+        let buffer = c.buffer_index(d.inst_id, d.pass).map_or("?".into(), |i| i.to_string());
+        format!("{} from buffer B{buffer}, first row {}", instances(d), d.inst_off)
+    };
     t.push_str(&format!("| instances | {inst}{} |\n", if d.inst_ranges.is_empty() { String::new() } else { format!(" in {} ranges", d.inst_ranges.len()) }));
     t.push_str(&format!("| indices | {} from {} |\n", d.index[1], d.index[0]));
     let mut flags = Vec::new();
-    for (bit, name) in [(Draw::BLEND, "blend"), (Draw::DEPTH_WRITE, "depth-write"), (Draw::DEPTH_GREATER, "depth-greater"), (Draw::CULL, "cull back faces (front = counter-clockwise in clip space)"), (Draw::INDEX_U32, "u32 indices")] {
+    for (bit, name) in [(Draw::BLEND, "blend"), (Draw::DEPTH_WRITE, "depth-write"), (Draw::DEPTH_GREATER, "depth-greater")] {
         if d.flags & bit != 0 {
             flags.push(name);
         }
+    }
+    match Draw::cull_mode(d.flags) {
+        Some(CullMode::None) => {}
+        Some(CullMode::Back) => flags.push("cull back faces (front = counter-clockwise in clip space)"),
+        Some(CullMode::Front) => flags.push("cull front faces (front = counter-clockwise in clip space)"),
+        None => flags.push("invalid cull mode (both front and back bits set)"),
+    }
+    if d.flags & Draw::INDEX_U32 != 0 {
+        flags.push("u32 indices");
     }
     t.push_str(&format!("| state | {} zbias {} |\n", if flags.is_empty() { "-".into() } else { flags.join(", ") }, sig(d.zbias as f64)));
     if d.scissor.iter().all(|v| v.is_finite()) {
@@ -788,23 +803,30 @@ fn mesh_text(c: &Arc<Capture>, req: &Req) -> Result<String, String> {
     let (si, name, _) = shader_of(c, d);
     let p = c.pipelines.get(si).ok_or("the draw's pipeline is not in the capture")?;
     let blob = crate::buffers::PipelineBlob::parse(&p.blob).ok_or("the pipeline blob is malformed")?;
-    let stride = p.desc.instance_stride.max(1) as usize;
+    let stride = p.desc.instance_stride as usize;
     let floats = |b: &[u8]| -> Vec<f32> { b.chunks_exact(4).map(|x| f32::from_le_bytes([x[0], x[1], x[2], x[3]])).collect() };
-    let inst: Vec<f32> = if d.inst_kind == Inst::INLINE {
-        floats(&d.inst_data)
+    let count = instances(d);
+    let mut t = format!("D{k} S{si} {name}: {count} instances, {} indices; vertex layout {:?}\n\n", d.index[1], blob.vertex_layout);
+    if d.inst_id.is_none() {
+        t.push_str("no instance data\n");
     } else {
-        c.buffer(d.inst_id).and_then(|b| b.contents.as_ref()).map(|b| floats(&b[(d.inst_off as usize).min(b.len())..])).unwrap_or_default()
-    };
-    let count = instances(d) as usize;
-    let mut t = format!("D{k} S{si} {name}: {count} instances of {stride} floats, {} indices; vertex layout {:?}\n\n", d.index[1], blob.vertex_layout);
-    t.push_str("instance inputs (floats in declaration order of the shader's instance fields):\n\n| inst | values |\n|---|---|\n");
-    let firsts: Vec<usize> = if d.inst_ranges.is_empty() { (0..count).collect() } else { d.inst_ranges.iter().flat_map(|r| r[0] as usize..(r[0] + r[1]) as usize).collect() };
-    for &i in firsts.iter().take(n) {
-        let row = inst.get(i * stride..(i + 1) * stride).map_or("(past the data)".to_string(), |v| v.iter().map(|f| sig(*f as f64)).collect::<Vec<_>>().join(" "));
-        t.push_str(&format!("| {i} | {row} |\n"));
-    }
-    if firsts.len() > n {
-        t.push_str(&format!("+{} more instances (n=<count>)\n", firsts.len() - n));
+        let data = c.buffer_index(d.inst_id, d.pass).and_then(|i| c.buffers[i].contents.as_deref());
+        t.push_str(&format!("instance inputs ({stride} floats per buffer row):\n\n| buffer row | values |\n|---|---|\n"));
+        let whole = [0, d.inst_count];
+        let ranges: &[[u32; 2]] = if d.inst_ranges.is_empty() { std::slice::from_ref(&whole) } else { &d.inst_ranges };
+        for i in ranges.iter().flat_map(|&[start, len]| (0..len).map(move |i| u64::from(start) + u64::from(i))).take(n) {
+            let row = u64::from(d.inst_off) + i;
+            let size = stride.checked_mul(4);
+            let bytes = size.and_then(|size| {
+                let at = usize::try_from(row).ok()?.checked_mul(size)?;
+                data?.get(at..at.checked_add(size)?)
+            });
+            let values = bytes.map_or("(past the data)".into(), |b| floats(b).iter().map(|f| sig(*f as f64)).collect::<Vec<_>>().join(" "));
+            t.push_str(&format!("| {row} | {values} |\n"));
+        }
+        if count > n as u64 {
+            t.push_str(&format!("+{} more instances (n=<count>)\n", count - n as u64));
+        }
     }
     if let Some(vb) = c.buffer(d.vb).and_then(|b| b.contents.as_ref()) {
         let vstride = blob.vertex_layout.first().copied().unwrap_or(16).max(4) as usize / 4;

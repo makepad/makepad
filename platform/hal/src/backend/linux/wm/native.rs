@@ -36,7 +36,7 @@ pub fn trace_enabled() -> bool {
 }
 
 pub(crate) fn enable_bridge(session: u32) { BRIDGE.store(session, Ordering::Release); }
-pub fn bridge_enabled() -> bool { BRIDGE.load(Ordering::Acquire) != u32::MAX }
+pub(crate) fn bridge_enabled() -> bool { BRIDGE.load(Ordering::Acquire) != u32::MAX }
 pub(crate) fn receive(incoming: Incoming) {
     let session = id(&incoming.event).session;
     lock(&INCOMING).push(incoming);

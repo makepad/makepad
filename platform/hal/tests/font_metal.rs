@@ -131,6 +131,10 @@ impl Device {
             inst.extend_from_slice(&[x / W as f32, 4.0 / H as f32, tw / W as f32, th / H as f32, tx, ty, tw, th]);
             x += tw + 4.0;
         }
+        let rows = Id::new(3, self.frame as u32 + 1);
+        let bytes: Vec<u8> = inst.into_iter().flat_map(f32::to_le_bytes).collect();
+        self.w.buffer_create(rows, buffer_kind::INSTANCE, bytes.len() as u64, Attr::default());
+        self.w.buffer_update(rows, 0, &bytes);
         // frames until the draw is drawn (pipeline variants for the window are built lazily)
         loop {
             self.frame += 1;
@@ -139,8 +143,7 @@ impl Device {
             self.w.frame_begin(n, FrameMeta::default());
             self.w.pass(Pass { color: [Id::NONE; 4], depth: Id::NONE, load: [pass_load::CLEAR; 5], clear: [[0.0, 0.0, 0.0, 0.0]; 4], viewport: [0.0, 0.0, W as f32, H as f32], dpi: 1.0, ..Default::default() });
             let tex = self.w.put_ids(&[alias]);
-            // SAFETY: `inst` lives, unchanged, until `submit` below has returned
-            self.w.draw(Draw { pipeline: PIPE, vb: QUAD, ib: INDEX, index: [0, 6], inst: Inst::inline(unsafe { Slice::of(&inst[..]) }, glyphs.len() as u32), tex, scissor: [f32::NAN; 4], bounds: [f32::NAN; 4], ..Default::default() });
+            self.w.draw(Draw { pipeline: PIPE, vb: QUAD, ib: INDEX, index: [0, 6], inst: Inst::buffer(rows, 0, glyphs.len() as u32), tex, scissor: [f32::NAN; 4], bounds: [f32::NAN; 4], ..Default::default() });
             self.w.frame_end(WIN, target::WINDOW);
             self.w.snapshot(WIN, 7);
             self.seen.readback = None;

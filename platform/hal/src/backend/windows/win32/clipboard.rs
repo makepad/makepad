@@ -2,8 +2,7 @@
 //! (`ClipRead` -> `Clipboard`): text, HTML, Markdown, an image (the registered "PNG" format as it is, else a
 //! CF_DIBV5 / CF_DIB bitmap converted to PNG on the clipboard worker, never in the WndProc) and
 //! CF_HDROP file lists (file URL + native path). All representations are copied out under one
-//! open of the clipboard. A clipboard another process holds open is tried again on a later timer
-//! turn with the same request id.
+//! open of the clipboard. When another process holds it open, reads and writes wait in order.
 
 use crate::clipboard::ClipboardData;
 use crate::Id;
@@ -14,17 +13,86 @@ use makepad_windows_sys::Win32::System::Memory::*;
 use makepad_windows_sys::Win32::System::Ole::{CF_DIB, CF_DIBV5, CF_HDROP, CF_UNICODETEXT};
 use makepad_windows_sys::Win32::UI::Shell::{DragQueryFileW, HDROP};
 use makepad_windows_sys::Win32::UI::WindowsAndMessaging::{KillTimer, SetTimer};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Mutex, OnceLock};
 
-/// The dispatch window's timer that retries busy reads.
+/// The dispatch window's timer that retries a busy clipboard.
 pub(super) const RETRY_TIMER: usize = 0x4d50_0001;
 const RETRY_MS: u32 = 30;
 
+enum ClipboardOp {
+    Read { sid: u32, req: u64 },
+    Write { text: Vec<u16>, html: Option<Vec<u8>>, markdown: String },
+}
+
+#[derive(Default)]
+struct ClipboardQueue {
+    ops: RefCell<VecDeque<ClipboardOp>>,
+    draining: Cell<bool>,
+}
+
+impl ClipboardQueue {
+    /// The first request on an idle queue can run immediately.
+    fn push(&self, op: ClipboardOp) -> bool {
+        let mut ops = self.ops.borrow_mut();
+        let idle = ops.is_empty() && !self.draining.get();
+        ops.push_back(op);
+        idle
+    }
+
+    fn drain(&self, mut try_op: impl FnMut(&ClipboardOp) -> bool) -> bool {
+        // Win32 can dispatch another message during a clipboard call.
+        if self.draining.replace(true) {
+            return false;
+        }
+        let drained = loop {
+            let Some(op) = self.ops.borrow_mut().pop_front() else { break true };
+            if !try_op(&op) {
+                self.ops.borrow_mut().push_front(op);
+                break false;
+            }
+        };
+        self.draining.set(false);
+        drained
+    }
+}
+
 thread_local! {
-    /// reads waiting for the clipboard: (session, request)
-    static PENDING: RefCell<Vec<(u32, u64)>> = const { RefCell::new(Vec::new()) };
+    static PENDING: ClipboardQueue = ClipboardQueue::default();
+}
+
+#[cfg(test)]
+#[test]
+fn busy_write_keeps_its_place_between_reads() {
+    let queue = ClipboardQueue::default();
+    let read = |req| ClipboardOp::Read { sid: 1, req };
+    let write = ClipboardOp::Write { text: wide("copy"), html: None, markdown: String::new() };
+    assert!(queue.push(read(1)), "the first read can run immediately");
+    assert!(!queue.push(write), "the write waits behind the first read");
+    assert!(!queue.push(read(2)), "the second read waits behind the write");
+
+    let mut reads = Vec::new();
+    assert!(!queue.drain(|op| match op {
+        ClipboardOp::Read { req, .. } => { reads.push(*req); true }
+        ClipboardOp::Write { .. } => false,
+    }), "a refused write keeps the timer running");
+    assert_eq!(reads, [1], "the first turn stops at the busy write");
+    assert!(!queue.push(read(3)), "a new read joins the back of the queue");
+
+    let mut clipboard = Vec::new();
+    assert!(queue.drain(|op| {
+        match op {
+            ClipboardOp::Write { text, .. } => clipboard.clone_from(text),
+            ClipboardOp::Read { req, .. } => {
+                assert_eq!(clipboard, wide("copy"), "read {req} sees the retried write");
+                reads.push(*req);
+            }
+        }
+        true
+    }), "a successful retry drains the queue");
+    assert_eq!(reads, [1, 2, 3], "each read runs once in request order");
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -127,24 +195,30 @@ unsafe fn set_bytes(format: u32, bytes: &[u8]) {
     }
 }
 
-pub(super) fn set(data: &ClipboardData) {
-    let utf16 = wide(&data.text);
-    let html = (!data.html.is_empty()).then(|| build_cf_html(&data.html));
+pub(super) fn set(dispatch: HWND, data: ClipboardData) {
+    submit(dispatch, ClipboardOp::Write {
+        text: wide(&data.text),
+        html: (!data.html.is_empty()).then(|| build_cf_html(&data.html)),
+        markdown: data.markdown,
+    });
+}
+
+fn try_write(dispatch: HWND, text: &[u16], html: Option<&[u8]>, markdown: &str) -> bool {
     unsafe {
-        if OpenClipboard(None).is_err() {
-            eprintln!("[hal-win32] clipboard busy: data not copied");
-            return;
+        if OpenClipboard(Some(dispatch)).is_err() {
+            return false;
         }
         let _ = EmptyClipboard();
-        set_bytes(CF_UNICODETEXT.0 as u32, std::slice::from_raw_parts(utf16.as_ptr().cast(), utf16.len() * 2));
+        set_bytes(CF_UNICODETEXT.0 as u32, std::slice::from_raw_parts(text.as_ptr().cast(), std::mem::size_of_val(text)));
         if let Some(html) = html {
-            set_bytes(html_format(), &html);
+            set_bytes(html_format(), html);
         }
-        if !data.markdown.is_empty() {
-            set_bytes(markdown_format(), data.markdown.as_bytes());
+        if !markdown.is_empty() {
+            set_bytes(markdown_format(), markdown.as_bytes());
         }
         let _ = CloseClipboard();
     }
+    true
 }
 
 /// The clipboard's text (the paste chord); `None` when there is none or it is busy.
@@ -282,41 +356,51 @@ fn try_read(sid: u32, req: u64) -> bool {
     true
 }
 
-/// `ClipRead`: answered now, or on a later turn while another process holds the clipboard.
 pub(super) fn read(dispatch: HWND, sid: u32, req: u64) {
-    let queued = PENDING.with_borrow(|p| !p.is_empty());
-    if !queued && try_read(sid, req) {
-        return;
-    }
-    PENDING.with_borrow_mut(|p| p.push((sid, req)));
-    if !queued {
-        if super::log_enabled() {
-            eprintln!("[hal-win32] clipboard busy: read {req} retries");
-        }
-        unsafe {
-            SetTimer(Some(dispatch), RETRY_TIMER, RETRY_MS, None);
-        }
+    submit(dispatch, ClipboardOp::Read { sid, req });
+}
+
+fn try_op(dispatch: HWND, op: &ClipboardOp) -> bool {
+    match op {
+        ClipboardOp::Read { sid, req } => try_read(*sid, *req),
+        ClipboardOp::Write { text, html, markdown } => try_write(dispatch, text, html.as_deref(), markdown),
     }
 }
 
-/// The retry timer: the waiting reads in order, until the clipboard is busy again.
-pub(super) fn retry(dispatch: HWND) {
-    loop {
-        let Some((sid, req)) = PENDING.with_borrow(|p| p.first().copied()) else { break };
-        if !try_read(sid, req) {
-            return;
+fn submit(dispatch: HWND, op: ClipboardOp) {
+    let read_req = match &op {
+        ClipboardOp::Read { req, .. } => Some(*req),
+        ClipboardOp::Write { .. } => None,
+    };
+    PENDING.with(|pending| {
+        if pending.push(op) {
+            if pending.drain(|op| try_op(dispatch, op)) {
+                return;
+            }
+            unsafe {
+                SetTimer(Some(dispatch), RETRY_TIMER, RETRY_MS, None);
+            }
         }
-        PENDING.with_borrow_mut(|p| {
-            p.remove(0);
-        });
-    }
-    unsafe {
-        let _ = KillTimer(Some(dispatch), RETRY_TIMER);
+        if super::log_enabled() {
+            if let Some(req) = read_req {
+                eprintln!("[hal-win32] clipboard busy: read {req} waits");
+            } else {
+                eprintln!("[hal-win32] clipboard busy: write waits");
+            }
+        }
+    });
+}
+
+pub(super) fn retry(dispatch: HWND) {
+    if PENDING.with(|pending| pending.drain(|op| try_op(dispatch, op))) {
+        unsafe {
+            let _ = KillTimer(Some(dispatch), RETRY_TIMER);
+        }
     }
 }
 
 pub(super) fn session_closed(sid: u32) {
-    PENDING.with_borrow_mut(|p| p.retain(|(s, _)| *s != sid));
+    PENDING.with(|pending| pending.ops.borrow_mut().retain(|op| !matches!(op, ClipboardOp::Read { sid: s, .. } if *s == sid)));
 }
 
 /// A device-independent bitmap (BITMAPINFOHEADER / V4 / V5 and its pixels) as RGBA8 rows,

@@ -1,4 +1,4 @@
-//! One TLS connection's throughput with this crate's own stacks (the Desk Link path: a server
+//! One TLS connection's throughput with this crate's own stacks (the remote desktop link's path: a server
 //! on `TlsServer`, a client on `SocketStream::connect_capture`), against plain TCP.
 //!
 //!   tls_bench serve <port> [secs] [chunk KiB] [plain]   sends for `secs` (default 10) in writes
@@ -6,7 +6,7 @@
 //!   tls_bench read <host> <port> [plain]                 reads until the server closes
 //!
 //! Both ends print Mbit/s; the server also the slowest single write. The server writes with a
-//! 5 ms write timeout and retries, as the Desk Link session does.
+//! 5 ms write timeout and retries, as the remote desktop session does.
 
 use makepad_network::tls::{TlsIdentity, TlsServer};
 use makepad_network::SocketStream;

@@ -154,6 +154,7 @@ pub struct FontService {
     grow_refused_at: Option<u64>,
 }
 
+#[relax_api::relax_api(loader = "the HAL's font service, run by its executor: JIT code reaches it through the HAL's font commands")]
 impl FontService {
     pub fn new(notify: Option<Arc<dyn Fn() + Send + Sync>>) -> FontService {
         let mut settings = Settings::default();
@@ -589,7 +590,7 @@ impl FontService {
         let Ok(e) = host.textures.get_mut(HOST, tex) else { return };
         e.val.uploaded += bytes.len() as u64;
         let obj = e.val.clone();
-        gpu.texture_update(host, tex, &obj, 0, rect, 0, bytes);
+        exec::upload_texture(gpu, host, tex, &obj, 0, rect, 0, bytes);
     }
 
     /// The device was replaced: the atlas textures have new, empty storage under their ids; the

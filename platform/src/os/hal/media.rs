@@ -105,9 +105,9 @@ fn audio_entry_buffer() -> AudioBuffer {
     // Linux and Android transports split every negotiated period into this scratch quantum. Allocate
     // before registering the entry so resize in a realtime callback only changes the length.
     #[cfg(target_os = "linux")]
-    { AudioBuffer::new_with_size(makepad_hal::backend::linux::media::AUDIO_BLOCK_FRAMES, 2) }
+    { AudioBuffer::new_with_size(makepad_hal::linux::AUDIO_BLOCK_FRAMES, 2) }
     #[cfg(target_os = "android")]
-    { AudioBuffer::new_with_size(makepad_hal::backend::android::media::AUDIO_BLOCK_FRAMES, 2) }
+    { AudioBuffer::new_with_size(makepad_hal::android::AUDIO_BLOCK_FRAMES, 2) }
     // Elsewhere the device picks the period: room for 8192 frames of 8 channels up front, so
     // the callback's resize only changes the length (a larger period grows it once).
     #[cfg(not(any(target_os = "linux", target_os = "android")))]
@@ -656,7 +656,7 @@ impl Cx {
             HalEvent::MidiData { .. } => {}
             #[cfg(target_os = "linux")]
             HalEvent::ScreenSurface { window, size: _, handle } => {
-                let lease = makepad_hal::backend::linux::media::capture_surface::take_lease(self.hal.frames.w.session(), handle);
+                let lease = makepad_hal::linux::capture_surface::take_lease(self.hal.frames.w.session(), handle);
                 if lease.found() {
                     let (width, height) = (lease.width(), lease.height());
                     crate::screen_capture::deliver_capture_surface(Some(window.index as usize), crate::screen_capture::ScreenCaptureSurface {
@@ -670,7 +670,7 @@ impl Cx {
 }
 
 #[cfg(target_os = "linux")]
-impl crate::screen_capture::MappedCapture for makepad_hal::backend::linux::media::capture_surface::CaptureLease {
+impl crate::screen_capture::MappedCapture for makepad_hal::linux::capture_surface::CaptureLease {
     fn bytes(&self) -> &[u8] { self.bytes() }
     fn stride(&self) -> usize { self.width() as usize * 4 }
     fn bgra(&self) -> bool { self.bgra() }

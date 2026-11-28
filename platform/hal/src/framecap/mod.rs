@@ -1,7 +1,7 @@
 //! Frame capture: one frame's complete GPU work recorded at the HAL command level, for every
 //! backend and for native and JIT apps alike (both submit the same `FramePacket`s).
 //!
-//! A capture holds the frame packet (passes, draws, inline instance data, uniforms), every
+//! A capture holds the frame packet (passes, draws, uniforms), every
 //! resource it names (create parameters, attribution, the pipeline blobs exactly as received, and
 //! the contents of textures and buffers as the frame found them) and the strings that attribute
 //! it. [`replay`] re-executes it in a private HAL (offscreen, same backend kind) with the frame
@@ -11,14 +11,13 @@
 //!
 //! Recording: `cap grab` arms the recorder ([`arm`]) and asks the app for a full frame (the
 //! `Redraw` event); the executor calls [`on_frame`] before it hands the next matching window frame
-//! to the backend; texture contents arrive from the GPU asynchronously (`Gpu::capture_texture`);
-//! the capture is complete when the last one has.
+//! to the backend. The recording completes when every buffer and texture snapshot has arrived.
 
 pub mod answer;
 pub mod file;
 pub mod replay;
 
-use crate::backend::exec::Gpu;
+use crate::backend::exec::{self, Gpu};
 use crate::buffers::{read_ids, read_pairs, read_rects, CmdView};
 use crate::ledger::Kind;
 use crate::session::Session;
@@ -53,6 +52,8 @@ pub struct CapTexture {
 #[derive(Clone, Debug, Default)]
 pub struct CapBuffer {
     pub id: Id,
+    /// First pass reading this snapshot. Later packets can append to the same instance slab.
+    pub first_pass: u32,
     pub kind: u16,
     pub size: u64,
     pub owner: StrId,
@@ -106,12 +107,9 @@ pub struct CapDraw {
     pub vb: Id,
     pub ib: Id,
     pub index: [u32; 2],
-    pub inst_kind: u32,
     pub inst_id: Id,
     pub inst_off: u32,
     pub inst_count: u32,
-    /// inline instance floats (`Inst::INLINE`)
-    pub inst_data: Vec<u8>,
     pub inst_ranges: Vec<[u32; 2]>,
     pub uniforms: [Vec<u8>; 4],
     pub ubufs: [Id; 4],
@@ -180,6 +178,9 @@ impl Capture {
     pub fn buffer(&self, id: Id) -> Option<&CapBuffer> {
         self.buffers.iter().find(|b| b.id == id)
     }
+    fn buffer_index(&self, id: Id, pass: u32) -> Option<usize> {
+        self.buffers.iter().rposition(|b| b.id == id && b.first_pass <= pass)
+    }
     pub fn pipeline(&self, id: Id) -> Option<&CapPipeline> {
         self.pipelines.iter().find(|p| p.id == id)
     }
@@ -188,7 +189,7 @@ impl Capture {
         let t: u64 = self.textures.iter().map(|t| t.contents.as_ref().map_or(0, |c| c.len() as u64)).sum();
         let b: u64 = self.buffers.iter().map(|b| b.contents.as_ref().map_or(0, |c| c.len() as u64)).sum();
         let p: u64 = self.pipelines.iter().map(|p| p.blob.len() as u64).sum();
-        let d: u64 = self.draws.iter().map(|d| (d.inst_data.len() + d.uniforms.iter().map(Vec::len).sum::<usize>()) as u64).sum();
+        let d: u64 = self.draws.iter().map(|d| d.uniforms.iter().map(Vec::len).sum::<usize>() as u64).sum();
         t + b + p + d
     }
 }
@@ -208,7 +209,7 @@ pub struct Arm {
 
 struct Building {
     capture: Capture,
-    /// texture contents still on their way, plus one while packets are still being recorded
+    /// resource snapshots still on their way, plus one while packets are still being recorded
     waiting: usize,
     seq: u64,
     /// string ids to resolve when the window packet closes the record
@@ -239,7 +240,7 @@ fn state() -> std::sync::MutexGuard<'static, State> {
 
 /// Whether a capture is waiting for its frame (the executor's cheap check).
 #[inline]
-pub fn armed() -> bool {
+pub(crate) fn armed() -> bool {
     ARMED.load(Ordering::Relaxed)
 }
 
@@ -259,6 +260,7 @@ pub(crate) fn end_run() {
 
 /// Arms the recorder for the next frame of `session` (`None`: any): its texture packets and the
 /// window packet that ends it. Returns the request's number for [`wait`].
+#[relax_api::relax_api(loader = "the loader's frame capture (inspect `grab`): JIT code has no use for it")]
 pub fn arm(session: Option<u32>, window: Option<u32>) -> u64 {
     let mut st = state();
     let seq = st.next_seq;
@@ -270,7 +272,7 @@ pub fn arm(session: Option<u32>, window: Option<u32>) -> u64 {
 }
 
 /// Disarms a request that timed out.
-pub fn disarm(seq: u64) {
+pub(crate) fn disarm(seq: u64) {
     let mut st = state();
     if st.arm.is_some_and(|a| a.seq == seq) {
         st.arm = None;
@@ -280,6 +282,7 @@ pub fn disarm(seq: u64) {
 }
 
 /// Waits up to `timeout` for the capture of request `seq`.
+#[relax_api::relax_api(loader = "the loader's frame capture (inspect `grab`): JIT code has no use for it")]
 pub fn wait(seq: u64, timeout: std::time::Duration) -> Option<Arc<Capture>> {
     let deadline = std::time::Instant::now() + timeout;
     let mut st = state();
@@ -296,7 +299,7 @@ pub fn wait(seq: u64, timeout: std::time::Duration) -> Option<Arc<Capture>> {
 }
 
 /// The newest finished capture of this process.
-pub fn latest() -> Option<Arc<Capture>> {
+pub(crate) fn latest() -> Option<Arc<Capture>> {
     state().done.last().map(|(_, c)| c.clone())
 }
 
@@ -307,7 +310,17 @@ pub(crate) fn replace(seq: u64, c: Arc<Capture>) {
     }
 }
 
-fn finish(b: Building) {
+fn finish(mut b: Building) {
+    // Compare in packet order once every snapshot has landed. Callbacks may finish in a
+    // different order, and their slots must stay stable until then.
+    let c = &mut b.capture;
+    for buf in std::mem::take(&mut c.buffers) {
+        if c.buffers.iter().rev().find(|prev| prev.id == buf.id).is_some_and(|prev| prev.contents == buf.contents) { continue; }
+        if buf.contents.is_none() {
+            c.notes.push(format!("buffer {}:{}: this backend did not give its bytes", buf.id.index, buf.id.gen));
+        }
+        c.buffers.push(buf);
+    }
     let mut st = state();
     st.done.push((b.seq, Arc::new(b.capture)));
     if st.done.len() > KEEP {
@@ -316,16 +329,23 @@ fn finish(b: Building) {
     DONE.notify_all();
 }
 
-/// One share of the record has landed (a texture's contents, or the end of recording).
-fn land(b: &Shared, slot: Option<(usize, Option<Vec<u8>>)>) {
+#[derive(Clone, Copy)]
+enum Snapshot { Texture(usize), Buffer(usize) }
+
+/// One share of the record has landed (a resource's contents, or the end of recording).
+fn land(b: &Shared, slot: Option<(Snapshot, Option<Vec<u8>>)>) {
     let mut g = b.lock().unwrap_or_else(|e| e.into_inner());
     let Some(bl) = g.as_mut() else { return };
-    if let Some((i, bytes)) = slot {
-        let t = &mut bl.capture.textures[i];
-        if bytes.is_none() {
-            t.note = "no storage yet, or this backend cannot read it".into();
+    match slot {
+        Some((Snapshot::Texture(i), bytes)) => {
+            let t = &mut bl.capture.textures[i];
+            if bytes.is_none() {
+                t.note = "no storage yet, or this backend cannot read it".into();
+            }
+            t.contents = bytes;
         }
-        t.contents = bytes;
+        Some((Snapshot::Buffer(i), bytes)) => bl.capture.buffers[i].contents = bytes,
+        None => {}
     }
     bl.waiting -= 1;
     if bl.waiting == 0 {
@@ -341,7 +361,7 @@ fn land(b: &Shared, slot: Option<(usize, Option<Vec<u8>>)>) {
 /// the record. Resources are snapshotted when the record first names them: before any recorded
 /// pass has drawn into them.
 #[allow(clippy::too_many_arguments)]
-pub fn on_frame(gpu: &mut dyn Gpu, s: &mut Session, sid: u32, target: Id, kind: u32, packet: u32, view: &CmdView, _now: u64) {
+pub(crate) fn on_frame(gpu: &mut dyn Gpu, s: &mut Session, sid: u32, target: Id, kind: u32, packet: u32, view: &CmdView, _now: u64) {
     let base = kind & !target::FLAGS;
     if kind & (target::PICK | target::OVERLAY) != 0 || (base != target::WINDOW && base != target::TEXTURE) {
         return;
@@ -371,7 +391,7 @@ pub fn on_frame(gpu: &mut dyn Gpu, s: &mut Session, sid: u32, target: Id, kind: 
     let wanted = {
         let mut g = b.lock().unwrap_or_else(|e| e.into_inner());
         let Some(bl) = g.as_mut() else { return };
-        let wanted = record_packet(gpu, s, sid, p, view, bl);
+        let wanted = record_packet(s, sid, p, view, bl);
         bl.waiting += wanted.len();
         if window {
             let c = &mut bl.capture;
@@ -398,20 +418,24 @@ pub fn on_frame(gpu: &mut dyn Gpu, s: &mut Session, sid: u32, target: Id, kind: 
         }
         wanted
     };
-    // texture contents come from the GPU (outside the record's lock: a backend may answer at once)
-    for (i, id) in wanted {
+    // Request snapshots outside the record's lock: a backend may answer at once.
+    for (slot, id) in wanted {
         let b2 = b.clone();
-        gpu.capture_texture(s, id, Box::new(move |bytes| land(&b2, Some((i, bytes)))));
+        let done = Box::new(move |bytes| land(&b2, Some((slot, bytes))));
+        match slot {
+            Snapshot::Texture(_) => gpu.capture_texture(s, id, done),
+            Snapshot::Buffer(_) => gpu.capture_buffer_async(s, id, done),
+        }
     }
     if window {
-        // the recording's own share: complete once every texture has landed
+        // the recording's own share: complete once every snapshot has landed
         land(&b, None);
     }
 }
 
 /// Appends one packet's passes and draws (deep copies) and the resources they first name;
-/// returns the textures whose contents to read (index in `capture.textures`, id).
-fn record_packet(gpu: &mut dyn Gpu, s: &mut Session, sid: u32, p: &FramePacket, view: &CmdView, bl: &mut Building) -> Vec<(usize, Id)> {
+/// returns the resource snapshots to request for this packet.
+fn record_packet(s: &Session, sid: u32, p: &FramePacket, view: &CmdView, bl: &mut Building) -> Vec<(Snapshot, Id)> {
     let c = &mut bl.capture;
     let strs = &mut bl.strs;
     let range = |r: Range, len: usize| {
@@ -419,27 +443,28 @@ fn record_packet(gpu: &mut dyn Gpu, s: &mut Session, sid: u32, p: &FramePacket, 
         a.checked_add(r.len as usize).filter(|e| *e <= len).map(|e| a..e)
     };
     let Some(passes) = range(p.passes, view.passes.len()) else { return Vec::new() };
+    let Some(stream) = exec::packet_uniforms(view, p) else { return Vec::new() };
+    let mut views = Vec::new();
     let first_pass = c.passes.len();
     for pass in &view.passes[passes] {
         let Some(dr) = range(pass.draws, view.draws.len()) else { continue };
+        if exec::pass_views_into(pass, view.arena, stream, 16, &mut views).is_err() { continue; }
+        let uniforms = views.iter().flat_map(|v| exec::uniform_slice(stream, v.uniforms, 16).unwrap().iter().copied()).collect();
         let pi = c.passes.len() as u32;
         let first = c.draws.len() as u32;
         for d in &view.draws[dr] {
-            // SAFETY: inside the `hal_submit` call that lent these slices
-            let bytes = |sl: Slice| unsafe { sl.as_bytes() }.to_vec();
+            let [Some(call), Some(list), Some(dynamic), Some(scope)] = d.uniforms.map(|r| exec::uniform_slice(stream, r, 16)) else { continue };
             c.draws.push(CapDraw {
                 pass: pi,
                 pipeline: d.pipeline,
                 vb: d.vb,
                 ib: d.ib,
                 index: d.index,
-                inst_kind: d.inst.kind,
                 inst_id: d.inst.id,
                 inst_off: d.inst.off,
                 inst_count: d.inst.count,
-                inst_data: if d.inst.kind == Inst::INLINE { bytes(d.inst.data) } else { Vec::new() },
                 inst_ranges: read_pairs(view.arena, d.inst_ranges).collect(),
-                uniforms: [bytes(d.uniforms[0]), bytes(d.uniforms[1]), bytes(d.uniforms[2]), bytes(d.uniforms[3])],
+                uniforms: [call.to_vec(), list.to_vec(), dynamic.to_vec(), scope.to_vec()],
                 ubufs: d.ubufs,
                 tex: read_ids(view.arena, d.tex).collect(),
                 scissor: d.scissor,
@@ -455,8 +480,6 @@ fn record_packet(gpu: &mut dyn Gpu, s: &mut Session, sid: u32, p: &FramePacket, 
             strs.extend([d.owner, d.list_name]);
         }
         let n = c.draws.len() as u32 - first;
-        // SAFETY: as above
-        let uniforms = unsafe { pass.uniforms.as_bytes() }.to_vec();
         c.passes.push(CapPass {
             color: pass.color,
             depth: pass.depth,
@@ -504,7 +527,7 @@ fn record_packet(gpu: &mut dyn Gpu, s: &mut Session, sid: u32, p: &FramePacket, 
         let attr = s.ledger.get(Kind::Texture, id.index).filter(|l| l.gen == id.gen).map(|l| l.attr).unwrap_or_default();
         strs.extend([attr.owner, attr.site, attr.label]);
         if needs {
-            wanted.push((c.textures.len(), id));
+            wanted.push((Snapshot::Texture(c.textures.len()), id));
         }
         c.textures.push(CapTexture {
             id,
@@ -526,9 +549,8 @@ fn record_packet(gpu: &mut dyn Gpu, s: &mut Session, sid: u32, p: &FramePacket, 
     let mut bufs: Vec<Id> = Vec::new();
     let first_draw = c.passes[first_pass..].first().map_or(c.draws.len(), |p| p.draws.off as usize);
     for d in &c.draws[first_draw..] {
-        let inst = (d.inst_kind == Inst::BUFFER).then_some(d.inst_id);
-        for id in [d.vb, d.ib].into_iter().chain(inst).chain(d.ubufs) {
-            if !id.is_none() && !bufs.contains(&id) && c.buffer(id).is_none() {
+        for id in [d.vb, d.ib, d.inst_id].into_iter().chain(d.ubufs) {
+            if !id.is_none() && !bufs.contains(&id) && (id == d.inst_id || c.buffer(id).is_none()) {
                 bufs.push(id);
             }
         }
@@ -540,13 +562,11 @@ fn record_packet(gpu: &mut dyn Gpu, s: &mut Session, sid: u32, p: &FramePacket, 
         };
         let attr = s.ledger.get(Kind::Buffer, id.index).filter(|l| l.gen == id.gen).map(|l| l.attr).unwrap_or_default();
         strs.extend([attr.owner, attr.site, attr.label]);
-        // A storage buffer can be written by the GPU. The synchronous capture hook
-        // cannot safely read mapped bytes; its contents require BufferReadback.
-        let contents = if e.val.kind & buffer_kind::KIND_MASK == buffer_kind::STORAGE { None } else { gpu.capture_buffer(sid, id) };
-        if contents.is_none() {
-            c.notes.push(format!("buffer {}:{}: this backend did not give its bytes", id.index, id.gen));
+        // GPU-writable storage still requires BufferReadback on backends with a mapped hook.
+        if e.val.kind & buffer_kind::KIND_MASK != buffer_kind::STORAGE {
+            wanted.push((Snapshot::Buffer(c.buffers.len()), id));
         }
-        c.buffers.push(CapBuffer { id, kind: e.val.kind, size: e.val.size, owner: attr.owner, site: attr.site, label: attr.label, contents });
+        c.buffers.push(CapBuffer { id, first_pass: first_pass as u32, kind: e.val.kind, size: e.val.size, owner: attr.owner, site: attr.site, label: attr.label, contents: None });
     }
     // pipelines: the blob exactly as received
     let mut pipes: Vec<Id> = Vec::new();

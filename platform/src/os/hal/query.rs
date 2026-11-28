@@ -10,6 +10,13 @@ impl Cx {
         self.hal.gpu_prof.as_ref()
     }
 
+    /// Stops the recording [`Cx::gpu_prof_recording`]'s first query started and forgets its last
+    /// answer; a recording the remote tools started runs on. The next query starts a new one.
+    pub fn gpu_prof_stop(&mut self) {
+        self.hal.frames.w.gpu_prof_stop();
+        self.hal.gpu_prof = None;
+    }
+
     pub(crate) fn hal_answer_query(&mut self, req: u32, request: &[u8]) {
         let request = String::from_utf8_lossy(request);
         // (posted: nothing waits for a reply)

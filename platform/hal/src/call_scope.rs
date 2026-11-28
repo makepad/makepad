@@ -21,6 +21,7 @@ pub struct CallScope {
 static HOOKS: OnceLock<CallScope> = OnceLock::new();
 
 /// Registers the host's hooks, once per process (a later call is ignored).
+#[relax_api::relax_api(loader = "the loader registers its call-scope hooks: JIT code has no use for it")]
 pub fn set_call_scope(hooks: CallScope) {
     let _ = HOOKS.set(hooks);
 }
@@ -29,9 +30,11 @@ pub fn set_call_scope(hooks: CallScope) {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Scope(u64);
 
+#[relax_api::relax_api(marked)]
 impl Scope {
     /// The scope of the calling thread: call where the app registers the callback, never on a
     /// realtime path.
+    #[relax_api::relax_api(loader = "the HAL takes a callback's scope where the HAL registers the callback: JIT code registers callbacks through the HAL's ops")]
     pub fn here() -> Scope {
         Scope(HOOKS.get().map_or(0, |h| (h.capture)()))
     }
@@ -39,7 +42,7 @@ impl Scope {
     /// Runs `f` (a call into the callback) in this scope, on the calling thread. It comes back when
     /// the host ended the app's run under it, too (`relax_api::app_call`).
     #[inline]
-    pub fn call(self, f: impl FnOnce()) {
+    pub(crate) fn call(self, f: impl FnOnce()) {
         if self.0 == 0 {
             return f();
         }

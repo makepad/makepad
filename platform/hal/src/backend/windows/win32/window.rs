@@ -666,7 +666,7 @@ fn command(s: &'static Shared, sid: u32, cmd: OsCmd) {
                 }
             }
         }
-        OsCmd::ClipSet { data } => clipboard::set(&data),
+        OsCmd::ClipSet { data } => clipboard::set(HWND(s.dispatch.load(Ordering::Acquire) as _), data),
         OsCmd::ClipRead { req, .. } => clipboard::read(HWND(s.dispatch.load(Ordering::Acquire) as _), sid, req),
         OsCmd::ImeShow { id, area, .. } => {
             if let Some(w) = target(id) {

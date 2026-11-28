@@ -21,6 +21,7 @@ pub(super) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 
 pub(super) fn error(e: vk::Result) -> String { format!("Vulkan: {e:?}") }
 
+#[cfg(target_os = "linux")]
 pub struct VideoQueue {
     pub family: u32,
     pub queue: vk::Queue,
@@ -56,6 +57,7 @@ pub struct Device {
     /// profiler places its pass times on the HAL clock with them ([`Device::calibrate`]).
     pub calibrated: bool,
     pub extensions: HashSet<String>,
+    #[cfg(target_os = "linux")]
     pub present_wait: bool,
     /// Multiview render passes (Vulkan 1.1 `multiview`, enabled when the device has it).
     pub multiview: bool,
@@ -80,6 +82,7 @@ pub struct Device {
     /// The queue of the GPU's hardware video encoder (VK_KHR_video_encode_queue + H.264), when
     /// it has one: `video_encode::Stream` submits there. Its own lock: video submits never wait
     /// for the graphics queue's.
+    #[cfg(target_os = "linux")]
     pub video_encode: Option<VideoQueue>,
     /// The instance, destroyed after the last device made on it (display peers and a device
     /// that replaced a lost one share it).
@@ -102,6 +105,8 @@ pub struct Device {
     /// Whether `Buffer::new` has already logged falling back from `DEVICE_LOCAL|HOST_VISIBLE|HOST_COHERENT`
     /// to host memory on this device, so a non-ReBAR or exhausted BAR heap logs once per device.
     pub rebar_fallback_logged: AtomicBool,
+    /// Whether the route of this device's APPEND writes (staged or mapped) has been logged.
+    pub append_route_logged: AtomicBool,
     /// The last device budget read (`memory_budget`) and when.
     budget: Mutex<Option<(std::time::Instant, MemoryBudget)>>,
     /// Sampler Y'CbCr conversion (core 1.1 `samplerYcbcrConversion`, enabled when the device has
@@ -221,6 +226,7 @@ impl Device {
 
     /// The process is done with Vulkan (Android's GLES fallback), so its device goes with the
     /// last backend holding it.
+    #[cfg(target_os = "android")]
     pub(crate) fn release_shared() {
         lock(&SHARED).take();
     }
@@ -447,6 +453,7 @@ impl Device {
         let video_priorities = [1.0; 4];
         let mut queue_infos = vec![vk::DeviceQueueCreateInfo::default().queue_family_index(family as u32).queue_priorities(&priorities)];
         if let Some(video) = video_family { queue_infos.push(vk::DeviceQueueCreateInfo::default().queue_family_index(video as u32).queue_priorities(&video_priorities[..video_count as usize])); }
+        #[cfg(target_os = "linux")]
         let video_timestamp_bits = video_family.map_or(0, |f| queues[f].timestamp_valid_bits);
         let queues = queue_infos;
         let mut create = vk::DeviceCreateInfo::default()
@@ -498,16 +505,20 @@ impl Device {
         });
         let calibrated = calibration.is_some() && raw.table.get_calibrated_timestamps_khr.is_some();
         report_profiling(name, &properties, queue.timestamp_valid_bits, calibrated);
+        #[cfg(target_os = "linux")]
         let video_encode = video_family.map(|f| VideoQueue { family: f as u32, queue: unsafe { raw.get_device_queue(f as u32, 0) }, timestamp_bits: video_timestamp_bits,
             more: (1..video_count).map(|i| (unsafe { raw.get_device_queue(f as u32, i) }, Mutex::new(()))).collect(), lock: Mutex::new(()), h265, qp_map: has_qp_map });
-        if let Some(v) = &video_encode { if log_enabled() { eprintln!("[hal-vulkan] hardware video encode queue family={}", v.family); } }
+        if let Some(family) = video_family { if log_enabled() { eprintln!("[hal-vulkan] hardware video encode queue family={family}"); } }
         let (pipeline_cache, pipeline_cache_file, pipeline_cache_cold) = open_pipeline_cache(&raw, &properties);
         Ok(Some(Arc::new(Self {
             queue: unsafe { raw.get_device_queue(family as u32, 0) }, queue_lock: Mutex::new(()), raw, instance: instance.clone(),
             physical, family: family as u32, properties, memory, features, formats,
-            timestamp_bits: queue.timestamp_valid_bits, calibrated, extensions, present_wait: pacing, multiview: has_multiview, compute, fdm: has_fdm, msaa, life: life.clone(),
+            timestamp_bits: queue.timestamp_valid_bits, calibrated, extensions, multiview: has_multiview, compute, fdm: has_fdm, msaa, life: life.clone(),
+            #[cfg(target_os = "linux")]
+            present_wait: pacing,
+            #[cfg(target_os = "linux")]
             video_encode,
-            pools: Default::default(), blocks: Default::default(), lost: AtomicBool::new(false), starved: AtomicBool::new(false), files_reported: AtomicBool::new(false), rebar_fallback_logged: AtomicBool::new(false), budget: Mutex::new(None),
+            pools: Default::default(), blocks: Default::default(), lost: AtomicBool::new(false), starved: AtomicBool::new(false), files_reported: AtomicBool::new(false), rebar_fallback_logged: AtomicBool::new(false), append_route_logged: AtomicBool::new(false), budget: Mutex::new(None),
             ycbcr: has_ycbcr, video_samplers: Mutex::new(Default::default()), unfiltered_samplers: Mutex::new(Default::default()),
             pipeline_cache, pipeline_cache_file, pipeline_cache_cold, pipelines_made: AtomicU32::new(0), pipeline_made_ns: AtomicU64::new(0),
         })))
@@ -677,8 +688,12 @@ impl Device {
         Ok(Arc::new(Self { instance: instance.clone(), queue: unsafe { raw.get_device_queue(family as u32, 0) },
             raw, physical, queue_lock: Mutex::new(()), family: family as u32, properties, memory, features, formats,
             // a display peer only scans out: the GPU profiler times the rendering device
-            timestamp_bits: queue.timestamp_valid_bits, calibrated: false, extensions, present_wait: pacing, multiview: false, compute: false, fdm: false, msaa: 1, life: owner.life.clone(), video_encode: None,
-            pools: Default::default(), blocks: Default::default(), lost: AtomicBool::new(false), starved: AtomicBool::new(false), files_reported: AtomicBool::new(false), rebar_fallback_logged: AtomicBool::new(false), budget: Mutex::new(None),
+            timestamp_bits: queue.timestamp_valid_bits, calibrated: false, extensions, multiview: false, compute: false, fdm: false, msaa: 1, life: owner.life.clone(),
+            #[cfg(target_os = "linux")]
+            present_wait: pacing,
+            #[cfg(target_os = "linux")]
+            video_encode: None,
+            pools: Default::default(), blocks: Default::default(), lost: AtomicBool::new(false), starved: AtomicBool::new(false), files_reported: AtomicBool::new(false), rebar_fallback_logged: AtomicBool::new(false), append_route_logged: AtomicBool::new(false), budget: Mutex::new(None),
             ycbcr: false, video_samplers: Mutex::new(Default::default()), unfiltered_samplers: Mutex::new(Default::default()),
             pipeline_cache, pipeline_cache_file, pipeline_cache_cold, pipelines_made: AtomicU32::new(0), pipeline_made_ns: AtomicU64::new(0) }))
     }
@@ -712,7 +727,6 @@ fn pipeline_cache_file(properties: &vk::PhysicalDeviceProperties) -> Option<Path
     let android: Option<String> = None;
     let dir = if let Some(d) = std::env::var_os("MAKEPAD_HAL_CACHE_DIR") { PathBuf::from(d) }
         else if cfg!(target_os = "android") { android.map(PathBuf::from).or_else(|| std::env::var_os("TMPDIR").map(PathBuf::from))? }
-        else if cfg!(target_vendor = "apple") { PathBuf::from(apple_cache_dir()?) }
         else if let Some(d) = std::env::var_os("XDG_CACHE_HOME") { PathBuf::from(d) }
         else if let Some(d) = std::env::var_os("LOCALAPPDATA") { PathBuf::from(d) }
         else { PathBuf::from(std::env::var_os("HOME")?).join(".cache") };
@@ -723,10 +737,6 @@ fn pipeline_cache_file(properties: &vk::PhysicalDeviceProperties) -> Option<Path
         else { relax_api::env::current_exe().ok().and_then(|exe| Some(format!("{}-", exe.file_stem()?.to_string_lossy()))) };
     Some(dir.join("makepad-hal").join(format!("pipelines-{}{:x}-{:x}-{:x}.bin", app.unwrap_or_default(), properties.vendor_id, properties.device_id, properties.driver_version)))
 }
-#[cfg(target_vendor = "apple")]
-fn apple_cache_dir() -> Option<String> { crate::app_cache_dir() }
-#[cfg(not(target_vendor = "apple"))]
-fn apple_cache_dir() -> Option<String> { None }
 
 /// Where a device's pipeline cache is kept between runs.
 struct PipelineCacheFile {
@@ -1167,6 +1177,7 @@ fn loader() -> Result<Entry, String> { unsafe { Entry::load() } }
 
 /// The vendor and device ids and driver version of the Vulkan 1.1 GPU a backend would open, read
 /// from an instance that's dropped right away, without making a device.
+#[cfg(target_os = "android")]
 pub fn first_gpu_driver() -> Option<[u32; 3]> {
     let entry = loader().ok()?;
     let app = vk::ApplicationInfo::default().application_name(c"Makepad HAL").api_version(vk::API_VERSION_1_1);

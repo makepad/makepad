@@ -280,6 +280,7 @@ unsafe fn wait_for_stream(
 
 struct PulseInputStream {
     device_id: u64,
+    media_role_phone: bool,
     index: usize,
     stream: *mut pa_stream,
     input_ptr: *mut PulseInputStruct,
@@ -298,6 +299,7 @@ impl PulseInputStream {
         device_id: u64,
         name: &str,
         index: usize,
+        media_role_phone: bool,
         pulse: &PulseAudioAccess,
     ) -> Option<PulseInputStream> {
         if !pulse.is_context_ready() {
@@ -317,12 +319,16 @@ impl PulseInputStream {
             channels: 2,
         };
 
-        let stream = pa_stream_new(
-            pulse.context,
-            "makepad input stream\0".as_ptr(),
-            &sample_spec,
-            std::ptr::null(),
-        );
+        let stream_name = "makepad input stream\0".as_ptr();
+        let props = if media_role_phone { pa_proplist_new() } else { std::ptr::null_mut() };
+        let stream = if props.is_null() {
+            pa_stream_new(pulse.context, stream_name, &sample_spec, std::ptr::null())
+        } else {
+            pa_proplist_sets(props, b"media.role\0".as_ptr().cast::<c_char>(), b"phone\0".as_ptr().cast::<c_char>());
+            let stream = pa_stream_new_with_proplist(pulse.context, stream_name, &sample_spec, std::ptr::null(), props);
+            pa_proplist_free(props);
+            stream
+        };
         if stream.is_null() {
             eprintln!(
                 "PulseAudio: pa_stream_new failed for input device {} ({})",
@@ -350,12 +356,15 @@ impl PulseInputStream {
             input_ptr as *mut _,
         );
 
+        // Record streams take their latency from fragsize (tlength is playback only). Ask for the
+        // playback cadence: left at the server default, classic PulseAudio can deliver capture in
+        // fragments of a second or more, so audio arrives in bursts long after the playback beside it.
         let buffer_attr = pa_buffer_attr {
             maxlength: u32::MAX,
-            tlength: (8 * pulse.buffer_frames) as u32,
+            tlength: u32::MAX,
             prebuf: 0,
             minreq: u32::MAX,
-            fragsize: u32::MAX,
+            fragsize: (8 * pulse.buffer_frames) as u32,
         };
         let flags = PA_STREAM_ADJUST_LATENCY;
 
@@ -391,6 +400,7 @@ impl PulseInputStream {
         pa_threaded_mainloop_unlock(pulse.main_loop);
         Some(Self {
             device_id,
+            media_role_phone,
             index,
             stream,
             input_ptr,
@@ -1098,15 +1108,17 @@ impl PulseAudioAccess {
         }
     }
 
-    pub fn use_audio_inputs(&mut self, devices: &[u64]) {
+    pub fn use_audio_inputs(&mut self, devices: &[u64], options: u32) {
+        let want_phone = options & crate::media::audio_option::ECHO_CANCELLATION != 0;
         self.reap_zombie_streams();
         self.reap_failed_inputs();
         self.rearm_on_explicit_request(devices, true);
         let new = {
             let mut i = 0;
             while i < self.audio_inputs.len() {
-                if devices.get(self.audio_inputs[i].index) != Some(&self.audio_inputs[i].device_id)
-                {
+                let s = &self.audio_inputs[i];
+                let phone = want_phone && self.device_descs.iter().any(|v| v.desc.id == s.device_id && v.desc.kind == device_kind::INPUT);
+                if devices.get(s.index) != Some(&s.device_id) || s.media_role_phone != phone {
                     let item = self.audio_inputs.remove(i);
                     unsafe { item.terminate(self) };
                 } else {
@@ -1136,14 +1148,15 @@ impl PulseAudioAccess {
                         .iter()
                         .find(|v| v.desc.id == *device_id && v.desc.kind != device_kind::OUTPUT)
                     {
-                        new.push((index, *device_id, &v.name))
+                        let phone = want_phone && v.desc.kind == device_kind::INPUT;
+                        new.push((index, *device_id, &v.name, phone))
                     }
                 }
             }
             new
         };
-        for (index, device_id, name) in new {
-            if let Some(new_input) = unsafe { PulseInputStream::new(device_id, name, index, self) }
+        for (index, device_id, name, phone) in new {
+            if let Some(new_input) = unsafe { PulseInputStream::new(device_id, name, index, phone, self) }
             {
                 self.audio_inputs.push(new_input);
             } else {

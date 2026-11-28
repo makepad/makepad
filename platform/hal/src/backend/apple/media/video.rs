@@ -437,7 +437,10 @@ impl Player {
         }
         let (texture, _, _) = self.cpu_texture.as_ref().expect("set above");
         let region = MTLRegion { origin: MTLOrigin { x: 0, y: 0, z: 0 }, size: MTLSize { width: width as u64, height: height as u64, depth: 1 } };
+        let started = crate::clock_ns();
         let _: () = msg_send![texture.as_id(), replaceRegion: region mipmapLevel: 0u64 withBytes: base as *const c_void bytesPerRow: bpr as u64];
+        s.stats.upload_ns += crate::clock_ns().saturating_sub(started);
+        s.stats.upload_bytes += width as u64 * height as u64 * 4;
         let _ = CVPixelBufferUnlockBaseAddress(pixel_buffer, LOCK_READ_ONLY);
         let id = texture.as_id();
         sink.adopt(s, self.targets.bgra, id, width as u32, height as u32, format::BGRA8, None)

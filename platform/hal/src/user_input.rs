@@ -43,6 +43,7 @@ pub struct UserInput {
     pub what: What,
 }
 
+#[relax_api::relax_api]
 static SEQ: AtomicU64 = AtomicU64::new(0);
 /// Desk Link viewers showing this desktop now, not paused (a person may be watching with no
 /// input for a while); a viewer's tab not selected or its window hidden pauses it.
@@ -87,8 +88,10 @@ pub fn open_device(index: usize) -> Option<OpenDevice> {
     OPEN.lock().unwrap_or_else(|e| e.into_inner()).get(index).copied()
 }
 
+#[relax_api::relax_api]
 static AT_NS: AtomicU64 = AtomicU64::new(0);
 /// origin * 4 + what (0: none yet)
+#[relax_api::relax_api]
 static KIND: AtomicU8 = AtomicU8::new(0);
 
 /// The tests that note and read the one process-wide record take turns.

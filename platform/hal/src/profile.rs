@@ -240,10 +240,12 @@ pub fn count(what: &'static str) {
 /// The app was given frame credit (FrameReady) / submitted a window frame now.
 #[relax_api]
 pub fn credit() { if on() { CREDIT.store(crate::clock_ns(), Ordering::Relaxed); } }
-pub fn credit_at() -> u64 { CREDIT.load(Ordering::Relaxed) }
+#[cfg(target_os = "linux")]
+pub(crate) fn credit_at() -> u64 { CREDIT.load(Ordering::Relaxed) }
 #[relax_api]
 pub fn submitted() { if on() { SUBMIT.store(crate::clock_ns(), Ordering::Relaxed); } }
-pub fn submitted_at() -> u64 { SUBMIT.swap(0, Ordering::Relaxed) }
+#[cfg(target_os = "linux")]
+pub(crate) fn submitted_at() -> u64 { SUBMIT.swap(0, Ordering::Relaxed) }
 
 fn report(samples: &Samples) -> String {
     use std::fmt::Write;

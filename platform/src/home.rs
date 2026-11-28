@@ -6,7 +6,7 @@ use std::path::PathBuf;
 /// below the user's home directory, with the process temporary directory used
 /// only when the platform exposes no home directory. The AI hub has an older
 /// copy of this rule and should call this helper when its dependency direction
-/// permits it.
+/// permits it. Apps keep their own per-user state under [`app_state_home`].
 pub fn makepad_home() -> PathBuf {
     // An empty MAKEPAD_HOME counts as unset: PathBuf::from("") would make
     // every path below it relative to the current folder.
@@ -20,11 +20,26 @@ pub fn makepad_home() -> PathBuf {
         .join(".makepad")
 }
 
+/// Where an app keeps its own per-user state under the Makepad home.
+/// An absolute `MAKEPAD_TEST_HOME` puts that state in the test home's `.makepad`
+/// directory. The session's plumbing stays in [`makepad_home`].
+/// On 11-27 a lane's live Town signed a name into a box's persistent demo copy.
+pub fn app_state_home() -> PathBuf {
+    app_state_home_from(std::env::var_os("MAKEPAD_TEST_HOME").map(PathBuf::from), makepad_home)
+}
+
+fn app_state_home_from(test_home: Option<PathBuf>, fallback: impl FnOnce() -> PathBuf) -> PathBuf {
+    test_home
+        .filter(|home| home.is_absolute())
+        .map(|home| home.join(".makepad"))
+        .unwrap_or_else(fallback)
+}
+
 /// Returns the root used by the native key/value storage backend: an absolute
 /// `MAKEPAD_STORAGE_DIR` (a test run's own, so it never reads what an earlier run
-/// stored), else `storage` in [`makepad_home`].
+/// stored), else `storage` in [`app_state_home`].
 pub fn storage_dir() -> PathBuf {
-    std::env::var_os("MAKEPAD_STORAGE_DIR").map(PathBuf::from).filter(|dir| dir.is_absolute()).unwrap_or_else(|| makepad_home().join("storage"))
+    std::env::var_os("MAKEPAD_STORAGE_DIR").map(PathBuf::from).filter(|dir| dir.is_absolute()).unwrap_or_else(|| app_state_home().join("storage"))
 }
 
 /// Where an app keeps its own per-user files: `~/Library/Application
@@ -59,5 +74,24 @@ pub fn app_data_dir(app: &str) -> Option<PathBuf> {
             None => absolute("XDG_DATA_HOME").or_else(|| absolute("HOME").map(|home| home.join(".local").join("share")))?,
         };
         Some(base.join("makepad").join(app))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_an_absolute_test_home_redirects_app_state() {
+        let configured = || PathBuf::from("configured//makepad-home");
+        for (kind, test_home) in [("unset", None), ("relative", Some(PathBuf::from("relative"))), ("empty", Some(PathBuf::new()))] {
+            let actual = app_state_home_from(test_home, configured);
+            assert_eq!(actual.as_os_str(), configured().as_os_str(), "{kind} test home must preserve the configured Makepad home byte for byte");
+        }
+        let absolute = PathBuf::from(if cfg!(windows) { r"C:\test-home" } else { "/test-home" });
+        assert_eq!(
+            app_state_home_from(Some(absolute.clone()), configured), absolute.join(".makepad"),
+            "an absolute test home must contain the app's .makepad directory",
+        );
     }
 }

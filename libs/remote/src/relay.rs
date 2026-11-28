@@ -98,6 +98,9 @@ fn forget(cfg: &Config, pid: u32) {
 /// The start time of a running process; None when there is no such process (or it is a zombie).
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub fn proc_start(pid: u32) -> Option<u64> {
+    if pid == 0 || pid > i32::MAX as u32 {
+        return None;
+    }
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     // `pid (comm) state ...`: comm may hold spaces and parens, so count from the last `)`
     let rest = &stat[stat.rfind(')')? + 1..];
@@ -111,6 +114,9 @@ pub fn proc_start(pid: u32) -> Option<u64> {
 
 #[cfg(target_os = "macos")]
 pub fn proc_start(pid: u32) -> Option<u64> {
+    if pid == 0 || pid > i32::MAX as u32 {
+        return None;
+    }
     extern "C" {
         fn proc_pidinfo(pid: i32, flavor: i32, arg: u64, buffer: *mut u8, size: i32) -> i32;
     }
@@ -140,6 +146,9 @@ pub fn proc_start(pid: u32) -> Option<u64> {
 /// the process list module is the server binary's, not this library's).
 #[cfg(all(unix, not(any(target_os = "linux", target_os = "android", target_os = "macos"))))]
 pub fn proc_start(pid: u32) -> Option<u64> {
+    if pid == 0 || pid > i32::MAX as u32 {
+        return None;
+    }
     extern "C" {
         fn kill(pid: i32, sig: i32) -> i32;
     }
@@ -521,5 +530,18 @@ pub fn dial_forever(ep: &Endpoint, addr: &str, creds: &makepad_network::tunnel::
         }
         std::thread::sleep(Duration::from_secs(backoff));
         backoff = (backoff * 2).min(30);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::proc_start;
+
+    #[test]
+    fn proc_start_rejects_zero_and_out_of_range_unix_pids() {
+        assert!(proc_start(0).is_none());
+        assert!(proc_start(i32::MAX as u32 + 1).is_none());
+        assert!(proc_start(u32::MAX).is_none());
+        assert!(proc_start(std::process::id()).is_some());
     }
 }

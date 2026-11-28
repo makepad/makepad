@@ -82,6 +82,8 @@ pub struct AudioUnitAccess {
     /// Options the running inputs were created with; a change rebuilds them.
     last_input_options: u32,
     #[cfg(target_os = "macos")]
+    _device_listeners: system_devices::Listeners,
+    #[cfg(target_os = "macos")]
     audio_tap: Option<Arc<Mutex<AudioTapAccess>>>,
     #[cfg(target_os = "ios")]
     ios_session_state: IosSessionState,
@@ -109,8 +111,111 @@ pub struct RunningAudioUnit {
     audio_unit: Option<AudioUnit>,
 }
 
+#[cfg(target_os = "macos")]
+mod system_devices {
+    use super::*;
+
+    extern "C" {
+        fn AudioObjectRemovePropertyListener(
+            object: AudioObjectID,
+            address: *const AudioObjectPropertyAddress,
+            listener: AudioObjectPropertyListenerProc,
+            client_data: *mut (),
+        ) -> OSStatus;
+        static _dispatch_source_type_data_or: u8;
+        fn dispatch_source_create(kind: *const u8, handle: usize, mask: usize, queue: ObjcId) -> ObjcId;
+        fn dispatch_source_set_event_handler(source: ObjcId, block: *const ());
+        fn dispatch_activate(source: ObjcId);
+        fn dispatch_source_merge_data(source: ObjcId, bits: usize);
+        fn dispatch_source_cancel(source: ObjcId);
+    }
+
+    pub(super) struct Listeners {
+        source: ObjcId,
+        registered: Vec<AudioObjectPropertyAddress>,
+    }
+
+    // Dispatch sources can be signalled and released from any thread.
+    unsafe impl Send for Listeners {}
+
+    unsafe extern "system" fn devices_changed(
+        _: AudioObjectID,
+        _: u32,
+        _: *const AudioObjectPropertyAddress,
+        source: *mut (),
+    ) -> OSStatus {
+        // Coalesce into the preallocated source. Signal::set wakes the HAL under a mutex,
+        // so its dispatch handler does that part off the CoreAudio thread.
+        dispatch_source_merge_data(source.cast(), 1);
+        0
+    }
+
+    impl Listeners {
+        pub(super) fn new(signal: Signal) -> Self {
+            let source = unsafe {
+                dispatch_source_create(&_dispatch_source_type_data_or, 0, 0, dispatch_get_global_queue(0, 0))
+            };
+            let mut listeners = Self { source, registered: Vec::new() };
+            if source.is_null() {
+                eprintln!("Could not create CoreAudio device change dispatch source");
+                return listeners;
+            }
+            let handler = objc_block!(move || { signal.set(); });
+            unsafe {
+                dispatch_source_set_event_handler(source, (&raw const handler).cast());
+                dispatch_activate(source);
+            }
+            use AudioObjectPropertySelector::*;
+            for (selector, name) in [(Devices, "devices"), (DefaultInputDevice, "default input"), (DefaultOutputDevice, "default output")] {
+                let address = AudioObjectPropertyAddress {
+                    mSelector: selector,
+                    mScope: AudioObjectPropertyScope::Global,
+                    mElement: AudioObjectPropertyElement::Master,
+                };
+                let status = unsafe {
+                    AudioObjectAddPropertyListener(kAudioObjectSystemObject, &address, Some(devices_changed), source.cast())
+                };
+                if status == 0 {
+                    listeners.registered.push(address);
+                } else {
+                    eprintln!("Could not add CoreAudio {name} listener ({status})");
+                }
+            }
+            listeners
+        }
+    }
+
+    impl Drop for Listeners {
+        fn drop(&mut self) {
+            if self.source.is_null() {
+                return;
+            }
+            let mut removed_all = true;
+            for address in &self.registered {
+                let status = unsafe {
+                    AudioObjectRemovePropertyListener(kAudioObjectSystemObject, address, Some(devices_changed), self.source.cast())
+                };
+                if status != 0 {
+                    eprintln!("Could not remove CoreAudio device change listener ({status})");
+                    removed_all = false;
+                }
+            }
+            unsafe {
+                dispatch_source_cancel(self.source);
+                // An unremoved listener can still reference this (now cancelled) source.
+                if removed_all {
+                    dispatch_release(self.source);
+                }
+            }
+        }
+    }
+}
+
 impl AudioUnitAccess {
     pub fn new(change_signal: Signal) -> Arc<Mutex<Self>> {
+        #[cfg(target_os = "macos")]
+        let device_listeners = system_devices::Listeners::new(change_signal.clone());
+        #[cfg(not(target_os = "macos"))]
         Self::observe_route_changes(change_signal.clone());
         Arc::new(Mutex::new(Self {
             failed_devices: Default::default(),
@@ -122,6 +227,8 @@ impl AudioUnitAccess {
             output_cb: Default::default(),
             audio_inputs: Default::default(),
             audio_outputs: Default::default(),
+            #[cfg(target_os = "macos")]
+            _device_listeners: device_listeners,
             #[cfg(target_os = "macos")]
             audio_tap: Some(AudioTapAccess::new()),
             #[cfg(target_os = "ios")]
@@ -418,6 +525,7 @@ impl AudioUnitAccess {
     }
 
 
+    #[cfg(not(target_os = "macos"))]
     pub fn observe_route_changes(device_change: Signal) {
         let center: ObjcId = unsafe { msg_send![class!(NSNotificationCenter), defaultCenter] };
         unsafe {
@@ -1181,5 +1289,91 @@ impl Drop for AudioUnitAccess {
             }
             units.clear();
         }
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+
+    extern "C" {
+        fn AudioHardwareCreateAggregateDevice(description: ObjcId, device: *mut AudioDeviceID) -> OSStatus;
+        fn AudioHardwareDestroyAggregateDevice(device: AudioDeviceID) -> OSStatus;
+    }
+
+    struct PrivateOutput(AudioDeviceID);
+
+    impl PrivateOutput {
+        fn new(output: AudioDeviceID, name: &str) -> Self {
+            // kAudioDevicePropertyDeviceUID is not in AudioObjectPropertySelector.
+            let address = [u32::from_be_bytes(*b"uid "), AudioObjectPropertyScope::Global as u32, 0];
+            let mut uid: CFStringRef = std::ptr::null();
+            let mut size = std::mem::size_of_val(&uid) as u32;
+            unsafe {
+                let status = AudioObjectGetPropertyData(
+                    output, address.as_ptr().cast(), 0, std::ptr::null(), &mut size, (&raw mut uid).cast(),
+                );
+                assert_eq!(status, 0, "could not read default output UID");
+                let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];
+                let sub: ObjcId = msg_send![class!(NSDictionary), dictionaryWithObject: uid as ObjcId forKey: str_to_nsstring("uid")];
+                CFRelease(uid.cast());
+                let subs: ObjcId = msg_send![class!(NSArray), arrayWithObject: sub];
+                let dict: ObjcId = msg_send![class!(NSMutableDictionary), dictionary];
+                let () = msg_send![dict, setObject: subs forKey: str_to_nsstring("subdevices")];
+                let private: ObjcId = msg_send![class!(NSNumber), numberWithInt: 1i32];
+                let () = msg_send![dict, setObject: private forKey: str_to_nsstring("private")];
+                let () = msg_send![dict, setObject: str_to_nsstring(name) forKey: str_to_nsstring("name")];
+                let () = msg_send![dict, setObject: str_to_nsstring(name) forKey: str_to_nsstring("uid")];
+                let mut id = 0;
+                let status = AudioHardwareCreateAggregateDevice(dict, &mut id);
+                let () = msg_send![pool, drain];
+                assert_eq!(status, 0, "could not create private output");
+                Self(id)
+            }
+        }
+    }
+
+    impl Drop for PrivateOutput {
+        fn drop(&mut self) {
+            let status = unsafe { AudioHardwareDestroyAggregateDevice(self.0) };
+            if status != 0 && !std::thread::panicking() {
+                panic!("could not destroy private output ({status})");
+            }
+        }
+    }
+
+    #[test]
+    fn private_output_appears_and_disappears() {
+        let signal = Signal::new(0);
+        let access = AudioUnitAccess::new(signal.clone());
+        let output = {
+            let mut audio = access.lock().unwrap();
+            audio.update_device_list().unwrap();
+            let descs = &audio.device_descs;
+            let Some(default) = descs.iter().find(|d| d.desc.kind == device_kind::OUTPUT && d.desc.is_default) else {
+                eprintln!("No default output available for a private aggregate");
+                return;
+            };
+            if descs.iter().any(|d| d.core_device_id == default.core_device_id && d.desc.kind == device_kind::INPUT) {
+                eprintln!("Default output is a duplex device, which cannot be the output-only subdevice");
+                return;
+            }
+            default.core_device_id
+        };
+
+        let name = format!("Makepad HAL private output {}", std::process::id());
+        let wait_for = |present| loop {
+            let wake = &crate::Hal::global().sig;
+            drop(wake.cv.wait_while(wake.signal.lock().unwrap(), |_| !signal.take()).unwrap());
+            let devices = access.lock().unwrap().get_updated_descs();
+            if devices.iter().any(|d| d.name == name && d.kind == device_kind::OUTPUT) == present {
+                return;
+            }
+        };
+        let aggregate = PrivateOutput::new(output, &name);
+        wait_for(true);
+        signal.take();
+        drop(aggregate);
+        wait_for(false);
     }
 }

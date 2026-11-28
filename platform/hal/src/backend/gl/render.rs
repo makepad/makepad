@@ -6,7 +6,7 @@
 use super::egl::{lock_context_lifecycle, Context};
 use super::surface::EglSurfaceSource;
 use super::sys::{self, GLenum, GLsync, GLuint};
-use super::{PipeState, TexObj};
+use super::{GlKey, PipeState, TexObj};
 use crate::font::FrameProgress;
 use crate::ledger::{Charge, Pool, Pools};
 use crate::session::TextureObj;
@@ -49,6 +49,9 @@ impl Queue {
 pub(super) struct Caps {
     pub formats: u64,
     pub max_texture: u32,
+    pub max_vertex_texture_units: u32,
+    pub max_fragment_texture_units: u32,
+    pub max_combined_texture_units: u32,
     pub max_layers: u32,
     pub ubo_align: usize,
     pub max_ubo: usize,
@@ -79,9 +82,16 @@ pub(super) struct Token {
     pub incarnation: Arc<FrameProgress>,
 }
 
+#[derive(Default)]
+pub(super) struct UploadStats {
+    pub ns: u64,
+    pub driver_uploads: u64,
+}
+
 pub(super) enum Event {
     /// `gpu_ns`: 0 when the GPU time isn't known. `ran`: the GPU did the frame's work.
-    Frame { target: Id, kind: u32, frame: u64, window: bool, gpu_ns: u64, ran: bool },
+    Frame { target: Id, kind: u32, frame: u64, window: bool, gpu_ns: u64, ran: bool, binds: u64, cpu_ns: u64, upload_ns: UploadStats },
+    Counters { binds: u64, cpu_ns: u64, upload_ns: UploadStats },
     BufferLeases { req: u32, status: u32, leases: Vec<crate::lease::Lease> },
     Readback { req: u32, status: u32, rect: [u32; 4], lease: Option<crate::lease::Lease> },
 }
@@ -184,7 +194,7 @@ fn half(b: &[u8]) -> [u8; 2] {
 }
 
 pub(super) enum Then {
-    Frame { token: Token, target: Id, kind: u32, frame: u64, window: bool, timing: Option<(GLuint, u64)> },
+    Frame { token: Token, target: Id, kind: u32, frame: u64, window: bool, timing: Option<(GLuint, u64)>, binds: u64, cpu_ns: u64, upload_ns: UploadStats },
     Read { token: Token, req: u32, rect: [u32; 4], read: ReadFormat, pbo: GLuint, _charge: Charge },
     Copy { token: Token, req: u32, rect: [u32; 4] },
 }
@@ -200,13 +210,15 @@ pub(super) struct GlTex {
 pub(super) struct GlBuf {
     pub name: GLuint,
     pub size: u64,
+    append: bool,
     /// the words as an R32UI texture, for programs that fetch instances by id (made on use)
-    pub words: Option<Words>,
-    pub words_stale: bool,
+    pub words: Words,
+    /// Byte range `[start, end)` to refresh before the next draw that fetches words.
+    pub words_dirty: Option<(u64, u64)>,
 }
 
-/// Instance words as an R32UI texture of `WORD_ROW`-wide rows (`Renderer::words_texture`), and
-/// its ledger charge.
+/// Instance words as an R32UI array texture of `WORD_ROW`-wide rows in layers of `WORD_ROW` rows
+/// (`Renderer::words_texture`), and its ledger charge.
 #[derive(Default)]
 pub(super) struct Words {
     pub tex: GLuint,
@@ -214,31 +226,40 @@ pub(super) struct Words {
     _charge: Option<Charge>,
 }
 
-/// The size of the instance word textures' rows (GLES 3 guarantees 2048 texels).
+/// The size of the instance word textures' rows and of their layers' height (GLES 3 guarantees
+/// 2048 texels): a layer is one window of 2048² words. The shader emitter's
+/// `INSTANCE_WORD_ROW_SHIFT` addresses the same row and layer.
 pub(super) const WORD_ROW: u32 = 2048;
 
 pub(super) struct Renderer {
     pub ctx: Context,
+    /// The context's GL_CULL_FACE_MODE, retained across passes even while culling is disabled.
+    pub cull_face: GLenum,
+    pub binds: u64,
+    upload_times: HashMap<u32, (Token, UploadStats)>,
     pub caps: Arc<Caps>,
-    pub textures: HashMap<u64, GlTex>,
-    pub buffers: HashMap<u64, GlBuf>,
-    pub programs: HashMap<u64, super::program::GlProgram>,
+    pub textures: Vec<Option<GlTex>>,
+    tex_recycled: Arc<Mutex<Vec<GlKey>>>,
+    pub buffers: Vec<Option<GlBuf>>,
+    buf_recycled: Arc<Mutex<Vec<GlKey>>>,
+    pub programs: Vec<Option<super::program::GlProgram>>,
+    pub(super) prog_recycled: Arc<Mutex<Vec<GlKey>>>,
     pub linking: Vec<(Weak<PipeState>, super::program::Linking)>,
-    pub fbos: HashMap<[(u64, u32); 5], GLuint>,
+    pub fbos: HashMap<[(GlKey, u32); 5], GLuint>,
     pub read_fbo: GLuint,
     pub copy_fbo: GLuint,
     /// 1x1 textures per sampled shape for a draw that names no texture
     pub fallback: [GLuint; 5],
     /// nearest samplers per address mode and compare mode, for formats the driver can't filter
     pub nearest: [GLuint; 8],
-    /// the frame's uniform blocks and inline instances, and the instance words as a texture
+    /// the frame's uniform blocks
     pub uniform_arena: GLuint,
-    pub instance_arena: GLuint,
-    pub arena_words: Words,
+    pub zero_uniform: (GLuint, usize),
+    zero_uniform_charge: Option<Charge>,
     /// what this thread allocates for itself, on the HAL's ledger as backend rows
     pub pools: Arc<Pools>,
-    /// the arenas' sizes as last specified, and their charges
-    pub arena_charges: Option<([u64; 2], [Charge; 2])>,
+    /// the uniform arena's size as last specified, and its charge
+    pub arena_charge: Option<(u64, Charge)>,
     _fallback_charges: [Charge; 5],
     pending: VecDeque<(GLsync, Then)>,
     pub mailbox: Mailbox,
@@ -256,14 +277,22 @@ pub(super) struct Renderer {
     exit: bool,
 }
 
-pub(super) fn start(source: Box<dyn EglSurfaceSource>, mailbox: Mailbox, pools: Arc<Pools>) -> Result<(Queue, Arc<Caps>, std::thread::JoinHandle<()>), String> {
+pub(super) fn slot_for_insert<T>(slots: &mut Vec<Option<T>>, key: GlKey) -> &mut Option<T> {
+    let slot = key as usize;
+    if slot >= slots.len() { slots.resize_with(slot + 1, || None); }
+    &mut slots[slot]
+}
+
+pub(super) fn start(source: Box<dyn EglSurfaceSource>, mailbox: Mailbox, pools: Arc<Pools>,
+    tex_recycled: Arc<Mutex<Vec<GlKey>>>, buf_recycled: Arc<Mutex<Vec<GlKey>>>, prog_recycled: Arc<Mutex<Vec<GlKey>>>,
+) -> Result<(Queue, Arc<Caps>, std::thread::JoinHandle<()>), String> {
     let (tx, rx) = mpsc::channel::<Job>();
     let queue = Queue { jobs: tx, #[cfg(target_os = "android")] urgent: Arc::new(Mutex::new(Vec::new())), #[cfg(target_os = "android")] surfaces: Default::default() };
     #[cfg(target_os = "android")]
     let own = queue.clone();
     let (ready, made) = mpsc::sync_channel(1);
     let thread = std::thread::Builder::new().name("makepad-gl-render".into()).spawn(move || {
-        match Renderer::new(source, mailbox, pools, #[cfg(target_os = "android")] own) {
+        match Renderer::new(source, mailbox, pools, tex_recycled, buf_recycled, prog_recycled, #[cfg(target_os = "android")] own) {
             Ok(r) => {
                 let _ = ready.send(Ok(r.caps.clone()));
                 r.run(rx);
@@ -279,7 +308,26 @@ pub(super) fn start(source: Box<dyn EglSurfaceSource>, mailbox: Mailbox, pools: 
 }
 
 impl Renderer {
-    fn new(source: Box<dyn EglSurfaceSource>, mailbox: Mailbox, pools: Arc<Pools>, #[cfg(target_os = "android")] queue: Queue) -> Result<Self, String> {
+    pub(super) fn ensure_zero_uniform(&mut self, need: usize) {
+        let (mut name, capacity) = self.zero_uniform;
+        if name != 0 && capacity >= need { return; }
+        let gl = &self.ctx.gl;
+        let size = need.max(256).next_power_of_two().min(self.caps.max_ubo.max(256));
+        let zeros = vec![0u8; size];
+        unsafe {
+            if name == 0 { (gl.glGenBuffers)(1, &mut name); }
+            (gl.glBindBuffer)(sys::UNIFORM_BUFFER, name);
+            (gl.glBufferData)(sys::UNIFORM_BUFFER, size as isize, zeros.as_ptr() as _, sys::STATIC_DRAW);
+            (gl.glBindBuffer)(sys::UNIFORM_BUFFER, 0);
+        }
+        self.zero_uniform = (name, size);
+        self.zero_uniform_charge = Some(self.pools.charge(Pool::Fallback, size as u64));
+    }
+
+    fn new(source: Box<dyn EglSurfaceSource>, mailbox: Mailbox, pools: Arc<Pools>,
+        tex_recycled: Arc<Mutex<Vec<GlKey>>>, buf_recycled: Arc<Mutex<Vec<GlKey>>>, prog_recycled: Arc<Mutex<Vec<GlKey>>>,
+        #[cfg(target_os = "android")] queue: Queue,
+    ) -> Result<Self, String> {
         // Drop the guard before ctx on errors; Context::drop takes the same lock.
         let ctx;
         let _context_lifecycle = lock_context_lifecycle();
@@ -314,6 +362,9 @@ impl Renderer {
         let cache = super::cache::ProgramCache::new(gl);
         let caps = Arc::new(Caps {
             formats,
+            max_vertex_texture_units: gl.integer(sys::MAX_VERTEX_TEXTURE_IMAGE_UNITS) as u32,
+            max_fragment_texture_units: gl.integer(sys::MAX_TEXTURE_IMAGE_UNITS) as u32,
+            max_combined_texture_units: gl.integer(sys::MAX_COMBINED_TEXTURE_IMAGE_UNITS) as u32,
             max_texture: gl.integer(sys::MAX_TEXTURE_SIZE).min(gl.integer(sys::MAX_RENDERBUFFER_SIZE)).max(2048) as u32,
             max_layers: gl.integer(sys::MAX_ARRAY_TEXTURE_LAYERS).max(256) as u32,
             ubo_align: gl.integer(sys::UNIFORM_BUFFER_OFFSET_ALIGNMENT).max(16) as usize,
@@ -330,10 +381,10 @@ impl Renderer {
             #[cfg(target_os = "linux")]
             share: [ctx.share.display as u64, ctx.share.config as u64, ctx.share.context as u64],
         });
-        let mut names = [0; 4];
+        let mut names = [0; 3];
         unsafe {
             (gl.glGenFramebuffers)(2, names.as_mut_ptr());
-            (gl.glGenBuffers)(2, names[2..].as_mut_ptr());
+            (gl.glGenBuffers)(1, names[2..].as_mut_ptr());
             (gl.glPixelStorei)(sys::UNPACK_ALIGNMENT, 1);
             (gl.glPixelStorei)(sys::PACK_ALIGNMENT, 1);
             (gl.glDepthFunc)(sys::LEQUAL);
@@ -364,9 +415,10 @@ impl Renderer {
         if super::super::log_enabled() {
             eprintln!("[hal-gl] context: {} ubo_align={} extensions={} float_linear={}", caps.renderer, caps.ubo_align, ext.len(), caps.float_linear);
         }
-        Ok(Self { ctx, caps, textures: HashMap::new(), buffers: HashMap::new(), programs: HashMap::new(), linking: Vec::new(),
+        Ok(Self { ctx, caps, cull_face: sys::BACK, binds: 0, upload_times: HashMap::new(), textures: Vec::new(), tex_recycled,
+            buffers: Vec::new(), buf_recycled, programs: Vec::new(), prog_recycled, linking: Vec::new(),
             fbos: HashMap::new(), read_fbo: names[0], copy_fbo: names[1], fallback, nearest,
-            uniform_arena: names[2], instance_arena: names[3], arena_words: Words::default(), pools, arena_charges: None,
+            uniform_arena: names[2], zero_uniform: (0, 0), zero_uniform_charge: None, pools, arena_charge: None,
             _fallback_charges: fallback_charges, pending: VecDeque::new(), mailbox,
             #[cfg(target_os = "android")] queue, #[cfg(target_os = "android")] presented: false,
             #[cfg(target_os = "android")] worker: super::worker::WorkerState::Unstarted, cache, timer, exit: false })
@@ -376,6 +428,30 @@ impl Renderer {
         self.exit = true;
     }
 
+    pub fn time_upload(&mut self, token: Token, upload: impl FnOnce(&mut Self) -> u64) {
+        let started = crate::clock_ns();
+        let driver_uploads = upload(self);
+        let elapsed = crate::clock_ns().saturating_sub(started);
+        let stats = &mut self.upload_times.entry(token.sid).or_insert_with(|| (token, UploadStats::default())).1;
+        stats.ns += elapsed;
+        stats.driver_uploads += driver_uploads;
+    }
+
+    pub fn take_upload_ns(&mut self, sid: u32) -> UploadStats {
+        let stats = self.upload_times.remove(&sid).map(|(_, stats)| stats).unwrap_or_default();
+        self.flush_upload_times();
+        stats
+    }
+
+    // An upload-only session may never submit a frame of its own.
+    fn flush_upload_times(&mut self) {
+        if !self.upload_times.is_empty() {
+            for (_, (token, upload_ns)) in self.upload_times.drain() {
+                self.mailbox.push(token, Event::Counters { binds: 0, cpu_ns: 0, upload_ns });
+            }
+        }
+    }
+
     fn run(mut self, rx: Receiver<Job>) {
         loop {
             #[cfg(target_os = "android")]
@@ -383,7 +459,11 @@ impl Renderer {
                 let urgent = std::mem::take(&mut *self.queue.urgent.lock().unwrap_or_else(|e| e.into_inner()));
                 for job in urgent { job(&mut self); }
             }
-            let next = match rx.try_recv() {
+            let next = rx.try_recv();
+            if matches!(next, Err(TryRecvError::Empty)) {
+                self.flush_upload_times();
+            }
+            let next = match next {
                 Ok(job) => Some(job),
                 Err(TryRecvError::Disconnected) => break,
                 Err(TryRecvError::Empty) if self.pending.is_empty() && self.linking.is_empty() => match rx.recv() {
@@ -432,13 +512,13 @@ impl Renderer {
     fn complete(&mut self, then: Then, failed: bool) {
         let gl = &self.ctx.gl;
         match then {
-            Then::Frame { token, target, kind, frame, window, timing } => {
+            Then::Frame { token, target, kind, frame, window, timing, binds, cpu_ns, upload_ns } => {
                 let gpu_ns = match (timing, &mut self.timer) {
                     (Some((query, began)), Some(timer)) if !failed => timer.read(gl, query, began),
                     _ => 0,
                 };
                 token.incarnation.done(frame);
-                self.mailbox.push(token, Event::Frame { target, kind, frame, window, gpu_ns, ran: !failed });
+                self.mailbox.push(token, Event::Frame { target, kind, frame, window, gpu_ns, ran: !failed, binds, cpu_ns, upload_ns });
             }
             Then::Copy { token, req, rect } => {
                 self.mailbox.push(token, Event::Readback { req, rect, status: if failed { readback::FAILED } else { readback::OK }, lease: None });
@@ -470,7 +550,7 @@ impl Renderer {
 
     // ---- objects
 
-    pub fn create_texture(&mut self, key: u64, desc: TextureObj, swizzled: bool) {
+    pub fn create_texture(&mut self, key: GlKey, desc: TextureObj, swizzled: bool) {
         let gl = &self.ctx.gl;
         let (ifmt, _, _) = gl_format(desc.format);
         let target = texture_target(&desc);
@@ -493,10 +573,10 @@ impl Renderer {
                 eprintln!("[hal-gl] texture {}x{}x{} format {} mips {}: GL error {error:#x}", desc.w, desc.h, desc.depth, format::name(desc.format), desc.mips);
             }
         }
-        if let Some(old) = self.textures.insert(key, GlTex { name, target, desc, owned: true }) { self.free_texture(old, key); }
+        if let Some(old) = slot_for_insert(&mut self.textures, key).replace(GlTex { name, target, desc, owned: true }) { self.free_texture(old, key); }
     }
 
-    fn free_texture(&mut self, t: GlTex, key: u64) {
+    fn free_texture(&mut self, t: GlTex, key: GlKey) {
         let gl = &self.ctx.gl;
         self.fbos.retain(|k, fbo| {
             let used = k.iter().any(|(tex, _)| *tex == key);
@@ -509,14 +589,14 @@ impl Renderer {
     /// A 2D texture of the app's GL context (same share group) under `key`. It is sampled as the
     /// one level it was adopted with: its last level is set to 0, so the mip-filtered samplers
     /// find it complete.
-    pub fn adopt_texture(&mut self, key: u64, name: GLuint, desc: TextureObj, owned: bool) {
+    pub fn adopt_texture(&mut self, key: GlKey, name: GLuint, desc: TextureObj, owned: bool) {
         let gl = &self.ctx.gl;
         unsafe {
             (gl.glBindTexture)(sys::TEXTURE_2D, name);
             (gl.glTexParameteri)(sys::TEXTURE_2D, sys::TEXTURE_MAX_LEVEL, 0);
             (gl.glBindTexture)(sys::TEXTURE_2D, 0);
         }
-        if let Some(old) = self.textures.insert(key, GlTex { name, target: sys::TEXTURE_2D, desc, owned }) { self.free_texture(old, key); }
+        if let Some(old) = slot_for_insert(&mut self.textures, key).replace(GlTex { name, target: sys::TEXTURE_2D, desc, owned }) { self.free_texture(old, key); }
     }
 
     /// The following GL commands wait on the GPU for the app context's fence, then it is deleted.
@@ -528,13 +608,14 @@ impl Renderer {
         }
     }
 
-    pub fn delete_texture(&mut self, key: u64) {
-        if let Some(t) = self.textures.remove(&key) { self.free_texture(t, key); }
+    pub fn delete_texture(&mut self, key: GlKey) {
+        if let Some(t) = self.textures.get_mut(key as usize).and_then(Option::take) { self.free_texture(t, key); }
+        self.tex_recycled.lock().unwrap_or_else(|e| e.into_inner()).push(key);
     }
 
     /// `data`: tightly packed rows of `rect` (HAL layout); already validated by the HAL side.
-    pub fn upload(&mut self, key: u64, mip: u32, rect: [u32; 4], layer: u32, data: Vec<u8>, swap_rb: bool) {
-        let Some(t) = self.textures.get(&key) else { return };
+    pub fn upload(&mut self, key: GlKey, mip: u32, rect: [u32; 4], layer: u32, data: Vec<u8>, swap_rb: bool) {
+        let Some(t) = self.textures.get(key as usize).and_then(Option::as_ref) else { return };
         let gl = &self.ctx.gl;
         let (_, fmt, ty) = gl_format(t.desc.format);
         let data = match t.desc.format {
@@ -564,12 +645,12 @@ impl Renderer {
         }
     }
 
-    pub fn read_buffers(&mut self, token: Token, req: u32, ranges: &[(u64, u64, u64)]) {
+    pub fn read_buffers(&mut self, token: Token, req: u32, ranges: &[(GlKey, u64, u64)]) {
         let result = (|| {
             let gl = &self.ctx.gl;
             let mut leases = Vec::with_capacity(ranges.len());
             for (order, (key, offset, len)) in ranges.iter().enumerate() {
-                let source = self.buffers.get(key)?;
+                let source = self.buffers.get(*key as usize)?.as_ref()?;
                 let mut bytes = Vec::new();
                 bytes.try_reserve_exact(*len as usize).ok()?;
                 bytes.resize(*len as usize, 0);
@@ -588,10 +669,11 @@ impl Renderer {
             Some(leases)
         })();
         let status = if result.is_some() { readback::OK } else { readback::FAILED };
+        self.flush_upload_times();
         self.mailbox.push(token, Event::BufferLeases { req, status, leases: result.unwrap_or_default() });
     }
 
-    pub fn create_buffer(&mut self, key: u64, size: u64) {
+    pub fn create_buffer(&mut self, key: GlKey, kind: u16, size: u64) {
         let gl = &self.ctx.gl;
         let mut name = 0;
         unsafe {
@@ -600,69 +682,113 @@ impl Renderer {
             (gl.glBufferData)(sys::ARRAY_BUFFER, size.max(4) as isize, std::ptr::null(), sys::DYNAMIC_DRAW);
             (gl.glBindBuffer)(sys::ARRAY_BUFFER, 0);
         }
-        if let Some(old) = self.buffers.insert(key, GlBuf { name, size, words: None, words_stale: true }) { self.free_buffer(old); }
+        let buf = GlBuf { name, size, append: kind & buffer_kind::APPEND != 0, words: Words::default(), words_dirty: Some((0, size)) };
+        if let Some(old) = slot_for_insert(&mut self.buffers, key).replace(buf) { self.free_buffer(old); }
     }
 
     fn free_buffer(&mut self, b: GlBuf) {
         let gl = &self.ctx.gl;
         unsafe {
             (gl.glDeleteBuffers)(1, &b.name);
-            if let Some(words) = &b.words { (gl.glDeleteTextures)(1, &words.tex) }
+            if b.words.tex != 0 { (gl.glDeleteTextures)(1, &b.words.tex) }
         }
     }
 
-    pub fn delete_buffer(&mut self, key: u64) {
-        if let Some(b) = self.buffers.remove(&key) { self.free_buffer(b); }
+    pub fn delete_buffer(&mut self, key: GlKey) {
+        if let Some(b) = self.buffers.get_mut(key as usize).and_then(Option::take) { self.free_buffer(b); }
+        self.buf_recycled.lock().unwrap_or_else(|e| e.into_inner()).push(key);
     }
 
-    pub fn write_buffer(&mut self, key: u64, off: u64, data: Vec<u8>) {
-        let Some(b) = self.buffers.get_mut(&key) else { return };
-        b.words_stale = true;
+    pub fn write_buffer_parts(&mut self, key: GlKey, mut off: u64, bytes: &[u8], gaps: &[(usize, u64)]) -> u64 {
+        let Some(b) = self.buffers.get_mut(key as usize).and_then(Option::as_mut) else { return 0 };
         let gl = &self.ctx.gl;
+        let mut start = 0;
+        for &(end, next_off) in gaps {
+            Self::write_buffer(gl, b, off, &bytes[start..end]);
+            start = end;
+            off = next_off;
+        }
+        Self::write_buffer(gl, b, off, &bytes[start..]);
+        gaps.len() as u64 + 1 // one glBufferSubData per run
+    }
+
+    fn write_buffer(gl: &sys::Gl, b: &mut GlBuf, off: u64, data: &[u8]) {
         unsafe {
             (gl.glBindBuffer)(sys::ARRAY_BUFFER, b.name);
+            if b.append && off == 0 {
+                (gl.glBufferData)(sys::ARRAY_BUFFER, b.size.max(4) as isize, std::ptr::null(), sys::DYNAMIC_DRAW);
+                b.words_dirty = None;
+            }
             (gl.glBufferSubData)(sys::ARRAY_BUFFER, off as isize, data.len() as isize, data.as_ptr() as _);
             (gl.glBindBuffer)(sys::ARRAY_BUFFER, 0);
         }
+        let end = off + data.len() as u64;
+        b.words_dirty = Some(match b.words_dirty {
+            Some((start, stop)) => (start.min(off), stop.max(end)),
+            None => (off, end),
+        });
     }
 
-    /// Copies `words` 32-bit words of a GL buffer into an R32UI texture of WORD_ROW-wide rows
-    /// (a GPU copy through the unpack binding); grows the texture when it is too small, charged
-    /// to `pool`.
-    pub fn words_texture(gl: &sys::Gl, pools: &Arc<Pools>, pool: Pool, buffer: GLuint, words: u64, tex: &mut Words) {
-        let rows = (words.div_ceil(WORD_ROW as u64) as u32).max(1);
+    /// Refreshes the word texture's dirty rows from the unpack buffer. A new texture needs
+    /// every row, including the unchanged prefix when the texture grows. Rows past one layer go
+    /// to the next: a buffer of any size reads whole, up to the device's layer count.
+    /// Pixel-unpack state is assumed at its defaults (`UNPACK_ROW_LENGTH`, `UNPACK_IMAGE_HEIGHT`
+    /// and `UNPACK_SKIP_*` 0): any other uploader that changes it restores it.
+    pub fn words_texture(gl: &sys::Gl, pools: &Arc<Pools>, max_layers: u32, buffer: GLuint, bytes: u64, mut dirty: (u64, u64), tex: &mut Words) {
+        let row = u64::from(WORD_ROW);
+        let row_bytes = row * 4;
+        let words = bytes / 4;
+        let rows = words.div_ceil(row).max(1);
         unsafe {
-            if tex.tex == 0 || tex.rows < rows {
+            if tex.tex == 0 || u64::from(tex.rows) < rows {
                 if tex.tex != 0 { (gl.glDeleteTextures)(1, &tex.tex) }
                 let rows = rows.next_power_of_two();
+                let (height, mut layers) = if rows <= row { (rows, 1) } else { (row, rows / row) };
+                if layers > 1 {
+                    eprintln!("[hal-gl] instance words of {bytes} bytes span {layers} texture windows of {} words", row * row);
+                }
+                if layers > u64::from(max_layers) {
+                    eprintln!("[hal-gl] instance words need {layers} texture windows and the device takes {max_layers}: words past {} read as zero", u64::from(max_layers) * row * row);
+                    layers = u64::from(max_layers);
+                }
                 (gl.glGenTextures)(1, &mut tex.tex);
-                (gl.glBindTexture)(sys::TEXTURE_2D, tex.tex);
-                (gl.glTexStorage2D)(sys::TEXTURE_2D, 1, sys::R32UI, WORD_ROW as i32, rows as i32);
+                (gl.glBindTexture)(sys::TEXTURE_2D_ARRAY, tex.tex);
+                (gl.glTexStorage3D)(sys::TEXTURE_2D_ARRAY, 1, sys::R32UI, WORD_ROW as i32, height as i32, layers as i32);
                 // it's sampled without a sampler object, and an integer texture is only complete unfiltered
-                (gl.glTexParameteri)(sys::TEXTURE_2D, sys::TEXTURE_MIN_FILTER, sys::NEAREST as i32);
-                (gl.glTexParameteri)(sys::TEXTURE_2D, sys::TEXTURE_MAG_FILTER, sys::NEAREST as i32);
-                tex.rows = rows;
-                tex._charge = Some(pools.charge(pool, WORD_ROW as u64 * rows as u64 * 4));
+                (gl.glTexParameteri)(sys::TEXTURE_2D_ARRAY, sys::TEXTURE_MIN_FILTER, sys::NEAREST as i32);
+                (gl.glTexParameteri)(sys::TEXTURE_2D_ARRAY, sys::TEXTURE_MAG_FILTER, sys::NEAREST as i32);
+                tex.rows = (height * layers) as u32;
+                tex._charge = Some(pools.charge(Pool::WordTextures, row * height * layers * 4));
+                dirty = (0, bytes);
             } else {
-                (gl.glBindTexture)(sys::TEXTURE_2D, tex.tex);
+                (gl.glBindTexture)(sys::TEXTURE_2D_ARRAY, tex.tex);
             }
             (gl.glBindBuffer)(sys::PIXEL_UNPACK_BUFFER, buffer);
-            let full = (words / WORD_ROW as u64) as i32;
-            if full > 0 {
-                (gl.glTexSubImage2D)(sys::TEXTURE_2D, 0, 0, 0, WORD_ROW as i32, full, sys::RED_INTEGER, sys::UNSIGNED_INT, std::ptr::null());
+            let held = u64::from(tex.rows);
+            let first = dirty.0 / row_bytes;
+            let end = dirty.1.min(words * 4).div_ceil(row_bytes).min(held);
+            let full_end = end.min(bytes / row_bytes);
+            // whole rows, one transfer per layer they cross
+            let mut at = first;
+            while at < full_end {
+                let stop = full_end.min((at / row + 1) * row);
+                (gl.glTexSubImage3D)(sys::TEXTURE_2D_ARRAY, 0, 0, (at % row) as i32, (at / row) as i32, WORD_ROW as i32, (stop - at) as i32, 1,
+                    sys::RED_INTEGER, sys::UNSIGNED_INT, (at * row_bytes) as usize as *const _);
+                at = stop;
             }
-            let rest = (words % WORD_ROW as u64) as i32;
-            if rest > 0 {
-                let at = full as usize * WORD_ROW as usize * 4;
-                (gl.glTexSubImage2D)(sys::TEXTURE_2D, 0, 0, full, rest, 1, sys::RED_INTEGER, sys::UNSIGNED_INT, at as *const _);
+            if first < end && full_end < end {
+                // The unpack buffer can end partway through the texture's last row.
+                let rest = (words % row) as i32;
+                (gl.glTexSubImage3D)(sys::TEXTURE_2D_ARRAY, 0, 0, (full_end % row) as i32, (full_end / row) as i32, rest, 1, 1,
+                    sys::RED_INTEGER, sys::UNSIGNED_INT, (full_end * row_bytes) as usize as *const _);
             }
             (gl.glBindBuffer)(sys::PIXEL_UNPACK_BUFFER, 0);
-            (gl.glBindTexture)(sys::TEXTURE_2D, 0);
+            (gl.glBindTexture)(sys::TEXTURE_2D_ARRAY, 0);
         }
     }
 
     /// The framebuffer of a pass's attachments ((texture key, layer) per colour slot, then depth).
-    pub fn framebuffer(&mut self, key: [(u64, u32); 5]) -> Result<GLuint, String> {
+    pub fn framebuffer(&mut self, key: [(GlKey, u32); 5]) -> Result<GLuint, String> {
         if let Some(fbo) = self.fbos.get(&key) { return Ok(*fbo); }
         let gl = &self.ctx.gl;
         let mut fbo = 0;
@@ -672,7 +798,7 @@ impl Renderer {
         }
         for (slot, (tex, layer)) in key.iter().enumerate() {
             if *tex == 0 { continue; }
-            let t = self.textures.get(tex).ok_or("a pass attachment has no storage")?;
+            let t = self.textures.get(*tex as usize).and_then(Option::as_ref).ok_or("a pass attachment has no storage")?;
             let attachment = if slot < 4 { sys::COLOR_ATTACHMENT0 + slot as u32 }
                 else if t.desc.format == format::DEPTH24_STENCIL8 { sys::DEPTH_STENCIL_ATTACHMENT } else { sys::DEPTH_ATTACHMENT };
             attach(gl, sys::FRAMEBUFFER, attachment, t, *layer);
@@ -697,8 +823,8 @@ impl Renderer {
     }
 
     /// Reads `rect` of level 0 into a pixel buffer; completes after the GPU did.
-    pub fn read(&mut self, token: Token, key: u64, read: ReadFormat, req: u32, rect: [u32; 4]) {
-        let Some(t) = self.textures.get(&key) else {
+    pub fn read(&mut self, token: Token, key: GlKey, read: ReadFormat, req: u32, rect: [u32; 4]) {
+        let Some(t) = self.textures.get(key as usize).and_then(Option::as_ref) else {
             self.mailbox.push(token, Event::Readback { req, rect, status: readback::FAILED, lease: None });
             return;
         };
@@ -718,8 +844,8 @@ impl Renderer {
     }
 
     /// The host's synchronous read of a whole RGBA8/BGRA8 image as RGBA rows, top first.
-    pub fn read_now(&mut self, key: u64, read: ReadFormat) -> Option<crate::backend::Pixels> {
-        let t = self.textures.get(&key)?;
+    pub fn read_now(&mut self, key: GlKey, read: ReadFormat) -> Option<crate::backend::Pixels> {
+        let t = self.textures.get(key as usize)?.as_ref()?;
         let (w, h) = (t.desc.w, t.desc.h);
         self.bind_read(t);
         let gl = &self.ctx.gl;
@@ -733,7 +859,7 @@ impl Renderer {
     }
 
     /// Copies a whole image into another of its size and format.
-    pub fn copy(&mut self, token: Token, from: u64, to: u64, req: u32, rect: [u32; 4]) {
+    pub fn copy(&mut self, token: Token, from: GlKey, to: GlKey, req: u32, rect: [u32; 4]) {
         if !self.blit(from, to, [rect[2], rect[3]]) {
             self.mailbox.push(token, Event::Readback { req, rect, status: readback::FAILED, lease: None });
             return;
@@ -743,8 +869,9 @@ impl Renderer {
 
     /// Copies the top-left `size` texels of image `from` into image `to` (level 0, layer 0 of
     /// both, which hold the same colour layout). False: one of them is gone.
-    pub fn blit(&mut self, from: u64, to: u64, size: [u32; 2]) -> bool {
-        let (Some(src), Some(dst)) = (self.textures.get(&from), self.textures.get(&to)) else { return false };
+    pub fn blit(&mut self, from: GlKey, to: GlKey, size: [u32; 2]) -> bool {
+        let (Some(src), Some(dst)) = (self.textures.get(from as usize).and_then(Option::as_ref),
+            self.textures.get(to as usize).and_then(Option::as_ref)) else { return false };
         self.bind_read(src);
         let gl = &self.ctx.gl;
         unsafe {
@@ -765,8 +892,8 @@ impl Renderer {
 
     /// The window's image goes to its surface; `damage` is what changed since its last frame (`None`:
     /// all of it). Ok(false): nothing is on screen for it.
-    pub fn present(&mut self, window: (u32, Id), key: u64, damage: Option<&[[i32; 4]]>) -> Result<bool, String> {
-        let t = self.textures.get(&key).ok_or("the window image has no storage")?;
+    pub fn present(&mut self, window: (u32, Id), key: GlKey, damage: Option<&[[i32; 4]]>) -> Result<bool, String> {
+        let t = self.textures.get(key as usize).and_then(Option::as_ref).ok_or("the window image has no storage")?;
         let size = [t.desc.w, t.desc.h];
         let gl = &self.ctx.gl;
         unsafe {
@@ -820,11 +947,12 @@ pub(super) fn face(target: GLenum, layer: u32) -> GLenum {
     if target == sys::TEXTURE_CUBE_MAP { sys::TEXTURE_CUBE_MAP_POSITIVE_X + layer } else { target }
 }
 
-/// A cube ([`TextureObj::is_cube`]); other layered textures are arrays.
+/// A cube ([`TextureObj::is_cube`]); other layered textures, and every texture created with
+/// [`usage::ARRAY`] (a one-layer array included), are arrays.
 pub(super) fn texture_target(t: &TextureObj) -> GLenum {
-    if t.depth == 1 { sys::TEXTURE_2D }
-    else if t.is_cube() { sys::TEXTURE_CUBE_MAP }
-    else { sys::TEXTURE_2D_ARRAY }
+    if t.is_cube() { sys::TEXTURE_CUBE_MAP }
+    else if t.depth > 1 || t.usage & usage::ARRAY != 0 { sys::TEXTURE_2D_ARRAY }
+    else { sys::TEXTURE_2D }
 }
 
 /// The GL target a sampled shape needs (pipeline texture shapes: 0 2D, 1 cube, 2 array,
@@ -881,6 +1009,7 @@ impl Drop for Renderer {
         unsafe {
             for (fence, _) in self.pending.drain(..) { (gl.glDeleteSync)(fence) }
             (gl.glFinish)();
+            if self.zero_uniform.0 != 0 { (gl.glDeleteBuffers)(1, &self.zero_uniform.0); }
         }
         if let Some(timer) = &mut self.timer { timer.delete(gl); }
     }

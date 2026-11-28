@@ -80,7 +80,7 @@ pub fn mix_active_media_audio(info: AudioInfo, output: &mut AudioBuffer) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use crate::media_plugin::PlaybackPrepared;

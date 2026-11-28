@@ -48,6 +48,7 @@ pub struct Lease {
     block: Option<(u64, u64)>,
 }
 
+#[relax_api::relax_api(marked)]
 impl Lease {
     /// # Safety
     /// `owner` must keep this range mapped and readable until dropped. Before delivery the
@@ -76,6 +77,7 @@ impl Lease {
     }
 
     /// Transfer exactly one release obligation to the receiver.
+    #[relax_api::relax_api(loader = "the HAL hands its leases to the app as records: JIT code receives records, it makes none")]
     pub fn into_record(mut self) -> Record {
         let token = NEXT.fetch_add(1, Ordering::Relaxed);
         assert_ne!(token, 0, "lease token space exhausted");

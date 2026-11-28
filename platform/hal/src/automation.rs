@@ -294,8 +294,10 @@ impl Script {
     }
 }
 
+#[relax_api::relax_api(loader = "the loader runs automation scripts: JIT code has no use for it")]
 impl Script {
     /// Reads and parses a script file; the error names the file and the line.
+    #[relax_api::relax_api(loader = "the loader runs automation scripts: JIT code has no use for it")]
     pub fn load(path: &std::path::Path) -> Result<Script, String> {
         let bytes = match crate::read_virtual(&path.to_string_lossy()) {
             Some(read) => read,
@@ -358,6 +360,7 @@ pub struct Outcome {
     pub gpu_ns_max: u64,
 }
 
+#[relax_api::relax_api(loader = "the loader runs automation scripts: JIT code has no use for it")]
 impl Outcome {
     pub fn ok(&self) -> bool {
         self.failure.is_none()
@@ -488,6 +491,7 @@ pub struct Runner {
     first_frame_waited: bool,
 }
 
+#[relax_api::relax_api(loader = "the loader runs automation scripts: JIT code has no use for it")]
 impl Runner {
     /// The run counts the session's frames from here: a frame the app presents before `run`
     /// gets to its first step (the app's thread races the runner's) is one the first `wait_frame` waits for.
@@ -498,6 +502,7 @@ impl Runner {
     }
 
     /// Runs the steps against the session, one JSON line each; stops at the first failure.
+    #[relax_api::relax_api(loader = "the loader runs automation scripts: JIT code has no use for it")]
     pub fn run(&mut self, hal: &Hal) -> Outcome {
         let mut outcome = Outcome { steps: self.script.lines.len(), ..Default::default() };
         let lines = self.script.lines.clone();
@@ -804,8 +809,10 @@ pub struct Running {
     handle: std::thread::JoinHandle<Outcome>,
 }
 
+#[relax_api::relax_api(loader = "the loader runs automation scripts: JIT code has no use for it")]
 impl Running {
     /// Starts the steps, one JSON line each on stdout.
+    #[relax_api::relax_api(loader = "the loader runs automation scripts: JIT code has no use for it")]
     pub fn start(hal: &'static Hal, script: Script, cfg: Config) -> Running {
         let session = cfg.session;
         let mut runner = Runner::new(hal, script, cfg, Box::new(std::io::stdout()));

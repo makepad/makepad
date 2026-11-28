@@ -121,9 +121,8 @@ pub fn find(trees: &Trees, q: &Query) -> Vec<(u64, Node)> {
     q.find_in(trees.iter().map(|(k, t)| (*k, t))).into_iter().map(|(k, n)| (k, n.clone())).collect()
 }
 
-/// The refusal of an act over windows with no tree yet: the app builds its tree for a request
-/// (its builder is off between them), and the first one it builds may take longer than the
-/// request's `timeout_ms`. Nothing was done, so a caller may send the act again.
+/// The app builds its tree on request. Its first tree may take longer than `timeout_ms`,
+/// so a caller can retry a query or action that received this answer.
 pub const NO_TREE_YET: &str = "no tree yet (none built within timeout_ms; nothing was done)";
 
 pub fn resolve(trees: &Trees, q: &Query) -> Result<(u64, Node), String> {
@@ -271,6 +270,9 @@ fn run(req: &Req, out: &mut Out, backend: &dyn Backend, snapshots: &Snapshots) -
     }
     match verb {
         "" | "find" => {
+            if (verb == "find" || json) && trees.iter().all(|(_, tree)| tree.nodes.is_empty()) {
+                return Err(NO_TREE_YET.into());
+            }
             let rows = find(&trees, &q);
             if json {
                 let rows = if verb.is_empty() {
@@ -472,6 +474,52 @@ fn run(req: &Req, out: &mut Out, backend: &dyn Backend, snapshots: &Snapshots) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct FakeBackend(Trees);
+
+    impl Backend for FakeBackend {
+        fn activate(&self, _: Duration) {}
+        fn deactivate(&self) {}
+        fn trees(&self) -> Trees { self.0.clone() }
+        fn wait_change(&self, _: &[(u64, u64)], _: Duration) { unreachable!() }
+        fn action(&self, _: u64, _: ActionRequest, _: Duration) -> Result<ActionResult, String> { unreachable!() }
+        fn wait_action(&self, _: u64, _: Duration) -> Result<Option<ActionResult>, String> { unreachable!() }
+        fn present(&self, _: u64, _: Duration) -> Result<(), String> { unreachable!() }
+        fn type_text(&self, _: u64, _: &str) -> Result<(), String> { unreachable!() }
+        fn user_seq(&self, _: u64) -> Result<u64, String> { unreachable!() }
+        fn pointer(&self, _: u64, _: PointerEvent, _: f64, _: f64, _: u32, _: u32) -> Result<(), String> { unreachable!() }
+        fn frames(&self, _: u64) -> u64 { unreachable!() }
+        fn os_selfcheck(&self, _: u64, _: bool) -> Result<String, String> { unreachable!() }
+    }
+
+    #[test]
+    fn find_before_the_first_tree_is_not_yet() {
+        let snapshots = Snapshots::default();
+        let ask = |backend: &dyn Backend, line: &str| -> Result<String, String> {
+            let mut bytes = Vec::new();
+            run(&Req::parse(line), &mut Out::new(&mut bytes), backend, &snapshots)?;
+            Ok(String::from_utf8(bytes).unwrap())
+        };
+        let native = &super::super::Native;
+        for line in [
+            "ui find w=4294967295 timeout_ms=0",
+            "ui find w=4294967295 timeout_ms=0 json=1",
+            "ui w=4294967295 timeout_ms=0 json=1",
+        ] {
+            assert_eq!(ask(native, line).unwrap_err(), NO_TREE_YET, "{line}");
+        }
+        let dump = ask(native, "ui w=4294967295 timeout_ms=0").unwrap();
+        assert_eq!(dump.trim(), "empty tree (nothing drawn yet)");
+
+        let mut tree = Tree::new();
+        let node = Node { id: NodeId(1), name: "Save".into(), ..Default::default() };
+        tree.apply(TreeUpdate { full: true, root: node.id, nodes: vec![node], ..Default::default() });
+        let backend = FakeBackend(vec![(0, tree)]);
+        let found = ask(&backend, "ui find name=Save timeout_ms=0").unwrap();
+        assert!(found.contains("Save") && found.contains("-- 1 matches"), "{found}");
+        let missing = ask(&backend, "ui find name=Open timeout_ms=0").unwrap();
+        assert_eq!(missing.trim(), "-- 0 matches");
+    }
 
     #[test]
     fn ui_rejects_unknown_parameters() {

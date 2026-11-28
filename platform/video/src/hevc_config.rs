@@ -28,16 +28,33 @@ fn rbsp(nal: &[u8]) -> Vec<u8> {
     out
 }
 
-/// The `chroma_format_idc` of an HEVC SPS NAL (with its 2-byte header): 1 4:2:0, 3 4:4:4. Reads
-/// past a single-layer profile_tier_level (`sps_max_sub_layers_minus1` 0; more layers: None).
+pub(crate) fn sps_max_sub_layers_minus1(sps: &[u8]) -> Option<u8> {
+    // The first payload byte precedes any possible emulation-prevention byte.
+    let layers = (sps.get(2)? >> 1) & 7;
+    (layers <= 6).then_some(layers)
+}
+
+/// The `chroma_format_idc` of an HEVC SPS NAL (with its 2-byte header): 1 4:2:0, 3 4:4:4.
 pub fn sps_chroma_format_idc(sps: &[u8]) -> Option<u32> {
+    let layers = sps_max_sub_layers_minus1(sps)?;
     let r = rbsp(sps);
-    // vps id (4), max_sub_layers_minus1 (3), temporal_id_nesting (1); then the general
-    // profile_tier_level: 12 bytes
-    if r.len() < 14 || (r[0] >> 1) & 7 != 0 {
-        return None;
+    // One SPS header byte and twelve general profile/tier/level bytes. For multiple
+    // layers the presence flags and reserved bits occupy exactly two more bytes.
+    let mut offset = 13;
+    if layers > 0 {
+        let flags = u16::from_be_bytes([*r.get(13)?, *r.get(14)?]);
+        offset += 2;
+        for i in 0..layers {
+            let pair = (flags >> (14 - 2 * i)) & 3;
+            if pair & 2 != 0 {
+                offset += 11;
+            }
+            if pair & 1 != 0 {
+                offset += 1;
+            }
+        }
     }
-    let mut bit = 13 * 8;
+    let mut bit = offset * 8;
     let mut ue = || -> Option<u32> {
         let mut zeros = 0;
         while (r.get(bit / 8)? >> (7 - bit % 8)) & 1 == 0 {
@@ -56,7 +73,8 @@ pub fn sps_chroma_format_idc(sps: &[u8]) -> Option<u32> {
         Some((1u32 << zeros) - 1 + v)
     };
     let _sps_id = ue()?;
-    ue()
+    let chroma = ue()?;
+    (chroma <= 3).then_some(chroma)
 }
 
 /// The `hvcC` record for Annex-B parameter sets (VPS, SPS, PPS, in any order), or `None`
@@ -66,6 +84,7 @@ pub fn sps_chroma_format_idc(sps: &[u8]) -> Option<u32> {
 pub fn hvcc_from_annex_b(parameter_sets: &[u8]) -> Option<Vec<u8>> {
     let nals = split_annex_b(parameter_sets);
     let sps = nals.iter().find(|n| hevc_nal_unit_type(n) == SPS)?;
+    let max_sub_layers = sps_max_sub_layers_minus1(sps)?;
     let ptl = rbsp(sps);
     // sps_video_parameter_set_id(4) max_sub_layers_minus1(3) temporal_id_nesting(1), then the
     // general profile_tier_level: 1 + 4 + 6 + 1 bytes.
@@ -76,12 +95,12 @@ pub fn hvcc_from_annex_b(parameter_sets: &[u8]) -> Option<Vec<u8>> {
     out.push(general[11]); // general_level_idc
     out.extend_from_slice(&0xF000u16.to_be_bytes()); // min_spatial_segmentation_idc = 0
     out.push(0xFC); // parallelismType = 0
-    out.push(0xFC | sps_chroma_format_idc(sps).unwrap_or(1).min(3) as u8); // chroma_format_idc (the SPS's)
+    out.push(0xFC | sps_chroma_format_idc(sps)? as u8);
     out.push(0xF8); // bit_depth_luma_minus8 = 0
     out.push(0xF8); // bit_depth_chroma_minus8 = 0
     out.extend_from_slice(&0u16.to_be_bytes()); // avgFrameRate
-    // constantFrameRate 0, numTemporalLayers 1, temporalIdNested 1, lengthSizeMinusOne 3.
-    out.push((1 << 3) | (1 << 2) | 3);
+    // constantFrameRate 0, the SPS's layer count and nesting flag, lengthSizeMinusOne 3.
+    out.push(((max_sub_layers + 1) << 3) | ((ptl[0] & 1) << 2) | 3);
     let arrays: Vec<(u8, Vec<&[u8]>)> = [VPS, SPS, PPS]
         .iter()
         .map(|&t| (t, nals.iter().copied().filter(|n| hevc_nal_unit_type(n) == t).collect::<Vec<_>>()))
@@ -141,6 +160,78 @@ mod tests {
         let mut nal = vec![0x42, 0x01];
         nal.extend_from_slice(&ptl);
         assert_eq!(sps_chroma_format_idc(&nal), Some(3));
+    }
+
+    #[test]
+    fn sps_chroma_format_idc_handles_multi_temporal_layers() {
+        // 16x16, 8-bit SPS. A sub-layer has an optional eleven-byte profile and one-byte level.
+        for (layers, nesting, flags) in [
+            (0u8, 1, 0u16),
+            (1, 0, 0x4000), // layer 0: level only
+            (2, 1, 0xe000), // layer 0: profile and level, layer 1: profile only
+        ] {
+            // 4:4:4 adds separate_colour_plane_flag=0 after chroma_format_idc.
+            for (chroma, chroma_bits) in [(1, "010"), (3, "001000")] {
+                let mut payload = vec![(layers << 1) | nesting, if chroma == 3 { 4 } else { 1 }];
+                payload.resize(12, 0);
+                payload.push(60); // general_level_idc
+                if layers > 0 {
+                    payload.extend_from_slice(&flags.to_be_bytes());
+                    if layers == 2 {
+                        payload.extend_from_within(1..12);
+                    }
+                    payload.push(60);
+                    if layers == 2 {
+                        payload.extend_from_within(1..12);
+                    }
+                }
+                let mut bits = format!("1{chroma_bits}"); // SPS id 0, chroma
+                bits.push_str(concat!(
+                    "000010001000010001", // ue(16) twice: width and height
+                    "0111", "0111",       // no crop, default depths/POC, one ordering entry
+                    "1010", "1011", "11", // coding/transform block sizes and hierarchy depths
+                    "0000", "1", "00000", "1", // tools off, no reference sets/extensions, stop bit
+                ));
+                while bits.len() % 8 != 0 {
+                    bits.push('0');
+                }
+                let header_bytes = payload.len();
+                payload.extend(bits.as_bytes().chunks_exact(8).map(|byte| {
+                    byte.iter().fold(0, |v, digit| (v << 1) | (digit - b'0'))
+                }));
+                let mut nal = vec![0x42, 1];
+                let mut zeros = 0;
+                let mut chroma_at = 0;
+                for (i, b) in payload.into_iter().enumerate() {
+                    if zeros == 2 && b <= 3 {
+                        nal.push(3);
+                        zeros = 0;
+                    }
+                    if i == header_bytes {
+                        chroma_at = nal.len();
+                    }
+                    nal.push(b);
+                    zeros = if b == 0 { zeros + 1 } else { 0 };
+                }
+                assert_eq!(sps_chroma_format_idc(&nal), Some(chroma));
+                assert_eq!(sps_max_sub_layers_minus1(&nal), Some(layers));
+                let config = hvcc_from_annex_b(&annex_b(&[&nal])).unwrap();
+                assert_eq!(config[16] & 3, chroma as u8);
+                assert_eq!(config[21] >> 3, layers + 1);
+                assert_eq!((config[21] >> 2) & 1, nesting);
+                for cut in 0..=chroma_at {
+                    assert_eq!(sps_chroma_format_idc(&nal[..cut]), None, "truncated at {cut}");
+                }
+                let original = nal[chroma_at];
+                nal[chroma_at] = 0b1001_0100; // ue(0), ue(4)
+                assert_eq!(sps_chroma_format_idc(&nal), None);
+                nal[chroma_at] = original;
+                nal[2] |= 0b1110;
+                assert_eq!(sps_max_sub_layers_minus1(&nal), None);
+                assert_eq!(sps_chroma_format_idc(&nal), None);
+                assert!(hvcc_from_annex_b(&annex_b(&[&nal])).is_none());
+            }
+        }
     }
 
     #[test]

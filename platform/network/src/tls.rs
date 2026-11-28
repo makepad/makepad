@@ -1231,7 +1231,7 @@ mod server_tests {
     }
 
     /// A server that writes with a short send timeout to a client that reads slowly, retrying
-    /// each `WouldBlock`/`TimedOut` as Desk Link's `write_all` does: every byte arrives once, in
+    /// each `WouldBlock`/`TimedOut` as the remote desktop link's `write_all` does: every byte arrives once, in
     /// order (Windows: a send that ran into SO_SNDTIMEO had sent part of a record that was then
     /// sent again, and the client's next record failed to decrypt).
     #[test]

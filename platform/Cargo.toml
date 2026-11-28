@@ -9,7 +9,7 @@ repository = "https://github.com/makepad/makepad/"
 metadata.makepad-auto-version = "ue5pTU0e_KaMiNqLQpo2CaD-WeQ="
 
 [package.metadata.makepad.platform-gaps]
-windows = { "test:resource_resolver" = "1 of 6 fails there: reading a directory gives no InvalidPath there", "test:web_js" = "its pages run in CEF on Linux only (libs/web_test)" }
+windows = { "test:web_js" = "its pages run in CEF on Linux only (libs/web_test)" }
 
 # Chromium re-runs the test binary as its subprocesses, which the JIT's runner is not.
 [package.metadata.makepad.native-tests]
@@ -49,6 +49,7 @@ makepad-cpu-budget = { workspace = true }
 makepad-a11y = { path = "../libs/a11y", version = "0.1.0" }
 relax-attr = { workspace = true }
 makepad-alloc-epoch = { path = "../libs/alloc_epoch", version = "1.0.0" }
+makepad-alloc-guard = { path = "../libs/alloc_guard", version = "1.0.0" }
 makepad-studio-protocol = { path = "./studio", version = "0.1.0" }
 makepad-futures = { path = "../libs/futures", version = "1.0.0" }
 makepad-shared-bytes = { path = "../libs/shared_bytes", version = "1.0.0" }

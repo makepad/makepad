@@ -210,6 +210,7 @@ mod tests {
         assert_eq!(l.take().gpu_ms, [0.0; 3], "taken: starts again");
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn ui_time_lands_in_its_part() {
         let mut l = PassLoad::default();

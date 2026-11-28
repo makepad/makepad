@@ -130,6 +130,8 @@ impl PickImage {
 pub(crate) struct PickRequest {
     pub ticket: PickTicket,
     pub texture: Texture,
+    /// The repaint when the ticket was queued. A later producer paint releases its wait.
+    pub repaint: u64,
 }
 
 #[derive(Default)]
@@ -271,6 +273,7 @@ impl Cx {
             self.pick.requests.push(PickRequest {
                 ticket,
                 texture: texture.clone(),
+                repaint: self.repaint_id,
             });
             self.repaint_pass(producer);
         }

@@ -109,6 +109,8 @@ const INFO_PLIST_PARTS: [&str; 4] = [
     <string>Used to capture camera video when you request it.</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>Used to capture microphone audio when you request it.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>Used to turn your speech into text when you request it.</string>
     <key>NSLocationUsageDescription</key>
     <string>Used to show your position on the map.</string>
     <key>NSLocationWhenInUseUsageDescription</key>

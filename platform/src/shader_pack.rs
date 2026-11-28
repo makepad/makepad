@@ -85,7 +85,7 @@ fn mapping_difference(a: &crate::draw_shader::CxDrawShaderMapping, b: &crate::dr
         )?;
         same("uniform_buffers", &a.uniform_buffers, &b.uniform_buffers)?;
         same("samplers", &a.samplers, &b.samplers)?;
-        same("texture_sampler_indices", &a.texture_sampler_indices, &b.texture_sampler_indices)?;
+        same("glsl_texture_bindings", &a.glsl_texture_bindings, &b.glsl_texture_bindings)?;
         same("uses_time", a.uses_time, b.uses_time)?;
         same("rect_pos", a.rect_pos, b.rect_pos)?;
         same("rect_size", a.rect_size, b.rect_size)?;

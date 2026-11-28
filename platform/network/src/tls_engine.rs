@@ -237,13 +237,35 @@ fn wait_writable(socket: &TcpStream, deadline: Instant) -> io::Result<bool> {
 }
 
 impl SocketPump {
+    #[cfg(not(windows))]
+    pub(crate) fn handshake_deadline(timeout: Option<std::time::Duration>) -> io::Result<Option<Instant>> {
+        let Some(limit) = timeout else { return Ok(None) };
+        Instant::now().checked_add(limit).map(Some).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "TLS handshake timeout is too large")
+        })
+    }
+
     pub(crate) fn handshake(tcp: TcpStream, engine: TlsEngine, deadline: Option<Instant>) -> io::Result<Self> {
+        // A connect and its TLS upgrade can share a deadline already spent on TCP.
+        if deadline.is_some_and(|end| Instant::now() >= end) {
+            return Err(io::Error::new(io::ErrorKind::TimedOut, "TLS handshake timed out"));
+        }
+        let previous_read_timeout = deadline.map(|_| tcp.read_timeout()).transpose()?;
         let mut pump = Self { tcp, engine, output: Vec::new(), sent: 0, control_pending: false, shut_down: false };
         loop {
             pump.flush()?;
-            if pump.engine.handshake_done() { return Ok(pump); }
-            if deadline.is_some_and(|end| Instant::now() >= end) {
-                return Err(io::Error::new(io::ErrorKind::TimedOut, "TLS handshake timed out"));
+            if pump.engine.handshake_done() {
+                if let Some(previous) = previous_read_timeout {
+                    pump.tcp.set_read_timeout(previous)?;
+                }
+                return Ok(pump);
+            }
+            if let Some(end) = deadline {
+                let remaining = end.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(io::Error::new(io::ErrorKind::TimedOut, "TLS handshake timed out"));
+                }
+                pump.tcp.set_read_timeout(Some(remaining))?;
             }
             match pump.receive() {
                 Err(e) if deadline.is_some() && matches!(e.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock) => continue,

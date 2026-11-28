@@ -2,7 +2,6 @@
 
 use std::os::raw::{c_char, c_int, c_long, c_uchar, c_uint, c_ulong, c_void};
 
-pub type snd_pcm_info_t = _snd_pcm_info;
 pub type _snd_pcm_format = c_int;
 pub use self::_snd_pcm_format as snd_pcm_format_t;
 pub type _snd_pcm_stream = c_uint;
@@ -17,11 +16,9 @@ pub use self::_snd_pcm_access as snd_pcm_access_t;
 pub const SND_PCM_ACCESS_RW_INTERLEAVED: _snd_pcm_access = 3;
 pub type snd_pcm_uframes_t = c_ulong;
 pub type snd_pcm_sframes_t = c_long;
-pub type snd_output_t = _snd_output;
 pub type snd_seq_t = _snd_seq;
 pub const SND_SEQ_OPEN_OUTPUT: i32 = 1;
 pub const SND_SEQ_OPEN_INPUT: i32 = 2;
-pub const SND_SEQ_OPEN_DUPLEX: i32 = SND_SEQ_OPEN_OUTPUT | SND_SEQ_OPEN_INPUT;
 
 pub const SND_SEQ_PORT_CAP_READ: c_uint = 1 << 0;
 pub const SND_SEQ_PORT_CAP_WRITE: c_uint = 1 << 1;
@@ -29,35 +26,10 @@ pub const SND_SEQ_PORT_CAP_SUBS_READ: c_uint = 1 << 5;
 pub const SND_SEQ_PORT_CAP_SUBS_WRITE: c_uint = 1 << 6;
 pub const SND_SEQ_PORT_CAP_NO_EXPORT: c_uint = 1 << 7;
 pub const SND_SEQ_PORT_TYPE_APPLICATION: c_uint = 1 << 20;
-pub const SND_SEQ_PORT_TYPE_MIDI_GENERIC: c_uint = 1 << 1;
-pub const SND_SEQ_CLIENT_SYSTEM: u8 = 0;
-pub const SND_SEQ_PORT_SYSTEM_ANNOUNCE: u8 = 1;
-pub const SND_SEQ_USER_CLIENT: snd_seq_client_type = 1;
-pub const SND_SEQ_KERNEL_CLIENT: snd_seq_client_type = 2;
 pub type snd_seq_client_type = c_uint;
 pub use self::snd_seq_client_type as snd_seq_client_type_t;
 
-pub const SND_SEQ_ADDRESS_SUBSCRIBERS: c_uint = 254;
-pub const SND_SEQ_ADDRESS_UNKNOWN: c_uint = 253;
 pub const SND_SEQ_QUEUE_DIRECT: c_uint = 253;
-
-pub type snd_seq_event_type = u8;
-pub const SND_SEQ_EVENT_NOTEON: snd_seq_event_type = 6;
-pub const SND_SEQ_EVENT_NOTEOFF: snd_seq_event_type = 7;
-pub const SND_SEQ_EVENT_KEYPRESS: snd_seq_event_type = 8;
-pub const SND_SEQ_EVENT_CONTROLLER: snd_seq_event_type = 10;
-pub const SND_SEQ_EVENT_PGMCHANGE: snd_seq_event_type = 11;
-pub const SND_SEQ_EVENT_CHANPRESS: snd_seq_event_type = 12;
-pub const SND_SEQ_EVENT_PITCHBEND: snd_seq_event_type = 13;
-
-pub const SND_SEQ_EVENT_CLIENT_START: snd_seq_event_type = 60;
-pub const SND_SEQ_EVENT_CLIENT_EXIT: snd_seq_event_type = 61;
-pub const SND_SEQ_EVENT_CLIENT_CHANGE: snd_seq_event_type = 62;
-pub const SND_SEQ_EVENT_PORT_START: snd_seq_event_type = 63;
-pub const SND_SEQ_EVENT_PORT_EXIT: snd_seq_event_type = 64;
-pub const SND_SEQ_EVENT_PORT_CHANGE: snd_seq_event_type = 65;
-pub const SND_SEQ_EVENT_PORT_SUBSCRIBED: snd_seq_event_type = 66;
-pub const SND_SEQ_EVENT_PORT_UNSUBSCRIBED: snd_seq_event_type = 67;
 
 pub type snd_seq_event_type_t = c_uchar;
 pub type snd_seq_tick_time_t = c_uint;
@@ -78,26 +50,7 @@ pub struct _snd_seq_port_subscribe {
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
-pub struct _snd_output {
-    _unused: [u8; 0],
-}
-
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
 pub struct _snd_pcm {
-    _unused: [u8; 0],
-}
-
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct _snd_ctl {
-    _unused: [u8; 0],
-}
-pub type snd_ctl_t = _snd_ctl;
-
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct _snd_pcm_info {
     _unused: [u8; 0],
 }
 
@@ -119,7 +72,6 @@ pub struct snd_seq_real_time {
     pub tv_sec: c_uint,
     pub tv_nsec: c_uint,
 }
-pub type snd_seq_real_time_t = snd_seq_real_time;
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -281,13 +233,7 @@ extern "C" {
         mode: c_int,
     ) -> c_int;
 
-    pub fn snd_card_next(card: *mut c_int) -> c_int;
-
     pub fn snd_strerror(errnum: c_int) -> *const c_char;
-
-    pub fn snd_ctl_open(ctl: *mut *mut snd_ctl_t, name: *const u8, mode: c_int) -> c_int;
-
-    pub fn snd_ctl_pcm_next_device(ctl: *mut snd_ctl_t, device: *mut c_int) -> c_int;
 
     pub fn snd_device_name_hint(
         card: c_int,
@@ -350,8 +296,6 @@ extern "C" {
 
     pub fn snd_pcm_hw_params_free(obj: *mut snd_pcm_hw_params_t);
 
-    pub fn snd_pcm_prepare(pcm: *mut snd_pcm_t) -> c_int;
-
     pub fn snd_pcm_hw_params_get_channels(
         params: *const snd_pcm_hw_params_t,
         val: *mut c_uint,
@@ -366,12 +310,6 @@ extern "C" {
     pub fn snd_pcm_hw_params_get_period_size(
         params: *const snd_pcm_hw_params_t,
         frames: *mut snd_pcm_uframes_t,
-        dir: *mut c_int,
-    ) -> c_int;
-
-    pub fn snd_pcm_hw_params_get_period_time(
-        params: *const snd_pcm_hw_params_t,
-        val: *mut c_uint,
         dir: *mut c_int,
     ) -> c_int;
 
@@ -466,7 +404,6 @@ extern "C" {
     pub fn snd_seq_event_input(handle: *mut snd_seq_t, ev: *mut *mut snd_seq_event_t) -> c_int;
     pub fn snd_midi_event_new(bufsize: usize, rdev: *mut *mut snd_midi_event_t) -> c_int;
     pub fn snd_midi_event_free(dev: *mut snd_midi_event_t);
-    pub fn snd_midi_event_init(dev: *mut snd_midi_event_t);
     pub fn snd_midi_event_reset_encode(dev: *mut snd_midi_event_t);
     pub fn snd_midi_event_encode(
         dev: *mut snd_midi_event_t,
@@ -482,7 +419,6 @@ extern "C" {
     pub fn snd_pcm_drop(pcm: *mut snd_pcm_t) -> c_int;
     pub fn snd_pcm_recover(pcm: *mut snd_pcm_t, error: c_int, silent: c_int) -> c_int;
     pub fn snd_seq_close(seq: *mut snd_seq_t) -> c_int;
-    pub fn snd_seq_nonblock(seq: *mut snd_seq_t, nonblock: c_int) -> c_int;
     pub fn snd_seq_client_info_free(info: *mut snd_seq_client_info_t);
     pub fn snd_seq_port_info_free(info: *mut snd_seq_port_info_t);
     pub fn snd_seq_port_subscribe_free(info: *mut snd_seq_port_subscribe_t);

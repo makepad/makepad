@@ -658,7 +658,7 @@ mod raw_hid {
         }
 
         fn stop(&mut self) {
-            self.stop.store(true, Ordering::Relaxed);
+            self.stop.store(true, Ordering::Release);
             if let Ok(run_loop) = self.run_loop.lock() {
                 if *run_loop != 0 {
                     unsafe {
@@ -712,8 +712,10 @@ mod raw_hid {
 
                 Self::enumerate_existing_devices(manager, callback_context_ptr as *mut _);
 
-                if !stop.load(Ordering::Relaxed) {
-                    CFRunLoopRun();
+                // Bounded slices, not one CFRunLoopRun: a `stop()` landing between the check and
+                // the run finds CFRunLoopStop a no-op, and an unbounded run would never return.
+                while !stop.load(Ordering::Acquire) {
+                    CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.25, 0);
                 }
 
                 IOHIDManagerUnscheduleFromRunLoop(manager, run_loop, kCFRunLoopDefaultMode);
@@ -1248,5 +1250,19 @@ mod raw_hid {
         }
         let bytes = std::slice::from_raw_parts(report, report_length as usize);
         AppleRawHidInput::handle_report(context, sender, report_id, bytes);
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::{raw_hid::AppleRawHidInput, Signal};
+
+    /// Start then stop at once, many times: a stop that lands before the HID thread's run loop
+    /// runs must still end it, or the join in `stop` never returns (the test then hangs).
+    #[test]
+    fn raw_hid_stop_right_after_start_returns() {
+        for round in 0..300u32 {
+            drop(AppleRawHidInput::new(Signal::new(round)));
+        }
     }
 }

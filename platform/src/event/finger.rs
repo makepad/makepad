@@ -4,6 +4,7 @@ use {
     crate::{
         area::Area,
         cx::Cx,
+        script::HostGrants,
         event::event::{Event, Hit},
         event::xr::XrHand,
         makepad_live_id::{live_id, live_id_num, FromLiveId},
@@ -2112,12 +2113,12 @@ impl Event {
             }
             // A restricted isolate's widgets can't export text to the clipboard.
             Event::TextCopy(tc) => {
-                if cx.keyboard.has_key_focus(area) && !cx.script_data.std.host_io_only() {
+                if cx.keyboard.has_key_focus(area) && cx.script_data.std.has_grant(HostGrants::CLIPBOARD) {
                     return Hit::TextCopy(tc.clone());
                 }
             }
             Event::TextCut(tc) => {
-                if cx.keyboard.has_key_focus(area) && !cx.script_data.std.host_io_only() {
+                if cx.keyboard.has_key_focus(area) && cx.script_data.std.has_grant(HostGrants::CLIPBOARD) {
                     return Hit::TextCut(tc.clone());
                 }
             }

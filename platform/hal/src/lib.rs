@@ -20,7 +20,28 @@ extern crate makepad_thread_local;
 /// many times a frame, where std's SipHash was ~4% of the main thread's encode samples.
 pub type FastMap<K, V> = std::collections::HashMap<K, V, fxhash::FxBuildHasher>;
 
-pub mod backend;
+pub(crate) mod backend;
+/// The Android backend's items the platform crate and the Android host use.
+#[cfg(target_os = "android")]
+pub mod android {
+    pub use crate::backend::android::{
+        assets, inject, media::AUDIO_BLOCK_FRAMES, performance_hint::PerformanceHint, register_natives, socket, standalone,
+        system_property,
+    };
+}
+/// The Linux backend's media items the platform crate and the camera example use.
+#[cfg(target_os = "linux")]
+pub mod linux {
+    pub use crate::backend::linux::media::{capture_surface, v4l2_camera, AUDIO_BLOCK_FRAMES};
+}
+/// A click on a native media layer (macOS remote control).
+#[cfg(target_os = "macos")]
+pub use backend::apple::media::native_click;
+/// Compiles MSL on the Metal device, as the HAL builds pipelines (shader tests).
+#[cfg(target_vendor = "apple")]
+pub use backend::apple::metal::compile_msl;
+/// The HAL's own integration tests: a lost device, and a texture's byte size.
+pub use backend::exec::{device_lost, texture_bytes};
 #[cfg(target_os = "linux")]
 pub mod dmabuf;
 /// Shared textures outside any session on Windows (frame rings): a producer's copy or upload
@@ -95,6 +116,8 @@ pub mod native_layer;
 pub mod profile;
 pub mod threadcpu;
 pub mod session;
+pub mod sources;
+pub(crate) mod table;
 pub mod types;
 pub mod window_controls;
 pub use window_controls::{host_caption, host_window_controls, HostCaption, WindowControls};
@@ -303,6 +326,7 @@ pub type VirtualRead = fn(&str) -> Option<std::io::Result<Vec<u8>>>;
 static VIRTUAL_READ: OnceLock<VirtualRead> = OnceLock::new();
 
 /// Set once, by the loader, before a session opens fonts or loads an automation script.
+#[relax_api::relax_api(loader = "the runner sets the reader of its virtual files: JIT code has no use for it")]
 pub fn set_virtual_reader(read: VirtualRead) {
     let _ = VIRTUAL_READ.set(read);
 }
@@ -595,7 +619,9 @@ fn before_exit_at_exit() {
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn before_exit_at_exit() {}
 
+#[relax_api::relax_api(loader = "the loader's HAL: JIT code reaches it through the `hal_*` ops")]
 impl Hal {
+    #[relax_api::relax_api(loader = "the loader makes the one HAL: JIT code reaches it through the `hal_*` ops (`makepad_hal::hal_open` opens a session)")]
     pub fn new() -> Arc<Hal> {
         raise_open_file_limit();
         Arc::new_cyclic(|me| Hal {
@@ -608,6 +634,7 @@ impl Hal {
         })
     }
 
+    #[relax_api::relax_api(loader = "the loader's one HAL: JIT code reaches it through the `hal_*` ops (`makepad_hal::hal_open` opens a session)")]
     pub fn global() -> &'static Hal {
         GLOBAL.get_or_init(Hal::new)
     }
@@ -618,17 +645,20 @@ impl Hal {
     /// refused. A non-zero `app_key` of an already open session closes that session first. A
     /// request naming a `parent` is accepted only as the opening of a domain that parent
     /// started with `DomainStart` (its `app_key` is the proof).
+    #[relax_api::relax_api(loader = "JIT code opens a session with `makepad_hal::hal_open`")]
     pub fn open(&self, req: &OpenReq) -> HalInfo {
         self.open_as(req, Caps::default(), false, false)
     }
 
     /// The host's open: like [`Hal::open`] with capabilities, and `req.parent` taken as given.
+    #[relax_api::relax_api(loader = "the host's open of a domain: JIT code opens a session with `makepad_hal::hal_open`")]
     pub fn open_domain(&self, req: &OpenReq, caps: Caps) -> HalInfo {
         self.open_as(req, caps, true, false)
     }
 
     /// Opens the host's permanent session on the same backend its apps will use.
     /// Session 0 is never lent or closed; only its windows are lent.
+    #[relax_api::relax_api(loader = "the host's own session: JIT code opens a session with `makepad_hal::hal_open`")]
     pub fn open_host(&self, req: &OpenReq) -> HalInfo {
         self.open_as(req, Caps { privileged: true }, true, true)
     }
@@ -911,6 +941,7 @@ impl Hal {
     }
 
     /// The backend this Hal runs (`backend_id`) and its shader dialect, once one is open.
+    #[relax_api::relax_api(loader = "the loader's HAL: JIT code reads its backend from the answer of `makepad_hal::hal_open`")]
     pub fn backend_info(&self) -> Option<HalInfo> {
         lock(&self.state).backend.as_ref().map(|(_, b)| backend_info_of(&**b))
     }
@@ -972,6 +1003,7 @@ impl Hal {
     /// early by [`Hal::wake`], an event for this session, or a due timer). Returns the event
     /// count. A turn steps the backend under the state lock; the pump blocks until there is news
     /// for its own session, so other sessions' traffic costs it no turn and an idle system none.
+    #[relax_api::relax_api(loader = "JIT code pumps with `makepad_hal::hal_pump`")]
     pub fn pump(&self, timeout_ns: u64, out: &mut EventBuf) -> u32 {
         let sid = out.session;
         let t0 = std::time::Instant::now();
@@ -1357,6 +1389,7 @@ pub fn run_main_loop() {
 /// bar) like a bundle whose Info.plist says `LSUIElement`, for a binary that is not such a bundle
 /// (a host a launcher bundle starts). Set before the window system starts. A host API.
 #[cfg(target_os = "macos")]
+#[relax_api::relax_api]
 pub fn set_menu_bar_app(on: bool) {
     backend::apple::appkit::MENU_BAR_APP.store(on, std::sync::atomic::Ordering::Release);
 }
@@ -1420,6 +1453,7 @@ pub fn expect_main_loop() {
 /// session goes, as a fresh process has it. The session's close frees the rest (`free_session`);
 /// the window, the GPU device and the host's own session stay.
 #[cfg(not(target_arch = "wasm32"))]
+#[relax_api::relax_api]
 pub fn end_run() {
     completion::end_run();
     framecap::end_run();
@@ -1440,12 +1474,14 @@ pub fn end_run() {
 /// what the OS holds for the process by its pid and would keep past the exec goes. macOS: the
 /// activity an unseen app (menu-bar, no-focus) holds against App Nap, whose power assertion an
 /// exec would leave behind while the next image begins another. [`exec_failed`] takes it back.
+#[relax_api::relax_api]
 pub fn before_exec() {
     #[cfg(target_os = "macos")]
     backend::apple::appkit::end_unseen_activity();
 }
 
 /// The exec [`before_exec`] prepared for did not happen: the process goes on as it was.
+#[relax_api::relax_api]
 pub fn exec_failed() {
     #[cfg(target_os = "macos")]
     backend::apple::appkit::resume_unseen_activity();
@@ -1709,36 +1745,22 @@ pub fn hal_allocations(session: u32, out: &mut [Allocation]) -> Allocations {
     Allocations { open: true, count: count as u32, has_device: report.device_allocated.is_some(), device_allocated: report.device_allocated.unwrap_or(0) }
 }
 
-/// The directory of the app bundle's resources (Foundation, any thread).
+/// The directory of the app bundle's resources (Foundation, any thread). Its classes and
+/// selectors are looked up on each call, not through `class!` / `msg_send!`, whose caches are
+/// statics of this crate: JIT code compiles this fn from source (platform's asset reads, through
+/// `bundle_resource`), and a static of a provided crate it reaches is refused. Six runtime
+/// lookups per read, tens of ns each.
 #[cfg(target_vendor = "apple")]
 pub fn bundle_resource_dir() -> Option<String> {
-    use makepad_apple_sys::*;
+    use makepad_apple_sys::{nil, nsstring_to_string, Class, ObjcId, Sel};
+    use makepad_objc_sys::__send_message_or_panic as send;
+    let (pool_class, bundle_class) = (Class::get("NSAutoreleasePool")?, Class::get("NSBundle")?);
     unsafe {
-        let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];
-        let bundle: ObjcId = msg_send![class!(NSBundle), mainBundle];
-        let root: ObjcId = msg_send![bundle, resourcePath];
+        let pool: ObjcId = send(pool_class, Sel::register("new"), ());
+        let bundle: ObjcId = send(bundle_class, Sel::register("mainBundle"), ());
+        let root: ObjcId = send(bundle, Sel::register("resourcePath"), ());
         let path = (root != nil).then(|| nsstring_to_string(root));
-        let () = msg_send![pool, release];
-        path
-    }
-}
-
-/// The app's own cache directory (`Library/Caches` of its container), writable, kept across
-/// launches but not backed up; the OS may empty it when space runs low (Foundation, any thread).
-#[cfg(target_vendor = "apple")]
-pub fn app_cache_dir() -> Option<String> {
-    /// NSCachesDirectory, NSUserDomainMask
-    const CACHES: u64 = 13;
-    const USER_DOMAIN: u64 = 1;
-    use makepad_apple_sys::*;
-    unsafe {
-        let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];
-        let manager: ObjcId = msg_send![class!(NSFileManager), defaultManager];
-        let urls: ObjcId = msg_send![manager, URLsForDirectory: CACHES inDomains: USER_DOMAIN];
-        let url: ObjcId = if urls != nil { msg_send![urls, firstObject] } else { nil };
-        let path: ObjcId = if url != nil { msg_send![url, path] } else { nil };
-        let path = (path != nil).then(|| nsstring_to_string(path));
-        let () = msg_send![pool, release];
+        let () = send(pool, Sel::register("release"), ());
         path
     }
 }
@@ -1748,6 +1770,22 @@ pub fn app_cache_dir() -> Option<String> {
 #[cfg(target_vendor = "apple")]
 pub fn bundle_resource(path: &str) -> Option<Vec<u8>> {
     std::fs::read(std::path::Path::new(&bundle_resource_dir()?).join(path)).ok()
+}
+
+#[cfg(all(test, target_vendor = "apple"))]
+mod bundle_resource_tests {
+    /// Foundation's resource dir of the running executable, its classes and selectors looked up
+    /// per call: the same answer on each call, and its smallest file reads back whole through
+    /// `bundle_resource`.
+    #[test]
+    fn the_bundle_resource_dir_is_read_through_foundation() {
+        let dir = super::bundle_resource_dir().expect("the main bundle has a resource path");
+        assert_eq!(super::bundle_resource_dir().as_deref(), Some(dir.as_str()), "a second call answers the same");
+        let (name, len) = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok())
+            .filter_map(|e| Some((e.file_name().into_string().ok()?, e.metadata().ok().filter(|m| m.is_file())?.len())))
+            .min_by_key(|(_, len)| *len).expect("a file in the resource dir");
+        assert_eq!(super::bundle_resource(&name).map(|b| b.len() as u64), Some(len), "{name} in {dir} reads back through bundle_resource");
+    }
 }
 
 /// Queues activation of a running process. The OS may decline the request.
@@ -2502,6 +2540,7 @@ pub fn hal_thermal_state() -> i32 {
 /// is killed, never exited, so the makepad run host writes its compile cache from here (the loader's
 /// quit write) instead of at an exit that never comes. Set once, before the first stop.
 static BACKGROUND_HOOK: std::sync::OnceLock<fn()> = std::sync::OnceLock::new();
+#[relax_api::relax_api(loader = "the quit hook of the loader's run host (its compile cache write): JIT code has no use for it")]
 pub fn set_background_hook(f: fn()) {
     let _ = BACKGROUND_HOOK.set(f);
 }

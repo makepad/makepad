@@ -6,7 +6,7 @@
 //! otherwise posts are dropped, logged once. Hosted apps (the makepad WM) and backends without
 //! notifications drop them for now.
 
-use crate::{cx::Cx, cx_api::CxOsOp, makepad_live_id::LiveId};
+use crate::{cx::Cx, cx_api::CxOsOp, script::HostGrants, makepad_live_id::LiveId};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Notification {
@@ -24,10 +24,16 @@ pub struct NotificationClickEvent {
 impl Cx {
     /// Posts a notification, replacing the one already shown with the same id.
     pub fn post_notification(&mut self, n: Notification) {
+        if !self.script_data.std.has_grant(HostGrants::DESKTOP_SHELL) {
+            return;
+        }
         self.platform_ops.push_back(CxOsOp::PostNotification(n));
     }
 
     pub fn remove_notification(&mut self, id: LiveId) {
+        if !self.script_data.std.has_grant(HostGrants::DESKTOP_SHELL) {
+            return;
+        }
         self.platform_ops.push_back(CxOsOp::RemoveNotification(id));
     }
 }

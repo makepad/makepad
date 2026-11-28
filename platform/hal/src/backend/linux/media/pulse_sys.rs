@@ -14,8 +14,6 @@ pub type pa_source_state = c_int;
 pub use self::pa_source_state as pa_source_state_t;
 pub type pa_sample_format = c_int;
 pub use self::pa_sample_format as pa_sample_format_t;
-pub type pa_channel_map_def = c_uint;
-pub use self::pa_channel_map_def as pa_channel_map_def_t;
 pub type pa_channel_position = c_int;
 pub use self::pa_channel_position as pa_channel_position_t;
 pub type pa_volume_t = u32;
@@ -40,27 +38,17 @@ pub type pa_stream_flags = c_uint;
 pub use self::pa_stream_flags as pa_stream_flags_t;
 
 pub const PA_OPERATION_RUNNING: pa_operation_state = 0;
-pub const PA_OPERATION_DONE: pa_operation_state = 1;
-pub const PA_OPERATION_CANCELLED: pa_operation_state = 2;
 
 pub const PA_CONTEXT_NOAUTOSPAWN: pa_context_flags = 0x0001;
-pub const PA_CONTEXT_NOFAIL: pa_context_flags = 0x0002;
 
-pub const PA_CONTEXT_UNCONNECTED: pa_context_state = 0;
-pub const PA_CONTEXT_CONNECTING: pa_context_state = 1;
+#[cfg(test)]
 pub const PA_CONTEXT_AUTHORIZING: pa_context_state = 2;
-pub const PA_CONTEXT_SETTING_NAME: pa_context_state = 3;
 pub const PA_CONTEXT_READY: pa_context_state = 4;
 pub const PA_CONTEXT_FAILED: pa_context_state = 5;
 pub const PA_CONTEXT_TERMINATED: pa_context_state = 6;
 
 pub const PA_SAMPLE_FLOAT32LE: pa_sample_format = 5;
 
-pub const PA_CHANNEL_POSITION_INVALID: pa_channel_position = -1;
-pub const PA_CHANNEL_POSITION_LEFT: pa_channel_position = 1;
-pub const PA_CHANNEL_POSITION_RIGHT: pa_channel_position = 2;
-
-pub const PA_STREAM_UNCONNECTED: pa_stream_state = 0;
 pub const PA_STREAM_CREATING: pa_stream_state = 1;
 pub const PA_STREAM_READY: pa_stream_state = 2;
 pub const PA_STREAM_FAILED: pa_stream_state = 3;
@@ -70,12 +58,8 @@ pub const PA_SEEK_RELATIVE: pa_seek_mode = 0;
 pub const PA_SEEK_RELATIVE_ON_READ: pa_seek_mode = 2;
 
 pub const PA_STREAM_START_CORKED: pa_stream_flags = 1;
-pub const PA_STREAM_INTERPOLATE_TIMING: pa_stream_flags = 2;
-pub const PA_STREAM_AUTO_TIMING_UPDATE: pa_stream_flags = 8;
 pub const PA_STREAM_ADJUST_LATENCY: pa_stream_flags = 8192;
 pub const PA_STREAM_START_UNMUTED: pa_stream_flags = 65536;
-
-pub const PA_CHANNEL_MAP_DEFAULT: pa_channel_map_def = 0;
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -408,8 +392,6 @@ extern "C" {
         api: *const pa_spawn_api,
     ) -> c_int;
 
-    pub fn pa_context_new(mainloop: *mut pa_mainloop_api, name: *const c_char) -> *mut pa_context;
-
     pub fn pa_context_set_state_callback(
         c: *mut pa_context,
         cb: pa_context_notify_cb_t,
@@ -459,6 +441,7 @@ extern "C" {
         userdata: *mut c_void,
     ) -> *mut pa_operation;
     pub fn pa_proplist_new() -> *mut pa_proplist;
+    pub fn pa_proplist_sets(p: *mut pa_proplist, key: *const c_char, value: *const c_char) -> c_int;
     pub fn pa_proplist_free(p: *mut pa_proplist);
     pub fn pa_context_new_with_proplist(
         mainloop: *mut pa_mainloop_api,
@@ -471,6 +454,14 @@ extern "C" {
         name: *const u8,
         ss: *const pa_sample_spec,
         map: *const pa_channel_map,
+    ) -> *mut pa_stream;
+
+    pub fn pa_stream_new_with_proplist(
+        c: *mut pa_context,
+        name: *const u8,
+        ss: *const pa_sample_spec,
+        map: *const pa_channel_map,
+        p: *mut pa_proplist,
     ) -> *mut pa_stream;
 
     pub fn pa_stream_set_state_callback(

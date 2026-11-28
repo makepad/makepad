@@ -16,7 +16,7 @@ use {
     crate::{
         action::Actions,
         cx::Cx,
-        cx_api::{CxOsApi, OpenUrlInPlace},
+        cx_api::OpenUrlInPlace,
         event::Event,
         file_dialogs::{FileDialog, FileDialogAction, Filter},
         makepad_live_id::LiveId,

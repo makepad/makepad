@@ -309,7 +309,27 @@ pub fn stop_main_loop_with(code: i32) {
     // an event ends the main loop's wait for the next event, which then sees the stop
     let ready = lock(&shared.run).ready;
     if ready {
+        if !held {
+            // A modal panel or an open menu runs its own nested loop, which never looks at the
+            // stop: end it from a block that runs in that loop's modes.
+            run_on_main(|| unsafe { end_nested_loops() });
+        }
         wake_event_loop();
+    }
+}
+
+/// Main thread, any run-loop mode: ends a modal session (`file_dialog`'s `runModal` then returns
+/// `NSModalResponseAbort`, not OK, so it reports no path) and a menu-bar menu being tracked.
+unsafe fn end_nested_loops() {
+    let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
+    // abortModal outside a modal session raises, so only when one runs
+    let modal: ObjcId = msg_send![ns_app, modalWindow];
+    if modal != nil {
+        let () = msg_send![ns_app, abortModal];
+    }
+    let main_menu: ObjcId = msg_send![ns_app, mainMenu];
+    if main_menu != nil {
+        let () = msg_send![main_menu, cancelTracking];
     }
 }
 
@@ -702,37 +722,8 @@ unsafe fn process_ns_event(event: ObjcId) {
             let Some(win) = window_of_ns_event(event) else { return };
             let point: NSPoint = msg_send![event, locationInWindow];
             win.set_pointer(win.view_point(point));
-            let dx: f64 = msg_send![event, scrollingDeltaX];
-            let dy: f64 = msg_send![event, scrollingDeltaY];
-            let precise: BOOL = msg_send![event, hasPreciseScrollingDeltas];
-            // NSEventPhase bits: Began 1<<0, Stationary 1<<1, Changed 1<<2, Ended 1<<3,
-            // Cancelled 1<<4, MayBegin 1<<5. `phase` covers the finger-driven part of a trackpad
-            // gesture, `momentumPhase` the stream after lift-off; wheel mice report 0 for both.
-            let phase_bits: u64 = msg_send![event, phase];
-            let momentum_bits: u64 = msg_send![event, momentumPhase];
-            let phase = if momentum_bits & ((1 << 3) | (1 << 4)) != 0 {
-                input::scroll::MOMENTUM_ENDED
-            } else if momentum_bits != 0 {
-                input::scroll::MOMENTUM
-            } else if phase_bits & ((1 << 0) | (1 << 5)) != 0 {
-                input::scroll::BEGAN
-            } else if phase_bits & ((1 << 1) | (1 << 2)) != 0 {
-                input::scroll::CHANGED
-            } else if phase_bits & (1 << 3) != 0 {
-                input::scroll::ENDED
-            } else if phase_bits & (1 << 4) != 0 {
-                // cancelled: the system took over the gesture; abort without momentum, which
-                // widgets treat as a reset when it arrives as `Began`
-                input::scroll::BEGAN
-            } else {
-                input::scroll::NONE
-            };
-            let mods = keys::event_mods(event);
-            if precise == YES {
-                win.scroll([-dx, -dy], mods, true, phase);
-            } else {
-                win.scroll([-dx * 32., -dy * 32.], mods, false, phase);
-            }
+            let (delta, precise, phase) = keys::event_scroll(event);
+            win.scroll(delta, keys::event_mods(event), precise, phase);
         }
         NSEventType::NSEventTypeMagnify => {
             let Some(win) = window_of_ns_event(event) else { return };
@@ -1223,7 +1214,7 @@ fn apply(op: Op) {
             }
             super::tray::session_closed(sid);
         }
-        Op::Cmd(sid, cmd, _) => command(sid, cmd),
+        Op::Cmd(sid, cmd) => command(sid, cmd),
     }
 }
 

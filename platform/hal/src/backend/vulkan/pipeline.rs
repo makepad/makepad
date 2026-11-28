@@ -328,7 +328,7 @@ struct VariantKey { colors: [u32; 4], depth: u32, flags: u32, views: u8, samples
 
 impl VariantKey {
     fn new(program: &Program, pass: PassKey, flags: u32) -> Self {
-        let mut flags = flags & (Draw::BLEND | Draw::CULL | Draw::DEPTH_WRITE | Draw::WIREFRAME | Draw::DEPTH_GREATER);
+        let mut flags = flags & (Draw::BLEND | Draw::CULL_MASK | Draw::DEPTH_WRITE | Draw::WIREFRAME | Draw::DEPTH_GREATER);
         if pass.depth == ABSENT { flags &= !(Draw::DEPTH_WRITE | Draw::DEPTH_GREATER); } // no depth attachment: the bit changes nothing
         if program.desc.blend & pipeline_blend::RAW != 0 { flags &= !Draw::BLEND; } // a raw write never blends: neither does the bit
         Self { colors: pass.colors, depth: pass.depth, flags, views: pass.views, samples: pass.samples.max(1) }
@@ -347,6 +347,7 @@ fn note_refusal(e: &str) {
     if e.starts_with("Vulkan: ") && !out_of_memory(e) && !e.ends_with("DEVICE_LOST") { let _ = REFUSED.set(e.to_owned()); }
 }
 
+#[cfg(target_os = "android")]
 pub fn refused_pipeline() -> Option<&'static str> { REFUSED.get().map(String::as_str) }
 
 /// A pipeline's create, as the app sent it: the program is made from it (again on a device that
@@ -539,6 +540,12 @@ fn require_add_blend(dev: &Device, format: u32, name: &str) -> Result<(), String
 }
 
 fn create_variant(program: Arc<Program>, pass: &RenderPass, flags: u32) -> Result<Arc<Pipeline>, String> {
+    let cull = match Draw::cull_mode(flags) {
+        Some(CullMode::None) => vk::CullModeFlags::NONE,
+        Some(CullMode::Back) => vk::CullModeFlags::BACK,
+        Some(CullMode::Front) => vk::CullModeFlags::FRONT,
+        None => return Err("conflicting Draw::CULL and Draw::CULL_FRONT flags".into()),
+    };
     let dev = &program.dev;
     let add = program.desc.blend & pipeline_blend::ADD != 0;
     if add && program.desc.blend & pipeline_blend::RAW == 0 && flags & Draw::BLEND != 0 {
@@ -563,7 +570,7 @@ fn create_variant(program: Arc<Program>, pass: &RenderPass, flags: u32) -> Resul
     let viewport = vk::PipelineViewportStateCreateInfo::default().viewport_count(1).scissor_count(1);
     let lines = flags & Draw::WIREFRAME != 0 && program.dev.features.fill_mode_non_solid == vk::TRUE;
     let raster = vk::PipelineRasterizationStateCreateInfo::default().polygon_mode(if lines { vk::PolygonMode::LINE } else { vk::PolygonMode::FILL })
-        .cull_mode(if flags & Draw::CULL != 0 { vk::CullModeFlags::BACK } else { vk::CullModeFlags::NONE })
+        .cull_mode(cull)
         .front_face(vk::FrontFace::COUNTER_CLOCKWISE).line_width(1.0);
     // an MSAA pass: its sample count, per-sample shading off (one fragment shader run per pixel);
     // an opaque draw's alpha is its coverage of the pixel (alpha to coverage: a cut-out's edge,

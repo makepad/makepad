@@ -58,6 +58,8 @@ pub fn http_error_out(tcp_stream: TcpStream, code: u16) {
     http_error_out_until(tcp_stream, code, None, Instant::now() + HTTP_ERROR_WRITE_TIMEOUT);
 }
 
+/// Writes the HTTP error and closes the connection. The write gets at least five
+/// seconds, even if the request deadline has passed, and keeps any later deadline.
 pub fn http_error_out_until(
     mut tcp_stream: TcpStream,
     code: u16,
@@ -72,7 +74,7 @@ pub fn http_error_out_until(
             status_reason(code)
         )
         .as_bytes(),
-        deadline,
+        deadline.max(Instant::now() + HTTP_ERROR_WRITE_TIMEOUT),
     );
     let _ = tcp_stream.shutdown(Shutdown::Both);
 }

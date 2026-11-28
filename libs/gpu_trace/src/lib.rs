@@ -112,6 +112,7 @@ pub mod draw_flags {
     pub const CULL: u8 = 4;
     /// the pass has a depth attachment (the draw is depth-tested)
     pub const DEPTH_TEST: u8 = 8;
+    pub const CULL_FRONT: u8 = 16;
 }
 
 /// Split frames: GPU time of the consecutive draws of one shader (each in its own encoder).

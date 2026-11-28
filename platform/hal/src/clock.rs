@@ -139,21 +139,42 @@ pub fn process_cpu_ns() -> u64 {
 /// wait, once a look). macOS keeps a runnable time only for a whole process (proc_pid_rusage's
 /// ri_runnable_time), where the calling thread's and the skipped ones' cannot be told apart, and
 /// Windows none outside its event tracing: both answer 0.
-#[cfg(any(target_os = "linux", target_os = "android"))]
 pub fn threads_waited_ns(skip: impl Fn(&str) -> bool) -> u64 {
+    threads_waited_ns_filtered(|_, name| skip(name))
+}
+
+/// The calling thread's OS thread id (Linux's `gettid`), as [`threads_waited_ns_filtered`] names
+/// threads; 0 on an OS that keeps no per-thread wait.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub fn thread_id() -> u64 {
     extern "C" {
         fn gettid() -> i32;
     }
     // SAFETY: no arguments; the calling thread's id
-    let me = unsafe { gettid() }.to_string();
+    unsafe { gettid() }.max(0) as u64
+}
+
+/// See the Linux one.
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+pub fn thread_id() -> u64 {
+    0
+}
+
+/// [`threads_waited_ns`], `skip` given each thread's id ([`thread_id`]) and name: a caller that
+/// knows its other threads by id (a test binary's threads driving its other tests) leaves them out
+/// too.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub fn threads_waited_ns_filtered(skip: impl Fn(u64, &str) -> bool) -> u64 {
+    let me = thread_id();
     let Ok(tasks) = std::fs::read_dir("/proc/self/task") else { return 0 };
     let mut waited = 0;
     for task in tasks.flatten() {
-        if task.file_name().to_str() == Some(me.as_str()) {
+        let Some(tid) = task.file_name().to_str().and_then(|t| t.parse::<u64>().ok()) else { continue };
+        if tid == me {
             continue;
         }
         let path = task.path();
-        if skip(std::fs::read_to_string(path.join("comm")).unwrap_or_default().trim_end()) {
+        if skip(tid, std::fs::read_to_string(path.join("comm")).unwrap_or_default().trim_end()) {
             continue;
         }
         // "<run time> <run_delay> <timeslices>", in ns
@@ -165,7 +186,7 @@ pub fn threads_waited_ns(skip: impl Fn(&str) -> bool) -> u64 {
 
 /// See the Linux one: this OS keeps no runnable time per thread.
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
-pub fn threads_waited_ns(skip: impl Fn(&str) -> bool) -> u64 {
+pub fn threads_waited_ns_filtered(skip: impl Fn(u64, &str) -> bool) -> u64 {
     let _ = skip;
     0
 }

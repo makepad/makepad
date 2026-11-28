@@ -74,7 +74,7 @@ pub fn take_registered_video_frame_session(
     unregister_video_frame_session(id)
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use crate::video_decode::yuv::{YuvColorMatrix, YuvLayout, YuvPlaneData};

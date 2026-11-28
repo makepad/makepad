@@ -67,11 +67,19 @@ pub fn trace_log_dir(topic: &str) -> std::path::PathBuf {
 #[cfg(not(target_arch = "wasm32"))]
 mod async_sink {
     use super::*;
-    use std::sync::{atomic::{AtomicU64, Ordering}, mpsc::{sync_channel, SyncSender}, OnceLock};
+    use std::sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        mpsc::{sync_channel, RecvTimeoutError, SyncSender, TrySendError},
+        OnceLock,
+    };
+
+    const FLUSH_TIMEOUT: Duration = Duration::from_millis(500);
 
     pub(super) enum Message {
         Record(Box<dyn FnOnce() + Send>),
         Deferred(DeferredLog),
+        /// Every message queued before this one has been pushed into `log_ring`.
+        Flush(SyncSender<()>),
         /// the consumer returns
         Stop,
     }
@@ -84,6 +92,7 @@ mod async_sink {
     }
     static SINK: OnceLock<Option<SyncSender<Message>>> = OnceLock::new();
     static DROPPED: AtomicU64 = AtomicU64::new(0);
+    static FLUSH_STALLED: AtomicBool = AtomicBool::new(false);
 
     pub(super) fn init() {
         SINK.get_or_init(|| {
@@ -92,24 +101,32 @@ mod async_sink {
             let (tx, rx) = sync_channel::<Message>(depth);
             std::thread::Builder::new().name("makepad-log".into()).spawn(move || {
                 let mut reported = 0;
+                let report_dropped = |reported: &mut u64| {
+                    let dropped = DROPPED.load(Ordering::Relaxed);
+                    if dropped != *reported {
+                        write_log_record("logger", 0, 0, 0, 0,
+                            format!("log sink dropped {} records (total {})", dropped - *reported, dropped),
+                            LogLevel::Warning);
+                        *reported = dropped;
+                    }
+                };
                 while let Ok(message) = rx.recv() {
                     if matches!(message, Message::Stop) {
                         return;
                     }
+                    if let Message::Flush(done) = message {
+                        report_dropped(&mut reported);
+                        let _ = done.try_send(());
+                        continue;
+                    }
                     if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match message {
                         Message::Record(write) => write(),
                         Message::Deferred(record) => record.write(),
-                        Message::Stop => {}
+                        Message::Flush(_) | Message::Stop => {}
                     })).is_err() {
                         DROPPED.fetch_add(1, Ordering::Relaxed);
                     }
-                    let dropped = DROPPED.load(Ordering::Relaxed);
-                    if dropped != reported {
-                        write_log_record("logger", 0, 0, 0, 0,
-                            format!("log sink dropped {} records (total {})", dropped - reported, dropped),
-                            LogLevel::Warning);
-                        reported = dropped;
-                    }
+                    report_dropped(&mut reported);
                 }
             }).ok().map(|_| tx)
         });
@@ -133,12 +150,53 @@ mod async_sink {
     }
 
     pub(super) fn dropped() -> u64 { DROPPED.load(Ordering::Relaxed) }
+
+    fn note_flush_incomplete(reason: &str) {
+        // Bypass both the bounded sink channel (full or stalled) and stderr (which the consumer
+        // may be blocked writing to); record once per episode in the in-memory ring so the
+        // degraded `/log` reply carries the warning without deadlocking or spamming.
+        if !FLUSH_STALLED.swap(true, Ordering::AcqRel) {
+            crate::log_ring::push(
+                LogLevel::Warning,
+                format!(
+                    "{} logger:1:1 - log sink flush incomplete ({reason}); /log answered with buffered lines",
+                    log_level_prefix(LogLevel::Warning),
+                ),
+            );
+        }
+    }
+
+    pub(super) fn flush() {
+        let Some(Some(tx)) = SINK.get() else { return };
+        let (done_tx, done_rx) = sync_channel(1);
+        match tx.try_send(Message::Flush(done_tx)) {
+            Ok(()) => match done_rx.recv_timeout(FLUSH_TIMEOUT) {
+                Ok(()) => FLUSH_STALLED.store(false, Ordering::Release),
+                Err(RecvTimeoutError::Timeout) => {
+                    note_flush_incomplete("timed out after 500 ms");
+                }
+                Err(RecvTimeoutError::Disconnected) => {}
+            },
+            Err(TrySendError::Full(_)) => {
+                note_flush_incomplete("sink queue full");
+            }
+            Err(TrySendError::Disconnected(_)) => {}
+        }
+    }
 }
 
 /// A hosted app ends: the log consumer thread returns (records logged after it are counted as dropped).
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn stop_sink() {
     async_sink::stop();
+}
+
+/// Drain records already submitted to the native async log sink into `log_ring`.
+/// Called by the remote `/log` route so reads see every `log!()` that happened-before the query;
+/// never called on real-time or UI hot paths.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn flush_sink() {
+    async_sink::flush();
 }
 
 /// Number of log records refused by the bounded native sink.
@@ -192,8 +250,9 @@ impl DeferredLog {
         match async_sink::try_submit(async_sink::Message::Deferred(self)) {
             Ok(()) => Ok(()),
             Err(async_sink::Message::Deferred(record)) => Err(record),
-            Err(async_sink::Message::Record(_)) => unreachable!(),
-            Err(async_sink::Message::Stop) => unreachable!(),
+            Err(async_sink::Message::Record(_))
+            | Err(async_sink::Message::Flush(_))
+            | Err(async_sink::Message::Stop) => unreachable!(),
         }
         #[cfg(target_arch = "wasm32")]
         {

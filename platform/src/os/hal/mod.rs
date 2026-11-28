@@ -148,6 +148,8 @@ pub struct HalClient {
     /// a remote headset slot was offered when last looked (a headset linked: the app draws again
     /// and finds an XR display, `Cx::xr_display`)
     pub(crate) xr_remote_seen: bool,
+    /// the generation of `makepad run`'s source snapshot when last looked (0 outside a run)
+    pub(crate) sources_seen: u64,
     /// a window drag started by the app (`CxOsOp::StartDragging`): the in-window drag protocol
     /// synthesises Drag / Drop events from mouse move and up
     pub(crate) internal_drag_items: Option<Arc<Vec<DragItem>>>,
@@ -292,6 +294,7 @@ impl Default for HalClient {
             hosted: None,
             xr: None,
             xr_remote_seen: false,
+            sources_seen: 0,
             internal_drag_items: None,
             #[cfg(target_os = "android")]
             app_background_argb: None,
@@ -616,15 +619,27 @@ impl crate::cx_api::CxOsApi for Cx {
         self.hal.secs(makepad_hal::clock_ns())
     }
 
-    fn open_url(&mut self, url: &str, _in_place: OpenUrlInPlace) {
+    fn open_url(&mut self, url: &str, in_place: OpenUrlInPlace) {
+        Cx::open_url(self, url, in_place);
+    }
+
+    fn browser_update_url(&mut self, url: &str, replace: bool) {
+        Cx::browser_update_url(self, url, replace);
+    }
+
+    fn browser_history_go(&mut self, delta: i32) {
+        Cx::browser_history_go(self, delta);
+    }
+}
+
+impl Cx {
+    pub(crate) fn hal_open_url(&mut self, url: &str) {
         #[cfg(any(target_vendor = "apple", target_os = "windows"))]
         if !makepad_hal::open_url(url) { crate::error!("open_url: the system did not open {url}"); }
         #[cfg(not(any(target_vendor = "apple", target_os = "windows")))]
         crate::warning!("open_url is unavailable on this HAL backend: {url}");
     }
-}
 
-impl Cx {
     /// Loads the dependencies from the app bundle's resources (iOS / tvOS devices).
     #[cfg(all(any(target_os = "ios", target_os = "tvos"), not(apple_sim)))]
     fn bundle_load_dependencies(&mut self) {

@@ -6,7 +6,7 @@
 //! the kind says which lane the field uses and how many words, and the table macros generate the
 //! constructor, the decoder and the writer method from that one line.
 
-use crate::types::{Attr, Id, Range, Slice, StrId};
+use crate::types::{Attr, BufferParts, Id, PartsTable, Range, Slice, StrId};
 
 /// Words in `Cmd::a`.
 pub const CMD_WORDS: usize = 8;
@@ -156,6 +156,9 @@ pub mod k {
     pub struct slice;
     /// A borrowed run whose length fits 32 bits (3 words).
     pub struct slice32;
+    /// Writes at several offsets of one buffer: a table of (offset, address, length) records in
+    /// the arena (`Cmd::data`), each over bytes the writer copied as for [`slice`].
+    pub struct parts;
     /// Header flags (`Cmd::flags`).
     pub struct flags;
     /// An id in the words (2).
@@ -306,6 +309,41 @@ impl Field for k::slice {
     }
     fn sample(_n: u32) -> &'static [u8] {
         b"sample slice"
+    }
+}
+
+/// Each part's bytes go into the writer's upload memory as [`k::slice`]'s do, and its record into
+/// the arena; the command names the table ([`PartsTable`], which only a writer makes). It decodes
+/// to [`BufferParts`] over the records.
+impl Field for k::parts {
+    type T = PartsTable;
+    type In<'a> = &'a [(u64, &'a [u8])];
+    type Out<'a> = BufferParts<'a>;
+    const UW: usize = 0;
+    const FW: usize = 0;
+    const UPLOAD: bool = true;
+    #[inline]
+    fn pack(v: PartsTable, p: &mut Packer) {
+        p.data = v.0;
+    }
+    fn lower<'a, S: ArenaSink>(s: &mut S, parts: &'a [(u64, &'a [u8])]) -> PartsTable {
+        let mut records = Vec::with_capacity(parts.len() * BufferParts::RECORD);
+        for (off, bytes) in parts {
+            let kept = s.keep_bytes(bytes);
+            BufferParts::put_record(&mut records, *off, kept.ptr, kept.len);
+        }
+        PartsTable(s.put_bytes(&records))
+    }
+    #[inline]
+    fn read<'a>(r: &mut Reader<'a>) -> BufferParts<'a> {
+        BufferParts::records(r.bytes(r.data))
+    }
+    fn expect<'a>(v: Self::In<'a>) -> Self::Out<'a> {
+        BufferParts::list(v)
+    }
+    fn sample(_n: u32) -> &'static [(u64, &'static [u8])] {
+        const PARTS: &[(u64, &[u8])] = &[(0, b"first part"), (64, b"second")];
+        PARTS
     }
 }
 

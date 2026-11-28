@@ -8,6 +8,10 @@
 //! Then the app rests, with nothing to draw, and paints on. For the rest's first half it still asks
 //! for every NextFrame and paints nothing (beats with no frame's work), then it idles. Neither is a
 //! stall, so no present gap reads as long as either half.
+// a test of the native event loop: on wasm32 it builds to nothing
+#![cfg_attr(target_arch = "wasm32", no_main)]
+#![cfg(not(target_arch = "wasm32"))]
+
 use makepad_platform::makepad_error_log::{self, LogLevel};
 use makepad_platform::*;
 use std::sync::atomic::{AtomicUsize, Ordering};

@@ -41,6 +41,10 @@ pub struct Range {
     pub len: u32,
 }
 
+impl Range {
+    pub fn is_empty(self) -> bool { self.len == 0 }
+}
+
 /// A borrowed run of memory: `len` is in BYTES. The pointer is valid for the duration of the
 /// call that receives it (`hal_submit`), never longer: the HAL copies whatever it keeps before
 /// that call returns. Nothing may be stored from it.
@@ -180,6 +184,8 @@ pub struct CmdBuf {
     pub(crate) session: u32,
     pub(crate) cmds: Slice,
     pub(crate) arena: Slice,
+    /// Packed uniform bytes addressed by each packet.
+    pub(crate) uniforms: Slice,
     pub(crate) frames: Slice,
     /// `[Pass]` and `[Draw]` of every frame in `frames` (element ranges, see [`FramePacket`])
     pub(crate) passes: Slice,
@@ -474,6 +480,10 @@ pub struct HalInfo {
     pub volume_formats: u64,
     /// Maximum width, height and depth for every advertised volume format.
     pub max_volume_dimension: u32,
+    /// Required alignment for uniform buffer offsets. Zero selects 256 bytes.
+    pub uniform_align: u32,
+    /// Maximum single uniform block in bytes. Zero selects 65536 bytes.
+    pub max_uniform_block: u32,
 }
 
 /// What kind of GPU a backend runs on (`HalInfo::device_kind`).
@@ -486,6 +496,14 @@ pub mod device_kind {
 }
 
 impl HalInfo {
+    pub fn effective_uniform_align(&self) -> u32 {
+        if self.uniform_align == 0 { 256 } else { self.uniform_align.clamp(16, 256).next_power_of_two() }
+    }
+
+    pub fn effective_max_uniform_block(&self) -> u32 {
+        if self.max_uniform_block == 0 { 65_536 } else { self.max_uniform_block.max(16_384) }
+    }
+
     /// Whether this device accepts a pipeline that samples a 3D texture.
     pub fn sampled_volume_support(&self) -> Result<(), &'static str> {
         if self.volume_formats != 0 && self.max_volume_dimension != 0 { return Ok(()); }
@@ -517,29 +535,33 @@ impl HalInfo {
     /// Field by field, little-endian, for an event payload (`BackendChanged`).
     /// Every field is named, so a new one can't be left out of the payload.
     pub fn to_bytes(&self) -> Vec<u8> {
-        let Self { session, backend, dialect, flags, formats, storage_formats, volume_formats, max_volume_dimension, max_workgroup_size, max_workgroup_invocations,
+        let Self { session, backend, dialect, flags, formats, storage_formats, volume_formats, max_volume_dimension, uniform_align, max_uniform_block, max_workgroup_size, max_workgroup_invocations,
             msaa, dpi, max_texture, max_window, max_buffer, working_set, vendor_id, device_kind, device_name } = *self;
         let words = [session, backend, dialect, flags, max_workgroup_size[0], max_workgroup_size[1], max_workgroup_size[2],
             max_workgroup_invocations, msaa, dpi.to_bits(), max_texture, max_window[0], max_window[1], vendor_id, device_kind];
         let longs = [formats, storage_formats, max_buffer, working_set].into_iter().chain(device_name);
         words.iter().flat_map(|w| w.to_le_bytes()).chain(longs.flat_map(u64::to_le_bytes))
-            .chain(volume_formats.to_le_bytes()).chain(max_volume_dimension.to_le_bytes()).collect()
+            .chain(volume_formats.to_le_bytes()).chain(max_volume_dimension.to_le_bytes()).chain(uniform_align.to_le_bytes()).chain(max_uniform_block.to_le_bytes()).collect()
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
         // 15 u32 words, then 12 u64s (4 fields and the 8 of `device_name`), as `to_bytes` writes them
         const WORDS: usize = 15;
         const VOLUME: usize = WORDS * 4 + 12 * 8;
-        let (volume_formats, max_volume_dimension) = match bytes.get(VOLUME..)? {
-            [] => (0, 0),
-            tail if tail.len() == 12 => (u64::from_le_bytes(tail[..8].try_into().ok()?), u32::from_le_bytes(tail[8..].try_into().ok()?)),
+        let (volume_formats, max_volume_dimension, uniform_align, max_uniform_block) = match bytes.get(VOLUME..)? {
+            [] => (0, 0, 256, 65_536),
+            tail if matches!(tail.len(), 12 | 20) => {
+                let word = |i| u32::from_le_bytes(tail[i..i + 4].try_into().unwrap());
+                let (align, max) = if tail.len() == 20 { (word(12), word(16)) } else { (256, 65_536) };
+                (u64::from_le_bytes(tail[..8].try_into().ok()?), word(8), align, max)
+            }
             _ => return None,
         };
         let w = |i: usize| u32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap());
         let l = |i: usize| u64::from_le_bytes(bytes[WORDS * 4 + i * 8..WORDS * 4 + i * 8 + 8].try_into().unwrap());
         Some(Self { session: w(0), backend: w(1), dialect: w(2), flags: w(3), max_workgroup_size: [w(4), w(5), w(6)],
             max_workgroup_invocations: w(7), msaa: w(8), dpi: f32::from_bits(w(9)), max_texture: w(10), max_window: [w(11), w(12)],
-            volume_formats, max_volume_dimension, vendor_id: w(13), device_kind: w(14), formats: l(0), storage_formats: l(1), max_buffer: l(2), working_set: l(3),
+            volume_formats, max_volume_dimension, uniform_align, max_uniform_block, vendor_id: w(13), device_kind: w(14), formats: l(0), storage_formats: l(1), max_buffer: l(2), working_set: l(3),
             device_name: std::array::from_fn(|i| l(4 + i)) })
     }
 }
@@ -699,6 +721,12 @@ pub mod buffer_kind {
     pub const KIND_MASK: u16 = 255;
     pub const INDIRECT: u16 = 1 << 8;
     pub const READBACK: u16 = 1 << 9;
+    /// For instance slabs: every `buffer_update` writes bytes that no submitted,
+    /// uncompleted frame reads. A write at offset zero starts a fresh slab after its
+    /// last reader completes. A draw reads only bytes written in the current slab.
+    /// The backend writes in place without copying, renaming or zeroing storage to
+    /// preserve bytes on the caller's behalf.
+    pub const APPEND: u16 = 1 << 10;
 }
 
 /// `Pass::load` values.
@@ -1070,6 +1098,105 @@ pub mod lifecycle {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct BufferReadRange { pub id: Id, pub offset: u64, pub len: u64 }
 
+/// Where the parts table of a `BufferUpdateParts` command is in the writer's arena. Only the
+/// writer makes one, over records it wrote itself: their bytes are memory the batch keeps
+/// (`CmdWriter::buffer_update_parts`) or that its caller vouched for
+/// ([`CmdWriter::buffer_update_parts_borrowed`](crate::buffers::CmdWriter::buffer_update_parts_borrowed)),
+/// so no command can name arena bytes that merely look like records.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PartsTable(pub(crate) Range);
+
+/// The writes of one buffer update, each a destination offset and the bytes to put there, in
+/// order: what the same list of `buffer_update` commands would write. A decoded
+/// `BufferUpdateParts` reads its records in the arena (offset, address, length); the HAL's own
+/// one-part updates are a list.
+#[derive(Clone, Copy)]
+pub struct BufferParts<'a>(PartsSrc<'a>);
+
+#[derive(Clone, Copy)]
+enum PartsSrc<'a> {
+    Records(&'a [u8]),
+    List(&'a [(u64, &'a [u8])]),
+}
+
+impl<'a> BufferParts<'a> {
+    /// Bytes of one record: offset, address and length, little-endian u64 each.
+    pub const RECORD: usize = 24;
+
+    pub(crate) fn records(table: &'a [u8]) -> Self {
+        BufferParts(PartsSrc::Records(table))
+    }
+
+    /// Parts the caller holds as references.
+    pub fn list(parts: &'a [(u64, &'a [u8])]) -> Self {
+        BufferParts(PartsSrc::List(parts))
+    }
+
+    pub(crate) fn put_record(out: &mut Vec<u8>, off: u64, ptr: *const u8, len: usize) {
+        out.extend_from_slice(&off.to_le_bytes());
+        out.extend_from_slice(&(ptr as usize as u64).to_le_bytes());
+        out.extend_from_slice(&(len as u64).to_le_bytes());
+    }
+
+    /// Whether the table is whole records; a decoded command whose table is not is malformed.
+    pub fn is_whole(&self) -> bool {
+        match self.0 {
+            PartsSrc::Records(b) => b.len() % Self::RECORD == 0,
+            PartsSrc::List(_) => true,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        match self.0 {
+            PartsSrc::Records(b) => b.len() / Self::RECORD,
+            PartsSrc::List(l) => l.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// (offset, address, length) of each part, without reading its bytes.
+    fn spans(&self) -> impl Iterator<Item = (u64, *const u8, usize)> + 'a {
+        let (records, list) = match self.0 {
+            PartsSrc::Records(b) => (b, &[][..]),
+            PartsSrc::List(l) => (&[][..], l),
+        };
+        let word = |r: &[u8], at: usize| u64::from_le_bytes(r[at..at + 8].try_into().unwrap());
+        records.chunks_exact(Self::RECORD).map(move |r| (word(r, 0), word(r, 8) as usize as *const u8, word(r, 16) as usize))
+            .chain(list.iter().map(|(off, bytes)| (*off, bytes.as_ptr(), bytes.len())))
+    }
+
+    /// The bytes of all parts.
+    pub fn total(&self) -> u64 {
+        self.spans().map(|(_, _, len)| len as u64).sum()
+    }
+
+    /// Each part's offset and bytes, in order.
+    ///
+    /// # Safety
+    /// A decoded command's parts point into memory lent for the `hal_submit` call that received
+    /// it: read them inside that call only, as [`Slice::as_bytes`].
+    pub unsafe fn iter(&self) -> impl Iterator<Item = (u64, &'a [u8])> + 'a {
+        self.spans().map(|(off, ptr, len)| (off, unsafe { Slice { ptr, len }.as_bytes() }))
+    }
+}
+
+/// Offsets and lengths: the addresses differ between the writer's copy and its source.
+impl std::fmt::Debug for BufferParts<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.spans().map(|(off, _, len)| (off, len))).finish()
+    }
+}
+
+/// The same writes from the same memory, as [`Slice`] compares.
+impl PartialEq for BufferParts<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.spans().eq(other.spans())
+    }
+}
+
 /// `Readback` event status.
 pub mod readback {
     pub const OK: u32 = 0;
@@ -1359,9 +1486,10 @@ pub struct Pass {
     /// pass loads them: this one, or a later MSAA pass of the submit loading one of its
     /// attachments (`exec::twins_kept`).
     pub samples: u32,
-    /// The pass's uniform block; with `view_rects` of n rects, n blocks of equal size, view
-    /// i's at `i * len / n`.
-    pub uniforms: Slice,
+    /// View zero's uniform block in the packet's stream.
+    pub uniforms: Range,
+    /// Distance between successive view blocks in bytes. Zero for a single view.
+    pub uniform_stride: u32,
     pub draws: Range,
     pub name: StrId,
     pub owner: StrId,
@@ -1380,32 +1508,37 @@ pub struct Pass {
 
 unsafe impl Plain for Pass {}
 
-/// Where a draw's instances come from: inline floats (a borrowed [`Slice`]) or a retained buffer.
+/// A draw reads `count` rows from an instance buffer starting at row `off`.
+/// [`Inst::none`] draws `count` instances without a buffer when the pipeline reads no instance inputs;
+/// every backend refuses it for a pipeline that does.
 #[relax_api(plain)]
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Inst {
-    /// [`Inst::INLINE`] or [`Inst::BUFFER`]
-    pub kind: u32,
     pub id: Id,
     pub off: u32,
     pub count: u32,
-    pub data: Slice,
 }
 
 impl Inst {
-    pub const INLINE: u32 = 0;
-    pub const BUFFER: u32 = 1;
-
-    /// Instances read from `data` (borrowed for the submit call).
-    pub fn inline(data: Slice, count: u32) -> Inst {
-        Inst { kind: Inst::INLINE, id: Id::NONE, off: 0, count, data }
-    }
-
-    /// Instances read from a retained instance buffer.
     pub fn buffer(id: Id, off: u32, count: u32) -> Inst {
-        Inst { kind: Inst::BUFFER, id, off, count, data: Slice::EMPTY }
+        Inst { id, off, count }
     }
+
+    pub fn none(count: u32) -> Inst {
+        Inst { id: Id::NONE, off: 0, count }
+    }
+}
+
+/// Face-culling mode. Front faces are counter-clockwise in clip space.
+#[relax_api(plain)]
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum CullMode {
+    #[default]
+    None = 0,
+    Back = 1,
+    Front = 2,
 }
 
 /// One draw call. `inst_ranges` is an element range into the arena's `[u32; 2]` (first, count)
@@ -1423,8 +1556,8 @@ pub struct Draw {
     pub index: [u32; 2],
     pub inst: Inst,
     pub inst_ranges: Range,
-    /// draw, list, pass-dynamic, scope
-    pub uniforms: [Slice; 4],
+    /// Packet-relative byte ranges for the draw call, list, dynamic and scope uniforms.
+    pub uniforms: [Range; 4],
     pub ubufs: [Id; 4],
     /// The sampled textures, one per texture the pipeline samples (`pipeline_binding::TEXTURES`),
     /// in binding order: an ELEMENT range into the arena's `[u32; 2]` (index, gen) array, as
@@ -1452,6 +1585,7 @@ pub struct Draw {
 
 impl Draw {
     pub const DEPTH_WRITE: u32 = 1;
+    /// Cull back faces (front = counter-clockwise in clip space).
     pub const CULL: u32 = 2;
     pub const BLEND: u32 = 4;
     /// the index buffer holds u32 indices (otherwise u16)
@@ -1463,6 +1597,26 @@ impl Draw {
     pub const INPUT_TRANSPARENT: u32 = 32;
     /// Strict greater-than depth comparison (otherwise less-equal).
     pub const DEPTH_GREATER: u32 = 64;
+    /// Cull front faces. Setting both this bit and [`Draw::CULL`] is invalid.
+    pub const CULL_FRONT: u32 = 128;
+    pub const CULL_MASK: u32 = Self::CULL | Self::CULL_FRONT;
+
+    pub const fn cull_mode(flags: u32) -> Option<CullMode> {
+        match flags & Self::CULL_MASK {
+            0 => Some(CullMode::None),
+            Self::CULL => Some(CullMode::Back),
+            Self::CULL_FRONT => Some(CullMode::Front),
+            _ => None,
+        }
+    }
+
+    pub const fn cull_flags(mode: CullMode) -> u32 {
+        match mode {
+            CullMode::None => 0,
+            CullMode::Back => Self::CULL,
+            CullMode::Front => Self::CULL_FRONT,
+        }
+    }
 }
 
 unsafe impl Plain for Draw {}
@@ -1562,6 +1716,8 @@ pub struct FramePacket {
     pub draws: Range,
     /// Element range into `CmdBuf::layers`. Empty preserves the unsplit rendering path.
     pub layers: Range,
+    /// Byte range in the batch holding this packet's uniform stream.
+    pub uniforms: Range,
     pub meta: FrameMeta,
 }
 

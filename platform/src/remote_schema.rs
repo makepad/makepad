@@ -45,7 +45,7 @@ pub struct Command {
 /// The built-in services: id, label, brief.
 pub const SERVICES: &[(&str, &str, &str)] = &[
     ("ui", "Window", "The app's window as a person uses it: read and act on its semantic tree (ui, ui find, ui act, ui type), inject raw mouse, keys and text for input tests, resize, wait until it settled, record or grab frames. Coordinates are window points as ui reports them."),
-    ("edit", "Design", "Live design edits: the tweaker overlay, structural Splash edits (design) and hot-patched shader constants."),
+    ("edit", "Design", "Live design edits: widget data and structural Splash edits (design), the tweaker overlay and hot-patched shader constants."),
     ("logs", "Logs", "The app's log lines and trace topics."),
     ("inspect", "Inspect", "Where the app's GPU memory is."),
 ];
@@ -55,22 +55,61 @@ pub fn tool_name(words: &str) -> String {
     words.replace(' ', "_")
 }
 
-pub fn json_str(s: &str) -> String {
-    let mut o = String::with_capacity(s.len() + 2);
-    o.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => o.push_str("\\\""),
-            '\\' => o.push_str("\\\\"),
-            '\n' => o.push_str("\\n"),
-            '\r' => o.push_str("\\r"),
-            '\t' => o.push_str("\\t"),
-            c if (c as u32) < 0x20 => o.push_str(&format!("\\u{:04x}", c as u32)),
-            c => o.push(c),
+pub use crate::remote::json_str;
+
+/// Flat argument object for a multi-op command. Each op's guide and the union of its
+/// properties come from the same table that validates parameters at runtime.
+fn flat_op_schema(operations: &[(&str, &str)]) -> String {
+    let mut op_enum = Vec::with_capacity(operations.len());
+    let mut op_guide = Vec::with_capacity(operations.len());
+    // Keep first-seen order and the original entry when all its value schemas agree.
+    let mut props: Vec<(&str, &str, Vec<&str>)> = Vec::new();
+    for &(op, params) in operations {
+        op_enum.push(json_str(op));
+        let fields = makepad_remote::params::properties(params);
+        if fields.is_empty() {
+            op_guide.push(op.to_string());
+        } else {
+            let names: Vec<&str> = fields.iter().map(|(key, _)| *key).collect();
+            op_guide.push(format!("{op}({})", names.join(",")));
+        }
+        for (key, entry) in fields {
+            if key == "op" {
+                continue;
+            }
+            let value = entry
+                .strip_prefix('"')
+                .and_then(|s| s.strip_prefix(key))
+                .and_then(|s| s.strip_prefix('"'))
+                .map(str::trim_start)
+                .and_then(|s| s.strip_prefix(':'))
+                .map(str::trim_start)
+                .unwrap_or("{}");
+            if let Some((_, _, values)) = props.iter_mut().find(|(k, _, _)| *k == key) {
+                if !values.contains(&value) {
+                    values.push(value);
+                }
+            } else {
+                props.push((key, entry, vec![value]));
+            }
         }
     }
-    o.push('"');
-    o
+    let mut properties = vec![format!(
+        "\"op\":{{\"type\":\"string\",\"enum\":[{}],\"description\":{}}}",
+        op_enum.join(","),
+        json_str(&op_guide.join("; "))
+    )];
+    for (key, first_entry, values) in props {
+        if values.len() == 1 {
+            properties.push(first_entry.to_string());
+        } else {
+            properties.push(format!("{}:{{\"anyOf\":[{}]}}", json_str(key), values.join(",")));
+        }
+    }
+    format!(
+        "{{\"type\":\"object\",\"properties\":{{{}}},\"required\":[\"op\"],\"additionalProperties\":false}}",
+        properties.join(",")
+    )
 }
 
 /// The JSON schema of a command's arguments.
@@ -81,19 +120,7 @@ pub fn schema(c: &Command) -> String {
         _ => None,
     };
     if let Some(operations) = operations {
-        let mut variants: Vec<String> = operations.iter().map(|(op, params)| {
-            let rest = if params.is_empty() { String::new() } else { format!(",{params}") };
-            format!("{{\"type\":\"object\",\"properties\":{{\"op\":{{\"const\":{}}}{rest}}},\"required\":[\"op\"],\"additionalProperties\":false}}", json_str(op))
-        }).collect();
-        if c.words == "tweak op" {
-            for (op, params) in makepad_remote::params::DESIGN {
-                let rest = if params.is_empty() { String::new() } else { format!(",{params}") };
-                variants.push(format!("{{\"type\":\"object\",\"properties\":{{\"op\":{{\"const\":{}}}{rest}}},\"required\":[\"op\"],\"additionalProperties\":false}}", json_str(&format!("design_{op}"))));
-            }
-        }
-        // An argument object first, then its variants: a tool's schema is an object (the services'
-        // manifest check refuses a bare oneOf), and each variant names its op's arguments.
-        return format!("{{\"type\":\"object\",\"oneOf\":[{}]}}", variants.join(","));
+        return flat_op_schema(operations);
     }
     let required: Vec<String> = c.required.iter().map(|r| json_str(r)).collect();
     format!("{{\"type\":\"object\",\"properties\":{{{}}},\"required\":[{}]}}", c.params, required.join(","))
@@ -226,6 +253,47 @@ mod tests {
         assert!(request_line(&DESIGN, "{}").is_err());
         assert!(request_line(&DESIGN, r#"{"op":"two words"}"#).is_err());
         assert!(request_line(&CLICK, "[1]").is_err());
+    }
+
+    #[test]
+    fn design_and_tweak_op_emit_flat_provider_safe_schemas() {
+        use crate::makepad_micro_serde::{DeJson, JsonValue};
+        use makepad_remote::params;
+
+        for (words, operations) in [("design", params::DESIGN), ("tweak op", params::TWEAK)] {
+            let schema = schema(&Command { words, ..DESIGN });
+            let root = JsonValue::deserialize_json_strict(&schema).unwrap();
+            assert_eq!(root.get("type").and_then(JsonValue::as_str), Some("object"), "{words}");
+            assert_eq!(root.get("additionalProperties"), Some(&JsonValue::Bool(false)), "{words}");
+            assert_eq!(root.get("required"), Some(&JsonValue::Array(vec![JsonValue::String("op".into())])), "{words}");
+            for keyword in ["oneOf", "anyOf", "allOf"] {
+                assert!(root.get(keyword).is_none(), "{words} has top-level {keyword}");
+            }
+            let properties = root.get("properties").unwrap().as_object().unwrap();
+            let op = &properties["op"];
+            assert_eq!(op.get("type").and_then(JsonValue::as_str), Some("string"), "{words}");
+            let names: Vec<_> = op.get("enum").unwrap().as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+            assert_eq!(names, operations.iter().map(|(name, _)| *name).collect::<Vec<_>>(), "{words}");
+            if words == "tweak op" {
+                assert!(names.iter().all(|name| !name.starts_with("design_")), "{words} advertises a design alias");
+            }
+            let mut guide = op.get("description").unwrap().as_str().unwrap().split("; ");
+            for &(name, params) in operations {
+                let mut keys = Vec::new();
+                for (key, _) in params::properties(params) {
+                    assert!(properties.contains_key(key), "{words} lacks {key} for {name}");
+                    keys.push(key);
+                }
+                let usage = if keys.is_empty() { name.to_string() } else { format!("{name}({})", keys.join(",")) };
+                assert_eq!(guide.next(), Some(usage.as_str()), "{words} guide for {name}");
+            }
+            assert_eq!(guide.next(), None, "{words} has extra op guidance");
+        }
+
+        let conflict = flat_op_schema(&[("a", r#""x":{"type":"integer"}"#), ("b", r#""x":{"type":"string"}"#)]);
+        let root = JsonValue::deserialize_json_strict(&conflict).unwrap();
+        let expected = JsonValue::deserialize_json_strict(r#"{"anyOf":[{"type":"integer"},{"type":"string"}]}"#).unwrap();
+        assert_eq!(root.get("properties").unwrap().get("x"), Some(&expected));
     }
 
     #[test]

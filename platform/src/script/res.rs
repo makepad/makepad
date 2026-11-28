@@ -325,13 +325,6 @@ fn web_resource_base_path(pathname: &str) -> String {
     base_path.trim_start_matches('/').to_string()
 }
 
-/// The handle this heap already holds for a crate resource, if any.
-fn registered_crate_resource(vm: &mut ScriptVm, crate_part: &str, file_path: &str) -> Option<ScriptValue> {
-    let (abs_path, _, _) = resolve_crate_resource_paths(vm, crate_part, file_path)?;
-    let heap_key = vm.heap_key();
-    vm.host.cx_mut().script_data.resources.get_handle_by_abs_path(heap_key, &abs_path).map(Into::into)
-}
-
 fn register_crate_resource_parts(
     vm: &mut ScriptVm,
     res_type: ScriptHandleType,
@@ -1049,7 +1042,25 @@ fn script_value_to_u8_bytes(vm: &mut ScriptVm, value: ScriptValue) -> Option<Vec
 }
 
 pub fn script_mod(vm: &mut ScriptVm) {
-    let res = vm.new_module(id!(res));
+    let res = new_loader(vm);
+    vm.set_value_def(vm.modules(), id!(res), res);
+}
+
+fn local_resources_allowed(vm: &mut ScriptVm) -> bool {
+    use makepad_script_std::HostGrants;
+    let std = &vm.cx().script_data.std;
+    if std.has_grant(HostGrants::LOCAL_RESOURCES) {
+        return true;
+    }
+    if !std.scoped_grants().contains(HostGrants::LOCAL_RESOURCES) {
+        return false;
+    }
+    vm.body_module(vm.trap_ip().body).is_some_and(|(manifest, _)| !manifest.is_empty())
+}
+
+/// Construct the host's loader in this heap without publishing it as a module.
+pub fn new_loader(vm: &mut ScriptVm) -> ScriptObject {
+    let res = vm.heap_mut().new_with_proto(id!(res).into());
     let res_type = vm.new_handle_type(id_lut!(res));
 
     // Get the path of the resource
@@ -1108,7 +1119,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
         id_lut!(load_all_resources),
         script_args_def!(value = NIL),
         move |vm, args| {
-            if vm.host.cx_mut().script_data.std.host_io_only() {
+            if !local_resources_allowed(vm) {
                 return script_err_io!(vm.trap(), "external resources require a host request");
             }
             let value = script_value!(vm, args.value);
@@ -1125,7 +1136,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
         id_lut!(file_resource),
         script_args_def!(path = NIL),
         move |vm, args| {
-            if vm.host.cx_mut().script_data.std.host_io_only() {
+            if !local_resources_allowed(vm) {
                 return script_err_io!(vm.trap(), "external resources require a host request");
             }
             let path = script_value!(vm, args.path);
@@ -1188,12 +1199,11 @@ pub fn script_mod(vm: &mut ScriptVm) {
         id_lut!(crate_resource),
         script_args_def!(path = NIL),
         move |vm, args| {
-            let host_io_only = vm.host.cx_mut().script_data.std.host_io_only();
+            if !local_resources_allowed(vm) {
+                return script_err_io!(vm.trap(), "external resources require a host request");
+            }
             let path = script_value!(vm, args.path);
             if !path.is_string_like() {
-                if host_io_only {
-                    return script_err_io!(vm.trap(), "external resources require a host request");
-                }
                 return script_err_type_mismatch!(vm.trap(), "invalid res arg type");
             }
 
@@ -1201,13 +1211,6 @@ pub fn script_mod(vm: &mut ScriptVm) {
 
             if let Some(path_string) = path_string {
                 if let Some((crate_part, file_path)) = parse_crate_path(&path_string) {
-                    // A restricted heap only gets back what its trusted boot already
-                    // loaded, e.g., when a restyle registers its widgets again.
-                    if host_io_only {
-                        return registered_crate_resource(vm, crate_part, file_path).unwrap_or_else(|| {
-                            script_err_io!(vm.trap(), "external resources require a host request")
-                        });
-                    }
                     // A crate this VM was never told about has no directory here: its resource
                     // would be nil without a word, and an empty font family or a blank icon
                     // shows up far from the path that was asked for.
@@ -1219,9 +1222,6 @@ pub fn script_mod(vm: &mut ScriptVm) {
                     }
                     return register_crate_resource_parts(vm, res_type, crate_part, file_path);
                 }
-            }
-            if host_io_only {
-                return script_err_io!(vm.trap(), "external resources require a host request");
             }
 
             script_err_type_mismatch!(vm.trap(), "invalid res arg type")
@@ -1235,15 +1235,16 @@ pub fn script_mod(vm: &mut ScriptVm) {
         id_lut!(http_resource),
         script_args_def!(url = NIL),
         move |vm, args| {
-            if vm.host.cx_mut().script_data.std.host_io_only() {
-                return script_err_io!(vm.trap(), "external resources require a host request");
-            }
             let url = script_value!(vm, args.url);
             if !url.is_string_like() {
                 return script_err_type_mismatch!(vm.trap(), "invalid res arg type");
             }
 
             if let Some(url_string) = vm.string_with(url, |_vm, s| s.to_string()) {
+                let runtime = match makepad_script_std::net::http_runtime(vm, &url_string) {
+                    Ok(runtime) => runtime,
+                    Err(error) => return error,
+                };
                 let heap_key = vm.heap_key();
                 let cx = vm.host.cx_mut();
                 if let Some(existing) = cx
@@ -1270,6 +1271,11 @@ pub fn script_mod(vm: &mut ScriptVm) {
                     return handle.into();
                 }
 
+                let request_id = LiveId::unique();
+                if let Err(err) = runtime.http_start(request_id, HttpRequest::new(url_string.clone(), Default::default())) {
+                    return script_err_io!(vm.trap(), "http request failed: {err}");
+                }
+
                 // Create the resource in Loading state
                 cx.script_data.resources.insert_resource(
                     heap_key,
@@ -1282,13 +1288,10 @@ pub fn script_mod(vm: &mut ScriptVm) {
                     },
                 );
 
-                // Fire the HTTP request
-                let request_id = LiveId::unique();
                 cx.script_data
                     .resources
                     .http_resources
                     .push(CxScriptHttpResource { request_id, abs_path: url_string.clone() });
-                cx.http_request(request_id, HttpRequest::new(url_string, Default::default()));
 
                 return handle.into();
             }
@@ -1304,6 +1307,9 @@ pub fn script_mod(vm: &mut ScriptVm) {
         id_lut!(binary_resource),
         script_args_def!(data = NIL),
         move |vm, args| {
+            if !local_resources_allowed(vm) {
+                return script_err_io!(vm.trap(), "external resources require a host request");
+            }
             let data = script_value!(vm, args.data);
             let Some(bytes) = script_value_to_u8_bytes(vm, data) else {
                 return script_err_type_mismatch!(
@@ -1337,4 +1343,5 @@ pub fn script_mod(vm: &mut ScriptVm) {
             handle.into()
         },
     );
+    res
 }

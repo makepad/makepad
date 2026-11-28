@@ -199,7 +199,7 @@ pub fn socket_path(dir: &Path, index: u32) -> PathBuf {
 
 /// The socket a client asks: where it found its WM after waiting for it ([`discovered`]), else
 /// the one its WM exported, else the first of this user's.
-pub fn discovery_path() -> Option<PathBuf> {
+pub(crate) fn discovery_path() -> Option<PathBuf> {
     if let Some(path) = FOUND.get() {
         return Some(path.clone());
     }
@@ -320,7 +320,7 @@ const NEXT_WM_EVERY: Duration = Duration::from_secs(1);
 /// the next one, as the apps that WM left waiting do. Such a process started in the seconds a
 /// WM restart takes and found no window system: a lease's next app launch in the gap a WM
 /// restart claims ([`wait_for_next`]).
-pub fn discovered(wire: u64) -> &'static Probe {
+pub(crate) fn discovered(wire: u64) -> &'static Probe {
     static PROBE: OnceLock<Probe> = OnceLock::new();
     PROBE.get_or_init(|| {
         let Some(path) = discovery_path() else { return Probe::Absent };
@@ -427,11 +427,12 @@ static CLIENT_NAME: OnceLock<String> = OnceLock::new();
 /// (`name_for_window_manager`) and a host running someone else's code (`makepad run`) names the
 /// app it runs, both before opening the HAL; only a process that does neither falls back to the
 /// executable's name.
+#[relax_api::relax_api]
 pub fn set_client_name(name: &str) {
     let _ = CLIENT_NAME.set(name.to_string());
 }
 
-pub fn client_name() -> String {
+pub(crate) fn client_name() -> String {
     CLIENT_NAME.get().cloned().unwrap_or_else(|| {
         std::env::current_exe().ok().and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())).unwrap_or_else(|| "app".into())
     })

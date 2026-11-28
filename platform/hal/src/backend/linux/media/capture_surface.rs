@@ -36,7 +36,7 @@ pub(crate) fn publish(session: u32, surface: Arc<Surface>) -> u64 {
     super::lock(surfaces()).insert((session, id), surface);
     id
 }
-pub fn take(session: u32, handle: u64) -> Option<Arc<Surface>> {
+pub(crate) fn take(session: u32, handle: u64) -> Option<Arc<Surface>> {
     super::lock(surfaces()).remove(&(session, handle))
 }
 pub(crate) fn close_session(session: u32) {

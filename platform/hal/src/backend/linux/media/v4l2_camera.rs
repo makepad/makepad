@@ -557,6 +557,7 @@ fn fake_desc() -> Option<&'static VideoInputInfo> {
     static FAKE: std::sync::OnceLock<Option<VideoInputInfo>> = std::sync::OnceLock::new();
     FAKE.get_or_init(fake_camera::listed).as_ref()
 }
+#[relax_api::relax_api(loader = "the HAL's camera backend: JIT code opens cameras with the media commands")]
 impl Camera {
     pub fn active(&self) -> bool {
         !self.captures.is_empty() || !self.fakes.is_empty()
@@ -571,6 +572,7 @@ impl Camera {
             .map(|fps| std::time::Duration::from_secs_f64(0.5 / fps))
             .min()
     }
+    #[relax_api::relax_api(loader = "the HAL's own camera list: JIT code has no use for it")]
     pub fn enumerate(&mut self) -> Vec<VideoInputInfo> {
         let mut paths: Vec<_> = std::fs::read_dir("/dev")
             .into_iter()

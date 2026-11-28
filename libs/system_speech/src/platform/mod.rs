@@ -15,6 +15,12 @@
 //! pub(crate) fn tts_synthesize(text: &str, options: &TtsOptions) -> Result<SpeechAudio, SpeechError>;
 //! ```
 
+// The other OS bridges cannot guarantee offline recognition for an installed language.
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
+pub(crate) fn stt_on_device(_language: &str) -> bool {
+    false
+}
+
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 mod apple;
 #[cfg(any(target_os = "macos", target_os = "ios"))]

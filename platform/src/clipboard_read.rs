@@ -3,7 +3,7 @@
 //! Ordinary text-field paste still arrives as `TextInput { was_paste: true }`.
 //! A copy writes its text with richer flavours beside it (`ClipboardWrite`).
 
-use crate::cx::Cx;
+use crate::{cx::Cx, script::HostGrants};
 use crate::window_controls::HostedClipboard;
 #[cfg(target_arch = "wasm32")]
 use crate::event::Event;
@@ -102,6 +102,9 @@ impl Cx {
     /// The read goes out with the platform ops, after any copy asked before it: a read right
     /// after a copy answers with the copied text.
     pub fn read_clipboard(&mut self) -> u64 {
+        if !self.script_data.std.has_grant(HostGrants::CLIPBOARD) {
+            return 0;
+        }
         self.clipboard.next += 1;
         let request = self.clipboard.next;
         #[cfg(not(target_arch = "wasm32"))]

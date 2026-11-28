@@ -34,16 +34,42 @@ use crate::buffers::{CmdView, PipelineBlob};
 use crate::glsl::GlslPipeline;
 use crate::ledger::{Charge, Kind, LedgerEntry, Pools};
 use crate::session::*;
+use crate::table::SessionTable;
 use crate::types::*;
 use render::{Caps, Event, Mailbox, Queue, ReadFormat, Token};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock, Weak};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
+
+/// Slot in one of the render thread's object tables. Zero is the absent attachment.
+pub(crate) type GlKey = u32;
+
+pub(crate) struct KeyPool {
+    next: GlKey,
+    recycled: Arc<Mutex<Vec<GlKey>>>,
+}
+
+impl KeyPool {
+    pub fn new() -> (Self, Arc<Mutex<Vec<GlKey>>>) {
+        let recycled = Arc::new(Mutex::new(Vec::new()));
+        (Self { next: 1, recycled: recycled.clone() }, recycled)
+    }
+
+    pub fn alloc(&mut self) -> GlKey {
+        if let Some(key) = self.recycled.lock().unwrap_or_else(|e| e.into_inner()).pop() {
+            return key;
+        }
+        let key = self.next;
+        assert_ne!(key, 0, "GL object keys exhausted");
+        self.next = key.wrapping_add(1);
+        key
+    }
+}
 
 /// A texture's storage on the render thread; dropping the last lease deletes it there (after
 /// every job queued before).
 pub(crate) struct TexObj {
-    key: u64,
+    key: GlKey,
     desc: TextureObj,
     /// a BGRA8 texture that is only uploaded keeps its bytes as RGBA storage, sampled swizzled
     swizzled: bool,
@@ -58,7 +84,7 @@ impl Drop for TexObj {
 }
 
 pub(crate) struct BufObj {
-    key: u64,
+    key: GlKey,
     size: u64,
     queue: Queue,
 }
@@ -74,11 +100,13 @@ impl Drop for BufObj {
 /// order (None: the program does not use it).
 pub(crate) struct Linked {
     block_sizes: Vec<Option<u32>>,
+    active_twins: Vec<usize>,
 }
 
 /// A program shared by every pipeline with the same payload and layout.
 pub(crate) struct PipeState {
-    key: u64,
+    key: GlKey,
+    pub texture_slots: usize,
     code: GlslPipeline,
     desc: PipelineDesc,
     linked: OnceLock<Result<Linked, String>>,
@@ -137,18 +165,19 @@ pub struct GlBackend {
     caps: Arc<Caps>,
     queue: Queue,
     thread: Option<std::thread::JoinHandle<()>>,
-    next_key: u64,
+    tex_keys: KeyPool,
+    buf_keys: KeyPool,
+    prog_keys: KeyPool,
     /// what the render thread allocates for itself (arenas, word textures, readback buffers)
     pools: Arc<Pools>,
-    tex: HashMap<(u32, u32), Tex>,
-    buf: HashMap<(u32, u32), Buf>,
-    pipe: HashMap<(u32, u32), Pipe>,
+    tex: SessionTable<Tex>,
+    buf: SessionTable<Buf>,
+    pipe: SessionTable<Pipe>,
     programs: HashMap<Vec<u8>, Weak<PipeState>>,
     /// windows' images, by (owner, index)
-    win: HashMap<(u32, u32), Tex>,
-    /// the frame a window's kept image holds all of (and that image's key), so the window's next
-    /// pass can repaint just what changed since
-    damage_base: HashMap<(u32, u32), (u64, u64)>,
+    win: SessionTable<Tex>,
+    /// The retained window image and its last complete frame, used to validate partial repaints.
+    damage_base: HashMap<(u32, u32), (Weak<TexObj>, u64)>,
     aliases: HashMap<(u32, Id), Id>,
     /// Pick targets whose latest replay skipped a draw.
     pick_pending: HashSet<(u32, Id)>,
@@ -191,22 +220,27 @@ impl GlBackend {
     pub(crate) fn with_source(wake: Arc<dyn Fn() + Send + Sync>, source: Box<dyn surface::EglSurfaceSource>, shell: Option<ShellRef>) -> Result<Self, String> {
         let mailbox = Mailbox::new(wake);
         let pools = Arc::new(Pools::default());
-        let (queue, caps, thread) = render::start(source, mailbox.clone(), pools.clone())?;
+        let (tex_keys, tex_recycled) = KeyPool::new();
+        let (buf_keys, buf_recycled) = KeyPool::new();
+        let (prog_keys, prog_recycled) = KeyPool::new();
+        let (queue, caps, thread) = render::start(source, mailbox.clone(), pools.clone(), tex_recycled, buf_recycled, prog_recycled)?;
         // offscreen too: a badge layer is composed into the retained image's copy either way
         let mut info = HalInfo { backend: backend_id::GL, dialect: dialect::GLSL, formats: caps.formats, msaa: 1, dpi: 1.0,
             flags: info_flags::WINDOW_BADGES | info_flags::WINDOW_LAYERS | info_flags::PARTIAL_REPAINT
                 | if caps.gpu_timer { info_flags::GPU_TIMESTAMPS } else { 0 } | if caps.program_cache_cold { info_flags::PIPELINE_CACHE_COLD } else { 0 },
+            uniform_align: (caps.ubo_align as u32).max(16).next_power_of_two(), max_uniform_block: (caps.max_ubo as u32).max(16_384),
             max_texture: caps.max_texture, max_window: [caps.max_texture; 2],
             device_kind: if caps.software { device_kind::SOFTWARE } else { device_kind::UNKNOWN }, ..Default::default() };
         info.set_device_name(&caps.renderer);
         if super::log_enabled() { eprintln!("[hal-gl] {} offscreen={} software={}", caps.renderer, shell.is_none(), caps.software); }
-        Ok(Self { shell, info, caps, queue, thread: Some(thread), next_key: 1, pools,
-            tex: HashMap::new(), buf: HashMap::new(), pipe: HashMap::new(), programs: HashMap::new(), win: HashMap::new(), damage_base: HashMap::new(),
+        Ok(Self { shell, info, caps, queue, thread: Some(thread), tex_keys, buf_keys, prog_keys, pools,
+            tex: SessionTable::default(), buf: SessionTable::default(), pipe: SessionTable::default(), programs: HashMap::new(), win: SessionTable::default(), damage_base: HashMap::new(),
             aliases: HashMap::new(), pick_pending: HashSet::new(), badged: HashMap::new(), compose: None,
             mailbox, media: Default::default() })
     }
 
     /// A software rasterizer (llvmpipe): the default selection prefers hardware Vulkan and GL.
+    #[cfg(target_os = "linux")]
     pub fn software(&self) -> bool {
         self.caps.software
     }
@@ -235,11 +269,6 @@ impl GlBackend {
         self.aliases.get(&(sid, id)).map_or((sid, id), |host| (HOST, *host))
     }
 
-    fn key(&mut self) -> u64 {
-        self.next_key += 1;
-        self.next_key
-    }
-
     fn new_texture(&mut self, mut desc: TextureObj) -> Result<Arc<TexObj>, String> {
         let c = &self.caps;
         if desc.w == 0 || desc.h == 0 || desc.depth == 0 || desc.mips == 0 || desc.mips > 32 - desc.w.max(desc.h).leading_zeros()
@@ -255,24 +284,24 @@ impl GlBackend {
         desc.bytes = exec::texture_bytes(desc.format, desc.w, desc.h, desc.depth, desc.mips);
         desc.imported = false;
         let swizzled = desc.format == format::BGRA8 && desc.usage & usage::RENDER_TARGET == 0;
-        let key = self.key();
+        let key = self.tex_keys.alloc();
         let made = desc.clone();
         self.queue.push(move |r| r.create_texture(key, made, swizzled));
         Ok(Arc::new(TexObj { key, desc, swizzled, queue: self.queue.clone() }))
     }
 
-    fn new_buffer(&mut self, size: u64) -> Arc<BufObj> {
-        let key = self.key();
-        self.queue.push(move |r| r.create_buffer(key, size));
+    fn new_buffer(&mut self, kind: u16, size: u64) -> Arc<BufObj> {
+        let key = self.buf_keys.alloc();
+        self.queue.push(move |r| r.create_buffer(key, kind, size));
         Arc::new(BufObj { key, size, queue: self.queue.clone() })
     }
 
     fn drain(&mut self, world: &mut World) {
         for done in self.mailbox.take() {
             let sid = done.token.sid;
-            if !world.session(sid).is_some_and(|s| Arc::ptr_eq(&s.font_frames, &done.token.incarnation)) { continue; }
+            let Some(s) = world.session_mut(sid).filter(|s| Arc::ptr_eq(&s.font_frames, &done.token.incarnation)) else { continue };
             match done.event {
-                Event::Frame { target, kind, frame, window, gpu_ns, ran } => {
+                Event::Frame { target, kind, frame, window, gpu_ns, ran, binds, cpu_ns, upload_ns } => {
                     // a frame the GPU never ran isn't in the window's image, nor is any frame built on it
                     if !ran && super::window_frame(kind) {
                         let (key_sid, key) = self.window_key(sid, target);
@@ -280,10 +309,12 @@ impl GlBackend {
                             self.damage_base.remove(&(key_sid, key.index));
                         }
                     }
-                    if let Some(s) = world.session_mut(sid) {
-                        s.stats.frames += 1;
-                        if gpu_ns > 0 { s.stats.gpu_frames += 1; s.stats.gpu_ns_total += gpu_ns; s.stats.gpu_ns_max = s.stats.gpu_ns_max.max(gpu_ns); }
-                    }
+                    s.stats.frames += 1;
+                    s.stats.binds += binds;
+                    s.stats.exec_ns += cpu_ns;
+                    s.stats.upload_ns += upload_ns.ns;
+                    s.stats.driver_uploads += upload_ns.driver_uploads;
+                    if gpu_ns > 0 { s.stats.gpu_frames += 1; s.stats.gpu_ns_total += gpu_ns; s.stats.gpu_ns_max = s.stats.gpu_ns_max.max(gpu_ns); }
                     if window {
                         world.window_presented(sid, target, frame, gpu_ns, done.time);
                         #[cfg(target_os = "linux")]
@@ -293,32 +324,38 @@ impl GlBackend {
                     }
                     world.frame_done(sid, target, kind, frame, gpu_ns, done.time, [0.0; 2]);
                 }
+                Event::Counters { binds, cpu_ns, upload_ns } => {
+                    s.stats.binds += binds;
+                    s.stats.exec_ns += cpu_ns;
+                    s.stats.upload_ns += upload_ns.ns;
+                    s.stats.driver_uploads += upload_ns.driver_uploads;
+                }
                 Event::BufferLeases { req, status, leases } => world.to_session(sid, |q| q.buffer_leases(req, status, leases)),
                 Event::Readback { req, status, rect, lease } => world.to_session(sid, |q| q.readback(req, status, rect, lease)),
             }
         }
-        for ((sid, index), pipe) in &mut self.pipe {
+        for ((sid, index), pipe) in self.pipe.iter_mut() {
             let epoch = pipe.state.epoch.load(Ordering::Acquire);
             if epoch == pipe.epoch { continue; }
             pipe.epoch = epoch;
-            let id = Id::new(*index, pipe.gen);
-            let Some(s) = world.session_mut(*sid) else { continue };
+            let id = Id::new(index, pipe.gen);
+            let Some(s) = world.session_mut(sid) else { continue };
             if !pipe.announced {
                 pipe.announced = true;
                 s.pipelines_pending = s.pipelines_pending.saturating_sub(1);
             }
             if let Some(log) = pipe.state.failure.get() {
                 eprintln!("[hal-gl] pipeline {id:?} failed: {log}");
-                world.to_session(*sid, |q| q.pipeline_failed(id, log.as_bytes()));
+                world.to_session(sid, |q| q.pipeline_failed(id, log.as_bytes()));
                 continue;
             }
             match pipe.state.linked.get() {
                 Some(Err(e)) => {
                     eprintln!("[hal-gl] pipeline {id:?} failed: {e}");
                     let log = e.clone();
-                    world.to_session(*sid, |q| q.pipeline_failed(id, log.as_bytes()));
+                    world.to_session(sid, |q| q.pipeline_failed(id, log.as_bytes()));
                 }
-                Some(Ok(_)) => world.to_session(*sid, |q| q.pipeline_ready(id)),
+                Some(Ok(_)) => world.to_session(sid, |q| q.pipeline_ready(id)),
                 None => {}
             }
         }
@@ -326,10 +363,10 @@ impl GlBackend {
         if let Some(host) = world.session_mut(HOST) {
             let frame = host.frame;
             host.ledger.set_pools(&self.pools, frame, crate::clock_ns());
-            for ((sid, index), t) in &self.win {
-                if *sid == HOST && host.ledger.get(Kind::Window, *index).is_none_or(|r| r.gen != t.gen || r.bytes != t.obj.desc.bytes
+            for ((sid, index), t) in self.win.iter() {
+                if sid == HOST && host.ledger.get(Kind::Window, index).is_none_or(|r| r.gen != t.gen || r.bytes != t.obj.desc.bytes
                     || r.width != t.obj.desc.w || r.height != t.obj.desc.h) {
-                    host.ledger.add(window_row(Id::new(*index, t.gen), &t.obj.desc, crate::clock_ns(), host.frame));
+                    host.ledger.add(window_row(Id::new(index, t.gen), &t.obj.desc, crate::clock_ns(), host.frame));
                 }
             }
         }
@@ -416,11 +453,14 @@ impl Backend for GlBackend {
     }
     fn session_closed(&mut self, world: &mut World, sid: u32) {
         self.media.session_closed(sid);
-        self.queue.push(move |r| r.ctx.close_session(sid));
-        self.tex.retain(|k, _| k.0 != sid);
-        self.buf.retain(|k, _| k.0 != sid);
-        self.pipe.retain(|k, _| k.0 != sid);
-        self.win.retain(|k, _| k.0 != sid);
+        self.queue.push(move |r| {
+            r.take_upload_ns(sid);
+            r.ctx.close_session(sid);
+        });
+        self.tex.take_session(sid);
+        self.buf.take_session(sid);
+        self.pipe.take_session(sid);
+        self.win.take_session(sid);
         self.damage_base.retain(|k, _| k.0 != sid);
         self.aliases.retain(|k, _| k.0 != sid);
         self.pick_pending.retain(|k| k.0 != sid);
@@ -485,7 +525,7 @@ impl Gpu for GlBackend {
     fn texture_create(&mut self, s: &mut Session, id: Id, t: &mut TextureObj) -> Result<(), String> {
         let obj = self.new_texture(t.clone()).map_err(|e| { eprintln!("[hal-gl] texture create: {e}"); e })?;
         t.bytes = obj.desc.bytes;
-        self.tex.insert((s.id, id.index), Tex { gen: id.gen, obj });
+        self.tex.insert(s.id, id.index, Tex { gen: id.gen, obj });
         Ok(())
     }
     fn texture_update(&mut self, s: &mut Session, id: Id, _t: &TextureObj, mip: u16, rect: [u32; 4], layer: u32, data: &[u8]) {
@@ -501,10 +541,11 @@ impl Gpu for GlBackend {
             return;
         }
         let (key, data, swap) = (t.key, data.to_vec(), !t.swizzled);
-        self.queue.push(move |r| r.upload(key, mip, rect, layer, data, swap));
+        let token = Self::token(s);
+        self.queue.push(move |r| r.time_upload(token, |r| { r.upload(key, mip, rect, layer, data, swap); 0 }));
     }
     fn texture_destroy(&mut self, sid: u32, id: Id) {
-        if self.tex.get(&(sid, id.index)).is_some_and(|t| t.gen <= id.gen) { self.tex.remove(&(sid, id.index)); }
+        if self.tex.get(sid, id.index).is_some_and(|t| t.gen <= id.gen) { self.tex.remove(sid, id.index); }
         self.pick_pending.remove(&(sid, id));
     }
     fn texture_readback(&mut self, s: &mut Session, id: Id, req: u32, rect: [u32; 4]) {
@@ -525,40 +566,52 @@ impl Gpu for GlBackend {
     fn texture_adopt_gl(&mut self, s: &mut Session, id: Id, name: u32, format: u32, w: u32, h: u32, owned: bool) -> Option<TextureObj> {
         let bytes = if owned { exec::texture_bytes(format, w, h, 1, 1) } else { 0 };
         let desc = TextureObj { format, w, h, depth: 1, mips: 1, usage: usage::SAMPLED, bytes, imported: true, uploaded: 0, lent: None };
-        let key = self.key();
+        let key = self.tex_keys.alloc();
         let made = desc.clone();
         self.queue.push(move |r| r.adopt_texture(key, name, made, owned));
         let obj = Arc::new(TexObj { key, desc: desc.clone(), swizzled: false, queue: self.queue.clone() });
-        self.tex.insert((s.id, id.index), Tex { gen: id.gen, obj });
+        self.tex.insert(s.id, id.index, Tex { gen: id.gen, obj });
         Some(desc)
     }
     fn gl_fence(&mut self, _s: &mut Session, sync: u64) {
         self.queue.push(move |r| r.wait_fence(sync));
     }
     fn buffer_create(&mut self, s: &mut Session, id: Id, b: &mut BufferObj) -> Result<(), String> {
-        let obj = self.new_buffer(b.size);
+        let obj = self.new_buffer(b.kind, b.size);
         b.bytes = b.size;
-        self.buf.insert((s.id, id.index), Buf { gen: id.gen, obj });
+        self.buf.insert(s.id, id.index, Buf { gen: id.gen, obj });
         Ok(())
     }
-    fn buffer_update(&mut self, s: &mut Session, id: Id, _b: &mut BufferObj, off: u64, data: &[u8]) {
-        match self.buf.get(&(s.id, id.index)).filter(|r| r.gen == id.gen) {
-            Some(r) => {
-                let (key, data) = (r.obj.key, data.to_vec());
-                self.queue.push(move |r| r.write_buffer(key, off, data));
-            }
-            None => {
-                eprintln!("[hal-gl] buffer update: missing buffer {id:?}");
-                s.bad();
-            }
+    fn buffer_update_parts(&mut self, s: &mut Session, id: Id, _b: &mut BufferObj, parts: BufferParts<'_>) {
+        let Some(r) = self.buf.get(s.id, id.index).filter(|r| r.gen == id.gen) else {
+            eprintln!("[hal-gl] buffer update: missing buffer {id:?}");
+            s.bad();
+            return;
+        };
+        // SAFETY: copy the lent parts before the queue outlives this hal_submit call.
+        let mut writes = unsafe { parts.iter() }.filter(|(_, data)| !data.is_empty());
+        let Some((start, first)) = writes.next() else { return; };
+        let mut bytes = Vec::with_capacity(parts.total() as usize);
+        bytes.extend_from_slice(first);
+        let mut end = start + first.len() as u64;
+        // Each gap records where the next run starts in the packed bytes and in the buffer.
+        let mut gaps = Vec::new();
+        for (off, data) in writes {
+            if off != end { gaps.push((bytes.len(), off)); }
+            bytes.extend_from_slice(data);
+            end = off + data.len() as u64;
         }
+        let key = r.obj.key;
+        let token = Self::token(s);
+        self.queue.push(move |r| r.time_upload(token, |r| r.write_buffer_parts(key, start, &bytes, &gaps)));
     }
     fn buffer_destroy(&mut self, sid: u32, id: Id) {
-        if self.buf.get(&(sid, id.index)).is_some_and(|b| b.gen <= id.gen) { self.buf.remove(&(sid, id.index)); }
+        if self.buf.get(sid, id.index).is_some_and(|b| b.gen <= id.gen) { self.buf.remove(sid, id.index); }
     }
     fn buffer_readbacks(&mut self, s: &mut Session, req: u32, ranges: &[BufferReadRange]) {
+        let buf_map = self.buf.session(s.id);
         let reads: Option<Vec<_>> = ranges.iter().map(|range| {
-            let b = self.buf.get(&(s.id, range.id.index)).filter(|b| b.gen == range.id.gen)?;
+            let b = buf_map?.get(range.id.index).filter(|b| b.gen == range.id.gen)?;
             Some((b.obj.clone(), range.offset, range.len))
         }).collect();
         let Some(reads) = reads else { s.events.buffer_leases(req, readback::STALE, Vec::new()); return; };
@@ -576,27 +629,30 @@ impl Gpu for GlBackend {
             return failure;
         }
         let custom = blob.bindings.len().saturating_sub(pipeline_binding::BUFFERS);
-        if blob.bindings.len() < pipeline_binding::BUFFERS || blob.bindings[pipeline_binding::TEXTURES] as usize != code.textures.len()
-            || code.blocks.len() != 5 + custom {
+        if blob.bindings.len() < pipeline_binding::BUFFERS || code.blocks.len() != 5 + custom {
             return PipeStatus::Failed("GLSL payload and pipeline bindings disagree".into());
         }
+        let texture_slots = blob.bindings[pipeline_binding::TEXTURES];
+        if code.textures.iter().any(|t| t.slot >= texture_slots) || code.pick_twins.iter().any(|t| t.slot >= texture_slots) {
+            return PipeStatus::Failed("GLSL texture slot outside pipeline bindings".into());
+        }
         let mut key = blob.code.to_vec();
-        for v in [blob.desc.blend, blob.desc.instance_stride, blob.desc.outputs] { key.extend_from_slice(&v.to_le_bytes()); }
+        for v in [blob.desc.blend, blob.desc.instance_stride, blob.desc.outputs, texture_slots] { key.extend_from_slice(&v.to_le_bytes()); }
         for f in blob.desc.color_formats { key.extend_from_slice(&f.to_le_bytes()); }
         let state = self.programs.get(&key).and_then(Weak::upgrade).unwrap_or_else(|| {
-            let state = Arc::new(PipeState { key: self.key(), code, desc: blob.desc, linked: OnceLock::new(), failure: OnceLock::new(), name: s.string(blob.desc.name).unwrap_or("unnamed").to_owned(), epoch: AtomicU64::new(0), queue: self.queue.clone() });
+            let state = Arc::new(PipeState { key: self.prog_keys.alloc(), texture_slots: texture_slots as usize, code, desc: blob.desc, linked: OnceLock::new(), failure: OnceLock::new(), name: s.string(blob.desc.name).unwrap_or("unnamed").to_owned(), epoch: AtomicU64::new(0), queue: self.queue.clone() });
             let job = state.clone();
             self.queue.push(move |r| r.compile(&job));
             self.programs.insert(key, Arc::downgrade(&state));
             state
         });
         // a program linked for an earlier pipeline is announced at the next drain like a new one
-        self.pipe.insert((s.id, id.index), Pipe { gen: id.gen, state, epoch: 0, announced: false });
+        self.pipe.insert(s.id, id.index, Pipe { gen: id.gen, state, epoch: 0, announced: false });
         PipeStatus::Pending
     }
     fn pipeline_destroy(&mut self, sid: u32, id: Id) -> bool {
-        if self.pipe.get(&(sid, id.index)).is_some_and(|p| p.gen <= id.gen) {
-            return self.pipe.remove(&(sid, id.index)).is_some_and(|p| !p.announced);
+        if self.pipe.get(sid, id.index).is_some_and(|p| p.gen <= id.gen) {
+            return self.pipe.remove(sid, id.index).is_some_and(|p| !p.announced);
         }
         false
     }
@@ -631,7 +687,7 @@ impl Gpu for GlBackend {
         }
     }
     fn window_closed(&mut self, sid: u32, id: Id) {
-        self.win.remove(&(sid, id.index));
+        self.win.remove(sid, id.index);
         if sid == HOST { self.badged.remove(&id.index); }
         self.damage_base.remove(&(sid, id.index));
         self.queue.push(move |r| r.ctx.close((sid, id)));
@@ -680,7 +736,7 @@ impl super::linux::media::Sink for GlBackend {
             if bytes.len() as u64 != format::level_bytes(plane.format, plane.width, plane.height) {
                 return Err("video plane byte count differs from its extent".into());
             }
-            let reuse = self.tex.get(&(s.id, id.index)).filter(|t| t.gen == id.gen && t.obj.desc.format == plane.format
+            let reuse = self.tex.get(s.id, id.index).filter(|t| t.gen == id.gen && t.obj.desc.format == plane.format
                 && t.obj.desc.w == plane.width && t.obj.desc.h == plane.height).map(|t| t.obj.clone());
             let obj = match reuse {
                 Some(obj) => obj,
@@ -691,18 +747,22 @@ impl super::linux::media::Sink for GlBackend {
         }
         for (id, obj, bytes) in uploads {
             let (key, w, h, swap) = (obj.key, obj.desc.w, obj.desc.h, !obj.swizzled);
-            self.queue.push(move |r| r.upload(key, 0, [0, 0, w, h], 0, bytes.to_vec(), swap));
+            let token = Self::token(s);
+            s.stats.upload_bytes += bytes.len() as u64;
+            let started = crate::clock_ns();
+            self.queue.push(move |r| r.time_upload(token, |r| { r.upload(key, 0, [0, 0, w, h], 0, bytes.to_vec(), swap); 0 }));
+            s.stats.upload_ns += crate::clock_ns().saturating_sub(started);
             let mut desc = obj.desc.clone();
             desc.imported = true;
             s.textures.get_mut(s.id, id).map_err(|_| "stale video texture")?.val = desc.clone();
-            self.tex.insert((s.id, id.index), Tex { gen: id.gen, obj });
+            self.tex.insert(s.id, id.index, Tex { gen: id.gen, obj });
             video_row(s, id, &desc);
         }
         Ok(true)
     }
     fn release(&mut self, s: &mut Session, ids: [Id; 4]) {
         for id in ids {
-            if self.tex.get(&(s.id, id.index)).is_some_and(|t| t.gen == id.gen) { self.tex.remove(&(s.id, id.index)); }
+            if self.tex.get(s.id, id.index).is_some_and(|t| t.gen == id.gen) { self.tex.remove(s.id, id.index); }
             if let Ok(entry) = s.textures.get_mut(s.id, id) {
                 entry.val.bytes = 0;
                 entry.val.imported = true;
@@ -734,3 +794,26 @@ fn window_row(id: Id, desc: &TextureObj, now: u64, frame: u64) -> LedgerEntry {
 
 /// The window image is counted; the EGL surface it is drawn to has buffers GL gives no size for.
 const WINDOW_NOTE: &str = "the EGL surface's buffers: the API reports no size";
+
+#[cfg(test)]
+mod tests {
+    use super::KeyPool;
+
+    #[test]
+    fn key_pool_recycles_bounded() {
+        for width in [1, 4] {
+            let (mut pool, recycled) = KeyPool::new();
+            let mut live = Vec::with_capacity(width);
+            for _ in 0..256 {
+                for _ in 0..width {
+                    let key = pool.alloc();
+                    assert_ne!(key, 0, "zero is the absent attachment");
+                    assert!(!live.contains(&key), "allocated key {key} while still live");
+                    live.push(key);
+                }
+                recycled.lock().unwrap().append(&mut live);
+            }
+            assert_eq!(pool.next, width as u32 + 1, "churn grew the pool beyond {width} live keys");
+        }
+    }
+}

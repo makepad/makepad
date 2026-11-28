@@ -16,13 +16,15 @@ use {
             assemble_virtual_files, FileDialog, FileDialogAction, VirtualFileData,
         },
         makepad_live_id::*,
-        makepad_wasm_bridge::{FromWasm, FromWasmMsg, ToWasm, ToWasmMsg, WasmDataU8},
+        makepad_wasm_bridge::{FromWasm, FromWasmMsg, ToWasm, ToWasmMsg, WasmDataU8, WasmPtrU8},
         permission::{Permission, PermissionResult, PermissionStatus},
         storage::{
             StorageError, StorageEstimate, StorageList, StorageOp, StorageRequestId,
             StorageRequestKind, StorageResult, StorageStat,
         },
         thread::SignalToUI,
+        ui_progress::GLOBAL_UI_PROGRESS,
+        uniform_stream::UniformStream,
         HttpError, HttpProgress, HttpResponse, Vec2d,
     },
     std::{
@@ -255,6 +257,7 @@ impl Cx {
     // incoming to_wasm. There is absolutely no other entrypoint
     // to general rust codeflow than this function. Only the allocators and init
     pub fn process_to_wasm(&mut self, msg_ptr: u32) -> u32 {
+        let _turn = GLOBAL_UI_PROGRESS.enter_turn();
         // A panic=abort trap cannot run dispatch guards. Every JS ingress is
         // a fresh top-level dispatch, so clear the bookkeeping it may leave.
         self.reset_event_dispatch_state();
@@ -290,6 +293,12 @@ impl Cx {
                             .clamp(64 * 1024 * 1024, 1024 * 1024 * 1024)
                     };
                     crate::thread::set_web_available_parallelism(self.cpu_cores);
+                    let max_block = if tw.gpu_info.max_uniform_block_size == 0 {
+                        65_536
+                    } else {
+                        tw.gpu_info.max_uniform_block_size.max(16_384)
+                    };
+                    self.os.uniforms.configure(tw.gpu_info.uniform_buffer_offset_alignment, max_block);
                     self.gpu_info.float_color_targets = tw.gpu_info.float_color_targets;
                     self.gpu_info.max_texture_size = tw.gpu_info.max_texture_size as usize;
                     self.gpu_info.init_from_info(
@@ -446,7 +455,7 @@ impl Cx {
 
                 live_id!(ToWasmGpuInventory) => {
                     let tw = ToWasmGpuInventory::read_to_wasm(&mut to_wasm);
-                    let json = gpu_inventory_json(&self.gpu_inventory());
+                    let json = gpu_inventory_json(&self.gpu_inventory(), self.os.regions.store.stats());
                     self.os.from_wasm(FromWasmGpuInventory { request_id: tw.request_id, json });
                 }
 
@@ -657,36 +666,9 @@ impl Cx {
                     self.redraw_all();
                 }
 
-                live_id!(ToWasmRetainedUploadFailed) => {
-                    let failed = ToWasmRetainedUploadFailed::read_to_wasm(&mut to_wasm);
-                    let lists: Vec<_> = self.draw_lists.id_iter().collect();
-                    for list in lists {
-                        for index in 0..self.draw_lists[list].draw_items.len() {
-                            let item = &mut self.draw_lists[list].draw_items[index];
-                            if item.os.inst_vb_id == Some(failed.buffer_id) {
-                                // A failed upload is final for this publication:
-                                // the browser could not allocate or fill the
-                                // buffer, and asking again every frame only
-                                // spins. The item stays off screen until its
-                                // content changes (a new publication).
-                                let publication = item
-                                    .retained_instances
-                                    .as_ref()
-                                    .map_or(item.retained_instance_id, |p| p.id());
-                                item.os.retained_failed = publication;
-                                item.os.retained_publication = None;
-                                item.os.inst_capacity = 0;
-                                item.instance_upload_pending = false;
-                                if let Some(call) = item.kind.draw_call_mut() {
-                                    call.instance_dirty = false;
-                                }
-                                crate::error!(
-                                    "WebGL retained upload failed for draw list {:?} item {}; that content stays off screen until it changes",
-                                    list, index
-                                );
-                            }
-                        }
-                    }
+                live_id!(ToWasmInstanceUploadFailed) => {
+                    let failed = ToWasmInstanceUploadFailed::read_to_wasm(&mut to_wasm);
+                    self.webgl_instance_upload_failed(failed);
                 }
 
                 live_id!(ToWasmWebGLShadersDone) => {
@@ -1130,10 +1112,16 @@ impl Cx {
 
     pub fn handle_repaint(&mut self, time: f64) {
         self.webgl_staged_uploads();
+        // Record pass commands until the last draw has finished growing the stream.
+        self.os.uniforms.begin_frame();
+        self.os.frame_cmds.clear();
+        std::mem::swap(self.os.from_wasm.as_mut().unwrap(), &mut self.os.frame_cmds);
+        let submitted_before = self.frame_submission_serial();
         let mut passes_todo = Vec::new();
 
         self.compute_pass_repaint_order(&mut passes_todo, time, self.os.animation_frame_ticks.interval);
         self.repaint_id += 1;
+        GLOBAL_UI_PROGRESS.note_repaint(self.repaint_id);
         let pass_time = self.pass_time(time);
         for draw_pass_id in &passes_todo {
             let uniforms_gen = self.next_uniform_gen();
@@ -1160,6 +1148,18 @@ impl Cx {
                 }
             }
         }
+        std::mem::swap(self.os.from_wasm.as_mut().unwrap(), &mut self.os.frame_cmds);
+        if !self.os.uniforms.is_empty() {
+            let data = WasmPtrU8::new(self.os.uniforms.as_bytes());
+            self.os.from_wasm(FromWasmUploadUniformStream { data });
+        }
+        self.os.from_wasm.as_mut().unwrap().append_from(&self.os.frame_cmds);
+        self.os.frame_cmds.clear();
+        // The instance store's frame closes once per repaint that submitted: a closed slab
+        // starts evacuating at one end_frame and drops what stayed behind at the next.
+        if self.frame_submission_serial() > submitted_before {
+            self.webgl_instance_frame_end();
+        }
     }
 
     // empty stub
@@ -1173,6 +1173,20 @@ impl Cx {
         self.native_layer_retire();
         while let Some(op) = self.platform_ops.pop_front() {
             match op {
+                CxOsOp::OpenUrl { url, in_place } => {
+                    self.os.from_wasm(FromWasmOpenUrl {
+                        url,
+                        in_place: matches!(in_place, OpenUrlInPlace::Yes),
+                    });
+                }
+                CxOsOp::BrowserUpdateUrl { url, replace } => {
+                    let (pathname, search, hash) = Self::split_web_location(&url);
+                    self.update_web_location_state(pathname, search, hash);
+                    self.os.from_wasm(FromWasmBrowserUpdateUrl { url, replace });
+                }
+                CxOsOp::BrowserHistoryGo(delta) => {
+                    self.os.from_wasm(FromWasmBrowserHistoryGo { delta: delta as f64 });
+                }
                 CxOsOp::CreateWindow(window_id) => {
                     let title = {
                         let window = &mut self.windows[window_id];
@@ -1687,7 +1701,7 @@ impl CxOsApi for Cx {
             ToWasmGpuReset::to_js_code(),
             ToWasmWebGLShadersDone::to_js_code(),
             ToWasmWebGLShadersLinked::to_js_code(),
-            ToWasmRetainedUploadFailed::to_js_code(),
+            ToWasmInstanceUploadFailed::to_js_code(),
             ToWasmLiveFileChange::to_js_code(),
             ToWasmLocationChange::to_js_code(),
             ToWasmWindowGotFocus::to_js_code(),
@@ -1761,8 +1775,8 @@ impl CxOsApi for Cx {
             FromWasmSpreadFirstDraws::to_js_code(),
             FromWasmCompileWebGLShader::to_js_code(),
             FromWasmAllocArrayBuffer::to_js_code(),
-            FromWasmRetainedArrayBuffer::to_js_code(),
-            FromWasmRetainedArrayUpdate::to_js_code(),
+            FromWasmCreateInstanceSlab::to_js_code(),
+            FromWasmWriteInstanceRegion::to_js_code(),
             FromWasmAllocIndexBuffer::to_js_code(),
             FromWasmAllocVao::to_js_code(),
             FromWasmFreeWebGLResources::to_js_code(),
@@ -1777,6 +1791,7 @@ impl CxOsApi for Cx {
             FromWasmRequestRenderTextureCapture::to_js_code(),
             FromWasmBeginRenderCanvas::to_js_code(),
             FromWasmSetDefaultDepthAndBlendMode::to_js_code(),
+            FromWasmUploadUniformStream::to_js_code(),
             FromWasmDrawCall::to_js_code(),
             FromWasmOpenUrl::to_js_code(),
             FromWasmBrowserUpdateUrl::to_js_code(),
@@ -1807,33 +1822,15 @@ impl CxOsApi for Cx {
     }
 
     fn open_url(&mut self, url: &str, in_place: OpenUrlInPlace) {
-        if self.script_data.std.host_io_only() { return; }
-        self.os.from_wasm(FromWasmOpenUrl {
-            url: url.to_string(),
-            in_place: if let OpenUrlInPlace::Yes = in_place {
-                true
-            } else {
-                false
-            },
-        });
+        Cx::open_url(self, url, in_place);
     }
 
     fn browser_update_url(&mut self, url: &str, replace: bool) {
-        let (pathname, search, hash) = Self::split_web_location(url);
-        self.update_web_location_state(pathname, search, hash);
-        self.os.from_wasm(FromWasmBrowserUpdateUrl {
-            url: url.to_string(),
-            replace,
-        });
+        Cx::browser_update_url(self, url, replace);
     }
 
     fn browser_history_go(&mut self, delta: i32) {
-        if delta == 0 {
-            return;
-        }
-        self.os.from_wasm(FromWasmBrowserHistoryGo {
-            delta: delta as f64,
-        });
+        Cx::browser_history_go(self, delta);
     }
 
     fn default_window_size(&self) -> Vec2d {
@@ -1897,6 +1894,8 @@ pub struct CxOs {
     pub(crate) start_time: f64,
 
     pub from_wasm: Option<FromWasmMsg>,
+    pub(crate) frame_cmds: FromWasmMsg,
+    pub(crate) uniforms: UniformStream,
 
     pub(crate) vertex_buffers: usize,
     pub(crate) index_buffers: usize,
@@ -1912,6 +1911,14 @@ pub struct CxOs {
     pub(crate) gpu_timer_on: bool,
     pub(crate) gpu_timer_frame: u64,
     pub(crate) completion_pending: u64,
+    /// The instance slabs every draw item's rows live in (one store for the page).
+    pub(crate) regions: crate::instance_store::InstanceRegions,
+    /// Per store slab slot: the page's backing for it (generation 0: none).
+    pub(crate) slab_backings: Vec<SlabBacking>,
+    pub(crate) last_backing_generation: u32,
+    /// The repaint a refused slab backing last asked for; a refusal right after it
+    /// waits for the app's next frame instead of repainting again.
+    pub(crate) backing_refusal_repaint: u64,
 
     pub(crate) to_wasm_js: Vec<String>,
     pub(crate) from_wasm_js: Vec<String>,
@@ -1929,6 +1936,13 @@ pub struct CxOs {
     pub(crate) animation_frame_ticks: TickClock,
 }
 
+/// The page's buffer behind one store slab: which backing it is, and the budget charge it holds.
+#[derive(Default)]
+pub(crate) struct SlabBacking {
+    pub(crate) generation: u32,
+    pub(crate) charge: Option<crate::retained_instances::RetainedAllocation>,
+}
+
 impl Default for CxOs {
     fn default() -> Self {
         Self {
@@ -1937,6 +1951,8 @@ impl Default for CxOs {
             start_time: 0.0,
 
             from_wasm: Some(FromWasmMsg::new()),
+            frame_cmds: FromWasmMsg::new(),
+            uniforms: UniformStream::new(256, 65_536),
 
             vertex_buffers: 0,
             index_buffers: 0,
@@ -1946,6 +1962,10 @@ impl Default for CxOs {
             gpu_timer_on: false,
             gpu_timer_frame: 0,
             completion_pending: 0,
+            regions: Default::default(),
+            slab_backings: Vec::new(),
+            last_backing_generation: 0,
+            backing_refusal_repaint: 0,
 
             to_wasm_js: Vec::new(),
             from_wasm_js: Vec::new(),
@@ -2044,9 +2064,10 @@ pub static mut BASE_ADDR: usize = 10;
 
 /// The inventory as the page's `makepad_gpu_inventory()` resolves it:
 /// `{textures: [{texture_id, kind, format, w, h, bytes, owner, dropped}], retired_texture_bytes,
-/// retained_allocation_bytes, geometry_bytes}`; `texture_id` is the page's
+/// retained_allocation_bytes, geometry_bytes, instance_store: {slab_bytes, live_bytes,
+/// evacuated_bytes, regions_dropped, slabs, spare_slabs}}`; `texture_id` is the page's
 /// texture slot, so its GL ledger joins on it.
-fn gpu_inventory_json(inv: &crate::gpu_inventory::GpuInventory) -> String {
+fn gpu_inventory_json(inv: &crate::gpu_inventory::GpuInventory, store: crate::instance_store::StoreStats) -> String {
     fn esc(s: &str) -> String {
         let mut o = String::with_capacity(s.len());
         for c in s.chars() {
@@ -2071,10 +2092,16 @@ fn gpu_inventory_json(inv: &crate::gpu_inventory::GpuInventory) -> String {
         ));
     }
     out.push_str(&format!(
-        "],\"retired_texture_bytes\":{},\"retained_allocation_bytes\":{},\"geometry_bytes\":{}}}",
+        "],\"retired_texture_bytes\":{},\"retained_allocation_bytes\":{},\"geometry_bytes\":{},\"instance_store\":{{\"slab_bytes\":{},\"live_bytes\":{},\"evacuated_bytes\":{},\"regions_dropped\":{},\"slabs\":{},\"spare_slabs\":{}}}}}",
         inv.retired_texture_bytes,
         inv.retained_allocation_bytes,
-        inv.geometry_gpu_bytes.unwrap_or(inv.geometry_cpu_bytes)
+        inv.geometry_gpu_bytes.unwrap_or(inv.geometry_cpu_bytes),
+        store.slab_bytes,
+        store.live_bytes,
+        store.evacuated_bytes,
+        store.regions_dropped,
+        store.slabs,
+        store.spare_slabs,
     ));
     out
 }

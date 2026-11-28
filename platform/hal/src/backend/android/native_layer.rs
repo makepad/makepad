@@ -11,10 +11,10 @@ struct Rect { left: i32, top: i32, right: i32, bottom: i32 }
 
 #[link(name = "dl")]
 extern "C" { fn dlsym(handle: Pointer, name: *const c_char) -> Pointer; }
-extern "C" { fn poll(fds: *mut PollFd, count: usize, timeout: i32) -> i32; }
+extern "C" { pub(crate) fn poll(fds: *mut PollFd, count: u32, timeout: i32) -> i32; }
 extern "C" { fn __system_property_get(name: *const c_char, value: *mut c_char) -> i32; }
 #[repr(C)]
-struct PollFd { fd: i32, events: i16, revents: i16 }
+pub(crate) struct PollFd { pub(crate) fd: i32, pub(crate) events: i16, pub(crate) revents: i16 }
 
 // The same read as android_get_device_api_level, which libc only exports from API 29 on.
 pub(crate) fn api_level() -> i32 { super::xr::system_property("ro.build.version.sdk").and_then(|v| v.parse().ok()).unwrap_or(-1) }

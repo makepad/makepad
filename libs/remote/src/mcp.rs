@@ -5,7 +5,7 @@
 //! target's manifests (its AI services and the built-in ui/edit/logs/inspect, unless
 //! `--no-builtins`) as `<service>__<tool>`; `tools/call` is one `app` call. The client-side
 //! commands (`ui__grab`, `ui__gseq`, `edit__tweak_grab`) run here and return the PNG as an
-//! image. Approvals are the MCP client's: it sees each tool's risk in its description.
+//! image. The client sees the risk in the description; the app confirms destructive tools on screen.
 //!
 //! `--caller-env NAME` passes the capability in that environment variable with every call (an
 //! agent lane's `MAKEPAD_SCOPE_MCP_TOKEN`); the app checks it.
@@ -15,11 +15,12 @@
 //! when it restarts. With `--launch <program> [args..]` an app that is not running is started
 //! (detached) when a request needs it.
 
-use crate::conn::{Event, CLOSE_LINK_LOST, CLOSE_NORMAL};
+use crate::conn::{ChannelTx, Event, CLOSE_LINK_LOST, CLOSE_NORMAL};
 use crate::link::{Client, Error};
 use makepad_strict_json::{self as json, Value};
 use std::io::{BufRead, Write};
 use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex, Weak, mpsc};
 
 /// Protocol versions spoken, newest first.
 const PROTOCOL_VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
@@ -55,21 +56,72 @@ struct Tool {
 struct Adapter {
     opts: Options,
     client: Option<Client>,
+    active: Option<Arc<Mutex<Cancellation>>>,
+}
+
+#[derive(Default)]
+struct Cancellation {
+    cancelled: bool,
+    channel: Option<ChannelTx>,
+}
+
+impl Cancellation {
+    fn cancel(token: &Mutex<Self>) {
+        let channel = {
+            let mut state = token.lock().unwrap();
+            state.cancelled = true;
+            state.channel.take()
+        };
+        if let Some(ch) = channel { ch.close(CLOSE_NORMAL, "the caller cancelled"); }
+    }
+}
+
+type RequestLine = (String, Option<Arc<Mutex<Cancellation>>>);
+
+// Only this reader touches stdin. A cancellation can close its own channel while the
+// dispatcher is waiting. Ordinary requests keep their input order, including queued calls.
+fn read_requests(input: impl BufRead, tx: mpsc::Sender<RequestLine>) {
+    let mut calls: Vec<(Value, Weak<Mutex<Cancellation>>)> = Vec::new();
+    for line in input.lines().map_while(Result::ok) {
+        if line.trim().is_empty() { continue }
+        calls.retain(|(_, token)| token.strong_count() != 0);
+        let msg = json::parse_depth(line.as_bytes(), DEPTH).ok();
+        let method = msg.as_ref().and_then(|m| m.get("method")).and_then(Value::as_str);
+        let id = msg.as_ref().and_then(|m| m.get("id"));
+        if method == Some("notifications/cancelled") && id.is_none() {
+            let target = msg.as_ref().and_then(|m| m.get("params")?.get("requestId"));
+            if let Some(token) = calls.iter().find(|(id, _)| Some(id) == target).and_then(|(_, t)| t.upgrade()) {
+                Cancellation::cancel(&token);
+            }
+            continue
+        }
+        let token = id.filter(|_| method == Some("tools/call")).map(|id| {
+            let token = Arc::new(Mutex::new(Cancellation::default()));
+            calls.push((id.clone(), Arc::downgrade(&token)));
+            token
+        });
+        if tx.send((line, token)).is_err() { break }
+    }
+    for (_, token) in calls {
+        if let Some(token) = token.upgrade() { Cancellation::cancel(&token); }
+    }
 }
 
 pub fn serve(opts: Options) -> i32 {
-    let mut a = Adapter { opts, client: None };
-    let stdin = std::io::stdin();
+    let (tx, rx) = mpsc::channel();
+    if let Err(err) = std::thread::Builder::new().name("mcp-stdin".into())
+        .spawn(move || read_requests(std::io::stdin().lock(), tx)) {
+        eprintln!("cannot read MCP requests: {err}");
+        return 1;
+    }
+    let mut adapter = Adapter { opts, client: None, active: None };
     let mut out = std::io::stdout();
-    for line in stdin.lock().lines() {
-        let Ok(line) = line else { break };
-        if line.trim().is_empty() {
-            continue;
-        }
-        if let Some(reply) = a.handle(&line) {
-            if writeln!(out, "{reply}").and_then(|_| out.flush()).is_err() {
-                break;
-            }
+    for (line, token) in rx {
+        adapter.active = token;
+        let reply = adapter.handle(&line);
+        adapter.active = None;
+        if let Some(reply) = reply {
+            if writeln!(out, "{reply}").and_then(|_| out.flush()).is_err() { break }
         }
     }
     0
@@ -269,18 +321,36 @@ enum Failure {
 }
 
 /// One `app` request: its answer lines, parsed.
-fn app_request(client: &Client, args: &str) -> Result<Vec<Value>, Failure> {
+fn app_request(client: &Client, args: &str, token: Option<&Mutex<Cancellation>>) -> Result<Vec<Value>, Failure> {
+    if token.is_some_and(|t| t.lock().unwrap().cancelled) {
+        return Err(Failure::Other("the caller cancelled".into()));
+    }
     let ch = client.open("app", args).map_err(|e| match e {
         Error::Refused(_, why) if why.contains("unsupported service") => Failure::Other("this process serves no `app` service".to_string()),
         Error::Refused(_, why) => Failure::Other(why),
         e => Failure::NotOpened(e.to_string()),
     })?;
+    if let Some(token) = token {
+        let mut state = token.lock().unwrap();
+        if state.cancelled {
+            drop(state);
+            ch.close(CLOSE_NORMAL, "the caller cancelled");
+            return Err(Failure::Other("the caller cancelled".into()));
+        }
+        state.channel = Some(ch.tx());
+    }
     let mut lines = Vec::new();
     loop {
-        match ch.recv_timeout(CALL_WAIT) {
+        let event = ch.recv_timeout(CALL_WAIT);
+        if token.is_some_and(|t| t.lock().unwrap().cancelled) {
+            return Err(Failure::Other("the caller cancelled".into()));
+        }
+        match event {
             Ok(Event::Data(d)) => {
                 for l in String::from_utf8_lossy(&d).lines().filter(|l| !l.is_empty()) {
-                    lines.push(json::parse_depth(l.as_bytes(), DEPTH).map_err(|e| Failure::Other(format!("an answer line I cannot read ({e})")))?);
+                    let line = json::parse_depth(l.as_bytes(), DEPTH).map_err(|e| Failure::Other(format!("an answer line I cannot read ({e})")))?;
+                    // Progress renews the silence wait. Only results and manifests are returned.
+                    if line.get("Progress").is_none() { lines.push(line); }
                 }
             }
             Ok(Event::Closed(CLOSE_NORMAL, _)) => return Ok(lines),
@@ -300,7 +370,7 @@ impl Adapter {
     /// the next request reconnects.
     fn app(&mut self, args: &str) -> Result<Vec<Value>, String> {
         let client = self.client()?;
-        let failure = match app_request(&client, args) {
+        let failure = match app_request(&client, args, self.active.as_deref()) {
             Ok(lines) => return Ok(lines),
             Err(f) => f,
         };
@@ -313,7 +383,7 @@ impl Adapter {
             Failure::NotOpened(_) => {
                 self.client = None;
                 let client = self.client()?;
-                app_request(&client, args).map_err(|f| match f {
+                app_request(&client, args, self.active.as_deref()).map_err(|f| match f {
                     Failure::NotOpened(why) | Failure::LinkLost(why) => {
                         self.client = None;
                         format!("link lost: {why}")
@@ -424,7 +494,7 @@ mod tests {
 
     #[test]
     fn the_handshake_and_errors_need_no_app() {
-        let mut a = Adapter { opts: Options { target: "nobody-runs-this-app".into(), builtins: true, launch: Vec::new(), caller: None }, client: None };
+        let mut a = Adapter { opts: Options { target: "nobody-runs-this-app".into(), builtins: true, launch: Vec::new(), caller: None }, client: None, active: None };
         let init = a.handle(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26"}}"#).unwrap();
         assert!(init.contains(r#""protocolVersion":"2025-03-26""#) && init.contains(r#""tools":{}"#), "{init}");
         assert!(a.handle(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#).is_none());
@@ -432,6 +502,48 @@ mod tests {
         let list = a.handle(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#).unwrap();
         assert!(list.contains(r#""error""#) && list.contains("nobody-runs-this-app"), "{list}");
         assert!(a.handle(r#"{"jsonrpc":"2.0","id":3,"method":"bogus"}"#).unwrap().contains("-32601"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mcp_cancels_the_held_channel_and_keeps_the_next_request_in_order() {
+        use crate::{endpoint::Endpoint, link::Target};
+        use std::{io::BufReader, os::unix::net::UnixStream, thread};
+
+        let app = Endpoint::new("confirmation-test");
+        let (opened, channel) = mpsc::channel();
+        app.register("app", 1, Arc::new(move |_, open| {
+            opened.send(open.channel).unwrap();
+            Ok(())
+        }));
+        let key = crate::carrier::loopback::new_token().unwrap();
+        let addr = crate::carrier::loopback::serve(&app, &key).unwrap().to_string();
+        let client = Client::new(Target::Loopback(addr, key), "test");
+        let (mut input, reader) = UnixStream::pair().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let read = thread::spawn(move || read_requests(BufReader::new(reader), tx));
+        writeln!(input, r#"{{"id":1,"method":"tools/call","params":{{"name":"example__change"}}}}"#).unwrap();
+        let (line, token) = rx.recv().unwrap();
+        let call = thread::spawn(move || {
+            let mut adapter = Adapter { opts: Options { target: String::new(), builtins: false,
+                launch: vec![], caller: None }, client: Some(client), active: token };
+            let reply = adapter.handle(&line).unwrap();
+            adapter.active = None;
+            (adapter, reply)
+        });
+        let held = channel.recv().unwrap();
+        held.send(b"{\"Progress\":{\"note\":\"waiting\"}}\n".to_vec()).unwrap();
+        writeln!(input, r#"{{"id":"next","method":"ping"}}"#).unwrap();
+        writeln!(input, r#"{{"method":"notifications/cancelled","params":{{"requestId":"other"}}}}"#).unwrap();
+        writeln!(input, r#"{{"method":"notifications/cancelled","params":{{"requestId":1}}}}"#).unwrap();
+        let end = held.recv();
+        assert!(matches!(&end, Some(Event::Closed(_, why)) if why == "the caller cancelled"), "app saw {end:?}");
+        let (mut adapter, reply) = call.join().unwrap();
+        assert!(reply.contains("the caller cancelled"));
+        let (next, _) = rx.recv().unwrap();
+        assert!(adapter.handle(&next).unwrap().contains(r#""id":"next","result":{}"#));
+        drop(input);
+        read.join().unwrap();
     }
 
     #[test]

@@ -15,7 +15,27 @@ const INDEX: Id = Id::new(2, 1);
 const PIPE: Id = Id::new(1, 1);
 const WINDOW: Id = Id::new(1, 1);
 
-fn open() -> (std::sync::Arc<Hal>, HalInfo) {
+// The device ledger is process-wide. Tests can use it concurrently except while one
+// measures an exact change in its pool bytes.
+static DEVICE_TESTS: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
+struct TestHal {
+    hal: std::sync::Arc<Hal>,
+    _device: std::sync::RwLockReadGuard<'static, ()>,
+}
+
+impl std::ops::Deref for TestHal {
+    type Target = std::sync::Arc<Hal>;
+    fn deref(&self) -> &Self::Target { &self.hal }
+}
+
+fn open() -> (TestHal, HalInfo) {
+    let guard = DEVICE_TESTS.read().unwrap();
+    let (hal, info) = open_device();
+    (TestHal { hal, _device: guard }, info)
+}
+
+fn open_device() -> (std::sync::Arc<Hal>, HalInfo) {
     // Require a graphics device and successful HAL initialization.
     // The probe runs once per process: the system loader's first instance creation is not safe
     // against other threads doing the same (it crashed inside vkCreateInstance when the tests'
@@ -98,14 +118,18 @@ fn shader() -> Vec<u8> {
 }
 
 fn resources(hal: &Hal, sid: u32) {
+    resources_with_geometry(hal, sid, &[-1.0, -1.0, 0.0, 1.0, 1.0, -1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0], &[0, 1, 2]);
+}
+
+fn resources_with_geometry(hal: &Hal, sid: u32, vertices: &[f32], indices: &[u16]) {
     let mut w = CmdWriter::new(sid);
     w.texture_create(TEX, usage::RENDER_TARGET | usage::SAMPLED, format::RGBA8, 32, 32, [1, 1], Attr::default());
-    let vertices: Vec<u8> = [-1.0f32, -1.0, 0.0, 1.0, 1.0, -1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0]
-        .into_iter().flat_map(f32::to_le_bytes).collect();
+    let vertices: Vec<u8> = vertices.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let indices: Vec<u8> = indices.iter().flat_map(|i| i.to_le_bytes()).collect();
     w.buffer_create(VERTEX, buffer_kind::VERTEX, vertices.len() as u64, Attr::default());
     w.buffer_update(VERTEX, 0, &vertices);
-    w.buffer_create(INDEX, buffer_kind::INDEX, 6, Attr::default());
-    w.buffer_update(INDEX, 0, &[0, 0, 1, 0, 2, 0]);
+    w.buffer_create(INDEX, buffer_kind::INDEX, indices.len() as u64, Attr::default());
+    w.buffer_update(INDEX, 0, &indices);
     let blob = CmdWriter::pipeline_blob(PipelineDesc { outputs: 1, ..Default::default() }, &shader(),
         &[u32::MAX, u32::MAX, u32::MAX, u32::MAX, u32::MAX, 0], &[16]);
     w.pipeline_create(PIPE, dialect::SPIRV, Attr::default(), &blob);
@@ -120,7 +144,7 @@ fn pass(texture: Id, width: u32, height: u32, clear: [f32; 4]) -> Pass {
 }
 
 fn draw() -> Draw {
-    Draw { pipeline: PIPE, vb: VERTEX, ib: INDEX, index: [0, 3], inst: Inst::inline(Slice::EMPTY, 1),
+    Draw { pipeline: PIPE, vb: VERTEX, ib: INDEX, index: [0, 3], inst: Inst::none(1),
         scissor: [f32::NAN; 4], ..Default::default() }
 }
 
@@ -166,6 +190,106 @@ fn pixels(hal: &Hal, sid: u32, req: u32) -> Vec<u8> {
         _ => false,
     });
     pixels
+}
+
+#[test]
+fn cull_mode_front_and_back_pixel_guard() {
+    let (hal, info) = open();
+    let sid = info.session;
+    // Two clip-space rows, bottom then top. Left indices wind CCW, right CW.
+    resources_with_geometry(&hal, sid, &[
+        -1.0, -1.0, 0.0, 1.0,  0.0, -1.0, 0.0, 1.0,  1.0, -1.0, 0.0, 1.0,
+        -1.0,  1.0, 0.0, 1.0,  0.0,  1.0, 0.0, 1.0,  1.0,  1.0, 0.0, 1.0,
+    ], &[0, 1, 4, 0, 4, 3, 1, 5, 2, 1, 4, 5]);
+    let mut w = CmdWriter::new(sid);
+    let pair = Draw { index: [0, 12], ..draw() };
+    let clear = pass(TEX, 32, 32, [0.0, 0.0, 0.0, 1.0]);
+    let finish_texture = |w: &mut CmdWriter, frame: u64| {
+        w.frame_end(TEX, target::TEXTURE);
+        hal.submit(&w.buf());
+        frame_done(&hal, sid, frame);
+        w.clear();
+        w.texture_readback(TEX, frame as u32, [0, 0, 32, 32]);
+        hal.submit(&w.buf());
+        pixels(&hal, sid, frame as u32)
+    };
+    let stats = || hal.with_world(|world| world.session(sid).unwrap().stats);
+    let halves = |rgba: &[u8], y: usize| -> [[u8; 4]; 2] {
+        assert_eq!(rgba.len(), 32 * 32 * 4);
+        [8, 24].map(|x| {
+            let at = (y * 32 + x) * 4;
+            rgba[at..at + 4].try_into().unwrap()
+        })
+    };
+    let white = [255; 4];
+    let black = [0, 0, 0, 255];
+    let both = Draw::CULL | Draw::CULL_FRONT;
+    for (frame, flags, expected) in [
+        (1, 0, [white, white]),
+        (2, Draw::CULL, [white, black]),
+        (3, Draw::CULL_FRONT, [black, white]),
+        (4, both, [black, black]),
+    ] {
+        let before = stats();
+        w.clear();
+        w.frame_begin(frame, FrameMeta::default());
+        w.pass(clear);
+        w.draw(Draw { flags, ..pair });
+        let rgba = finish_texture(&mut w, frame);
+        assert_eq!(halves(&rgba, 16), expected, "cull flags {flags:#x}");
+        let after = stats();
+        let invalid = u64::from(flags == both);
+        assert_eq!(after.bad_args - before.bad_args, invalid, "bad arguments for {flags:#x}");
+        assert_eq!(after.skipped_draws - before.skipped_draws, invalid, "skipped draws for {flags:#x}");
+    }
+
+    // Keep the first pass's strip. Each following strip isolates a change of cull mode.
+    w.clear();
+    w.frame_begin(5, FrameMeta::default());
+    w.pass(clear);
+    w.draw(Draw { flags: Draw::CULL_FRONT, scissor: [0.0, 0.0, 32.0, 8.0], ..pair });
+    let mut load = clear;
+    load.load[0] = pass_load::LOAD;
+    w.pass(load);
+    for (y, flags) in [(8.0, Draw::CULL), (16.0, Draw::CULL_FRONT), (24.0, 0)] {
+        w.draw(Draw { flags, scissor: [0.0, y, 32.0, 8.0], ..pair });
+    }
+    let rgba = finish_texture(&mut w, 5);
+    for (y, expected) in [(4, [black, white]), (12, [white, black]), (20, [black, white]), (28, [white, white])] {
+        assert_eq!(halves(&rgba, y), expected, "cross-pass and in-pass cull transitions at y={y}");
+    }
+
+    // Seed the retained window image. The right half must stay green through the partial repaint.
+    let base_frame = 6;
+    w.clear();
+    w.window_create(WINDOW, window_kind::NORMAL, Id::NONE, [0.0, 0.0, 32.0, 32.0], false);
+    let before = stats();
+    w.frame_begin(base_frame, FrameMeta::default());
+    w.pass(pass(Id::NONE, 32, 32, [0.0, 1.0, 0.0, 1.0]));
+    w.frame_end(WINDOW, target::WINDOW);
+    hal.submit(&w.buf());
+    frame_done(&hal, sid, base_frame);
+    let seed = stats();
+    assert_eq!((seed.draws - before.draws, seed.bad_args - before.bad_args, seed.skipped_draws - before.skipped_draws),
+        (0, 0, 0), "the seed frame is a clean clear");
+
+    w.clear();
+    w.frame_begin(base_frame + 1, FrameMeta::default());
+    let damage = w.put_rects(&[[0.0, 0.0, 16.0, 32.0]]);
+    w.pass(Pass { color: [Id::NONE; 4], damage, damage_since: base_frame, ..clear });
+    w.draw(Draw { flags: Draw::CULL, damage: 1, ..pair });
+    w.draw(Draw { flags: both, damage: 0, ..pair });
+    w.frame_end(WINDOW, target::WINDOW);
+    hal.submit(&w.buf());
+    frame_done(&hal, sid, base_frame + 1);
+    let after = stats();
+    assert_eq!(after.draws - seed.draws, 2, "both submitted draws are counted");
+    assert_eq!(after.bad_args - seed.bad_args, 1, "off-damage invalid flags report one error");
+    assert_eq!(after.skipped_draws - seed.skipped_draws, 1, "only the invalid draw is skipped");
+    w.clear();
+    w.snapshot(WINDOW, 7);
+    hal.submit(&w.buf());
+    assert_eq!(halves(&pixels(&hal, sid, 7), 16), [white, [0, 255, 0, 255]], "only the left half was repainted");
 }
 
 #[cfg(target_os = "linux")]
@@ -365,14 +489,11 @@ fn offscreen_two_passes_three_draws_and_timestamp() {
     assert!(hal.close(info.session));
 }
 
-/// The vertex position as given, the colour the first vec4 of the pass's uniform block (binding
-/// 0, `pipeline_binding::PASS`): a view of the pass shows its own block.
-fn pass_color_shader() -> Vec<u8> {
+/// Passes through clip-space vertices and sums the first vec4 of each bound uniform block.
+fn uniform_color_shader(blocks: u32) -> Vec<u8> {
     let mut ir = IrModule::new();
     let vec4 = ir.vec_ty(4, IrScalar::F32);
     let block_type = ir.synthetic_struct("PassColor", vec![IrField { name: Default::default(), ty: vec4 }]);
-    let block = ir.global(IrGlobalKind::Io(IrIo::UniformBuffer), Default::default(), block_type);
-    ir.globals[block as usize].binding = Some(0);
     let mut vertex = IrFunction::new("vertex_main".into(), TY_VOID);
     vertex.entry = Some(IrEntry { stage: IrStage::Vertex,
         inputs: vec![IrEntryIo { name: "geometry".into(), ty: vec4, binding: IrIoBinding::Location(0) }],
@@ -383,13 +504,23 @@ fn pass_color_shader() -> Vec<u8> {
     let mut fragment = IrFunction::new("fragment_main".into(), TY_VOID);
     fragment.entry = Some(IrEntry { stage: IrStage::Fragment, inputs: Vec::new(),
         outputs: vec![IrEntryIo { name: "color".into(), ty: vec4, binding: IrIoBinding::Location(0) }] });
-    let global = fragment.expr(ExprKind::Global(block), block_type);
-    let color = fragment.expr(ExprKind::Field(global, 0), vec4);
+    let mut color = None;
+    for binding in 0..blocks {
+        let name = makepad_shader::makepad_live_id::LiveId(u64::from(binding) + 1);
+        let block = ir.global(IrGlobalKind::Io(IrIo::UniformBuffer), name, block_type);
+        ir.globals[block as usize].binding = Some(binding);
+        let global = fragment.expr(ExprKind::Global(block), block_type);
+        let value = fragment.expr(ExprKind::Field(global, 0), vec4);
+        color = Some(match color {
+            Some(sum) => fragment.expr(ExprKind::Binary(BinOp::Add, sum, value), vec4),
+            None => value,
+        });
+    }
     let output = fragment.expr(ExprKind::EntryOut(0), vec4);
-    fragment.body.extend([Stmt::Assign(output, color), Stmt::Return(NO_EXPR)]);
+    fragment.body.extend([Stmt::Assign(output, color.unwrap()), Stmt::Return(NO_EXPR)]);
     ir.functions.extend([vertex, fragment]);
     SpirvPipeline { vertex: ir_to_spirv(&ir, 0, false).unwrap(), fragment: ir_to_spirv(&ir, 1, false).unwrap(),
-        texture_base: 1, sampler_base: 1, depth_binding: u32::MAX, instance_binding: u32::MAX,
+        texture_base: blocks, sampler_base: blocks, depth_binding: u32::MAX, instance_binding: u32::MAX,
         pick_binding: u32::MAX, pick_texture_base: u32::MAX, textures: Vec::new(), samplers: Vec::new(), sampler_textures: Vec::new(), xr_vertex: Vec::new(), xr_fragment: Vec::new() }.encode()
 }
 
@@ -424,12 +555,12 @@ fn an_msaa_pass_resolves_four_samples_and_a_loading_pass_or_a_second_view_contin
     w.buffer_update(TRI, 0, &tri);
     w.buffer_create(TRI_INDEX, buffer_kind::INDEX, 6, Attr::default());
     w.buffer_update(TRI_INDEX, 0, &[0, 0, 1, 0, 2, 0]);
-    let blob = CmdWriter::pipeline_blob(PipelineDesc { outputs: 1, ..Default::default() }, &pass_color_shader(),
+    let blob = CmdWriter::pipeline_blob(PipelineDesc { outputs: 1, ..Default::default() }, &uniform_color_shader(1),
         &[u32::MAX, 0, u32::MAX, u32::MAX, u32::MAX, 0], &[16]);
     w.pipeline_create(VIEW_PIPE, dialect::SPIRV, Attr::default(), &blob);
     hal.submit(&w.buf());
     until(&hal, sid, |e| matches!(e, HalEvent::PipelineReady { pipeline } if pipeline == VIEW_PIPE));
-    let tri_draw = |pipeline: Id| Draw { pipeline, vb: TRI, ib: TRI_INDEX, index: [0, 3], inst: Inst::inline(Slice::EMPTY, 1), scissor: [f32::NAN; 4], ..Default::default() };
+    let tri_draw = |pipeline: Id| Draw { pipeline, vb: TRI, ib: TRI_INDEX, index: [0, 3], inst: Inst::none(1), scissor: [f32::NAN; 4], ..Default::default() };
     let eye_pass = |eye: usize| {
         let load = if eye == 0 { pass_load::CLEAR } else { pass_load::LOAD };
         Pass { color: [TARGET, Id::NONE, Id::NONE, Id::NONE], depth: DEPTH, load: [load; 5], clear: [[0.0, 0.0, 0.0, 1.0]; 4], clear_depth: 1.0,
@@ -485,10 +616,12 @@ fn an_msaa_pass_resolves_four_samples_and_a_loading_pass_or_a_second_view_contin
         }
         w.clear();
         w.frame_begin(n, FrameMeta::default());
-        let uniforms = w.keep(&[1.0f32, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0][..]);
+        let red = [1.0, 0.0, 0.0, 1.0].map(f32::to_ne_bytes);
+        let green = [0.0, 1.0, 0.0, 1.0].map(f32::to_ne_bytes);
+        let (uniforms, uniform_stride) = w.put_pass_views_uniforms(&[red.as_flattened(), green.as_flattened()]);
         let view_rects = w.put_rects(&[[0.0, 0.0, 8.0, 8.0], [8.0, 0.0, 8.0, 8.0]]);
         w.pass(Pass { color: [TARGET, Id::NONE, Id::NONE, Id::NONE], depth: DEPTH, load: [pass_load::CLEAR; 5], clear: [[0.0, 0.0, 0.0, 1.0]; 4], clear_depth: 1.0,
-            viewport: [0.0, 0.0, 16.0, 8.0], dpi: 1.0, samples: 4, uniforms, view_rects, ..Default::default() });
+            viewport: [0.0, 0.0, 16.0, 8.0], dpi: 1.0, samples: 4, uniforms, uniform_stride, view_rects, ..Default::default() });
         w.draw(tri_draw(VIEW_PIPE));
         w.frame_end(TARGET, target::TEXTURE);
         views.push(read(&mut w, n, n as u32));
@@ -723,6 +856,82 @@ fn steady_upload_frames_allocate_no_arenas() {
     assert_eq!(arena_allocs(&hal, sid), warm, "steady frames allocated upload arenas");
     check_tail(&hal, sid, 7, size, &fill(last));
     assert!(hal.close(sid));
+}
+
+#[test]
+fn a_live_windows_last_upload_survives_idle() {
+    let _device = DEVICE_TESTS.write().unwrap();
+    let (hal, info) = open_device();
+    let sid = info.session;
+    hal.clock_advance(0);
+    let mut w = CmdWriter::new(sid);
+    w.window_create(WINDOW, window_kind::NORMAL, Id::NONE, [0.0, 0.0, 32.0, 32.0], false);
+    w.texture_create(TEX, usage::RENDER_TARGET | usage::SAMPLED, format::RGBA8, 256, 256, [1, 1], Attr::default());
+    hal.submit(&w.buf());
+    let snapshot = || hal.with_world(|world| {
+        let bytes = world.session(makepad_hal::session::HOST).unwrap().ledger
+            .get(Kind::Backend, ledger::Pool::UploadArena as u32).map_or(0, |row| row.bytes);
+        (world.session(sid).unwrap().stats.arena_creates, bytes)
+    });
+    let (start, base_bytes) = snapshot();
+    let mut events = EventStore::new(sid, 16, 1024);
+    let mut settle = |creates| {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while snapshot().0 < creates {
+            assert!(Instant::now() < deadline, "the upload-arena make-ahead must finish");
+            hal.pump(1_000_000, &mut events.buf());
+        }
+    };
+
+    // Seed two equal-sized arenas. The readback waits for the upload's arena to return,
+    // and the counter waits for its spare. The ledger gives their actual allocation size.
+    w.clear();
+    w.texture_update(TEX, 0, [0, 0, 1, 1], 0, &[255; 4]);
+    w.texture_readback(TEX, 1, [0, 0, 1, 1]);
+    hal.submit(&w.buf());
+    assert_eq!(pixels(&hal, sid, 1), [255; 4], "the seed upload must complete before its arena is reused");
+    settle(start + 2);
+    let arena_bytes = (snapshot().1 - base_bytes) / 2;
+    let frame = |w: &mut CmdWriter, n, id, kind| {
+        w.frame_begin(n, FrameMeta::default());
+        w.pass(pass(if kind == target::WINDOW { Id::NONE } else { id }, 32, 32, [0.0; 4]));
+        w.frame_end(id, kind);
+        hal.submit(&w.buf());
+        frame_done(&hal, sid, n);
+        w.clear();
+    };
+    // The texture frame fills both arenas. The window can reuse one, leaving at least
+    // one arena used only by the texture frame.
+    w.clear();
+    let tile = vec![255; 256 * 256 * 4];
+    for _ in 0..2 { w.texture_update(TEX, 0, [0, 0, 256, 256], 0, &tile); }
+    frame(&mut w, 1, TEX, target::TEXTURE);
+    settle(start + 3);
+    let window_frame = |w: &mut CmdWriter, n| {
+        w.texture_update(TEX, 0, [0, 0, 1, 1], 0, &[255; 4]);
+        frame(w, n, WINDOW, target::WINDOW);
+    };
+    window_frame(&mut w, 2);
+    let both_bytes = snapshot().1;
+    let mut idle = || {
+        hal.clock_advance(8_000_000_000);
+        hal.pump(0, &mut events.buf());
+    };
+    idle();
+    let (warm, kept_bytes) = snapshot();
+    assert!(base_bytes < kept_bytes && kept_bytes < both_bytes, "idle must release texture-frame bytes and retain window-frame bytes");
+    assert_eq!(kept_bytes - base_bytes, arena_bytes, "only the window frame's single arena survives idle");
+    window_frame(&mut w, 3);
+    assert_eq!(snapshot(), (warm, kept_bytes), "the first window frame after idle reuses its arena without making another");
+    idle();
+    assert_eq!(snapshot(), (warm, kept_bytes), "the resumed window keeps its arena while it remains live");
+
+    w.window_close(WINDOW);
+    hal.submit(&w.buf());
+    idle();
+    assert_eq!(snapshot(), (warm, base_bytes), "closing the window releases its arena while the texture is still live");
+    hal.clock_real();
+    assert!(hal.close(sid), "the test session closes");
 }
 
 /// A steady clear uses one slot. At each burst the frame-completion batch must return from its
@@ -1132,39 +1341,158 @@ fn a_retained_buffer_reads_zero_where_it_was_not_written() {
 fn uploads_from_freed_temporaries_land_the_bytes_of_the_call() {
     let (hal, info) = open();
     let sid = info.session;
-    let (buffer, texture) = (Id::new(9, 1), Id::new(9, 1));
+    let (buffer, slab, texture) = (Id::new(9, 1), Id::new(10, 1), Id::new(9, 1));
     let want_buffer: Vec<u8> = (0..4096u32).map(|i| (i * 7 + 3) as u8).collect();
     let want_texels: Vec<u8> = (0..16 * 16 * 4u32).map(|i| (i * 13 + 5) as u8).collect();
     let mut w = CmdWriter::new(sid);
     w.buffer_create(buffer, buffer_kind::INSTANCE, 4096, Attr::default());
+    w.buffer_create(slab, buffer_kind::INSTANCE | buffer_kind::APPEND, 4096, Attr::default());
     w.texture_create(texture, usage::SAMPLED | usage::RENDER_TARGET, format::RGBA8, 16, 16, [1, 1], Attr::default());
     w.buffer_update(buffer, 0, &want_buffer.clone());
+    w.buffer_update_parts(slab, &[(0, &want_buffer[..1000]), (1000, &want_buffer[1000..2048]), (2048, &want_buffer[2048..])]);
     w.texture_update(texture, 0, [0, 0, 16, 16], 0, &want_texels.clone());
     let scribble = [vec![0xeeu8; 4096], vec![0xee; 1024]];
-    w.read_buffers(1, &[BufferReadRange { id: buffer, offset: 0, len: 4096 }]);
+    w.read_buffers(1, &[buffer, slab].map(|id| BufferReadRange { id, offset: 0, len: 4096 }));
     w.texture_readback(texture, 2, [0, 0, 16, 16]);
     hal.submit(&w.buf());
     drop(scribble);
-    let mut got: [Vec<u8>; 2] = Default::default();
+    let mut got: [Vec<u8>; 3] = Default::default();
     until(&hal, sid, |e| {
         if let HalEvent::BufferLeases { req: 1, status, records } = e {
-                use makepad_hal::buffers::Wire;
-                assert_eq!(status, readback::OK);
-                let record = makepad_hal::lease::Record::read(records);
-                got[0] = unsafe { std::slice::from_raw_parts(record.ptr as *const u8, record.len as usize) }.to_vec();
-                hal_lease_release(record.token);
+            use makepad_hal::{buffers::Wire, lease::{Held, Record}};
+            assert_eq!(status, readback::OK);
+            assert_eq!(records.len(), 2 * Record::SIZE, "one lease for each buffer");
+            for (out, record) in got[..2].iter_mut().zip(records.chunks_exact(Record::SIZE)) {
+                // SAFETY: this process pumped the event and takes each lease once.
+                *out = unsafe { Held::from_payload(record) }.unwrap().to_vec();
             }
-        if let HalEvent::Readback { req: req @ 1..=2, status, lease, .. } = e {
+        }
+        if let HalEvent::Readback { req: 2, status, lease, .. } = e {
             // SAFETY: this process pumped the event and takes its lease once.
             let pixels = unsafe { makepad_hal::lease::Held::from_payload(lease) }.unwrap();
             assert_eq!(status, readback::OK);
-            got[req as usize - 1] = pixels.to_vec();
+            got[2] = pixels.to_vec();
         }
         got.iter().all(|g| !g.is_empty())
     });
     assert!(got[0] == want_buffer, "the buffer holds other bytes than its upload's");
-    assert!(got[1] == want_texels, "the texture holds other bytes than its upload's");
+    assert!(got[1] == want_buffer, "the APPEND slab holds all three parts in order");
+    assert!(got[2] == want_texels, "the texture holds other bytes than its upload's");
     assert_eq!(hal.with_world(|w| w.session(sid).unwrap().stats.bad_args), 0);
+    assert!(hal.close(sid));
+}
+
+#[test]
+fn uniform_stream_renders_pass_list_draw_and_short_block() {
+    const MONO: Id = Id::new(5, 1);
+    const STEREO: Id = Id::new(6, 1);
+    const QUAD: Id = Id::new(5, 1);
+    const INDICES: Id = Id::new(6, 1);
+    const PIPELINE: Id = Id::new(5, 1);
+    let (hal, info) = open();
+    let sid = info.session;
+    let mut w = CmdWriter::new(sid);
+    w.set_uniform_align(info.effective_uniform_align());
+    for target in [MONO, STEREO] {
+        w.texture_create(target, usage::RENDER_TARGET | usage::SAMPLED, format::RGBA8, 16, 8, [1, 1], Attr::default());
+    }
+    // Extend past the left edge so each stereo view must clip to its own rectangle.
+    let quad: Vec<u8> = [-3.0f32, -1.0, 0.0, 1.0, 1.0, -1.0, 0.0, 1.0,
+        1.0, 1.0, 0.0, 1.0, -3.0, 1.0, 0.0, 1.0].into_iter().flat_map(f32::to_le_bytes).collect();
+    let indices: Vec<u8> = [0u16, 1, 2, 0, 2, 3].into_iter().flat_map(u16::to_le_bytes).collect();
+    w.buffer_create(QUAD, buffer_kind::VERTEX, quad.len() as u64, Attr::default());
+    w.buffer_update(QUAD, 0, &quad);
+    w.buffer_create(INDICES, buffer_kind::INDEX, indices.len() as u64, Attr::default());
+    w.buffer_update(INDICES, 0, &indices);
+    let source = uniform_color_shader(3);
+    let none = pipeline_binding::NONE;
+    let desc = PipelineDesc { outputs: 1, color_formats: [format::RGBA8, 0, 0, 0], ..Default::default() };
+    let blob = CmdWriter::pipeline_blob(desc, &source, &[0, 1, 2, none, none, 0], &[16]);
+    w.pipeline_create(PIPELINE, dialect::SPIRV, Attr::default(), &blob);
+    hal.submit(&w.buf());
+    until(&hal, sid, |e| matches!(e, HalEvent::PipelineReady { pipeline } if pipeline == PIPELINE));
+    let finish = |w: &mut CmdWriter, frame: u64, target: Id, expected: &[(Id, [u8; 4], [u8; 4])]| {
+        w.frame_end(target, target::TEXTURE);
+        hal.submit(&w.buf());
+        frame_done(&hal, sid, frame);
+        for &(target, left, right) in expected {
+            w.clear();
+            w.texture_readback(target, frame as u32, [0, 0, 16, 8]);
+            hal.submit(&w.buf());
+            let image = pixels(&hal, sid, frame as u32);
+            assert_eq!(image.len(), 16 * 8 * 4);
+            for (k, pixel) in image.chunks_exact(4).enumerate() {
+                let want = if k % 16 < 8 { left } else { right };
+                assert!(pixel.iter().zip(want).all(|(&a, b)| a.abs_diff(b) <= 1),
+                    "frame {frame}, target {target:?}, pixel ({}, {}) was {pixel:?}, expected {want:?}", k % 16, k / 16);
+            }
+        }
+    };
+    w.clear();
+    w.frame_begin(1, FrameMeta::default());
+    let pass = Pass { viewport: [0.0, 0.0, 16.0, 8.0], dpi: 1.0, load: [pass_load::CLEAR; 5], ..Default::default() };
+    let mono = Pass { color: [MONO, Id::NONE, Id::NONE, Id::NONE], ..pass };
+    let stereo = Pass { color: [STEREO, Id::NONE, Id::NONE, Id::NONE], ..pass };
+    let uniforms = w.put_uniform(&[0.0f32, 0.0, 0.0, 1.0]);
+    w.pass(Pass { uniforms, ..mono });
+    let list = w.put_uniform(&[0.0f32, 0.5]);
+    let draw = Draw { pipeline: PIPELINE, vb: QUAD, ib: INDICES, index: [0, 6], inst: Inst::none(1),
+        scissor: [f32::NAN; 4], ..Default::default() };
+    for (x, red) in [(0.0, 0.25f32), (8.0, 0.75)] {
+        let call = w.put_uniform(&[red, 0.0, 0.0, 0.0]);
+        w.draw(Draw { scissor: [x, 0.0, 8.0, 8.0], uniforms: [call, list, Range::default(), Range::default()], ..draw });
+    }
+
+    let left = [0.0, 0.0, 0.0, 1.0].map(f32::to_ne_bytes);
+    let right = [0.0, 0.0, 1.0, 1.0].map(f32::to_ne_bytes);
+    let (uniforms, uniform_stride) = w.put_pass_views_uniforms(&[left.as_flattened(), right.as_flattened()]);
+    let view_rects = w.put_rects(&[[0.0, 0.0, 8.0, 8.0], [8.0, 0.0, 8.0, 8.0]]);
+    w.pass(Pass { uniforms, uniform_stride, view_rects, ..stereo });
+    let call = w.put_uniform(&[0.25f32, 0.0, 0.0, 0.0]);
+    w.draw(Draw { uniforms: [call, list, Range::default(), Range::default()], ..draw });
+    finish(&mut w, 1, STEREO, &[
+        (MONO, [64, 128, 0, 255], [191, 128, 0, 255]),
+        (STEREO, [64, 128, 0, 255], [64, 128, 255, 255]),
+    ]);
+    let stats = || hal.with_world(|wd| wd.session(sid).unwrap().stats);
+    let first = stats();
+    assert_eq!((first.draws, first.skipped_draws, first.bad_args), (3, 0, 0));
+
+    w.clear();
+    w.frame_begin(2, FrameMeta::default());
+    let uniforms = w.put_uniform(&[0.0f32, 0.0, 0.5, 1.0]);
+    w.pass(Pass { uniforms, ..mono });
+    let list = w.put_uniform(&[0.0f32, 0.5]);
+    let call = w.put_uniform(&[0.75f32, 0.0, 0.0, 0.0]);
+    let left_draw = Draw { scissor: [0.0, 0.0, 8.0, 8.0], ..draw };
+    let right_draw = Draw { scissor: [8.0, 0.0, 8.0, 8.0], ..draw };
+    let empty = Range::default();
+    w.draw(Draw { uniforms: [call, list, empty, empty], ..left_draw });
+    w.draw(Draw { uniforms: [empty; 4], ..right_draw });
+    w.pass(stereo);
+    let call = w.put_uniform(&[0.25f32, 0.0, 0.0, 0.0]);
+    w.draw(Draw { uniforms: [call, empty, empty, empty], ..draw });
+    finish(&mut w, 2, STEREO, &[
+        (MONO, [191, 128, 128, 255], [0, 0, 128, 255]),
+        (STEREO, [64, 0, 0, 0], [64, 0, 0, 0]),
+    ]);
+    let before = stats();
+    assert_eq!((before.bad_args, before.skipped_draws), (0, 0));
+
+    w.clear();
+    w.frame_begin(3, FrameMeta::default());
+    let uniforms = w.put_uniform(&[0.0f32, 0.0, 0.0, 1.0]);
+    w.pass(Pass { uniforms, ..mono });
+    let list = w.put_uniform(&[0.0f32, 0.5]);
+    let call = w.put_uniform(&[0.5f32, 0.0, 0.0, 0.0]);
+    w.draw(Draw { uniforms: [call, list, empty, empty], ..left_draw });
+    for off in [4, 16 * w.uniform_align()] {
+        w.draw(Draw { uniforms: [Range { off, len: 16 }, list, empty, empty], ..right_draw });
+    }
+    finish(&mut w, 3, MONO, &[(MONO, [128, 128, 0, 255], [0, 0, 0, 0])]);
+    let after = stats();
+    assert_eq!(after.bad_args - before.bad_args, 2, "rejected uniform arguments");
+    assert_eq!(after.skipped_draws - before.skipped_draws, 2, "skipped invalid draws");
     assert!(hal.close(sid));
 }
 
@@ -1186,7 +1514,7 @@ fn rgba16f_add_and_raw_writes() {
     w.buffer_update(VERTICES, 0, &vertices);
     w.buffer_create(INDICES, buffer_kind::INDEX, indices.len() as u64, Attr::default());
     w.buffer_update(INDICES, 0, &indices);
-    let source = pass_color_shader();
+    let source = uniform_color_shader(1);
     let none = pipeline_binding::NONE;
     for (id, blend) in [(ADD, pipeline_blend::ADD), (RAW, pipeline_blend::RAW)] {
         let blob = CmdWriter::pipeline_blob(PipelineDesc { outputs: 1, color_formats: [format::RGBA16F, 0, 0, 0], blend, instance_stride: 0, ..Default::default() },
@@ -1212,9 +1540,9 @@ fn rgba16f_add_and_raw_writes() {
         for (i, color) in [[1.5f32, 0.25, 4.0, 1.0], [2.25, 0.5, 0.125, 1.0]].iter().enumerate() {
             let mut pass = pass(TARGET, 2, 2, [0.0; 4]);
             if i != 0 { pass.load[0] = pass_load::LOAD; }
-            pass.uniforms = w.keep(&color[..]);
+            pass.uniforms = w.put_uniform(color);
             w.pass(pass);
-            let inst = Inst::inline(Slice::EMPTY, 1);
+            let inst = Inst::none(1);
             w.draw(Draw { pipeline, vb: VERTICES, ib: INDICES, index: [0, 6], inst, flags,
                 scissor: [f32::NAN; 4], bounds: [f32::NAN; 4], ..Default::default() });
         }

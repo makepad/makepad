@@ -1,4 +1,4 @@
-//! The profiler stream (local/agent_state/relax-campaign/profproto.md): what a running makepad app
+//! The profiler stream: what a running makepad app
 //! sends a viewer over its makepad-remote `prof` service, and the `.mkpf` recording file, which is
 //! byte for byte the stream a viewer received. Our own binary layout: a 16-byte prelude, then
 //! records with a fixed 8-byte little-endian header (kind u16, flags u16, length u32) and a

@@ -302,6 +302,11 @@ impl Stream {
         self.sent_bytes
     }
 
+    /// Payload bytes accepted by `write` that are still waiting for their first transmission.
+    pub fn unsent_bytes(&self) -> usize {
+        self.tx.unsent_bytes()
+    }
+
     pub fn state(&self) -> State {
         self.state
     }
@@ -365,11 +370,16 @@ impl Stream {
         }
     }
 
-    fn advance(&mut self, now: u64) -> bool {
+    /// Polling at this instant would time out the stream. Service pending input first.
+    pub fn idle_due(&self, now: u64) -> bool {
+        now >= self.deadline && !matches!(self.state, State::Closed(_))
+    }
+
+    fn advance(&mut self, now: u64, check_idle: bool) -> bool {
         self.now = now;
         if self.linger_until.is_some_and(|t| now >= t) {
             self.state = State::Closed(CloseReason::Finished);
-        } else if now >= self.deadline && !matches!(self.state, State::Closed(_)) {
+        } else if check_idle && self.idle_due(now) {
             self.state = State::Closed(CloseReason::TimedOut);
         }
         !matches!(self.state, State::Closed(_))
@@ -425,7 +435,9 @@ impl Stream {
             self.unverified_replay.admit(p.number)
         };
         let Some(highest) = highest else { return };
-        if !self.advance(now_ms) {
+        // A verified packet may already have been waiting when the driver woke up.
+        // Only accepted traffic on the current path can renew the deadline below.
+        if (!verified && self.idle_due(now_ms)) || !self.advance(now_ms, false) {
             return;
         }
         if verified {
@@ -476,7 +488,7 @@ impl Stream {
     }
 
     pub fn poll_transmit(&mut self, now_ms: u64) -> Option<(SocketAddr, Vec<u8>)> {
-        if !self.advance(now_ms) {
+        if !self.advance(now_ms, true) {
             return None;
         }
         if self.next_packet > MAX_PN {

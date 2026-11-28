@@ -65,7 +65,7 @@ pub unsafe fn android_on_load(vm: *mut std::ffi::c_void, app: fn()) -> i32 {
             set(activity);
         }
     }
-    makepad_hal::backend::android::standalone::on_load(vm, app, activity_ready)
+    makepad_hal::android::standalone::on_load(vm, app, activity_ready)
 }
 
 /// `app` is the whole of the app's main: it creates its `Cx` itself.
@@ -133,8 +133,8 @@ pub fn should_run_stdin_loop_from_env() -> bool {
     launched_by_host()
 }
 
-/// The host started this process as its child (`--stdin-loop` / `MAKEPAD_STDIN_LOOP`): the
-/// child follows its parent's lifetime and the host serves its tools.
+/// The host started this process as its child (`--stdin-loop` / `MAKEPAD_STDIN_LOOP`).
+/// The child follows its parent's lifetime, serves its own tools, and joins the host's AI bus.
 pub fn launched_by_host() -> bool {
     std::env::args().any(|v| v == "--stdin-loop")
         || std::env::var("MAKEPAD_STDIN_LOOP").is_ok_and(|v| {
@@ -410,6 +410,15 @@ mod tests {
 }
 
 pub trait AppMain {
+    /// An app may answer a command line itself, before any window, log or single-instance
+    /// claim. Return the exit code, or `None` to start the app.
+    fn command_line() -> Option<i32>
+    where
+        Self: Sized,
+    {
+        None
+    }
+
     fn script_mod(_vm: &mut ScriptVm) -> ScriptValue
     where
         Self: Sized,
@@ -834,6 +843,9 @@ macro_rules! app_main {
             let _ = ::core::hint::black_box(&MAKEPAD_FONT_ASSETS_V1);
             $crate::relax_app_main();
             $crate::attach_parent_console();
+            if let Some(code) = <$app as AppMain>::command_line() {
+                ::std::process::exit(code);
+            }
             Cx::init_log();
             // MAKEPAD_NET_AUDIT=1: log every socket from the first instruction on
             $crate::makepad_network::socket_audit::start_if_enabled();

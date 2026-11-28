@@ -134,14 +134,14 @@ pub struct AudioEntry {
 impl AudioEntry {
     /// The entry of an `AudioEntry` command, on the app's thread that submitted it (None: `entry`
     /// 0, the slot is cleared).
-    pub fn from_cmd(entry: u64, ctx: u64) -> Option<AudioEntry> {
+    pub(crate) fn from_cmd(entry: u64, ctx: u64) -> Option<AudioEntry> {
         // SAFETY: a non-zero `entry` is the address of the `extern "C" fn` the app registered
         (entry != 0).then(|| AudioEntry { f: unsafe { std::mem::transmute::<usize, AudioFn>(entry as usize) }, ctx: ctx as usize, scope: crate::call_scope::Scope::here() })
     }
 
     /// Calls the entry with `block` (the device's realtime thread).
     #[inline]
-    pub fn call(&self, block: &mut AudioBlock) {
+    pub(crate) fn call(&self, block: &mut AudioBlock) {
         self.scope.call(|| (self.f)(self.ctx as *mut std::ffi::c_void, block))
     }
 }

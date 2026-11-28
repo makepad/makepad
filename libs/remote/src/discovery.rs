@@ -112,6 +112,18 @@ impl App {
         string(raw.as_bytes(), &mut i)
     }
 
+    /// Main window title as supplied by the application, without the remote marker.
+    pub fn title(&self) -> Option<String> { self.text("title") }
+
+    /// Visible window IDs and their titles, in window order. Older endpoints advertise none.
+    pub fn visible_windows(&self) -> Vec<(usize, String)> {
+        let Some((_, raw)) = self.fields.iter().find(|(key, _)| key == "windows") else { return Vec::new() };
+        let mut windows: Vec<_> = fields(raw).into_iter().filter_map(|(id, title)|
+            Some((id.parse().ok()?, string(title.as_bytes(), &mut 0)?))).collect();
+        windows.sort_by_key(|(id, _)| *id);
+        windows
+    }
+
     /// Whether the endpoint serves `service` (any version).
     pub fn serves(&self, service: &str) -> bool {
         self.caps.iter().any(|c| c.split('/').next() == Some(service))
@@ -273,16 +285,55 @@ pub fn parse(text: &str) -> Option<App> {
 /// Replaces the `caps` of a discovery file (a service registered after the endpoint started
 /// listening): written to a temporary file and renamed, so a reader never sees half a file.
 pub(crate) fn rewrite_caps(file: &std::path::Path, caps: &[String]) {
-    let Ok(text) = std::fs::read_to_string(file) else { return };
-    let Some(at) = text.find("\"caps\":[") else { return };
-    let start = at + "\"caps\":[".len();
-    let Some(len) = text[start..].find(']') else { return };
-    let list: Vec<String> = caps.iter().map(|c| crate::cmd::json_str(c)).collect();
-    let new = format!("{}{}{}", &text[..start], list.join(","), &text[start + len..]);
+    let list = caps.iter().map(|c| crate::cmd::json_str(c)).collect::<Vec<_>>().join(",");
+    let _ = rewrite_fields(file, &[("caps", format!("[{list}]"))]);
+}
+
+fn window_fields(title: Option<&str>, windows: &[(usize, String)]) -> [(&'static str, String); 2] {
+    let windows = windows.iter().map(|(id, title)| format!(r#""{id}":{}"#, crate::cmd::json_str(title)))
+        .collect::<Vec<_>>().join(",");
+    [("title", title.map_or_else(|| "null".into(), crate::cmd::json_str)), ("windows", format!("{{{windows}}}"))]
+}
+
+/// Publish a window snapshot in this process's discovery file. Call off the UI thread.
+pub fn publish_windows(title: Option<&str>, windows: &[(usize, String)]) -> std::io::Result<()> {
+    let file = crate::carrier::unix::paths(std::process::id()).1;
+    rewrite_fields(&file, &window_fields(title, windows))
+}
+
+fn rewrite_fields(file: &Path, updates: &[(&str, String)]) -> std::io::Result<()> {
+    use std::io::Write;
+    // In a hosted run, the endpoint and the application may hold different copies of this
+    // library. Serialize their read-modify-renames so a late registration preserves the windows.
+    #[cfg(unix)]
+    let dir = crate::carrier::unix::own_socket_dir()?;
+    #[cfg(not(unix))]
+    let dir = crate::carrier::unix::socket_dir();
+    let lock = std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true)
+        .open(dir.join(".discovery-write.lock"))?;
+    lock.lock()?;
+    let mut entries = fields(&std::fs::read_to_string(file)?);
+    entries.retain(|(name, _)| !updates.iter().any(|(key, _)| name == key));
+    entries.extend(updates.iter().map(|(key, value)| (key.to_string(), value.clone())));
+    let body = entries.iter().map(|(key, value)| format!("{}:{value}", crate::cmd::json_str(key)))
+        .collect::<Vec<_>>().join(",");
     let tmp = file.with_extension("json.new");
-    if std::fs::write(&tmp, new).is_ok() {
-        let _ = std::fs::rename(&tmp, file);
+    let mut options = std::fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    { use std::os::unix::fs::OpenOptionsExt; options.mode(0o600); }
+    // A previous writer can have exited before its rename.
+    match std::fs::remove_file(&tmp) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
     }
+    let mut out = options.open(&tmp)?;
+    let result = writeln!(out, "{{{body}}}");
+    drop(out);
+    let result = result.and_then(|()| std::fs::rename(&tmp, file));
+    if result.is_err() { let _ = std::fs::remove_file(tmp); }
+    result
 }
 
 /// Where every process of this user registers its endpoint: one directory whatever the
@@ -459,7 +510,8 @@ pub fn publish(path: &std::path::Path) -> std::io::Result<()> {
 
 /// The line [`publish`] writes for `app`.
 fn published_line(app: &App) -> String {
-    format!("{{\"pid\":{},\"app\":{},\"started_ms\":{}}}\n", app.pid, crate::cmd::json_str(&app.app), app.started_ms)
+    let [(_, title), (_, windows)] = window_fields(app.title().as_deref(), &app.visible_windows());
+    format!("{{\"pid\":{},\"app\":{},\"started_ms\":{},\"title\":{title},\"windows\":{windows}}}\n", app.pid, crate::cmd::json_str(&app.app), app.started_ms)
 }
 
 /// The running endpoint an endpoint file names: the same pid and the same start time.
@@ -579,9 +631,19 @@ mod rewrite_tests {
     fn caps_follow_a_later_registration() {
         let file = std::env::temp_dir().join(format!("makepad-remote-caps-test-{}.json", std::process::id()));
         std::fs::write(&file, "{\"pid\":1,\"app\":\"x\",\"socket\":\"/s\",\"started_ms\":2,\"caps\":[\"cmd/1\"],\"extra\":3}\n").unwrap();
+        let read = || super::parse(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert!(read().title().is_none() && read().visible_windows().is_empty(), "an older entry has no advertised windows");
+        let windows = vec![(2, "Board ]".into()), (7, "Editor · \"notes\"".into())];
+        super::rewrite_fields(&file, &super::window_fields(Some("Board ]"), &windows)).unwrap();
         super::rewrite_caps(&file, &["cmd/1".into(), "app/1".into()]);
         let app = super::parse(&std::fs::read_to_string(&file).unwrap()).unwrap();
         assert!(app.serves("app") && app.serves("cmd"));
+        for app in [read(), super::parse(&super::published_line(&app)).unwrap()] {
+            assert_eq!(app.title().as_deref(), Some("Board ]"));
+            assert_eq!(app.visible_windows(), windows);
+        }
+        super::rewrite_fields(&file, &super::window_fields(None, &[])).unwrap();
+        assert!(read().visible_windows().is_empty() && read().serves("app"));
         assert_eq!(app.text("app").as_deref(), Some("x"));
         std::fs::remove_file(&file).unwrap();
     }

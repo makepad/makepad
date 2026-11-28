@@ -69,7 +69,7 @@ impl VkSurfaceSource for AndroidSurfaces {
         };
         let handle = instance.create_android_surface(&vk::AndroidSurfaceCreateInfoKHR::default().window(lease.0 as _), None)
             .map_err(|e| format!("vkCreateAndroidSurfaceKHR: {e:?}"))?;
-        Ok(NativeSurface { handle, keep: Arc::new(lease) })
+        Ok(NativeSurface { handle, _keep: Arc::new(lease) })
     }
 }
 
@@ -86,7 +86,7 @@ impl egl::EglSurfaceSource for AndroidEglSurfaces {
         if sid != crate::session::HOST || r.host != Some(id) { return egl::SurfaceState::Lost; }
         match (&r.window, r.state.status()) {
             (Some(window), state::SurfaceStatus::Native { generation, size }) =>
-                egl::SurfaceState::Native(egl::NativeSurface { generation, window: window.0, size, keep: Arc::new(window.clone()) }),
+                egl::SurfaceState::Native(egl::NativeSurface { generation, window: window.0, size, _keep: Arc::new(window.clone()) }),
             _ => egl::SurfaceState::Lost,
         }
     }

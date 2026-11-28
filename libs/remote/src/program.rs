@@ -1,4 +1,4 @@
-//! Services a program registers on its process's endpoint through a C ABI: the same three
+//! Services a program registers on its process's endpoint through a C ABI: the same
 //! functions whether the endpoint is the process's own (a native app, makepad-platform) or the
 //! Relax host's (a program under `makepad run`). One channel = one producer: `open` gets the OPEN
 //! arguments and a sink, answers through the sink and ends the channel with its last sink call;
@@ -18,6 +18,9 @@ pub type ServiceSink = extern "C" fn(ctx: *mut std::ffi::c_void, kind: u32, ptr:
 pub type ServiceOpen = extern "C" fn(args: *const u8, len: usize, sink: ServiceSink, ctx: *mut std::ffi::c_void) -> usize;
 /// The client closed the channel: the producer for `handle` stops.
 pub type ServiceClose = extern "C" fn(handle: usize);
+/// Offers one inbound DATA message to the producer for `handle`. True takes it. On false the
+/// same bytes are offered again about 1 ms later. Return true for a handle no longer known.
+pub type ServiceData = extern "C" fn(handle: usize, ptr: *const u8, len: usize) -> bool;
 
 struct ProgramChannel {
     tx: ChannelTx,
@@ -42,7 +45,7 @@ extern "C" fn sink(ctx: *mut std::ffi::c_void, kind: u32, ptr: *const u8, len: u
 
 impl Endpoint {
     /// Serves `name` with a program's producer functions.
-    pub fn register_program(&self, name: &str, version: u32, open: ServiceOpen, close: ServiceClose) {
+    pub fn register_program(&self, name: &str, version: u32, open: ServiceOpen, close: ServiceClose, data: Option<ServiceData>) {
         self.register(
             name,
             version,
@@ -57,16 +60,28 @@ impl Endpoint {
                 }
                 let ch = opened.channel;
                 let hooks = conn.hooks();
-                let _ = std::thread::Builder::new().name("makepad-remote-service".into()).spawn(move || {
+                let worker = std::thread::Builder::new().name("makepad-remote-service".into()).spawn(move || {
                     (hooks.enter)();
                     while let Some(ev) = ch.recv() {
-                        if matches!(ev, crate::Event::Closed(..)) {
-                            break;
+                        match ev {
+                            crate::Event::Data(bytes) => {
+                                if let Some(data) = data {
+                                    while !data(handle, bytes.as_ptr(), bytes.len()) {
+                                        std::thread::sleep(std::time::Duration::from_millis(1));
+                                    }
+                                }
+                            }
+                            crate::Event::Closed(..) => break,
+                            crate::Event::Opened(_) => {}
                         }
                     }
                     close(handle);
                     (hooks.exit)();
                 });
+                if let Err(error) = worker {
+                    close(handle);
+                    return Err((CLOSE_REFUSED, error.to_string()));
+                }
                 Ok(())
             }),
         );

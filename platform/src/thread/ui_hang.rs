@@ -1,5 +1,6 @@
 //! Always-on UI stall sampling. The UI publishes atomics; only the watchdog
 //! unwinds/symbolizes/logs. No timer, repaint, lock, or worker wait on the UI.
+use crate::ui_progress::{UiProgressState, GLOBAL_UI_PROGRESS};
 use std::{marker::PhantomData, rc::Rc};
 #[path = "ui_hash.rs"]
 pub mod hashing;
@@ -34,9 +35,10 @@ pub enum UiPhase {
     Tasks,
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-fn phase_name(id: u32) -> &'static str {
+pub(crate) fn phase_name(id: u32) -> &'static str {
     match id {
+        0 => "none",
+        1 => "unknown",
         256 => "native-event",
         257 => "draw-list",
         258 => "widget-draw",
@@ -60,7 +62,7 @@ fn phase_name(id: u32) -> &'static str {
         276 => "signals",
         277 => "platform-ops",
         278 => "tasks",
-        id => crate::event::Event::name_from_u32(id.saturating_sub(1)),
+        id => crate::event::Event::name_from_u32(id - 1),
     }
 }
 
@@ -101,6 +103,7 @@ pub fn stall_sampled() -> bool {
 /// event/frame; the event loop's idle wait must remain outside that scope.
 #[must_use]
 pub struct UiPhaseGuard {
+    previous_progress_phase: Option<(&'static UiProgressState, u32)>,
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     state: *const State,
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -193,25 +196,42 @@ pub(crate) mod relax_timeline {
 }
 
 #[inline]
+fn phase_code(phase: UiPhase, detail: u32) -> u64 {
+    phase as u64 | ((detail as u64) << 32)
+}
+
+#[inline]
+fn event_phase_code(event: &crate::event::Event) -> u64 {
+    event.to_u32() as u64 + 1
+}
+
+#[inline]
 pub fn ui_phase(phase: UiPhase) -> UiPhaseGuard {
     ui_phase_detail(phase, 0)
 }
 
 #[inline]
 pub fn ui_phase_detail(phase: UiPhase, detail: u32) -> UiPhaseGuard {
-    enter(phase as u64 | ((detail as u64) << 32))
+    enter(phase_code(phase, detail), &GLOBAL_UI_PROGRESS)
 }
 
 #[inline]
 pub fn ui_event_phase(event: &crate::event::Event) -> UiPhaseGuard {
-    enter(event.to_u32() as u64 + 1)
+    enter(event_phase_code(event), &GLOBAL_UI_PROGRESS)
+}
+
+#[inline]
+fn mirror_phase(phase: u64, progress: &'static UiProgressState) -> Option<(&'static UiProgressState, u32)> {
+    makepad_core_util::ui_thread::is_ui_thread()
+        .then(|| (progress, progress.swap_phase(phase as u32)))
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 #[inline]
-fn enter(phase: u64) -> UiPhaseGuard {
+fn enter(phase: u64, progress: &'static UiProgressState) -> UiPhaseGuard {
     let state = CURRENT.with(Cell::get);
     let mut guard = UiPhaseGuard {
+        previous_progress_phase: mirror_phase(phase, progress),
         state,
         previous: 0,
         root: false,
@@ -247,13 +267,16 @@ fn enter(phase: u64) -> UiPhaseGuard {
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 #[inline]
-fn enter(_: u64) -> UiPhaseGuard {
-    UiPhaseGuard { _thread: PhantomData }
+fn enter(phase: u64, progress: &'static UiProgressState) -> UiPhaseGuard {
+    UiPhaseGuard { previous_progress_phase: mirror_phase(phase, progress), _thread: PhantomData }
 }
 
 impl Drop for UiPhaseGuard {
     #[inline]
     fn drop(&mut self) {
+        if let Some((progress, previous)) = self.previous_progress_phase {
+            progress.swap_phase(previous);
+        }
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         if self.traced != 0 {
             if let Some(h) = relax_timeline::hooks() {
@@ -272,5 +295,47 @@ impl Drop for UiPhaseGuard {
             }
             state.phase.store(self.previous, std::sync::atomic::Ordering::Relaxed);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::event::Event;
+
+    #[test]
+    fn ui_loop_writes_nested_phases_without_watchdog_registration() {
+        static PROGRESS: UiProgressState = UiProgressState::new();
+        let run = || {
+            let phase = || PROGRESS.snapshot().phase;
+            assert_eq!(phase(), 0);
+            // Only mark the UI thread. The mirror also runs with the watchdog disabled.
+            makepad_core_util::ui_thread::mark_ui_thread();
+            {
+                let _outer = enter(phase_code(UiPhase::FrameBuild, 7), &PROGRESS);
+                assert_eq!(phase(), UiPhase::FrameBuild as u32);
+                {
+                    let event = Event::Startup;
+                    let _inner = enter(event_phase_code(&event), &PROGRESS);
+                    let expected = event.to_u32() + 1;
+                    assert_eq!(phase(), expected);
+                    #[cfg(not(target_arch = "wasm32"))]
+                    std::thread::spawn(move || {
+                        {
+                            let _worker = enter(phase_code(UiPhase::Tasks, 0), &PROGRESS);
+                            assert_eq!(PROGRESS.snapshot().phase, expected);
+                        }
+                        assert_eq!(PROGRESS.snapshot().phase, expected);
+                    }).join().unwrap();
+                    assert_eq!(phase(), expected);
+                }
+                assert_eq!(phase(), UiPhase::FrameBuild as u32);
+            }
+            assert_eq!(phase(), 0);
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        std::thread::spawn(run).join().unwrap();
+        #[cfg(target_arch = "wasm32")]
+        run();
     }
 }

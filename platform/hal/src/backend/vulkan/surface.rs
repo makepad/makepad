@@ -107,7 +107,8 @@ pub trait FramePresenter: Send + Sync {
 
 pub struct NativeSurface {
     pub handle: vk::SurfaceKHR,
-    pub keep: Arc<dyn std::any::Any + Send + Sync>,
+    /// Keeps the native window alive through Vulkan surface destruction.
+    pub _keep: Arc<dyn std::any::Any + Send + Sync>,
 }
 
 /// GPU-real windows backed by render targets, with no display-server or Activity dependency.

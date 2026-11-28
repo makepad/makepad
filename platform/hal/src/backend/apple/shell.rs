@@ -162,7 +162,9 @@ use crate::buffers::EventQueue;
 use crate::types::Id;
 use makepad_apple_sys::*;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+#[cfg(any(target_os = "ios", target_os = "tvos"))]
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
@@ -184,7 +186,11 @@ pub enum Op {
     /// taken from the shell when it sent the command (see [`Shared::push`]): a command that
     /// answers an older state of the OS object than the shell knows of is stale (the text
     /// field's state while newer typing is still on its way to the app).
+    #[cfg(any(target_os = "ios", target_os = "tvos"))]
     Cmd(u32, OsCmd, u64),
+    /// A validated command of a session. AppKit has no stale-command check.
+    #[cfg(target_os = "macos")]
+    Cmd(u32, OsCmd),
     /// The session is gone: its windows close without telling anyone.
     CloseSession(u32),
     /// Change the borrower of a host window; its physical identity and layer stay fixed.
@@ -208,8 +214,10 @@ pub struct Shared {
     /// events by session, written by the main thread, drained by `Hal::pump`
     pub(super) inbox: Mutex<HashMap<u32, EventQueue>>,
     /// events pushed so far (the number of the newest one), under the inbox lock
+    #[cfg(any(target_os = "ios", target_os = "tvos"))]
     pub(super) pushed: AtomicU64,
     /// per session: the number of the newest event its pump has taken, under the inbox lock
+    #[cfg(any(target_os = "ios", target_os = "tvos"))]
     pub(super) taken: Mutex<HashMap<u32, u64>>,
     pub(super) ops: Mutex<Vec<Op>>,
     /// a main-queue drain is pending
@@ -239,7 +247,9 @@ impl Shared {
     fn new() -> Shared {
         Shared {
             inbox: Mutex::new(HashMap::new()),
+            #[cfg(any(target_os = "ios", target_os = "tvos"))]
             pushed: AtomicU64::new(0),
+            #[cfg(any(target_os = "ios", target_os = "tvos"))]
             taken: Mutex::new(HashMap::new()),
             ops: Mutex::new(Vec::new()),
             scheduled: AtomicBool::new(false),
@@ -307,13 +317,19 @@ impl Shared {
 
     /// Hands a command to the main thread.
     pub fn command(&self, sid: u32, cmd: OsCmd) {
-        let taken = lock(&self.taken).get(&sid).copied().unwrap_or(0);
-        self.post(Op::Cmd(sid, cmd, taken));
+        #[cfg(any(target_os = "ios", target_os = "tvos"))]
+        {
+            let taken = lock(&self.taken).get(&sid).copied().unwrap_or(0);
+            self.post(Op::Cmd(sid, cmd, taken));
+        }
+        #[cfg(target_os = "macos")]
+        self.post(Op::Cmd(sid, cmd));
     }
 
     /// The session's windows close (silently) and its events are dropped.
     pub fn session_closed(&self, sid: u32) {
         lock(&self.inbox).remove(&sid);
+        #[cfg(any(target_os = "ios", target_os = "tvos"))]
         lock(&self.taken).remove(&sid);
         lock(&self.layers).retain(|k, _| k.0 != sid);
         self.post(Op::CloseSession(sid));
@@ -369,17 +385,21 @@ impl Shared {
     /// Moves what the main thread queued for the session into its event queue.
     pub fn drain_events(&self, sid: u32, world: &mut crate::session::World) {
         let mut inbox = lock(&self.inbox);
+        #[cfg(any(target_os = "ios", target_os = "tvos"))]
         let pushed = self.pushed.load(Ordering::Acquire);
+        #[cfg(any(target_os = "ios", target_os = "tvos"))]
         let mut taken = lock(&self.taken);
         if sid == crate::session::HOST {
             // The owner keeps pumping when a borrower is parked before its first
             // frame. Its visible run-state view must still receive native input.
             for (&recipient, q) in inbox.iter_mut() {
                 q.drain_with(|event, payload| world.window_event(recipient, event, payload));
+                #[cfg(any(target_os = "ios", target_os = "tvos"))]
                 taken.insert(recipient, pushed);
             }
         } else if let Some(q) = inbox.get_mut(&sid) {
             q.drain_with(|event, payload| world.window_event(sid, event, payload));
+            #[cfg(any(target_os = "ios", target_os = "tvos"))]
             taken.insert(sid, pushed);
         }
     }
@@ -398,15 +418,18 @@ impl Shared {
         std::mem::take(&mut *lock(&self.ops))
     }
 
-    /// An event for the session's pumping thread (from the main thread). Returns the event's
-    /// number (see [`Op::Cmd`]).
+    /// An event for the session's pumping thread (from the main thread). Returns the event
+    /// number for UIKit's stale-command check (see [`Op::Cmd`]), or zero on macOS.
     pub(super) fn push(&self, sid: u32, f: impl FnOnce(&mut EventQueue)) -> u64 {
         let number = {
             let mut inbox = lock(&self.inbox);
             let q = inbox.entry(sid).or_default();
             q.set_time(crate::clock_ns());
             f(q);
-            self.pushed.fetch_add(1, Ordering::AcqRel) + 1
+            #[cfg(any(target_os = "ios", target_os = "tvos"))]
+            { self.pushed.fetch_add(1, Ordering::AcqRel) + 1 }
+            #[cfg(target_os = "macos")]
+            { 0 }
         };
         let wake = lock(&self.wake).clone();
         if let Some(wake) = wake {

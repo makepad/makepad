@@ -43,6 +43,11 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
         "the shell backend, WM connection and windows, without asking the shell thread",
     ),
     (
+        "hal stats",
+        "",
+        "each session's frame counters so far: frames, passes, draws, instance rows, binds, set writes, upload / uniform bytes, commands, buffer updates / parts, arenas taken, copy commands / regions, upload barriers, submissions, driver uploads, build / walk / exec / upload ns, GPU frames and ns",
+    ),
+    (
         "hal lose",
         "",
         "the GPU device is taken for lost, as a driver reset would: every session hears DeviceLost, then DeviceReset on a new device (refused by a backend that cannot replace one)",
@@ -137,6 +142,7 @@ fn lose(out: &mut Out) {
 }
 
 /// True when this is a GPU or HAL command. The endpoint thread reads the native ledger directly.
+#[relax_api::relax_api(loader = "the loader serves the GPU and HAL inspect commands in its host: JIT code answers its UI commands only")]
 pub fn dispatch(req: &Req, out: &mut Out) -> bool {
     if crate::framecap::dispatch(req, out) {
         return true;
@@ -152,8 +158,9 @@ pub fn dispatch(req: &Req, out: &mut Out) -> bool {
             Some("pump") => pump(out),
             Some("pace") => pace(out),
             Some("shell") => out.line(&crate::backend::shell::line()),
+            Some("stats") => stats(out),
             Some("lose") => lose(out),
-            _ => out.err("hal pump|pace|shell|lose"),
+            _ => out.err("hal pump|pace|shell|stats|lose"),
         }
         return true;
     }
@@ -335,6 +342,24 @@ fn pace(out: &mut Out) {
         }
     }
     out.line("{\"pace\":\"no WM-hosted window in this process\"}");
+}
+
+fn stats(out: &mut Out) {
+    let counts = crate::Hal::global().with_world(|w| {
+        w.session_ids().into_iter().filter_map(|id| w.session(id).map(|s| (id, s.stats))).collect::<Vec<_>>()
+    });
+    for (id, s) in counts {
+        out.line(&format!(
+            "{{\"session\":{},\"frames\":{},\"passes\":{},\"draws\":{},\"instance_rows\":{},\"skipped_draws\":{},\
+             \"binds\":{},\"set_writes\":{},\"upload_bytes\":{},\"uniform_bytes\":{},\"commands\":{},\"buffer_updates\":{},\"buffer_parts\":{},\
+             \"arenas_taken\":{},\"copy_cmds\":{},\"copy_regions\":{},\"upload_barriers\":{},\"submissions\":{},\"driver_uploads\":{},\
+             \"build_ns\":{},\"walk_ns\":{},\"exec_ns\":{},\"upload_ns\":{},\"buffer_creates\":{},\"staged_bytes\":{},\"arena_creates\":{},\"gpu_frames\":{},\"gpu_ns_total\":{}}}",
+            id, s.frames, s.passes, s.draws, s.instance_rows, s.skipped_draws,
+            s.binds, s.set_writes, s.upload_bytes, s.uniform_bytes, s.commands, s.buffer_updates, s.buffer_parts,
+            s.arenas_taken, s.copy_cmds, s.copy_regions, s.upload_barriers, s.submissions, s.driver_uploads,
+            s.build_ns, s.walk_ns, s.exec_ns, s.upload_ns, s.buffer_creates, s.staged_bytes, s.arena_creates, s.gpu_frames, s.gpu_ns_total,
+        ));
+    }
 }
 
 fn pump(out: &mut Out) {

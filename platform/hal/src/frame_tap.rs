@@ -67,6 +67,7 @@ pub struct TapFrame {
 
 /// A subscription: its frames arrive on `frames` (one waits at most; a consumer that is behind
 /// misses frames, the tap never waits for it). Dropping it unsubscribes.
+#[relax_api::relax_api(handle)]
 pub struct Tap {
     sub: Arc<Sub>,
     pub frames: Receiver<TapFrame>,
@@ -134,11 +135,13 @@ struct Sub {
 /// How many taps there are: the core's hook looks at nothing else while there are none.
 static TAPS: AtomicUsize = AtomicUsize::new(0);
 static SUBS: Mutex<Vec<Arc<Sub>>> = Mutex::new(Vec::new());
+#[relax_api::relax_api]
 static NEXT_LOG: AtomicU64 = AtomicU64::new(0);
 
 /// Taps `window` of `session` (the session and window the core presents it as: the host window
 /// is `(session::HOST, its id)`): its frames' `region` scaled to `size` (even, at least 2x2),
 /// at most `fps` a second. Frames start with the window's next frame.
+#[relax_api::relax_api(loader = "the loader's frame taps (the desk host's stream): JIT code has no use for it")]
 pub fn subscribe(session: u32, window: Id, region: Region, size: [u32; 2], fps: u32) -> Result<Tap, String> {
     if size[0] < 2 || size[1] < 2 || size[0] % 2 != 0 || size[1] % 2 != 0 {
         return Err(format!("tap size {}x{} must be even and at least 2x2", size[0], size[1]));

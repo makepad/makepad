@@ -138,12 +138,15 @@ unsafe fn set_data_rate_limit(session: VTCompressionSessionRef, kbps: u32, fps: 
     }
 }
 
-unsafe fn set_i32_property(session: VTCompressionSessionRef, key: CFStringRef, value: i32) {
+/// The session's answer (0: taken).
+unsafe fn set_i32_property(session: VTCompressionSessionRef, key: CFStringRef, value: i32) -> OSStatus {
     let num = CFNumberCreate(std::ptr::null(), kCFNumberSInt32Type, &value as *const i32 as *const c_void);
-    if !num.is_null() {
-        VTSessionSetProperty(session as *mut c_void, key, num as *const c_void);
-        CFRelease(num as *const c_void);
+    if num.is_null() {
+        return -1;
     }
+    let status = VTSessionSetProperty(session as *mut c_void, key, num as *const c_void);
+    CFRelease(num as *const c_void);
+    status
 }
 
 pub struct AppleStreamEncoder {
@@ -158,6 +161,8 @@ pub struct AppleStreamEncoder {
     fps: u32,
     /// The fastest encode (see `new`): its burst limit follows the rate.
     fast: bool,
+    /// The QP ceiling asked for and the session's answer to it (0: taken), for the description.
+    max_qp: Option<(u32, OSStatus)>,
     /// Packed NV12 surfaces into the encoder's NV12 buffers (made on the first one).
     intake: Option<TextureIntake>,
     timings: EncodeTimings,
@@ -263,6 +268,7 @@ impl AppleStreamEncoder {
             bitrate_kbps: options.bitrate_kbps,
             fps: options.fps,
             fast,
+            max_qp: None,
             intake: None,
             timings: EncodeTimings::default(),
         })
@@ -442,12 +448,24 @@ impl StreamEncoderOs for AppleStreamEncoder {
         }
     }
 
+    fn set_max_qp(&mut self, qp: u32) {
+        // 0: the encoder's own range, which tops out at 51 for both codecs
+        let qp = if qp == 0 { 51 } else { qp.min(51) };
+        let status = unsafe { set_i32_property(self.session, kVTCompressionPropertyKey_MaxAllowedFrameQP, qp as i32) };
+        self.max_qp = Some((qp, status));
+    }
+
     fn timings(&self) -> EncodeTimings {
         self.timings
     }
 
     fn description(&self) -> String {
-        format!("{} {}{}x{} {} fps {} kbit/s (VideoToolbox)", if self.hevc { "H.265" } else { "H.264" }, if self.fast { "fast " } else { "" }, self.width, self.height, self.fps, self.bitrate_kbps)
+        let max_qp = match self.max_qp {
+            Some((qp, 0)) => format!(", max QP {qp}"),
+            Some((qp, status)) => format!(", max QP {qp} refused ({status})"),
+            None => String::new(),
+        };
+        format!("{} {}{}x{} {} fps {} kbit/s{max_qp} (VideoToolbox)", if self.hevc { "H.265" } else { "H.264" }, if self.fast { "fast " } else { "" }, self.width, self.height, self.fps, self.bitrate_kbps)
     }
 }
 

@@ -5,7 +5,7 @@
 //! stream's own size wins), and a picture comes back with the presentation time its access
 //! unit went in with.
 
-use crate::stream_decoder::{DecodedFrame, DecodedPicture, StreamVideoCodec};
+use crate::stream_decoder::{DecodedFrame, DecodedPicture, PictureBuffers, StreamVideoCodec};
 use crate::{VideoColor, VideoFileError};
 use makepad_hal::stream_decode as hal;
 
@@ -22,6 +22,7 @@ const PICTURE_WAIT_US: u32 = 30_000;
 pub(crate) struct HalStreamDecoder {
     id: u64,
     out: Vec<u8>,
+    buffers: PictureBuffers,
 }
 
 impl HalStreamDecoder {
@@ -36,7 +37,7 @@ impl HalStreamDecoder {
         if id == 0 {
             return Err(last_error());
         }
-        Ok(Self { id, out: Vec::new() })
+        Ok(Self { id, out: Vec::new(), buffers: PictureBuffers::default() })
     }
 
     pub fn name(&self) -> String {
@@ -46,19 +47,18 @@ impl HalStreamDecoder {
         String::from_utf8_lossy(&buf).into_owned()
     }
 
-    pub fn push_packet(&mut self, annex_b: &[u8], pts_100ns: i64) -> Result<Vec<DecodedFrame>, VideoFileError> {
+    pub fn push_packet_into(&mut self, annex_b: &[u8], pts_100ns: i64, frames: &mut Vec<DecodedFrame>) -> Result<(), VideoFileError> {
         if hal::hal_stream_decoder_push(self.id, annex_b, pts_100ns / 10, PICTURE_WAIT_US) < 0 {
             return Err(last_error());
         }
-        self.take()
+        self.take(frames)
     }
 
-    fn take(&mut self) -> Result<Vec<DecodedFrame>, VideoFileError> {
-        let mut frames = Vec::new();
+    fn take(&mut self, frames: &mut Vec<DecodedFrame>) -> Result<(), VideoFileError> {
         loop {
             let n = hal::hal_stream_decoder_read(self.id, &mut self.out) as usize;
             if n == 0 {
-                return Ok(frames);
+                return Ok(());
             }
             if n > self.out.len() {
                 self.out.resize(n, 0);
@@ -70,13 +70,37 @@ impl HalStreamDecoder {
             let pts_us = i64::from_le_bytes(b[8..16].try_into().unwrap());
             let ticket = u64::from_le_bytes(b[16..24].try_into().unwrap());
             let gpu = (ticket != 0).then(|| DecodedPicture { handle: ticket, full_chroma: false, _keep: std::sync::Arc::new(Held(ticket)) });
-            let nv12 = if ticket != 0 { Vec::new() } else { b[24..n].to_vec() };
+            let nv12 = if ticket != 0 { Vec::new() } else {
+                let mut nv12 = self.buffers.take();
+                nv12.clear();
+                nv12.extend_from_slice(&b[24..n]);
+                nv12
+            };
             frames.push(DecodedFrame { width, height, nv12, pts_100ns: pts_us * 10, gpu, color: VideoColor::BT709 });
         }
     }
 
-    pub fn flush(&mut self) -> Result<Vec<DecodedFrame>, VideoFileError> {
-        self.take()
+    pub fn ready_into(&mut self, out: &mut Vec<DecodedFrame>) -> Result<(), VideoFileError> {
+        let n = hal::hal_stream_decoder_poll(self.id);
+        if n < 0 {
+            return Err(last_error());
+        }
+        if n == 0 {
+            return Ok(());
+        }
+        self.take(out)
+    }
+
+    pub fn flush_into(&mut self, frames: &mut Vec<DecodedFrame>) -> Result<(), VideoFileError> {
+        self.ready_into(frames)
+    }
+
+    pub fn recycle(&mut self, nv12: Vec<u8>) {
+        self.buffers.recycle(nv12);
+    }
+
+    pub fn allocated_buffers(&self) -> u64 {
+        self.buffers.allocated
     }
 }
 

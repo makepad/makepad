@@ -1,15 +1,14 @@
 //! Programs from the GLSL dialect payload: loaded from the program cache, or compiled and
 //! linked on the render thread (finished by the driver's threads where KHR_parallel_shader_compile
 //! exists, by the compile worker after the first frame on Android where it doesn't, `worker.rs`),
-//! then the fixed bindings: uniform block i at binding i, texture i on unit i, the pick
-//! twin of texture i on unit textures + i, the instance words after them; attribute pointers per
-//! draw on one VAO.
+//! then uniform blocks in payload order and dense texture units for active uniforms.
 
 use super::cache::Key;
-use super::render::Renderer;
+use super::render::{slot_for_insert, Caps, Renderer};
 use super::sys::{self, GLenum, GLint, GLuint};
-use super::{Linked, PipeState};
-use crate::glsl::GlslPipeline;
+use super::{GlKey, Linked, PipeState};
+use crate::glsl::{GlslPipeline, Texture};
+use std::collections::HashSet;
 use crate::types::{format, pipeline_blend};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -35,20 +34,29 @@ pub(super) struct Attr {
     pub offset: u32,
 }
 
+pub(super) struct TexBinding {
+    pub unit: u32,
+    pub slot: usize,
+    pub target: GLenum,
+    pub shape: u32,
+    pub sampler: GLuint,
+    pub nearest: GLuint,
+    pub compare: bool,
+}
+
+pub(super) struct PickBinding {
+    pub unit: u32,
+    pub twin_index: usize,
+}
+
 pub(super) struct GlProgram {
     pub name: GLuint,
     pub vao: GLuint,
     pub geometry: Vec<Attr>,
     pub instance: Vec<Attr>,
     pub vertex_stride: i32,
-    /// per texture: its sampler object and the GL target its shape samples
-    pub samplers: Vec<GLuint>,
-    pub targets: Vec<GLenum>,
-    pub shapes: Vec<u32>,
-    /// per texture: whether its sampler compares depth, and the renderer's nearest sampler of
-    /// the same wrap and compare mode, for a format the driver can't filter
-    pub compare: Vec<bool>,
-    pub nearest: Vec<GLuint>,
+    pub bindings: Vec<TexBinding>,
+    pub pick_bindings: Vec<PickBinding>,
     pub pick: GLint,
     pub inst_base: GLint,
     /// the unit of the instance words (programs that fetch instances by id)
@@ -124,6 +132,29 @@ pub(super) fn link_error(gl: &sys::Gl, program: GLuint, shaders: [GLuint; 2]) ->
     format!("GLES link failed: {log}")
 }
 
+fn unit_limit_error<'a>(
+    name: &str, caps: &Caps, textures: impl Iterator<Item = &'a Texture>,
+    twins: usize, instance: bool, static_counts: bool,
+) -> Option<String> {
+    let mut slots = HashSet::new();
+    let mut pairs = 0;
+    let mut vertex = usize::from(instance);
+    let mut fragment = twins;
+    for t in textures {
+        slots.insert(t.slot);
+        pairs += 1;
+        vertex += usize::from(t.stages & 1 != 0);
+        fragment += usize::from(t.stages & 2 != 0);
+    }
+    let combined = pairs + twins + usize::from(instance);
+    if vertex <= caps.max_vertex_texture_units as usize && fragment <= caps.max_fragment_texture_units as usize
+        && combined <= caps.max_combined_texture_units as usize { return None; }
+    let qualifier = if static_counts { "up to " } else { "" };
+    Some(format!("shader `{name}` texture unit limit exceeded: need vertex={vertex} (max {}), fragment={fragment} (max {}), combined={combined} (max {}) [logical_textures={}, extra_sampler_pairs={}, pick_twins={qualifier}{twins}, inst_data={}]",
+        caps.max_vertex_texture_units, caps.max_fragment_texture_units, caps.max_combined_texture_units,
+        slots.len(), pairs - slots.len(), usize::from(instance)))
+}
+
 impl Renderer {
     pub fn compile(&mut self, state: &Arc<PipeState>) {
         if state.desc.blend & (pipeline_blend::ADD | pipeline_blend::RAW) == pipeline_blend::ADD {
@@ -161,6 +192,18 @@ impl Renderer {
     }
 
     pub(super) fn linked(&self, state: &PipeState, result: Result<Linked, String>) {
+        // Worker links and render-thread links both report here.
+        let result = result.map_err(|mut log| {
+            if log.starts_with("GLES link failed:") {
+                let code = &state.code;
+                if let Some(reason) = unit_limit_error(&state.name, &self.caps, code.textures.iter(),
+                    code.pick_twins.len(), code.instance_texture, true) {
+                    log.push('\n');
+                    log.push_str(&reason);
+                }
+            }
+            log
+        });
         let _ = state.linked.set(result);
         state.epoch.fetch_add(1, Ordering::Release);
         (self.mailbox.wake)();
@@ -178,7 +221,7 @@ impl Renderer {
             let Some(state) = state.upgrade() else {
                 let gl = &self.ctx.gl;
                 unsafe {
-                    for s in linking.shaders { (gl.glDeleteShader)(s) }
+                    for s in linking.shaders.into_iter().filter(|s| *s != 0) { (gl.glDeleteShader)(s) }
                     (gl.glDeleteProgram)(program);
                 }
                 continue;
@@ -197,14 +240,28 @@ impl Renderer {
         if ok == 0 {
             let log = link_error(gl, program, linking.shaders);
             unsafe {
-                for s in linking.shaders { (gl.glDeleteShader)(s) }
+                for s in linking.shaders.into_iter().filter(|s| *s != 0) { (gl.glDeleteShader)(s) }
                 (gl.glDeleteProgram)(program);
             }
             return Err(log);
         }
-        unsafe { for s in linking.shaders { (gl.glDeleteShader)(s) } }
-        if let Some(key) = linking.key { self.cache.store(gl, key, program); }
+        unsafe { for s in linking.shaders.into_iter().filter(|s| *s != 0) { (gl.glDeleteShader)(s) } }
         let uniform = |name: &str| unsafe { (gl.glGetUniformLocation)(program, cstr(name).as_ptr()) };
+        let active: Vec<_> = code.textures.iter().filter_map(|t| {
+            let loc = uniform(&t.name);
+            (loc >= 0).then_some((t, loc))
+        }).collect();
+        let twins: Vec<_> = code.pick_twins.iter().enumerate().filter_map(|(i, t)| {
+            let loc = uniform(&t.name);
+            (loc >= 0).then_some((i, loc))
+        }).collect();
+        let words = code.instance_texture.then(|| uniform("mp_inst_data")).filter(|&loc| loc >= 0);
+        if let Some(reason) = unit_limit_error(&state.name, &self.caps, active.iter().map(|&(t, _)| t),
+            twins.len(), words.is_some(), false) {
+            unsafe { (gl.glDeleteProgram)(program) };
+            return Err(reason);
+        }
+        if let Some(key) = linking.key { self.cache.store(gl, key, program); }
         unsafe { (gl.glUseProgram)(program) };
         let flip = uniform("mp_clip_y_flip");
         if flip >= 0 { unsafe { (gl.glUniform1f)(flip, 1.0) } }
@@ -223,18 +280,9 @@ impl Renderer {
             }
             block_sizes.push(Some(size.max(0) as u32));
         }
-        let ntex = code.textures.len() as u32;
-        let mut samplers = Vec::new();
-        let mut targets = Vec::new();
-        let mut compares = Vec::new();
-        let mut nearest = Vec::new();
-        for (unit, t) in code.textures.iter().enumerate() {
-            let loc = uniform(&t.name);
-            if loc >= 0 { unsafe { (gl.glUniform1i)(loc, unit as GLint) } }
-            if code.pick {
-                let twin = uniform(&format!("{}__pick", t.name));
-                if twin >= 0 { unsafe { (gl.glUniform1i)(twin, (ntex + unit as u32) as GLint) } }
-            }
+        let mut bindings = Vec::with_capacity(active.len());
+        for (unit, (t, loc)) in active.into_iter().enumerate() {
+            unsafe { (gl.glUniform1i)(loc, unit as GLint) }
             let mut sampler = 0;
             let s = t.sampler;
             let linear = s.filter == 1;
@@ -254,15 +302,21 @@ impl Renderer {
                     (gl.glSamplerParameteri)(sampler, sys::TEXTURE_COMPARE_FUNC, sys::LEQUAL as GLint);
                 }
             }
-            samplers.push(sampler);
-            targets.push(super::render::shape_target(t.shape));
-            compares.push(compare);
-            nearest.push(self.nearest[(s.address.min(3) * 2 + compare as u32) as usize]);
+            bindings.push(TexBinding {
+                unit: unit as u32, slot: t.slot as usize, target: super::render::shape_target(t.shape), shape: t.shape,
+                sampler, compare, nearest: self.nearest[(s.address.min(3) * 2 + compare as u32) as usize],
+            });
         }
-        let words_unit = code.instance_texture.then(|| {
-            let unit = ntex * if code.pick { 2 } else { 1 };
-            let loc = uniform("mp_inst_data");
-            if loc >= 0 { unsafe { (gl.glUniform1i)(loc, unit as GLint) } }
+        let mut pick_bindings = Vec::with_capacity(twins.len());
+        for (twin_index, loc) in twins {
+            let unit = (bindings.len() + pick_bindings.len()) as u32;
+            unsafe { (gl.glUniform1i)(loc, unit as GLint) }
+            pick_bindings.push(PickBinding { unit, twin_index });
+        }
+        let active_twins = pick_bindings.iter().map(|b| b.twin_index).collect();
+        let words_unit = words.map(|loc| {
+            let unit = (bindings.len() + pick_bindings.len()) as u32;
+            unsafe { (gl.glUniform1i)(loc, unit as GLint) }
             unit
         });
         let pick = uniform("mp_pick");
@@ -289,19 +343,21 @@ impl Renderer {
             (gl.glBindVertexArray)(0);
             (gl.glUseProgram)(0);
         }
-        self.programs.insert(state.key, GlProgram { name: program, vao, geometry, instance, vertex_stride: code.vertex_stride as i32,
-            samplers, targets, shapes: code.textures.iter().map(|t| t.shape).collect(), compare: compares, nearest, pick, inst_base, words_unit, geometry_on: true });
-        Ok(Linked { block_sizes })
+        *slot_for_insert(&mut self.programs, state.key) = Some(GlProgram { name: program, vao, geometry, instance, vertex_stride: code.vertex_stride as i32,
+            bindings, pick_bindings, pick, inst_base, words_unit, geometry_on: true });
+        Ok(Linked { block_sizes, active_twins })
     }
 
-    pub fn delete_program(&mut self, key: u64) {
-        let Some(p) = self.programs.remove(&key) else { return };
-        let gl = &self.ctx.gl;
-        unsafe {
-            (gl.glDeleteVertexArrays)(1, &p.vao);
-            (gl.glDeleteSamplers)(p.samplers.len() as i32, p.samplers.as_ptr());
-            (gl.glDeleteProgram)(p.name);
+    pub fn delete_program(&mut self, key: GlKey) {
+        if let Some(p) = self.programs.get_mut(key as usize).and_then(Option::take) {
+            let gl = &self.ctx.gl;
+            unsafe {
+                (gl.glDeleteVertexArrays)(1, &p.vao);
+                for b in &p.bindings { (gl.glDeleteSamplers)(1, &b.sampler); }
+                (gl.glDeleteProgram)(p.name);
+            }
         }
+        self.prog_recycled.lock().unwrap_or_else(|e| e.into_inner()).push(key);
     }
 }
 

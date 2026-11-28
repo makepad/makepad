@@ -216,17 +216,25 @@ impl Cx {
         for draw_pass_id in self.passes.id_iter() {
             if self.passes.0.is_free(draw_pass_id.0) {
                 let pass = &mut self.passes[draw_pass_id];
-                if !pass.color_textures.is_empty() || pass.depth_texture.is_some() {
+                if !pass.color_textures.is_empty()
+                    || pass.depth_texture.is_some()
+                    || !pass.readers.is_empty()
+                {
                     pass.color_textures.clear();
                     pass.depth_texture = None;
                     pass.main_draw_list_id = None;
                     pass.parent = crate::draw_pass::CxDrawPassParent::None;
                     pass.attached_by = None;
+                    pass.readers.clear();
                     pass.paint_dirty = false;
                     pass.incomplete = false;
                     pass.left_out = false;
                     pass.kept_recording = false;
                 }
+            } else if !self.passes[draw_pass_id].readers.is_empty() {
+                let mut readers = std::mem::take(&mut self.passes[draw_pass_id].readers);
+                readers.retain(|reader| !self.pass_reader_is_stale(reader));
+                self.passes[draw_pass_id].readers = readers;
             }
         }
 
@@ -333,6 +341,14 @@ impl Cx {
                             altered = true;
                         }
                     }
+                    // A dirty producer dirties its live readers, as it dirties its parent.
+                    for i in 0..self.passes[draw_pass_id].readers.len() {
+                        let reader = self.passes[draw_pass_id].readers[i].pass;
+                        if live[reader.0] == Some(true) && !self.passes[reader].paint_dirty {
+                            self.passes[reader].paint_dirty = true;
+                            altered = true;
+                        }
+                    }
                 }
             }
             // Liveness runs the OTHER way: a pass that declared itself
@@ -357,24 +373,6 @@ impl Cx {
             }
         }
 
-        // EXECUTION ORDER IS THE DEPENDENCY TREE, deepest first. A pass's
-        // parent is its CONSUMER — the pass that samples the texture it
-        // renders — so every dirty pass must execute before its parent.
-        // Distance-to-root gives exactly that: sort deepest first; the
-        // stable sort keeps pool-id order between passes at equal depth
-        // (siblings), which is the order this function always produced for
-        // them. The old scan inserted a child directly before its parent
-        // only when the parent was ALREADY in the list, so with three or
-        // more levels of texture passes and adverse (recycled) pool ids a
-        // grandchild could land AFTER the pass that consumes its output,
-        // which then read a stale texture (the VJ's post/sim pass chains
-        // hit exactly this). Parentless passes keep their old "run first"
-        // contract via the depth bias. Background passes (`DrawPass::set_background`) go
-        // after all others, in the same order among themselves: no window frame waits for them.
-        const ROOT_NONE_BIAS: u64 = 1 << 32;
-        // An offscreen XR pass (`info_flags::XR_OFFSCREEN`) produces textures the app hands on
-        // (packs, mirrors them): it runs before everything else, its own producers before it.
-        let xr_offscreen = self.xr_offscreen();
         // a window pass asked to paint explicitly (a remote grab, `repaint_pass`)
         let mut window_requested = false;
         for draw_pass_id in self.passes.id_iter() {
@@ -414,27 +412,69 @@ impl Cx {
         if passes_todo.iter().any(|id| self.pass_root_window(*id).is_some()) {
             self.window_paints += 1;
         }
-        let depth_of = |start: DrawPassId| -> u64 {
-            let mut depth = 0u64;
-            let mut walk = start;
-            loop {
-                match self.passes[walk].parent {
-                    CxDrawPassParent::DrawPass(parent_id) => {
-                        depth += 1;
-                        walk = parent_id;
-                        if depth as usize > slot_cap {
-                            // A cycle in stale parent links (recycled pass
-                            // slots): stop counting rather than hang.
-                            return depth;
-                        }
+        // EXECUTION ORDER IS THE DEPENDENCY TREE, deepest first. A pass's
+        // parent is its CONSUMER — the pass that samples the texture it
+        // renders — so every dirty pass must execute before its parent.
+        // Distance-to-root gives exactly that: sort deepest first; the
+        // stable sort keeps pool-id order between passes at equal depth
+        // (siblings), which is the order this function always produced for
+        // them. The old scan inserted a child directly before its parent
+        // only when the parent was ALREADY in the list, so with three or
+        // more levels of texture passes and adverse (recycled) pool ids a
+        // grandchild could land AFTER the pass that consumes its output,
+        // which then read a stale texture (the VJ's post/sim pass chains
+        // hit exactly this). A pass's other consumers (`Cx::add_pass_reader`)
+        // count like its parent: it goes deeper than every live reader, so a
+        // producer two sibling passes sample paints before both, whatever
+        // their pool ids. Parentless passes keep their old "run first"
+        // contract via the depth bias. Background passes (`DrawPass::set_background`) go
+        // after all others, in the same order among themselves: no window frame waits for them.
+        const ROOT_NONE_BIAS: u64 = 1 << 32;
+        fn depth_of(
+            cx: &Cx,
+            id: DrawPassId,
+            live: &[Option<bool>],
+            xr_offscreen: bool,
+            memo: &mut [Option<Option<u64>>],
+        ) -> Option<u64> {
+            if let Some(depth) = memo[id.0] {
+                return depth;
+            }
+            // The outer option marks a visited slot. The inner depth exists
+            // only for a path to a root. A visit in progress contributes none.
+            memo[id.0] = Some(None);
+            let pass = &cx.passes[id];
+            let mut depth = match pass.parent {
+                CxDrawPassParent::DrawPass(parent) => {
+                    depth_of(cx, parent, live, xr_offscreen, memo).map(|d| d + 1)
+                }
+                CxDrawPassParent::None => Some(ROOT_NONE_BIAS),
+                CxDrawPassParent::Xr if xr_offscreen => Some(2 * ROOT_NONE_BIAS),
+                _ => Some(0),
+            };
+            for reader in &pass.readers {
+                if live[reader.pass.0] == Some(true) {
+                    if let Some(d) = depth_of(cx, reader.pass, live, xr_offscreen, memo) {
+                        depth = depth.max(Some(d + 1));
                     }
-                    CxDrawPassParent::None => return depth + ROOT_NONE_BIAS,
-                    CxDrawPassParent::Xr if xr_offscreen => return depth + 2 * ROOT_NONE_BIAS,
-                    _ => return depth,
                 }
             }
-        };
-        passes_todo.sort_by_key(|id| (self.passes[*id].background, std::cmp::Reverse(depth_of(*id))));
+            memo[id.0] = Some(depth);
+            depth
+        }
+        if passes_todo.len() > 1 {
+            let mut depths = vec![None; slot_cap];
+            // An offscreen XR pass (`info_flags::XR_OFFSCREEN`) produces textures the app hands on
+            // (packs, mirrors them): it runs before everything else, its own producers before it.
+            let xr_offscreen = self.xr_offscreen();
+            passes_todo.sort_by_cached_key(|id| {
+                // An explicitly requested pass in a parent cycle has no root. The
+                // old parent walk stopped at slot_cap + 1 for every such pass.
+                let depth = depth_of(self, *id, &live, xr_offscreen, &mut depths)
+                    .unwrap_or(slot_cap as u64 + 1);
+                (self.passes[*id].background, std::cmp::Reverse(depth))
+            });
+        }
         self.pass_time_rebase = !(time_owed || time_held);
         self.demo_time_repaint = false;
         self.time_fps_clock = TimeFpsClock { frame_time, tolerance, next_due };
@@ -1143,7 +1183,11 @@ impl Cx {
                 let window = self.windows.id_iter().find(|w| w.id() == window_id && self.windows[*w].is_created);
                 if let Some(window) = window {
                     #[cfg(not(target_arch = "wasm32"))]
-                    if focused { self.hal.focused = Some(window); }
+                    if focused {
+                        self.hal.focused = Some(window);
+                    } else {
+                        self.hal_cancel_internal_drag();
+                    }
                     self.call_event_handler(&if focused {
                         Event::WindowGotFocus(window)
                     } else {
@@ -1182,6 +1226,10 @@ impl Cx {
                 self.fingers.switch_captures();
             }
             StudioToApp::MouseCancel(e) => {
+                #[cfg(not(target_arch = "wasm32"))]
+                if crate::event::MouseButton::from_bits_retain(e.button_raw_bits).is_primary() {
+                    self.hal_cancel_internal_drag();
+                }
                 self.dispatch_hosted_mouse_cancel(&e, window_id, pos);
                 self.update_pointer_capture_pacing();
                 self.send_studio_key_focus_rect_response();
@@ -1559,6 +1607,10 @@ impl Cx {
         //    `Apply::ScriptReapply` — no script_mod re-run, runtime
         //    overrides preserved, imperative-setter fields early-return.
         use crate::live_reload::LiveEditTrigger;
+        let had_reload = self.has_pending_live_edit_reload();
+        if had_reload {
+            self.script_data.live_reload.live_edit_active = true;
+        }
         match self.handle_live_edit() {
             LiveEditTrigger::FileChange => {
                 let t0 = Cx::time_now();
@@ -1603,6 +1655,19 @@ impl Cx {
                 }
             }
         }
+        if had_reload {
+            self.script_data.live_reload.live_edit_active = false;
+            self.script_data.live_reload.live_edit_seq += 1;
+            crate::remote::resolve_reload_waiters(self);
+        }
+    }
+
+    /// Process a pending file/override reload from the event loop or a test.
+    /// Call outside event handlers. Returns true if a file/override reload pass ran.
+    pub fn process_live_edit(&mut self) -> bool {
+        let before = self.live_edit_seq();
+        self.run_live_edit_if_needed("manual");
+        self.live_edit_seq() != before
     }
 
     #[allow(dead_code)]
@@ -3038,6 +3103,113 @@ mod tests {
         assert!(!todo.contains(&child_id));
     }
 
+    #[test]
+    fn a_producer_paints_before_its_readers_at_either_pool_id() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let root = DrawPass::new(&mut cx);
+        let (early, early_list) = pass_with_current_list(&mut cx);
+        let (child, child_list) = pass_with_current_list(&mut cx);
+        let (late, late_list) = pass_with_current_list(&mut cx);
+        let (root, early, child, late) =
+            (root.draw_pass_id(), early.draw_pass_id(), child.draw_pass_id(), late.draw_pass_id());
+        cx.set_pass_parent(early, root);
+        cx.set_pass_parent(late, root);
+        cx.set_pass_parent(child, early);
+        cx.passes[child].paint_dirty = true;
+        cx.passes[late].paint_dirty = true;
+        let mut todo = Vec::new();
+        cx.compute_pass_repaint_order(&mut todo, 0.0, 0.0);
+        assert_eq!(todo, [child, early, late, root], "siblings without reads keep pool-id order");
+
+        cx.add_pass_reader(late, early, Some(early_list.id()));
+        cx.compute_pass_repaint_order(&mut todo, 0.0, 0.0);
+        assert_eq!(todo, [child, late, early, root], "the later sibling paints before its reader");
+
+        cx.add_pass_reader(late, child, Some(child_list.id()));
+        cx.passes[child].paint_dirty = false;
+        cx.passes[early].paint_dirty = false;
+        cx.compute_pass_repaint_order(&mut todo, 0.0, 0.0);
+        assert_eq!(todo, [late, child, early, root], "a dirty producer repaints both readers, deepest reader first");
+
+        let input = DrawPass::new(&mut cx);
+        let input = input.draw_pass_id();
+        cx.set_pass_parent(input, late);
+        cx.passes[input].paint_dirty = true;
+        cx.compute_pass_repaint_order(&mut todo, 0.0, 0.0);
+        assert_eq!(todo, [input, late, child, early, root], "a producer's children inherit its reader-adjusted depth");
+        cx.passes[input].paint_dirty = false;
+
+        cx.begin_draw_context();
+        record_list(&mut cx, early_list.id());
+        record_list(&mut cx, child_list.id());
+        cx.compute_pass_repaint_order(&mut todo, 0.0, 0.0);
+        assert_eq!(todo, [child, early, late, root], "recording again without the reads restores pool-id order");
+
+        cx.add_pass_reader(early, late, Some(late_list.id()));
+        cx.passes[child].paint_dirty = false;
+        cx.passes[late].paint_dirty = false;
+        cx.compute_pass_repaint_order(&mut todo, 0.0, 0.0);
+        assert_eq!(todo, [early, late, root], "the earlier sibling repaints its higher-id reader");
+    }
+
+    #[test]
+    fn a_read_follows_its_recording_and_reader_lifetime() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, root_list) = pass_with_current_list(&mut cx);
+        let (reader, reader_list) = pass_with_current_list(&mut cx);
+        let producer = DrawPass::new(&mut cx);
+        let (root, reader_id, producer) =
+            (root.draw_pass_id(), reader.draw_pass_id(), producer.draw_pass_id());
+        cx.attach_child_pass(reader_id, root, Some(root_list.id()));
+        cx.set_pass_parent(producer, root);
+        cx.add_pass_reader(producer, reader_id, Some(reader_list.id()));
+        cx.begin_draw_context();
+        record_list(&mut cx, root_list.id());
+        cx.passes[producer].paint_dirty = true;
+        let mut todo = Vec::new();
+        cx.compute_pass_repaint_order(&mut todo, 0.0, 0.0);
+        assert_eq!(todo, [producer, root], "a read cannot revive an orphaned reader");
+        cx.passes[reader_id].kept_recording = true;
+        cx.compute_pass_repaint_order(&mut todo, 0.0, 0.0);
+        assert_eq!(todo, [producer, reader_id, root], "a kept reader still samples the producer");
+
+        let sublist = DrawList::new(&mut cx);
+        cx.add_pass_reader(producer, reader_id, Some(sublist.id()));
+        drop(sublist);
+        cx.passes[reader_id].paint_dirty = false;
+        cx.compute_pass_repaint_order(&mut todo, 0.0, 0.0);
+        assert_eq!(todo, [producer, root], "freeing the latest declaring list ends the read");
+
+        cx.add_pass_reader(producer, reader_id, None);
+        drop(reader);
+        let replacement = DrawPass::new(&mut cx);
+        assert_eq!(replacement.draw_pass_id(), reader_id, "the new pass exercises the recycled reader slot");
+        cx.compute_pass_repaint_order(&mut todo, 0.0, 0.0);
+        assert_eq!(todo, [producer, root], "a replacement pass does not inherit a read");
+    }
+
+    #[test]
+    fn cyclic_pass_dependencies_terminate() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let first = DrawPass::new(&mut cx);
+        let second = DrawPass::new(&mut cx);
+        let (a, b) = (first.draw_pass_id(), second.draw_pass_id());
+        cx.set_pass_parent(a, b);
+        cx.set_pass_parent(b, a);
+        cx.repaint_pass(b);
+        cx.repaint_pass(a);
+        let mut todo = Vec::new();
+        cx.compute_pass_repaint_order(&mut todo, 0.0, 0.0);
+        assert_eq!(todo, [a, b], "requested passes in a parent cycle retain their pool-id order");
+
+        second.detach(&mut cx);
+        cx.add_pass_reader(b, a, None);
+        cx.passes[a].paint_dirty = false;
+        cx.compute_pass_repaint_order(&mut todo, 0.0, 0.0);
+        todo.sort_by_key(|id| id.0);
+        assert_eq!(todo, [a, b], "a cycle through a reader queues each dirty pass once");
+    }
+
     fn pass_with_current_list(cx: &mut Cx) -> (DrawPass, DrawList) {
         let pass = DrawPass::new(cx);
         let list = DrawList::new(cx);
@@ -3053,6 +3225,7 @@ mod tests {
     /// window (the desktop does not render continuously for the headset), while every other
     /// cause of the window (input, data, an animation, a popover) paints it at once, and a
     /// screenshot or remote grab (and an explicit repaint) paints it too.
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn a_headset_frame_paints_no_window_but_the_window_stays_live() {
         let mut cx = Cx::new(Box::new(|_, _| {}));

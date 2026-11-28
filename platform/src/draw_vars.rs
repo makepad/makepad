@@ -171,12 +171,17 @@ impl ScriptHook for DrawVars {
                 self.options.alpha_blend = v != 0.0;
             }
 
-            let backface_culling_value =
-                vm.value(io_self, id!(backface_culling));
-            if let Some(v) = backface_culling_value.as_bool() {
-                self.options.backface_culling = v;
-            } else if let Some(v) = backface_culling_value.as_f64() {
-                self.options.backface_culling = v != 0.0;
+            let cull_mode = vm.value(io_self, id!(cull_mode));
+            if !cull_mode.is_nil() && cull_mode.value_type() != ScriptValueType::ERR_NOT_FOUND {
+                self.options.cull_mode = match cull_mode.as_id() {
+                    Some(id!(None)) => CullMode::None,
+                    Some(id!(Back)) => CullMode::Back,
+                    Some(id!(Front)) => CullMode::Front,
+                    _ => {
+                        crate::error!("invalid cull_mode {:?}, expected @None, @Back or @Front", cull_mode);
+                        CullMode::None
+                    }
+                };
             }
 
             // Anything but a positive, finite rate means every frame, and a NaN would never batch.
@@ -326,6 +331,9 @@ impl DrawVars {
         }
         let Some(old_id) = self.draw_shader_id else { return };
         let saved = self.clone();
+        // the geometry the old default names: a holder that drew another (a mesh it keeps) bound
+        // that one itself
+        let own_geometry = Self::object_geometry(vm, old_obj);
         let apply = Apply::Reload;
         self.on_after_apply(vm, &apply, &mut Scope::empty(), new_obj.into());
         let Some(new_id) = self.draw_shader_id else {
@@ -371,7 +379,11 @@ impl DrawVars {
                 }
             }
         }
-        // what the holder bound keeps binding (textures and buffers it sets, by the same slots)
+        // what the holder bound keeps binding (textures and buffers it sets, by the same slots,
+        // and a geometry of its own: an icon's kept mesh, set before the draw call this runs in)
+        if saved.geometry_id != own_geometry {
+            self.geometry_id = saved.geometry_id;
+        }
         self.texture_slots = saved.texture_slots;
         self.uniform_buffer_slots = saved.uniform_buffer_slots;
         #[cfg(not(target_arch = "wasm32"))]
@@ -1738,6 +1750,27 @@ mod tests {
         area::InstanceArea,
         draw_list::{CxDrawCall, CxDrawKind, DrawList},
     };
+
+    #[test]
+    fn splash_cull_mode_parses_none_back_front() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            let mut vars = DrawVars::script_new(vm);
+            for (source, expected) in [
+                ("{}", CullMode::None),
+                ("{cull_mode: @Back}", CullMode::Back),
+                ("{}", CullMode::Back),
+                ("{cull_mode: @None}", CullMode::None),
+                ("{cull_mode: @Front}", CullMode::Front),
+                ("{cull_mode: @Bogus}", CullMode::None),
+            ] {
+                let value = vm.eval(ScriptMod::new("", "", "cull_mode", 0, 0, source, &[]));
+                assert!(value.is_object(), "{source}");
+                vars.script_apply(vm, &Apply::Default(0), &mut Scope::empty(), value);
+                assert_eq!(vars.options.cull_mode, expected, "{source}");
+            }
+        });
+    }
 
     /// A registered shader whose dyn-uniform block is `slots` floats: one
     /// uniform `id` at offset `slots - 4`.

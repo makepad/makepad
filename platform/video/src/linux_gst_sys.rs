@@ -44,12 +44,16 @@ pub struct GError {
     pub message: *const c_char,
 }
 
-// GstState
+// GstState / GstStateChangeReturn
+pub const GST_STATE_VOID_PENDING: c_uint = 0;
 pub const GST_STATE_NULL: c_uint = 1;
+pub const GST_STATE_READY: c_uint = 2;
 pub const GST_STATE_PAUSED: c_uint = 3;
 pub const GST_STATE_PLAYING: c_uint = 4;
 pub const GST_STATE_CHANGE_FAILURE: c_int = 0;
+pub const GST_STATE_CHANGE_SUCCESS: c_int = 1;
 pub const GST_STATE_CHANGE_ASYNC: c_int = 2;
+pub const GST_STATE_CHANGE_NO_PREROLL: c_int = 3;
 // GstFormat
 pub const GST_FORMAT_TIME: c_int = 3;
 // GstSeekFlags
@@ -60,7 +64,16 @@ pub const GST_SEEK_FLAG_SNAP_BEFORE: c_uint = 1 << 5;
 pub const GST_MESSAGE_EOS: c_uint = 1 << 0;
 pub const GST_MESSAGE_ERROR: c_uint = 1 << 1;
 pub const GST_MESSAGE_WARNING: c_uint = 1 << 2;
+pub const GST_MESSAGE_STREAM_STATUS: c_uint = 1 << 13;
 pub const GST_MESSAGE_ANY: c_uint = !0;
+// GstStreamStatusType
+pub const GST_STREAM_STATUS_TYPE_CREATE: c_uint = 0;
+pub const GST_STREAM_STATUS_TYPE_ENTER: c_uint = 1;
+pub const GST_STREAM_STATUS_TYPE_DESTROY: c_uint = 3;
+// GstTaskState
+pub const GST_TASK_STARTED: c_uint = 0;
+pub const GST_TASK_STOPPED: c_uint = 1;
+pub const GST_TASK_PAUSED: c_uint = 2;
 // GstMapFlags
 pub const GST_MAP_READ: c_uint = 1 << 0;
 pub const GST_MAP_WRITE: c_uint = 1 << 1;
@@ -287,7 +300,13 @@ gst_fns! {
     gst.gst_bus_timed_pop_filtered: fn(*mut GstBus, u64, c_uint) -> *mut GstMessage;
     gst.gst_message_parse_error: fn(*mut GstMessage, *mut *mut GError, *mut *mut c_char);
     gst.gst_message_parse_warning: fn(*mut GstMessage, *mut *mut GError, *mut *mut c_char);
+    gst.gst_message_parse_stream_status: fn(*mut GstMessage, *mut c_uint, *mut *mut GstElement);
+    gst.gst_message_get_stream_status_object: fn(*mut GstMessage) -> *const GValue;
+    gst.gst_task_get_type: fn() -> usize;
+    gst.gst_task_get_state: fn(*mut c_void) -> c_uint;
     gst.gst_mini_object_unref: fn(*mut c_void);
+    gst.gst_object_ref: fn(*mut c_void) -> *mut c_void;
+    gst.gst_element_factory_find: fn(*const c_char) -> *mut c_void;
     gst.gst_object_unref: fn(*mut c_void);
     gst.gst_buffer_new_allocate: fn(*mut c_void, usize, *mut c_void) -> *mut GstBuffer;
     gst.gst_buffer_fill: fn(*mut GstBuffer, usize, *const c_void, usize) -> usize;
@@ -361,6 +380,17 @@ impl LibGst {
             Some(lib)
         })
         .as_ref()
+    }
+
+    /// Whether a GStreamer element factory with this exact name is installed.
+    pub fn has_element(&self, name: &str) -> bool {
+        let Ok(name) = CString::new(name) else { return false };
+        unsafe {
+            let factory = (self.gst_element_factory_find)(name.as_ptr());
+            if factory.is_null() { return false }
+            (self.gst_object_unref)(factory);
+            true
+        }
     }
 
     /// Sets `element`'s unsigned integer property `name` to `value`, brought
@@ -524,7 +554,10 @@ impl LibGst {
         }
     }
 
-    /// Parse + free an ERROR (or WARNING) message's GError into readable text.
+    /// Parse + free an ERROR (or WARNING) message's GError into readable text: its message, then
+    /// its debug detail in brackets, on one line. The message alone is often GStreamer's stock
+    /// text ("Internal data stream error."); the detail names the element that posted it and the
+    /// flow return that stopped the stream (`streaming stopped, reason not-negotiated (-4)`).
     pub fn take_error_text(&self, msg: *mut GstMessage) -> String {
         unsafe {
             let mut err: *mut GError = std::ptr::null_mut();
@@ -544,6 +577,10 @@ impl LibGst {
                 (self.g_error_free)(err);
             }
             if !debug.is_null() {
+                let detail = std::ffi::CStr::from_ptr(debug).to_string_lossy().split_whitespace().collect::<Vec<_>>().join(" ");
+                if !detail.is_empty() {
+                    text = format!("{text} [{detail}]");
+                }
                 (self.g_free)(debug as *mut c_void);
             }
             text

@@ -128,6 +128,12 @@ impl CxKeyboard {
         self.key_focus
     }
 
+    /// The area queued to hold key focus once the current event settles
+    /// (equals [`Self::key_focus`] when no focus change is pending).
+    pub fn next_key_focus(&self) -> Area {
+        self.next_key_focus
+    }
+
     /// Says whether `focus_area`, which holds the key focus, takes its keys as typed text. An area
     /// that does not hold the key focus changes nothing. See [`crate::Cx::set_key_focus_takes_text`].
     pub fn set_key_focus_takes_text(&mut self, focus_area: Area, takes_text: bool) {
@@ -343,6 +349,7 @@ mod takes_text_tests {
         kb.set_key_focus_takes_text(field, true);
         assert!(!kb.key_focus_takes_text(), "an area without the key focus cannot say it takes text");
         kb.set_key_focus_from_user(field);
+        assert_eq!(kb.next_key_focus(), field, "next_key_focus exposes pending focus before settle");
         assert!(settle(&mut kb, field), "a press on the field: it takes text once it has the focus");
         kb.set_key_focus(field);
         assert!(settle(&mut kb, field), "a plain set_key_focus on the holder moves nothing, so it keeps the flag");

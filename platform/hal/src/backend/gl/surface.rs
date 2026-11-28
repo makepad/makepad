@@ -4,7 +4,9 @@
 use crate::Id;
 use std::sync::Arc;
 
+#[cfg(target_os = "linux")]
 pub const PLATFORM_X11: u32 = 0x31D5;
+#[cfg(target_os = "linux")]
 pub const PLATFORM_WAYLAND: u32 = 0x31D8;
 pub const PLATFORM_SURFACELESS: u32 = 0x31DD;
 /// Android's default display (`eglGetDisplay`), whose windows are `ANativeWindow`s
@@ -26,7 +28,8 @@ pub struct NativeSurface {
     /// X11 Window id, `wl_surface*` or `ANativeWindow*`
     pub window: usize,
     pub size: [u32; 2],
-    pub keep: Arc<dyn std::any::Any + Send + Sync>,
+    /// Keeps the native window alive through EGL surface destruction.
+    pub _keep: Arc<dyn std::any::Any + Send + Sync>,
 }
 
 pub enum SurfaceState {
@@ -42,8 +45,10 @@ pub trait EglSurfaceSource: Send {
 }
 
 /// Hidden runs and tests: windows are render targets only, the display is the surfaceless one.
+#[cfg(target_os = "linux")]
 pub struct Offscreen;
 
+#[cfg(target_os = "linux")]
 impl EglSurfaceSource for Offscreen {
     fn display(&self) -> Result<Display, String> {
         Ok(Display { platform: PLATFORM_SURFACELESS, native: 0, visual: 0 })

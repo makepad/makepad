@@ -33,6 +33,8 @@ pub fn mtl_format(f: u32) -> Option<MTLPixelFormat> {
 /// The storage of a texture.
 pub struct Tex {
     pub gen: u32,
+    /// Whole paints of this storage since it was made or since a paint of it left a draw out.
+    pub painted: u32,
     pub obj: RcObjcId,
     /// the IOSurface a shared texture is backed by (kept alive here)
     pub surface: Option<IOSurfaceRef>,
@@ -213,7 +215,7 @@ pub fn create_texture(device: ObjcId, t: &TextureObj, gen: u32, label: &str) -> 
     unsafe {
         let _: () = msg_send![texture, setLabel: str_to_nsstring(label)];
     }
-    Ok(Tex { gen, obj: RcObjcId::from_owned(NonNull::new(texture).expect("checked")), surface, surface_id, last_bound: 0, _keep: None, msaa: None })
+    Ok(Tex { gen, painted: 0, obj: RcObjcId::from_owned(NonNull::new(texture).expect("checked")), surface, surface_id, last_bound: 0, _keep: None, msaa: None })
 }
 
 /// A texture over an IOSurface another process (or the host) owns, found by its global id:
@@ -266,7 +268,7 @@ pub fn import_surface(device: ObjcId, id: IOSurfaceID, gen: u32, kind: u32) -> O
         unsafe { CFRelease(surface) };
         return None;
     };
-    Some((Tex { gen, obj: RcObjcId::from_owned(texture), surface: Some(surface), surface_id: id, last_bound: 0, _keep: None, msaa: None }, w as u32, h as u32, fmt))
+    Some((Tex { gen, painted: 0, obj: RcObjcId::from_owned(texture), surface: Some(surface), surface_id: id, last_bound: 0, _keep: None, msaa: None }, w as u32, h as u32, fmt))
 }
 
 /// What the device holds for a texture.
@@ -276,8 +278,8 @@ pub fn allocated_size(object: ObjcId) -> u64 {
 
 // ------------------------------------------------------------------ buffers
 
-/// A Shared-storage buffer. A CPU write while an earlier command buffer may still read it goes
-/// to a fresh buffer (copy on write), so the GPU never sees a half-written one.
+/// A shared-storage buffer. APPEND updates write unused ranges directly. Other CPU updates
+/// copy on write while an earlier command buffer may still read the buffer.
 pub struct Buf {
     pub gen: u32,
     pub buffer: RcObjcId,

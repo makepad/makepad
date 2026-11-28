@@ -612,6 +612,39 @@ fn orderly_close_survives_lost_final_ack() {
 }
 
 #[test]
+fn unsent_bytes_tracks_first_transmissions_under_a_rate_cap() {
+    let mut w = Pair::new(29);
+    w.open();
+    w.keys();
+    w.streams[0].set_rate_cap(Some(80_000));
+    let data = vec![7; 20 * SEGMENT];
+    // A short first write leaves a partial segment at each end of the transfer.
+    let mut written = w.streams[0].write(&data[..SEGMENT / 2]);
+    let mut sent = 0;
+    let deadline = w.net.now() + IDLE;
+    while sent < data.len() {
+        assert!(w.net.now() < deadline, "the capped stream sends all accepted bytes");
+        assert_eq!(w.streams[0].unsent_bytes(), written - sent, "queued payload before transmission");
+        w.step_with(|side, _, bytes| {
+            if side == 0 && kind(bytes) == DATA {
+                let (packet, _) = Packet::decode(bytes, &ID, Some(&KEYS[0])).expect("valid data datagram");
+                sent += packet.body.len();
+            }
+            true
+        });
+        assert_eq!(w.streams[0].unsent_bytes(), written - sent, "sending retires payload before its ACK");
+        if written < data.len() {
+            written += w.streams[0].write(&data[written..]);
+            if written == data.len() {
+                w.streams[0].close(); // Queue the FIN behind the remaining data.
+            }
+        }
+    }
+    assert_eq!(w.streams[0].unsent_bytes(), 0, "all payload has gone out");
+    assert!(w.streams[0].tx.acked_bytes < sent as u64, "the last data is still in flight");
+}
+
+#[test]
 fn a_rate_cap_paces_new_data_and_loses_nothing() {
     const CAP: u64 = 400_000;
     let data = content(150_000);
@@ -663,4 +696,29 @@ fn a_rate_cap_paces_new_data_and_loses_nothing() {
     assert!(received == data, "uncapped again, every byte arrives");
     let uncapped = w.net.now() - start;
     assert!(uncapped * 3 < elapsed, "without the cap the same bytes take {uncapped} ms, not {elapsed}");
+}
+
+#[test]
+fn queued_peer_input_is_serviced_before_the_idle_timeout_after_a_stall() {
+    let mut pair = Pair::new(7);
+    pair.open();
+    pair.keys();
+    let now = pair.net.now();
+    assert_eq!(pair.streams[0].write(b"still here"), 10);
+    let (_, packet) = pair.streams[0].poll_transmit(now).unwrap();
+    let receiver = &mut pair.streams[1];
+    let peer = receiver.peer();
+    let due = receiver.deadline;
+    let mut silent = receiver.clone();
+    silent.poll_transmit(due - 1);
+    assert_eq!(silent.state(), State::Open);
+    silent.poll_transmit(due);
+    assert_eq!(silent.state(), State::Closed(CloseReason::TimedOut));
+
+    receiver.handle_datagram(due + 1, peer, &packet);
+    assert_eq!(receiver.state(), State::Open, "a queued authenticated packet survives the scheduling stall");
+    assert_eq!(receiver.deadline, due + 1 + IDLE);
+    receiver.handle_datagram(receiver.deadline, peer, &packet);
+    receiver.poll_transmit(receiver.deadline);
+    assert_eq!(receiver.state(), State::Closed(CloseReason::TimedOut), "a replay cannot renew the idle timer");
 }

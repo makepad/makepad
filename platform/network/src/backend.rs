@@ -117,7 +117,7 @@ impl EventSink {
         }
         if delivery == Delivery::WakeLoop {
             // The loop reads it; an `Event::Signal` to every widget for each
-            // host message (a hosted Stage: 100+ a second) would be all waste.
+            // host message (a hosted app: 100+ a second) would be all waste.
             // The sink of a loop socket always has the platform's wake fn.
             return Ok(());
         }

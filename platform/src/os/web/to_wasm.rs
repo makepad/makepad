@@ -21,6 +21,8 @@ pub struct WGpuInfo {
     pub min_uniform_vectors: u32,
     pub float_color_targets: bool,
     pub max_texture_size: u32,
+    pub uniform_buffer_offset_alignment: u32,
+    pub max_uniform_block_size: u32,
     pub vendor: String,
     pub renderer: String,
 }
@@ -820,4 +822,13 @@ pub struct ToWasmVideoPlaybackResourcesReleased {
 #[derive(ToWasm)]
 pub struct ToWasmRetainedUploadFailed {
     pub buffer_id: usize,
+}
+
+#[derive(ToWasm)]
+pub struct ToWasmInstanceUploadFailed {
+    pub slab_slot: u32,
+    pub backing_generation: u32,
+    /// 0 = backing, 1 = region, 2 = texture mirror.
+    pub scope: u32,
+    pub region: Option<super::from_wasm::WInstanceRegion>,
 }

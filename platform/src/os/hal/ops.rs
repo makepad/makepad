@@ -266,6 +266,8 @@ impl Cx {
         let mut tray_shown = false;
         while let Some(op) = self.platform_ops.pop_front() {
             match op {
+                CxOsOp::OpenUrl { url, .. } => self.hal_open_url(&url),
+                CxOsOp::BrowserUpdateUrl { .. } | CxOsOp::BrowserHistoryGo(_) => {}
                 CxOsOp::SetOwnChrome(own) => {
                     if let Some(window) = self.windows.id_iter().find(|w| self.windows[*w].is_created) {
                         self.hal.frames.w.window_chrome(hal_window_id(window), own);
@@ -307,11 +309,14 @@ impl Cx {
                     // (they differ by a window's `dpi_override`); a position is never scaled
                     let p = self.windows[window_id].window_geom.position;
                     let size = self.windows[window_id].layout_vec2d_to_native_points(size);
-                    // a hosted app's main window is the host's tile, whose size the host owns: it
-                    // is asked over the hosted wire (Linux's hosted transport asks from the WM's
-                    // shell, linux/wm.rs; here the HAL is in-process and keeps hosted geometry)
-                    let asks_host = cfg!(not(target_os = "linux")) && self.hal.hosted.is_some() && !self.hal_hosted_extra_window(window_id);
-                    if asks_host {
+                    // a hosted app's windows are the host's tiles, whose sizes the host owns: they
+                    // are asked over the hosted wire, the main window's as `HostedResize`, a later
+                    // one's with its id (Linux's hosted transport asks from the WM's shell,
+                    // linux/wm.rs; here the HAL is in-process and keeps hosted geometry)
+                    let asks_host = cfg!(not(target_os = "linux")) && self.hal.hosted.is_some();
+                    if asks_host && self.hal_hosted_extra_window(window_id) {
+                        Self::send_hosted_window(makepad_hal::window_controls::HostedWindow { x: size.x, y: size.y, ..makepad_hal::window_controls::HostedWindow::new(window_id.id(), makepad_hal::window_controls::hosted_window_op::RESIZE) });
+                    } else if asks_host {
                         Self::send_studio_message(crate::studio::AppToStudio::Custom(makepad_hal::window_controls::HostedResize { w: size.x, h: size.y }.to_json()));
                     } else {
                         self.hal.frames.w.window_geom(hal_window_id(window_id), [p.x as f32, p.y as f32, size.x as f32, size.y as f32]);

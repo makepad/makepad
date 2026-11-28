@@ -29,6 +29,36 @@ pub fn event_mods(event: ObjcId) -> u32 {
     modifier_bits(flags)
 }
 
+/// A scroll-wheel event's delta in points (Makepad's direction), whether it is precise (a trackpad
+/// or a Magic Mouse; a wheel's lines are 32 points each) and its `scroll` phase.
+pub fn event_scroll(event: ObjcId) -> ([f64; 2], bool, u32) {
+    let (dx, dy, precise, phase_bits, momentum_bits): (f64, f64, BOOL, u64, u64) = unsafe {
+        (msg_send![event, scrollingDeltaX], msg_send![event, scrollingDeltaY], msg_send![event, hasPreciseScrollingDeltas],
+            msg_send![event, phase], msg_send![event, momentumPhase])
+    };
+    // NSEventPhase bits: Began 1<<0, Stationary 1<<1, Changed 1<<2, Ended 1<<3, Cancelled 1<<4,
+    // MayBegin 1<<5. `phase` covers the finger-driven part of a trackpad gesture, `momentumPhase`
+    // the stream after lift-off; wheel mice report 0 for both.
+    let phase = if momentum_bits & ((1 << 3) | (1 << 4)) != 0 {
+        scroll::MOMENTUM_ENDED
+    } else if momentum_bits != 0 {
+        scroll::MOMENTUM
+    } else if phase_bits & ((1 << 0) | (1 << 5)) != 0 {
+        scroll::BEGAN
+    } else if phase_bits & ((1 << 1) | (1 << 2)) != 0 {
+        scroll::CHANGED
+    } else if phase_bits & (1 << 3) != 0 {
+        scroll::ENDED
+    } else if phase_bits & (1 << 4) != 0 {
+        // cancelled: the system took over the gesture; abort without momentum, which widgets
+        // treat as a reset when it arrives as `Began`
+        scroll::BEGAN
+    } else {
+        scroll::NONE
+    };
+    if precise == YES { ([-dx, -dy], true, phase) } else { ([-dx * 32., -dy * 32.], false, phase) }
+}
+
 /// Mouse button bit (Cx's `MouseButton` mask: primary 1, secondary 2, middle 4, back 8, forward 16)
 /// of an NSEvent button number.
 pub fn button_bit(number: usize) -> u32 {
@@ -345,6 +375,61 @@ pub fn keycode_to_menu_key(keycode: KeyCode, shift: bool) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::raw::c_void;
+
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGEventCreateScrollWheelEvent2(source: *const c_void, units: u32, wheel_count: u32, wheel1: i32,
+            wheel2: i32, wheel3: i32) -> *mut c_void;
+        fn CGEventSetIntegerValueField(event: *mut c_void, field: u32, value: i64);
+    }
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFRelease(cf: *const c_void);
+    }
+
+    /// A real scroll-wheel NSEvent, as the window server would deliver it: `pixels` for a
+    /// trackpad's precise delta, else wheel lines; `phase` and `momentum` as CGEvent fields.
+    fn scroll_event(pixels: bool, dy: i32, phase: i64, momentum: i64) -> ([f64; 2], bool, u32) {
+        const UNIT_PIXEL: u32 = 0;
+        const UNIT_LINE: u32 = 1;
+        const SCROLL_PHASE: u32 = 99;
+        const MOMENTUM_PHASE: u32 = 123;
+        unsafe {
+            let cg = CGEventCreateScrollWheelEvent2(std::ptr::null(), if pixels { UNIT_PIXEL } else { UNIT_LINE }, 1, dy, 0, 0);
+            assert!(!cg.is_null(), "CoreGraphics made no scroll event");
+            CGEventSetIntegerValueField(cg, SCROLL_PHASE, phase);
+            CGEventSetIntegerValueField(cg, MOMENTUM_PHASE, momentum);
+            let event: ObjcId = msg_send![class!(NSEvent), eventWithCGEvent: cg];
+            CFRelease(cg);
+            assert!(event != nil, "AppKit made no event of the CGEvent");
+            event_scroll(event)
+        }
+    }
+
+    /// The board tells a wheel from a trackpad by these: a wheel is not precise and has no phase.
+    #[test]
+    fn scroll_events_tell_a_wheel_from_a_trackpad() {
+        const BEGAN: i64 = 1;
+        const CHANGED: i64 = 2;
+        const ENDED: i64 = 4;
+        const MOMENTUM_CONTINUE: i64 = 2;
+        const MOMENTUM_END: i64 = 3;
+        let (delta, precise, phase) = scroll_event(false, -1, 0, 0);
+        assert!(!precise && phase == scroll::NONE, "a wheel line: precise {precise}, phase {phase}");
+        assert!(delta[0] == 0. && delta[1] != 0. && delta[1] % 32. == 0., "a wheel scrolls whole 32-point lines: {delta:?}");
+        let (up, ..) = scroll_event(false, 1, 0, 0);
+        assert!(up[1].signum() == -delta[1].signum(), "the other way round scrolls the other way: {up:?} vs {delta:?}");
+        for (cg, expected) in [(BEGAN, scroll::BEGAN), (CHANGED, scroll::CHANGED), (ENDED, scroll::ENDED)] {
+            let (delta, precise, phase) = scroll_event(true, -7, cg, 0);
+            assert!(precise && phase == expected, "a trackpad's phase {cg}: precise {precise}, phase {phase}");
+            assert_eq!(delta[1].abs(), 7., "a trackpad's delta is in points");
+        }
+        for (cg, expected) in [(MOMENTUM_CONTINUE, scroll::MOMENTUM), (MOMENTUM_END, scroll::MOMENTUM_ENDED)] {
+            let (_, precise, phase) = scroll_event(true, -3, 0, cg);
+            assert!(precise && phase == expected, "momentum {cg}: precise {precise}, phase {phase}");
+        }
+    }
 
     /// Shortcuts follow the typed letter when the active layout gives it a key.
     /// Dvorak and AZERTY shortcuts used to select the letter at the US position.

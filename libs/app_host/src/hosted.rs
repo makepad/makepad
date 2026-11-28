@@ -653,25 +653,25 @@ impl HostedApp {
             }
             return;
         }
-        let local = local.or_else(|| cancelled.then(Default::default)).map(|local| self.at_origin(local));
-        let release = if cancelled && self.child_mouse_cancel { StudioToApp::MouseCancel } else { StudioToApp::MouseUp };
-        if let Some(local) = local {
-            // A cancel travels in a batch of its own.
-            if cancelled {
-                if let Some(mv) = self.pending_move.take() {
-                    self.emit(target.client, vec![StudioToApp::MouseMove(mv)]);
-                }
+        let send_cancel = (cancelled || local.is_none()) && self.child_mouse_cancel;
+        // A real release after the tile lost its area must land outside any clickable content.
+        let point = self.at_origin(local.unwrap_or_else(|| {
+            if cancelled { Vec2d::default() } else { dvec2(-100_000.0, -100_000.0) }
+        }));
+        let up = RemoteMouseUp {
+            button_raw_bits: button.bits(),
+            x: point.x,
+            y: point.y,
+            time,
+            modifiers: RemoteKeyModifiers::from_key_modifiers(modifiers),
+        };
+        if send_cancel {
+            if let Some(mv) = self.pending_move.take() {
+                self.emit(target.client, vec![StudioToApp::MouseMove(mv)]);
             }
-            self.emit_after_pending_move(
-                target.client,
-                release(RemoteMouseUp {
-                    button_raw_bits: button.bits(),
-                    x: local.x,
-                    y: local.y,
-                    time,
-                    modifiers: RemoteKeyModifiers::from_key_modifiers(modifiers),
-                }),
-            );
+            self.emit(target.client, vec![StudioToApp::MouseCancel(up)]);
+        } else {
+            self.emit_after_pending_move(target.client, StudioToApp::MouseUp(up));
         }
     }
 
@@ -1578,6 +1578,42 @@ mod pacing_tests {
         let mut app = HostedApp::new(Clock { now, wall_now: now });
         app.current_target = Some(RunTarget { client: 1, window_id: 0 });
         app
+    }
+
+    #[test]
+    fn release_after_tile_invalidation_follows_the_move_and_ends_the_press() {
+        for takes_cancel in [false, true] {
+            let mut app = app();
+            app.child_mouse_cancel = takes_cancel;
+            app.set_window_origin(dvec2(300.0, 40.0));
+            let mods = KeyModifiers::default();
+            app.mouse_down(dvec2(1.0, 2.0), MouseButton::PRIMARY, 0.0, &mods);
+            app.take_outgoing();
+            app.mouse_move(dvec2(3.0, 4.0), 1.0, &mods);
+            app.mouse_up(None, MouseButton::PRIMARY, 2.0, &mods, false);
+
+            let batches: Vec<_> = app.take_outgoing().iter().map(|(client, bytes)| {
+                assert_eq!(*client, 1);
+                let (messages, errors) = StudioToAppVec::decode_bin(bytes).unwrap();
+                assert!(errors.is_empty(), "{errors:?}");
+                messages.0
+            }).collect();
+            let (mv, up) = if takes_cancel {
+                let [moves, cancel] = batches.as_slice() else { panic!("expected separate move and cancel batches") };
+                let ([StudioToApp::MouseMove(mv)], [StudioToApp::MouseCancel(up)]) =
+                    (moves.as_slice(), cancel.as_slice()) else { panic!("expected a move before the cancel") };
+                (mv, up)
+            } else {
+                let [batch] = batches.as_slice() else { panic!("expected one release batch") };
+                let [StudioToApp::MouseMove(mv), StudioToApp::MouseUp(up)] = batch.as_slice() else {
+                    panic!("expected a move before the release");
+                };
+                (mv, up)
+            };
+            assert_eq!((mv.x, mv.y, mv.time), (303.0, 44.0, 1.0));
+            assert_eq!((up.x, up.y, up.time), (-99_700.0, -99_960.0, 2.0));
+            assert_eq!(up.button_raw_bits, MouseButton::PRIMARY.bits());
+        }
     }
 
     #[test]

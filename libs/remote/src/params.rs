@@ -101,6 +101,7 @@ pub fn inspect(words: &str) -> Option<&'static str> {
         "gpu diff" => "",
         "gpu path" => "",
         "hal pump" => "",
+        "hal stats" => "",
         "hal pace" => "",
         "hal shell" => "",
         "hal lose" => "",
@@ -228,6 +229,15 @@ pub fn jit(cmd: &str, sub: &str) -> Option<&'static str> {
 
 /// Structural design operations, selected before queuing a UI edit.
 pub const DESIGN: &[(&str, &str)] = &[
+    ("tree", r#""w":{"type":"integer"},"window":{"type":"integer"},"path":{"type":"string"},"reveal":{"type":"string"},"query":{"type":"string"},"depth":{"type":"integer"},"offset":{"type":"integer"},"limit":{"type":"integer"}"#),
+    ("pick", r#""w":{"type":"integer"},"at":{"type":"string"},"path":{"type":"string"},"window":{"type":"integer"}"#),
+    ("props", r#""w":{"type":"integer"},"path":{"type":"string"}"#),
+    ("locate", r#""w":{"type":"integer"},"path":{"type":"string"}"#),
+    ("apply", r#""w":{"type":"integer"},"path":{"type":"string"},"splash":{"type":"string"},"prop":{"type":"string"},"value":{"type":"string"},"if_user_seq":{"type":"integer"}"#),
+    ("typed", r#""w":{"type":"integer"},"path":{"type":"string"},"prop":{"type":"string"},"value":{"type":"string"},"if_user_seq":{"type":"integer"}"#),
+    ("theme", r#""w":{"type":"integer"},"get":{"type":"boolean"},"set":{"type":"boolean"},"install":{"type":"boolean"},"spec":{"type":"string"},"name":{"type":"string"},"value":{"type":"string"},"if_user_seq":{"type":"integer"}"#),
+    ("states", r#""w":{"type":"integer"},"path":{"type":"string"},"layer":{"type":"string"}"#),
+    ("pose", r#""w":{"type":"integer"},"path":{"type":"string"},"layer":{"type":"string"},"state":{"type":"string"},"if_user_seq":{"type":"integer"}"#),
     ("open", r#""path":{"type":"string"},"if_user_seq":{"type":"integer"}"#),
     ("delete", r#""path":{"type":"string"},"if_user_seq":{"type":"integer"}"#),
     ("duplicate", r#""path":{"type":"string"},"if_user_seq":{"type":"integer"}"#),
@@ -248,7 +258,11 @@ pub const DESIGN: &[(&str, &str)] = &[
     ("patch", r#""#),
     ("commit", r#""#),
     ("bake", r#""if_user_seq":{"type":"integer"}"#),
-    ("verify", r#""#),
+    ("preview", r#""file":{"type":"string"},"base_hash":{"type":"string"},"edits":{"type":"string"},"text":{"type":"string"},"upload":{"type":"string"},"if_user_seq":{"type":"integer"}"#),
+    ("preview_chunk", r#""file":{"type":"string"},"id":{"type":"string"},"seq":{"type":"integer"},"data":{"type":"string"},"if_user_seq":{"type":"integer"}"#),
+    ("revert", r#""file":{"type":"string"},"if_user_seq":{"type":"integer"}"#),
+    ("verify", r#""file":{"type":"string"},"path":{"type":"string"},"w":{"type":"integer"},"window":{"type":"integer"}"#),
+    ("drop", r#""w":{"type":"integer"},"window":{"type":"integer"},"at":{"type":"string"},"x":{"type":"number"},"y":{"type":"number"},"exclude":{"type":"string"}"#),
 ];
 
 pub fn design(words: &str) -> Option<&'static str> {

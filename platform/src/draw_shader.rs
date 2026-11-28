@@ -27,6 +27,15 @@ use {
 // Re-export UniformBufferBindings for use in other modules
 pub use makepad_script::shader::UniformBufferBindings;
 
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum CullMode {
+    #[default]
+    None = 0,
+    Back = 1,
+    Front = 2,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct CxDrawShaderOptions {
     pub draw_call_group: LiveId,
@@ -42,7 +51,7 @@ pub struct CxDrawShaderOptions {
     /// Honoured per draw call through the HAL's `Draw::BLEND` flag, or the
     /// WebGL blend state. Over/Max retain their backend-specific eligibility.
     pub alpha_blend: bool,
-    pub backface_culling: bool,
+    pub cull_mode: CullMode,
     /// How many times a second a shader that animates from `draw_pass.time` needs its pass repainted,
     /// or 0 to repaint it every frame. A small or slow animation looks the same at far fewer frames.
     pub time_fps: f64,
@@ -63,7 +72,7 @@ impl Default for CxDrawShaderOptions {
             depth_write: true,
             depth_test_greater: false,
             alpha_blend: true,
-            backface_culling: false,
+            cull_mode: CullMode::None,
             time_fps: 0.0,
             scissor: None,
         }
@@ -1052,6 +1061,14 @@ pub enum VertexExtent {
     Rect,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DrawShaderGlslTextureBinding {
+    pub uniform_name: String,
+    pub texture_slot: u32,
+    pub sampler_index: u32,
+    pub stages: u8,
+}
+
 #[derive(Clone)]
 pub struct CxDrawShaderMapping {
     pub source: ScriptObjectRef,
@@ -1080,7 +1097,7 @@ pub struct CxDrawShaderMapping {
     pub storage_push_size: u32,
     pub uniform_buffers: Vec<DrawShaderUniformBufferInput>,
     pub samplers: Vec<ShaderSampler>,
-    pub texture_sampler_indices: Vec<usize>,
+    pub glsl_texture_bindings: Vec<DrawShaderGlslTextureBinding>,
     pub uses_time: bool,
     pub return_facts: Box<[FnReturnFacts]>,
     pub rect_pos: Option<usize>,
@@ -1359,7 +1376,6 @@ impl CxDrawShaderMapping {
         let mut geometries = DrawShaderInputs::new(DrawShaderInputPacking::Attribute);
         let mut textures = Vec::new();
         let mut uniform_buffers = Vec::new();
-        let mut texture_sampler_indices = Vec::new();
 
         let mut rect_pos = None;
         let mut rect_size = None;
@@ -1428,7 +1444,6 @@ impl CxDrawShaderMapping {
                     id: io.name(),
                     tex_type,
                 });
-                texture_sampler_indices.push(io.sampler());
             }
         }
 
@@ -1694,7 +1709,12 @@ impl CxDrawShaderMapping {
             textures,
             uniform_buffers,
             samplers: desc.samplers().to_vec(),
-            texture_sampler_indices,
+            glsl_texture_bindings: desc.glsl_texture_bindings().iter().map(|b| DrawShaderGlslTextureBinding {
+                uniform_name: b.uniform_name().to_owned(),
+                texture_slot: b.texture_slot(),
+                sampler_index: b.sampler_index(),
+                stages: b.stages(),
+            }).collect(),
             uses_time: desc.uses_time(),
             return_facts: desc.return_facts().into(),
             rect_pos,

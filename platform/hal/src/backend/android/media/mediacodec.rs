@@ -175,6 +175,13 @@ impl Drop for Reader {
 
 pub struct Image(pub *mut c_void);
 impl Image {
+    /// Returns the image to its reader. Android owns the fd and orders reuse after the fence.
+    pub fn delete_async(self, release_fence: std::os::fd::OwnedFd) {
+        use std::os::fd::IntoRawFd;
+        let image = std::mem::ManuallyDrop::new(self);
+        unsafe { ndk::AImage_deleteAsync(image.0, release_fence.into_raw_fd()) }
+    }
+
     /// A YUV_420_888 picture as tightly packed NV12 of `w` x `h` (its top-left part).
     pub fn nv12(&self, w: usize, h: usize) -> Result<Vec<u8>, String> {
         let plane = |i: i32| -> Result<(&[u8], usize, usize), String> {
@@ -265,10 +272,12 @@ pub mod ndk {
         pub fn AImageReader_getWindow(reader: *mut c_void, window: *mut *mut c_void) -> i32;
         pub fn AImageReader_delete(reader: *mut c_void);
         pub fn AImageReader_acquireNextImage(reader: *mut c_void, image: *mut *mut c_void) -> i32;
+        pub fn AImageReader_acquireNextImageAsync(reader: *mut c_void, image: *mut *mut c_void, acquire_fence_fd: *mut i32) -> i32;
         pub fn AImage_getPlaneData(image: *const c_void, plane: i32, data: *mut *mut u8, length: *mut i32) -> i32;
         pub fn AImage_getPlaneRowStride(image: *const c_void, plane: i32, stride: *mut i32) -> i32;
         pub fn AImage_getPlanePixelStride(image: *const c_void, plane: i32, stride: *mut i32) -> i32;
         pub fn AImage_delete(image: *mut c_void);
+        pub fn AImage_deleteAsync(image: *mut c_void, release_fence_fd: i32);
         pub fn AImageReader_newWithUsage(width: i32, height: i32, format: i32, usage: u64, max_images: i32, reader: *mut *mut c_void) -> i32;
         pub fn AImage_getHardwareBuffer(image: *const c_void, buffer: *mut *mut c_void) -> i32;
         pub fn AImage_getTimestamp(image: *const c_void, time: *mut i64) -> i32;

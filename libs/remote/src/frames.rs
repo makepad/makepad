@@ -3,12 +3,15 @@
 //! DATA message is one record `u32 LE json_len | json | bytes`, the json carrying
 //! `{seq, w, h, window, t_ns, codec}` (+ timings). An image never becomes a file on the app's
 //! side. The app registers the service (`Endpoint::register("frames", 1, ..)`); this module is the
-//! record format and the client side of it.
+//! record format and the client side of it. A capture subscription (`cap=1`) also takes `rle`,
+//! `h264` or `hevc`. Video DATA carries an encoded access unit, its `key` flag and its `pts` in
+//! 100 ns units. Its `chroma` is the opened format (`420` or `444`). Its first header adds `codecs` (strings) and `full_chroma` (an encoder capability).
+//! Send `key`, `kbps=N` or `fps=N` as UTF-8 DATA on that channel to steer the subscription.
 
 use crate::conn::{Event, CLOSE_NORMAL};
 use crate::link::{Client, Error};
 
-/// One frame: its header json and the image bytes (a PNG, or tightly packed RGBA for `raw`).
+/// One image or encoded access unit, with its JSON header.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Record {
     pub json: String,
@@ -43,6 +46,10 @@ impl Record {
     pub fn text(&self, key: &str) -> Option<String> {
         crate::discovery::string(self.raw(key)?.as_bytes(), &mut 0)
     }
+
+    pub fn flag(&self, key: &str) -> Option<bool> {
+        self.raw(key)?.parse().ok()
+    }
 }
 
 /// What a client asks the `frames` service for.
@@ -51,8 +58,10 @@ pub struct Request {
     pub window: Option<usize>,
     pub scale: Option<f64>,
     pub raw: bool,
-    /// the codec when not png/raw (`rle`): set by `rec`
+    /// Explicit codec (`png`, `raw`, `rle`, `h264` or `hevc`). Video codecs require `cap`.
     pub codec: Option<&'static str>,
+    /// Request 4:4:4 chroma from a video encoder. The default is 4:2:0.
+    pub full_chroma: bool,
     /// a fixed number of frames; none = until the channel is closed
     pub n: Option<usize>,
     pub fps: Option<f64>,
@@ -61,6 +70,15 @@ pub struct Request {
 }
 
 impl Request {
+    /// OPEN arguments with video rate control. The codec and capture options come from this request.
+    pub fn video_args(&self, kbps: u32, max_qp: Option<u32>) -> String {
+        let mut args = format!("{} kbps={kbps}", self.args());
+        if let Some(qp) = max_qp {
+            args.push_str(&format!(" maxqp={qp}"));
+        }
+        args
+    }
+
     /// The OPEN arguments.
     pub fn args(&self) -> String {
         let mut a = Vec::new();
@@ -81,6 +99,9 @@ impl Request {
         }
         if self.cap {
             a.push("cap=1".into());
+        }
+        if self.full_chroma {
+            a.push("chroma=444".into());
         }
         a.join(" ")
     }

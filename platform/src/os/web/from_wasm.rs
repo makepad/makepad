@@ -1,6 +1,6 @@
 use crate::{
-    cursor::MouseCursor, draw_shader::DrawShaderTextureInput, draw_vars::DRAW_CALL_TEXTURE_SLOTS,
-    makepad_math::Vec4f, makepad_script::shader::TextureType, makepad_wasm_bridge::*,
+    cursor::MouseCursor, draw_shader::{CxDrawShaderMapping, DrawShaderGlslTextureBinding}, draw_vars::DRAW_CALL_TEXTURE_SLOTS,
+    makepad_math::Vec4f, makepad_script::shader::{SamplerAddress, SamplerFilter, TextureType}, makepad_wasm_bridge::*,
 };
 
 // WebBrowser API
@@ -267,24 +267,45 @@ pub struct FromWasmWebSocketSendString{
     pub data: String
 }
 */
-#[derive(FromWasm)]
+#[derive(Clone, PartialEq, Eq, FromWasm)]
 pub struct WTextureInput {
     pub ty: String,
     pub name: String,
+    pub slot: u32,
+    pub stages: u32,
+    pub filter: u32,
+    pub address: u32,
+    pub compare: bool,
+    pub anisotropy: u32,
 }
 
-impl DrawShaderTextureInput {
-    pub fn to_from_wasm_texture_input(&self) -> WTextureInput {
-        let ty = match self.tex_type {
+impl WTextureInput {
+    pub fn from_binding(mapping: &CxDrawShaderMapping, b: &DrawShaderGlslTextureBinding) -> Result<Self, &'static str> {
+        let texture = mapping.textures.get(b.texture_slot as usize).ok_or("invalid WebGL texture slot")?;
+        let sampler = mapping.samplers.get(b.sampler_index as usize).ok_or("invalid WebGL sampler index")?;
+        let ty = match texture.tex_type {
+            TextureType::Texture1d | TextureType::Texture2d | TextureType::TextureVideo => "sampler2D",
             TextureType::TextureDepth => "sampler2DShadow",
-            TextureType::TextureCube | TextureType::TextureCubeArray => "samplerCube",
-            TextureType::Texture2dArray => "sampler2DArray",
-            _ => "sampler2D",
+            TextureType::TextureCube => "samplerCube",
+            TextureType::TextureCubeArray => return Err("WebGL2 does not support cube array textures"),
+            TextureType::Texture1dArray | TextureType::Texture2dArray | TextureType::TextureDepthArray => "sampler2DArray",
+            TextureType::Texture3d | TextureType::Texture3dArray => "sampler3D",
         };
-        WTextureInput {
-            ty: ty.to_string(),
-            name: self.id.to_string(),
-        }
+        Ok(Self {
+            ty: ty.to_owned(),
+            name: b.uniform_name.clone(),
+            slot: b.texture_slot,
+            stages: u32::from(b.stages),
+            filter: u32::from(sampler.filter == SamplerFilter::Linear),
+            address: match sampler.address {
+                SamplerAddress::Repeat => 0,
+                SamplerAddress::ClampToEdge => 1,
+                SamplerAddress::ClampToZero => 2,
+                SamplerAddress::MirroredRepeat => 3,
+            },
+            compare: texture.tex_type == TextureType::TextureDepth,
+            anisotropy: u32::from(sampler.anisotropy),
+        })
     }
 }
 
@@ -362,33 +383,27 @@ pub struct FromWasmAllocArrayBuffer {
 }
 
 #[derive(FromWasm)]
-pub struct FromWasmRetainedArrayBuffer {
-    pub buffer_id: usize,
-    pub data: WasmPtrF32,
-    pub first_slot: usize,
+pub struct FromWasmCreateInstanceSlab {
+    pub slab_slot: u32,
+    pub backing_generation: u32,
+    // Power-of-two rounding can take a wasm32 byte count to 4 GiB.
+    pub capacity_bytes: f64,
+}
+
+#[derive(FromWasm, ToWasm)]
+pub struct WInstanceRegion {
+    pub index: u32,
+    pub gen: u32,
 }
 
 #[derive(FromWasm)]
-pub struct WRetainedBufferCopy {
-    pub source_slot: usize,
-    pub destination_slot: usize,
-    pub slot_count: usize,
-}
-
-#[derive(FromWasm)]
-pub struct WRetainedBufferWrite {
-    pub destination_slot: usize,
-    pub data: WasmPtrF32,
-}
-
-#[derive(FromWasm)]
-pub struct FromWasmRetainedArrayUpdate {
-    pub buffer_id: usize,
-    pub slot_count: usize,
-    pub capacity_bytes: usize,
-    pub replace: bool,
-    pub copies: Vec<WRetainedBufferCopy>,
-    pub writes: Vec<WRetainedBufferWrite>,
+pub struct FromWasmWriteInstanceRegion {
+    pub slab_slot: u32,
+    pub backing_generation: u32,
+    pub region: WInstanceRegion,
+    pub byte_off: usize,
+    pub byte_len: usize,
+    pub parts: Vec<WasmPtrU8>,
 }
 
 #[derive(FromWasm)]
@@ -413,7 +428,18 @@ pub struct FromWasmAllocVao {
     pub shader_id: usize,
     pub geom_ib_id: usize,
     pub geom_vb_id: usize,
-    pub inst_vb_id: usize,
+    pub slab_slot: u32,
+    pub backing_generation: u32,
+    pub region: WInstanceRegion,
+    pub byte_off: usize,
+    pub byte_len: usize,
+    pub instance_byte_offset: usize,
+}
+
+#[derive(FromWasm)]
+pub struct WInstanceSlab {
+    pub slab_slot: u32,
+    pub backing_generation: u32,
 }
 
 /// Deletes WebGL objects whose owning Rust pool slots are genuinely free.
@@ -421,6 +447,7 @@ pub struct FromWasmAllocVao {
 /// invalidates VAOs which depend on a retired vertex/index buffer.
 #[derive(FromWasm)]
 pub struct FromWasmFreeWebGLResources {
+    pub instance_slabs: Vec<WInstanceSlab>,
     pub array_buffer_ids: Vec<usize>,
     pub index_buffer_ids: Vec<usize>,
     pub vao_ids: Vec<usize>,
@@ -566,8 +593,38 @@ pub struct FromWasmBeginRenderCanvas {
 pub struct FromWasmSetDefaultDepthAndBlendMode {}
 
 #[derive(FromWasm)]
+pub struct WInstanceRange {
+    pub first: u32,
+    pub count: u32,
+}
+
+impl From<[u32; 2]> for WInstanceRange {
+    fn from([first, count]: [u32; 2]) -> Self {
+        Self { first, count }
+    }
+}
+
+#[derive(FromWasm, Clone, Copy, Debug, Default)]
+pub struct WUniformRange {
+    pub off: u32,
+    pub len: u32,
+}
+
+impl From<crate::uniform_stream::UniformRange> for WUniformRange {
+    fn from(range: crate::uniform_stream::UniformRange) -> Self {
+        Self { off: range.off, len: range.len }
+    }
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmUploadUniformStream {
+    pub data: WasmPtrU8,
+}
+
+#[derive(FromWasm)]
 pub struct FromWasmDrawCall {
     pub custom_uniforms: Vec<WCustomUniformBuffer>,
+    pub instance_ranges: Vec<WInstanceRange>,
     pub vao_id: usize,
     pub shader_id: usize,
     pub index_width: u32,
@@ -578,24 +635,13 @@ pub struct FromWasmDrawCall {
     pub blend_max: bool,
     /// The shader's `blend_op: @Add`: ONE/ONE/ADD, alpha included.
     pub blend_add: bool,
-    pub backface_culling: bool,
-    pub pass_uniforms: WasmPtrF32,
-    pub pass_uniforms_gen_lo: u32,
-    pub pass_uniforms_gen_hi: u32,
-    pub draw_list_uniforms: WasmPtrF32,
-    pub draw_list_uniforms_gen_lo: u32,
-    pub draw_list_uniforms_gen_hi: u32,
-    pub draw_call_uniforms: WasmPtrF32,
-    pub draw_call_uniforms_gen_lo: u32,
-    pub draw_call_uniforms_gen_hi: u32,
-    pub user_uniforms: WasmPtrF32,
-    pub user_uniforms_gen_lo: u32,
-    pub user_uniforms_gen_hi: u32,
-    pub live_uniforms: WasmPtrF32,
-    pub live_uniforms_gen_lo: u32,
-    pub live_uniforms_gen_hi: u32,
-    pub reset_draw_uniforms: bool,
-    pub const_table: WasmPtrF32,
+    /// 0 = None, 1 = Back, 2 = Front (matches `CullMode as u32`).
+    pub cull_mode: u32,
+    pub pass_uniforms: WUniformRange,
+    pub draw_list_uniforms: WUniformRange,
+    pub draw_call_uniforms: WUniformRange,
+    pub user_uniforms: WUniformRange,
+    pub live_uniforms: WUniformRange,
     pub textures: [Option<usize>; DRAW_CALL_TEXTURE_SLOTS],
 }
 

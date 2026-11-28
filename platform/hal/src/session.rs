@@ -16,6 +16,7 @@
 use crate::buffers::{pack_strs, unpack_forward, DomainInfo, EventQueue};
 use crate::codec::ArenaSink;
 use crate::ledger::{Kind, Ledger, LedgerEntry};
+use crate::table::DENSE_MAX;
 use crate::types::*;
 use crate::FastMap;
 use std::collections::BTreeMap;
@@ -38,17 +39,44 @@ pub struct Entry<T> {
     pub val: T,
 }
 
-/// Objects of one kind, keyed by (session, index).
+#[derive(Debug)]
+struct Slot<T> {
+    live: Option<Entry<T>>,
+    /// Last destroyed generation. Zero is a valid generation.
+    retired: Option<u32>,
+}
+
+impl<T> Default for Slot<T> {
+    fn default() -> Self {
+        Self { live: None, retired: None }
+    }
+}
+
+impl<T> Slot<T> {
+    fn can_insert(&self, gen: u32) -> bool {
+        !self.retired.is_some_and(|g| gen <= g) && !self.live.as_ref().is_some_and(|e| gen < e.gen)
+    }
+}
+
+/// Objects of one kind in one session, indexed by handle.
 #[derive(Debug)]
 pub struct Table<T> {
-    map: FastMap<(u32, u32), Entry<T>>,
-    /// last destroyed generation per slot: a create or use with an older one is stale
-    retired: FastMap<(u32, u32), u32>,
+    dense: Vec<Slot<T>>,
+    overflow: FastMap<u32, Slot<T>>,
+    len: usize,
+    #[cfg(debug_assertions)]
+    session: Option<u32>,
 }
 
 impl<T> Default for Table<T> {
     fn default() -> Self {
-        Table { map: FastMap::default(), retired: FastMap::default() }
+        Self {
+            dense: Vec::new(),
+            overflow: FastMap::default(),
+            len: 0,
+            #[cfg(debug_assertions)]
+            session: None,
+        }
     }
 }
 
@@ -60,77 +88,163 @@ pub enum Miss {
 }
 
 impl<T> Table<T> {
-    pub(crate) fn can_insert(&self, session: u32, id: Id) -> bool {
-        let key = (session, id.index);
-        !self.retired.get(&key).is_some_and(|g| id.gen <= *g)
-            && !self.map.get(&key).is_some_and(|e| id.gen < e.gen)
+    #[inline]
+    fn check_session(&self, _session: u32) {
+        #[cfg(debug_assertions)]
+        debug_assert!(self.session.is_none_or(|s| s == _session));
     }
 
-    /// Inserts under `id`. A live older generation in the slot is replaced (returned); a create
-    /// with a generation not newer than the slot's last is stale.
+    #[inline]
+    fn slot(&self, index: u32) -> Option<&Slot<T>> {
+        if index < DENSE_MAX {
+            self.dense.get(index as usize)
+        } else {
+            self.overflow.get(&index)
+        }
+    }
+
+    #[inline]
+    fn slot_mut(&mut self, index: u32) -> Option<&mut Slot<T>> {
+        if index < DENSE_MAX {
+            self.dense.get_mut(index as usize)
+        } else {
+            self.overflow.get_mut(&index)
+        }
+    }
+
+    pub(crate) fn can_insert(&self, session: u32, id: Id) -> bool {
+        self.check_session(session);
+        self.slot(id.index).is_none_or(|slot| slot.can_insert(id.gen))
+    }
+
+    /// Replaces a live entry of the same or an older generation and returns its value.
+    /// A create must be newer than the slot's last destroyed generation.
     pub fn insert(&mut self, session: u32, id: Id, owner_session: u32, val: T) -> Result<Option<T>, Miss> {
-        let key = (session, id.index);
-        if !self.can_insert(session, id) {
+        self.check_session(session);
+        let slot = if id.index < DENSE_MAX {
+            let i = id.index as usize;
+            if i >= self.dense.len() {
+                self.dense.resize_with(i + 1, Slot::default);
+            }
+            &mut self.dense[i]
+        } else {
+            self.overflow.entry(id.index).or_default()
+        };
+        if !slot.can_insert(id.gen) {
             return Err(Miss::Stale);
         }
-        let old = self.map.insert(key, Entry { gen: id.gen, owner_session, lent_to: 0, val });
+        let old = slot.live.replace(Entry { gen: id.gen, owner_session, lent_to: 0, val });
+        if old.is_none() {
+            self.len += 1;
+        }
+        #[cfg(debug_assertions)]
+        {
+            self.session = Some(session);
+        }
         Ok(old.map(|e| e.val))
     }
 
+    #[inline]
     pub fn get(&self, session: u32, id: Id) -> Result<&Entry<T>, Miss> {
-        match self.map.get(&(session, id.index)) {
-            Some(e) if e.gen == id.gen => Ok(e),
-            _ => Err(Miss::Stale),
-        }
+        self.check_session(session);
+        self.slot(id.index)
+            .and_then(|slot| slot.live.as_ref())
+            .filter(|e| e.gen == id.gen)
+            .ok_or(Miss::Stale)
     }
 
+    #[inline]
     pub fn get_mut(&mut self, session: u32, id: Id) -> Result<&mut Entry<T>, Miss> {
-        match self.map.get_mut(&(session, id.index)) {
-            Some(e) if e.gen == id.gen => Ok(e),
-            _ => Err(Miss::Stale),
-        }
+        self.check_session(session);
+        self.slot_mut(id.index)
+            .and_then(|slot| slot.live.as_mut())
+            .filter(|e| e.gen == id.gen)
+            .ok_or(Miss::Stale)
     }
 
     pub fn remove(&mut self, session: u32, id: Id) -> Result<Entry<T>, Miss> {
-        self.get(session, id)?;
-        self.retired.insert((session, id.index), id.gen);
-        Ok(self.map.remove(&(session, id.index)).expect("checked live"))
+        self.check_session(session);
+        let slot = self.slot_mut(id.index).ok_or(Miss::Stale)?;
+        let entry = slot.live.take_if(|e| e.gen == id.gen).ok_or(Miss::Stale)?;
+        slot.retired = Some(id.gen);
+        self.len -= 1;
+        Ok(entry)
     }
 
     pub fn len(&self) -> usize {
-        self.map.len()
+        self.len
     }
 
     pub fn is_empty(&self) -> bool {
-        self.map.is_empty()
+        self.len == 0
     }
 
-    /// (index, generation) of the session's entries.
     /// Whether any live entry of the session matches.
     pub fn any_of(&self, session: u32, f: impl Fn(&T) -> bool) -> bool {
-        self.map.iter().any(|((s, _), e)| *s == session && f(&e.val))
+        self.iter_of(session).any(|(_, e)| f(&e.val))
     }
 
+    /// Live ids in ascending index order.
     pub fn keys_of(&self, session: u32) -> Vec<Id> {
-        let mut v: Vec<Id> = self.map.iter().filter(|((s, _), _)| *s == session).map(|((_, i), e)| Id::new(*i, e.gen)).collect();
-        v.sort_by_key(|i| i.index);
-        v
+        let mut ids = Vec::with_capacity(self.len);
+        ids.extend(self.iter_of(session).map(|(id, _)| id));
+        ids.sort_unstable_by_key(|id| id.index);
+        ids
     }
 
     /// Unordered, allocation-free form of `keys_of` for scanning a session's entries.
     pub fn iter_of(&self, session: u32) -> impl Iterator<Item = (Id, &Entry<T>)> + '_ {
-        self.map.iter()
-            .filter(move |((s, _), _)| *s == session)
-            .map(|((_, index), e)| (Id::new(*index, e.gen), e))
+        self.check_session(session);
+        self.dense.iter().enumerate().map(|(i, slot)| (i as u32, slot))
+            .chain(self.overflow.iter().map(|(&index, slot)| (index, slot)))
+            .filter_map(|(index, slot)| slot.live.as_ref().map(|e| (Id::new(index, e.gen), e)))
     }
 
     /// Frees everything of the session; returns the entries (aliases included) for the caller to
     /// give lent objects back.
     pub fn take_session(&mut self, session: u32) -> Vec<(Id, Entry<T>)> {
-        let ids = self.keys_of(session);
-        self.retired.retain(|(s, _), _| *s != session);
-        ids.into_iter().filter_map(|id| self.map.remove(&(session, id.index)).map(|e| (id, e))).collect()
+        self.check_session(session);
+        let table = std::mem::take(self);
+        let mut entries = Vec::with_capacity(table.len);
+        entries.extend(table.dense.into_iter().enumerate().map(|(i, slot)| (i as u32, slot))
+            .chain(table.overflow)
+            .filter_map(|(index, slot)| slot.live.map(|e| (Id::new(index, e.gen), e))));
+        entries.sort_unstable_by_key(|(id, _)| id.index);
+        entries
     }
+}
+
+#[cfg(test)]
+#[test]
+fn table_generation_retirement_dense_and_lent() {
+    let mut table = Table::default();
+    let sid = 5;
+    assert!(table.take_session(sid).is_empty());
+    for index in [42, LENT_BASE + 7] {
+        for gen in [0, 1] {
+            let id = Id::new(index, gen);
+            assert_eq!(table.get(sid, id).err(), Some(Miss::Stale));
+            assert_eq!(table.insert(sid, id, sid, gen), Ok(None));
+            assert_eq!(table.remove(sid, id).unwrap().val, gen);
+            assert!(!table.can_insert(sid, id));
+            assert_eq!(table.insert(sid, id, sid, gen), Err(Miss::Stale));
+        }
+        let two = Id::new(index, 2);
+        let three = Id::new(index, 3);
+        assert_eq!(table.insert(sid, two, sid, 20), Ok(None));
+        assert_eq!(table.get(sid, Id::new(index, 1)).err(), Some(Miss::Stale));
+        assert_eq!(table.insert(sid, three, sid, 30), Ok(Some(20)));
+        assert_eq!(table.get(sid, two).err(), Some(Miss::Stale));
+        assert_eq!(table.remove(sid, two).err(), Some(Miss::Stale));
+        assert_eq!(table.insert(sid, three, sid, 31), Ok(Some(30)));
+        assert_eq!(table.get(sid, three).unwrap().val, 31);
+    }
+    assert_eq!((table.dense.len(), table.overflow.len(), table.len()), (43, 1, 2));
+    let ids = [Id::new(42, 3), Id::new(LENT_BASE + 7, 3)];
+    assert_eq!(table.keys_of(sid), ids);
+    assert_eq!(table.take_session(sid).into_iter().map(|(id, _)| id).collect::<Vec<_>>(), ids);
+    assert!(table.is_empty());
+    assert_eq!(table.insert(sid + 1, Id::new(42, 0), sid + 1, 0), Ok(None));
 }
 
 // ------------------------------------------------------------------ objects
@@ -312,8 +426,7 @@ pub struct WindowObj {
 }
 
 /// A frame kept past its batch (session 0's badge layer): its packet with its own passes and
-/// draws (ranges from 0), the batch's arena, and a copy of every byte run its passes and draws
-/// borrowed from the client (uniforms, inline instances), which their slices point into now.
+/// draws (ranges from 0), the batch's arena, and the packet's uniform stream.
 #[derive(Debug, Default)]
 pub struct KeptFrame {
     frame: FramePacket,
@@ -321,13 +434,8 @@ pub struct KeptFrame {
     draws: Vec<Draw>,
     layers: Vec<Layer>,
     arena: Vec<u8>,
-    /// 8-aligned (the slices are read as words), never changed after `keep`
-    bytes: Vec<Box<[u64]>>,
+    uniforms: Vec<u8>,
 }
-
-// SAFETY: the only pointers are the slices into `bytes`, owned and immutable for the frame's life.
-unsafe impl Send for KeptFrame {}
-unsafe impl Sync for KeptFrame {}
 
 impl KeptFrame {
     /// A copy of packet `packet` of `view`; `None` when its ranges are out of bounds.
@@ -341,32 +449,16 @@ impl KeptFrame {
         };
         let passes = view.passes.get(within(p.passes, view.passes.len())?)?;
         let draws_at = within(p.draws, view.draws.len())?;
-        let mut kept = KeptFrame { arena: view.arena.to_vec(), ..Default::default() };
-        let own = |s: Slice, bytes: &mut Vec<Box<[u64]>>| -> Slice {
-            // SAFETY: inside the call that received the slice (see above)
-            let src = unsafe { s.as_bytes() };
-            if src.is_empty() { return Slice::EMPTY; }
-            let mut words = vec![0u64; src.len().div_ceil(8)].into_boxed_slice();
-            // SAFETY: `words` has at least `src.len()` bytes
-            unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), words.as_mut_ptr() as *mut u8, src.len()) };
-            let out = Slice { ptr: words.as_ptr() as *const u8, len: src.len() };
-            bytes.push(words);
-            out
-        };
+        let uniforms = crate::backend::exec::packet_uniforms(view, &p)?.to_vec();
+        let mut kept = KeptFrame { arena: view.arena.to_vec(), uniforms, ..Default::default() };
         for pass in passes {
             let r = within(pass.draws, view.draws.len())?;
             if r.start < draws_at.start || r.end > draws_at.end { return None; }
             let mut pass = *pass;
-            pass.uniforms = own(pass.uniforms, &mut kept.bytes);
             pass.draws = Range { off: (r.start - draws_at.start) as u32, len: r.len() as u32 };
             kept.passes.push(pass);
         }
-        for d in &view.draws[draws_at] {
-            let mut d = *d;
-            for u in &mut d.uniforms { *u = own(*u, &mut kept.bytes); }
-            d.inst.data = own(d.inst.data, &mut kept.bytes);
-            kept.draws.push(d);
-        }
+        kept.draws.extend_from_slice(&view.draws[draws_at]);
         for layer in view.layers.get(within(p.layers, view.layers.len())?)? {
             let mut layer = *layer;
             if layer.kind == Layer::DRAWS {
@@ -377,6 +469,7 @@ impl KeptFrame {
             kept.layers.push(layer);
         }
         kept.frame = FramePacket {
+            uniforms: Range { off: 0, len: p.uniforms.len },
             passes: Range { off: 0, len: kept.passes.len() as u32 },
             draws: Range { off: 0, len: kept.draws.len() as u32 },
             layers: Range { off: 0, len: kept.layers.len() as u32 },
@@ -387,7 +480,7 @@ impl KeptFrame {
 
     /// The frame as a batch of one packet (packet 0).
     pub fn view(&self) -> crate::buffers::CmdView<'_> {
-        crate::buffers::CmdView { session: HOST, cmds: &[], arena: &self.arena, frames: std::slice::from_ref(&self.frame), passes: &self.passes, draws: &self.draws, layers: &self.layers }
+        crate::buffers::CmdView { session: HOST, cmds: &[], arena: &self.arena, uniforms: &self.uniforms, frames: std::slice::from_ref(&self.frame), passes: &self.passes, draws: &self.draws, layers: &self.layers }
     }
 
     /// Whether the frame draws anything (none: the layer ends).
@@ -425,7 +518,7 @@ pub struct TimerObj {
     pub due_ns: u64,
 }
 
-/// Counters of things the HAL refused to act on (each is visible, none panics).
+/// Counters of work the HAL handled or refused for this session.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Stats {
     /// an id whose slot is empty, freed or of another generation
@@ -464,9 +557,56 @@ pub struct Stats {
     pub gpu_ns_max: u64,
     pub passes: u64,
     pub draws: u64,
+    /// instance rows the draws drew: each draw's count, or the rows its ranges select
+    pub instance_rows: u64,
+    /// buffer and texture upload bytes handed to the backend
+    pub upload_bytes: u64,
+    /// commands the HAL received from this session
+    pub commands: u64,
+    /// buffer updates handed to the backend (`BufferUpdate`, `BufferUpdateParts`) and the writes
+    /// in them: a frame builder sends one update per instance slab a frame writes
+    pub buffer_updates: u64,
+    pub buffer_parts: u64,
+    /// Upload arenas taken from the pool or newly allocated (Vulkan).
+    pub arenas_taken: u64,
+    /// Buffer copy commands recorded for staged slab writes (Vulkan).
+    pub copy_cmds: u64,
+    /// Regions in the buffer copy commands recorded for staged slab writes (Vulkan).
+    pub copy_regions: u64,
+    /// Barriers recorded after staged slab copies (Vulkan).
+    pub upload_barriers: u64,
+    /// Batches handed to the submit worker (Vulkan) or command buffers committed (Metal); D3D11
+    /// and GL report zero.
+    pub submissions: u64,
+    /// Driver calls that wrote the bytes of buffer updates: `glBufferSubData` (GL; an orphaning
+    /// `glBufferData` writes none), `Map` and `UpdateSubresource` (D3D11), and
+    /// `vkFlushMappedMemoryRanges` on non-coherent memory (Vulkan). Metal writes mapped memory and
+    /// makes none.
+    pub driver_uploads: u64,
+    /// Packed uniform stream bytes per executed packet, including alignment padding.
+    pub uniform_bytes: u64,
+    /// CPU time spent handling frames in the backend, in ns
+    pub exec_ns: u64,
+    /// CPU time the backend spent applying this session's buffer and texture uploads, in ns.
+    /// GL includes time on its render thread.
+    pub upload_ns: u64,
+    /// buffers the backend created for this session (a steady frame creates none)
+    pub buffer_creates: u64,
+    /// bytes of APPEND updates copied through an upload arena for this session
+    pub staged_bytes: u64,
+    /// upload arenas created for this session's work, including those made ahead
+    pub arena_creates: u64,
+    /// time Cx spent building frame packets, in ns
+    pub build_ns: u64,
+    /// time the app spent walking draws, counted once per beat, in ns
+    pub walk_ns: u64,
+    /// pipeline and resource binding calls issued for draws
+    pub binds: u64,
+    /// descriptor set writes issued for draws
+    pub set_writes: u64,
     /// the longest CPU time Cx spent building one frame (`FrameMeta` build start to end), ns
     pub max_frame_ns: u64,
-    /// upload arenas (uniforms, inline instances, texture upload staging) the backend had to
+    /// upload arenas (uniforms, texture upload staging) the backend had to
     /// allocate for this session's frames and uploads; steady frames reuse theirs and add none
     pub arena_allocs: u64,
     /// command buffer slots made for this session's frames, uploads and readbacks (Vulkan).
@@ -517,6 +657,8 @@ pub struct Session {
     pub ledger: Ledger,
     pub events: EventQueue,
     pub stats: Stats,
+    /// start of the last draw walk counted for this session
+    pub(crate) last_walk_start_ns: u64,
     /// the frame id of the newest frame submitted / finished
     pub frame: u64,
     pub last_frame_done: u64,
@@ -590,6 +732,7 @@ impl Session {
                 events
             },
             stats: Stats::default(),
+            last_walk_start_ns: 0,
             frame: 0,
             last_frame_done: 0,
             compute_in_flight: Default::default(),
@@ -734,12 +877,7 @@ pub struct ExecRecord {
     pub shown: Vec<(u32, Id, u64)>,
 }
 
-impl Default for World {
-    fn default() -> Self {
-        World::new()
-    }
-}
-
+#[relax_api::relax_api(loader = "the HAL's session table: JIT code opens a session with `makepad_hal::hal_open`")]
 impl World {
     pub fn new() -> World {
         let mut sessions = FastMap::default();
@@ -889,6 +1027,7 @@ impl World {
     /// host, embedded ones away from the parent, which hears `ChildWindowClosed`), and a domain's
     /// record takes the end state and tells its parent. `Relaunch` makes the session again, empty,
     /// under the same id.
+    #[relax_api::relax_api(loader = "the HAL ends a session: JIT code ends its own with `Cx::hal_close_session` (a `Quit` command)")]
     pub fn finish_close(&mut self, id: u32, how: CloseAs) -> bool {
         let Some(mut s) = self.sessions.remove(&id) else { return false };
         crate::a11y::close_session(id);
@@ -1107,6 +1246,7 @@ impl World {
 
     /// The privileged-only half of `DomainStart`: the child's session exists from now (state
     /// compiling), the parent hears it, and the returned launch is what the host is asked to run.
+    #[relax_api::relax_api(loader = "the host starts a domain: JIT code has no use for it")]
     pub fn start_domain(&mut self, parent: u32, req: u32, app: String, args: String) -> DomainLaunch {
         let dpi = self.domain_dpi(parent).expect("domain parent");
         let n = self.next_key;

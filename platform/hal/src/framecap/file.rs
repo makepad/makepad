@@ -1,11 +1,11 @@
 //! The `.mkcap` file: one [`Capture`], little-endian, `MKFC`, a version, then the fields in the
-//! order of the structs (lengths before every list and byte string). A file written by a newer
-//! version is refused with its version named; the format has no optional parts.
+//! order of the structs (lengths before every list and byte string). A file written by another
+//! version is refused with both versions named; the format has no optional parts.
 
 use super::*;
 
 const MAGIC: &[u8; 4] = b"MKFC";
-const VERSION: u32 = 3;
+const VERSION: u32 = 4;
 
 struct W(Vec<u8>);
 
@@ -190,6 +190,7 @@ pub fn encode(c: &Capture) -> Vec<u8> {
     w.u64(c.buffers.len() as u64);
     for b in &c.buffers {
         w.id(b.id);
+        w.u32(b.first_pass);
         w.u16(b.kind);
         w.u64(b.size);
         for v in [b.owner, b.site, b.label] {
@@ -231,11 +232,9 @@ pub fn encode(c: &Capture) -> Vec<u8> {
         w.id(d.ib);
         w.u32(d.index[0]);
         w.u32(d.index[1]);
-        w.u32(d.inst_kind);
         w.id(d.inst_id);
         w.u32(d.inst_off);
         w.u32(d.inst_count);
-        w.bytes(&d.inst_data);
         w.u64(d.inst_ranges.len() as u64);
         for [a, b] in &d.inst_ranges {
             w.u32(*a);
@@ -300,10 +299,11 @@ pub fn decode(b: &[u8]) -> Result<Capture, String> {
     }
     for _ in 0..r.count()? {
         let id = r.id()?;
+        let first_pass = r.u32()?;
         let kind = r.u16()?;
         let size = r.u64()?;
         let (owner, site, label) = (r.u32()?, r.u32()?, r.u32()?);
-        c.buffers.push(CapBuffer { id, kind, size, owner, site, label, contents: r.opt()? });
+        c.buffers.push(CapBuffer { id, first_pass, kind, size, owner, site, label, contents: r.opt()? });
     }
     for _ in 0..r.count()? {
         let id = r.id()?;
@@ -331,10 +331,8 @@ pub fn decode(b: &[u8]) -> Result<Capture, String> {
         let pass = r.u32()?;
         let (pipeline, vb, ib) = (r.id()?, r.id()?, r.id()?);
         let index = [r.u32()?, r.u32()?];
-        let inst_kind = r.u32()?;
         let inst_id = r.id()?;
         let (inst_off, inst_count) = (r.u32()?, r.u32()?);
-        let inst_data = r.bytes()?;
         let mut inst_ranges = Vec::new();
         for _ in 0..r.count()? {
             inst_ranges.push([r.u32()?, r.u32()?]);
@@ -350,7 +348,7 @@ pub fn decode(b: &[u8]) -> Result<Capture, String> {
         let (flags, owner, list, item, list_name) = (r.u32()?, r.u32()?, r.u32()?, r.u32()?, r.u32()?);
         let bounds = r.f4()?;
         let widget = r.str()?;
-        c.draws.push(CapDraw { pass, pipeline, vb, ib, index, inst_kind, inst_id, inst_off, inst_count, inst_data, inst_ranges, uniforms, ubufs, tex, scissor, zbias, flags, owner, list, item, list_name, bounds, widget });
+        c.draws.push(CapDraw { pass, pipeline, vb, ib, index, inst_id, inst_off, inst_count, inst_ranges, uniforms, ubufs, tex, scissor, zbias, flags, owner, list, item, list_name, bounds, widget });
     }
     for _ in 0..r.count()? {
         c.notes.push(r.str()?);
@@ -376,15 +374,19 @@ mod tests {
         let mut c = Capture { app: "calc".into(), backend: 1, dialect: 1, session: 2, frame: 77, target: Id::new(1, 1), kind: target::WINDOW, size: [800, 600], dpi: 2.0, ..Default::default() };
         c.strings.push((5, "Button".into()));
         c.textures.push(CapTexture { id: Id::new(3, 1), format: format::RGBA8, w: 2, h: 2, depth: 1, mips: 1, usage: usage::SAMPLED, contents: Some(vec![9; 16]), ..Default::default() });
-        c.buffers.push(CapBuffer { id: Id::new(4, 2), kind: buffer_kind::VERTEX, size: 8, contents: Some(vec![1; 8]), ..Default::default() });
+        c.buffers.push(CapBuffer { id: Id::new(4, 2), kind: buffer_kind::INSTANCE | buffer_kind::APPEND, size: 48, contents: Some(vec![1; 48]), ..Default::default() });
         c.pipelines.push(CapPipeline { id: Id::new(1, 1), dialect: 1, blob: vec![1, 2, 3], ..Default::default() });
-        c.passes.push(CapPass { color: [Id::NONE; 4], depth: Id::NONE, load: [pass_load::CLEAR; 5], viewport: [0.0, 0.0, 800.0, 600.0], dpi: 2.0, draws: Range { off: 0, len: 1 }, ..Default::default() });
-        c.draws.push(CapDraw { pipeline: Id::new(1, 1), inst_data: vec![0; 32], inst_count: 2, tex: vec![Id::new(3, 1)], inst_ranges: vec![[0, 2]], owner: 5, ..Default::default() });
+        c.passes.push(CapPass { color: [Id::NONE; 4], depth: Id::NONE, load: [pass_load::CLEAR; 5], viewport: [0.0, 0.0, 800.0, 600.0], dpi: 2.0, draws: Range { off: 0, len: 2 }, ..Default::default() });
+        c.draws.push(CapDraw { pipeline: Id::new(1, 1), inst_id: Id::new(4, 2), inst_off: 1, inst_count: 2, tex: vec![Id::new(3, 1)], inst_ranges: vec![[0, 2]], owner: 5, ..Default::default() });
+        c.draws.push(CapDraw { inst_id: Id::NONE, inst_count: 3, ..Default::default() });
         c.notes.push("n".into());
         c.widgets.push(CapWidget { path: "main.ok".into(), kind: "Button".into(), rect: [1.0, 2.0, 3.0, 4.0], text: "OK".into() });
         c.draws[0].widget = "main.ok (Button)".into();
-        let back = decode(&encode(&c)).unwrap();
+        let mut file = encode(&c);
+        let back = decode(&file).unwrap();
         assert_eq!(format!("{c:?}"), format!("{back:?}"));
-        assert!(decode(&encode(&c)[..40]).is_err());
+        assert!(decode(&file[..40]).is_err());
+        file[4..8].copy_from_slice(&3u32.to_le_bytes());
+        assert_eq!(decode(&file).unwrap_err(), "capture file version 3; this build reads version 4");
     }
 }

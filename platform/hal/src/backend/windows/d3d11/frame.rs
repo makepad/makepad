@@ -2,9 +2,8 @@
 //! made the packet). Moved from os/windows/d3d11.rs (`render_view`, `setup_pass_render_targets`,
 //! `draw_pass_to_window` / `draw_pass_to_texture`): what stays is binding and drawing.
 //!
-//! Per frame, the transient bytes (inline instances, uniform blocks, the per-draw instance base)
-//! are laid out first and written with one discard map each; the draws then bind windows into
-//! them (`VSSetConstantBuffers1` offsets, word offsets through `_mp_inst_base`).
+//! Each packet uploads its uniform stream once. Each pass uploads its pick and instance-base
+//! windows to a separate constant buffer.
 
 use super::complete::Ticket;
 use super::pipeline::Program;
@@ -42,29 +41,22 @@ fn slice(range: Range, len: usize) -> Option<std::ops::Range<usize>> {
     start.checked_add(range.len as usize).filter(|end| *end <= len).map(|end| start..end)
 }
 
-/// The frame's transient bytes, laid out before any draw is encoded.
+fn cb_window(r: Range) -> (u32, u32) {
+    (r.off / 16, r.len.max(16).next_multiple_of(CB_ALIGN as u32) / 16)
+}
+
+/// Per-pass instance bases and pick constants.
 #[derive(Default)]
 pub(super) struct FrameBytes {
     pub cb: Vec<u8>,
-    pub words: Vec<u8>,
 }
 
 impl FrameBytes {
-    fn put_cb(&mut self, bytes: &[u8]) -> (u32, u32) {
-        let at = self.cb.len().div_ceil(CB_ALIGN) * CB_ALIGN;
-        self.cb.resize(at, 0);
-        self.cb.extend_from_slice(bytes);
-        let len = bytes.len().max(16).div_ceil(CB_ALIGN) * CB_ALIGN;
-        self.cb.resize(at + len, 0);
-        ((at / 16) as u32, (len / 16) as u32)
-    }
-    /// Instance records at a whole multiple of the record stride; returns the first instance.
-    fn put_words(&mut self, bytes: &[u8], stride: usize) -> u32 {
-        let stride = stride.max(4);
-        let at = self.words.len().div_ceil(stride) * stride;
-        self.words.resize(at, 0);
-        self.words.extend_from_slice(bytes);
-        (at / stride) as u32
+    fn put_window(&mut self, words: [u32; 4]) -> u32 {
+        let at = self.cb.len();
+        self.cb.extend_from_slice(words.map(u32::to_le_bytes).as_flattened());
+        self.cb.resize(at + CB_ALIGN, 0);
+        (at / 16) as u32
     }
 }
 
@@ -86,7 +78,6 @@ pub(super) struct PassScratch {
 impl PassScratch {
     fn clear(&mut self) {
         self.bytes.cb.clear();
-        self.bytes.words.clear();
         self.prepared.clear();
         self.cbs.clear();
         self.ubufs.clear();
@@ -104,8 +95,7 @@ struct Prepared {
     cbs: std::ops::Range<usize>,
     ubufs: std::ops::Range<usize>,
     srvs: std::ops::Range<usize>,
-    /// the instance word view: a retained buffer's, or None = the frame arena's
-    inst_words: Option<Option<ID3D11ShaderResourceView>>,
+    inst_words: Option<ID3D11ShaderResourceView>,
     ranges: std::ops::Range<usize>,
     blend: Option<ID3D11BlendState>,
     depth_state: usize,
@@ -115,6 +105,7 @@ struct Prepared {
     draw_scissor: Option<[f32; 4]>,
     /// the slot the program reads the pass block at (each view binds its own there)
     pass_slot: Option<u32>,
+    pick_cb: Option<u32>,
     storage: Vec<(u32, Option<ID3D11ShaderResourceView>)>,
     index_first: u32,
     index_count: u32,
@@ -176,7 +167,7 @@ impl D3d11 {
     /// non-empty upper segment's draws into its own image at its bounds (transparent, depth
     /// cleared). Records past the budget are answered unsupported and drawn as nothing.
     #[allow(clippy::too_many_arguments)]
-    fn encode_split(&mut self, s: &mut Session, target: Id, pass: &Pass, records: &[Layer], view: &CmdView, now: u64,
+    fn encode_split(&mut self, s: &mut Session, target: Id, pass: &Pass, records: &[Layer], view: &CmdView, stream: &[u8], now: u64,
         deps: &mut Vec<LentRef>) -> Result<(Option<Arc<Texture>>, Split), String> {
         let sid = s.id;
         let mut rejected = Vec::new();
@@ -190,7 +181,7 @@ impl D3d11 {
         for g in &natives {
             self.over_budget.remove(&(sid, g.native));
         }
-        let image = self.encode_pass(s, target, true, false, pass, range_draws(view.draws, ranges[0]), view, now, deps)?;
+        let image = self.encode_pass(s, target, true, false, pass, range_draws(view.draws, ranges[0]), view, stream, now, deps)?;
         self.give_back_shared();
         let full = [0.0, 0.0, pass.viewport[2], pass.viewport[3]];
         let mut uppers = Vec::new();
@@ -233,7 +224,7 @@ impl D3d11 {
             upper.clear[0] = [0.0; 4];
             upper.load[4] = pass_load::CLEAR;
             self.segment = Some(SegTarget { origin: [rect[0], rect[1]], tex: tex.clone(), depth });
-            let encoded = self.encode_pass(s, target, true, false, &upper, draws, view, now, deps);
+            let encoded = self.encode_pass(s, target, true, false, &upper, draws, view, stream, now, deps);
             self.segment = None;
             self.give_back_shared();
             if let Err(e) = encoded {
@@ -324,7 +315,7 @@ impl D3d11 {
     pub(super) fn resolve(&mut self, s: &mut Session, id: Id) -> Option<Arc<Texture>> {
         let object = s.textures.get(s.id, id).ok()?.val.clone();
         let (sid, real) = object.lent.map_or((s.id, id), |l| (l.child, l.tex));
-        if let Some(t) = self.tex.get(&(sid, real.index)).filter(|t| t.gen == real.gen && t.tex.desc.w == object.w && t.tex.desc.h == object.h) {
+        if let Some(t) = self.tex.get(sid, real.index).filter(|t| t.gen == real.gen && t.tex.desc.w == object.w && t.tex.desc.h == object.h) {
             return Some(t.tex.clone());
         }
         if object.lent.is_some() || object.imported {
@@ -337,7 +328,7 @@ impl D3d11 {
         if let Some(row) = s.ledger.get_mut(Kind::Texture, id.index) {
             row.bytes = tex.bytes;
         }
-        self.tex.insert((sid, id.index), Tex { gen: id.gen, tex: tex.clone() });
+        self.tex.insert(sid, id.index, Tex { gen: id.gen, tex: tex.clone() });
         Some(tex)
     }
 
@@ -345,7 +336,7 @@ impl D3d11 {
     /// windows copy it into the swapchain).
     fn window_storage(&mut self, s: &mut Session, target: Id, size: [u32; 2], now: u64) -> Result<Arc<Texture>, String> {
         let (sid, id) = self.window_key(s.id, target);
-        if let Some(t) = self.win.get(&(sid, id.index)).filter(|t| t.gen == id.gen && [t.tex.desc.w, t.tex.desc.h] == size) {
+        if let Some(t) = self.win.get(sid, id.index).filter(|t| t.gen == id.gen && [t.tex.desc.w, t.tex.desc.h] == size) {
             if sid == s.id {
                 s.ledger.touch(Kind::Window, id.index, id.gen, s.frame, now);
             }
@@ -356,7 +347,7 @@ impl D3d11 {
         if sid == s.id {
             s.ledger.add(super::window_row(id, &tex, now, s.frame));
         }
-        self.win.insert((sid, id.index), Tex { gen: id.gen, tex: tex.clone() });
+        self.win.insert(sid, id.index, Tex { gen: id.gen, tex: tex.clone() });
         Ok(tex)
     }
 
@@ -373,37 +364,47 @@ impl D3d11 {
         if let Some(Some(composed)) = self.badged.get(&id.index).filter(|_| sid == HOST && viewer == HOST) {
             if composed.gen == id.gen { return Some(composed.tex.clone()); }
         }
-        self.win.get(&(sid, id.index)).filter(|t| t.gen == id.gen).map(|t| t.tex.clone())
+        self.win.get(sid, id.index).filter(|t| t.gen == id.gen).map(|t| t.tex.clone())
     }
 
-    /// The image a badge layer frame of host window `key` draws into: the window's retained image
-    /// copied into the window's composed image (made at its size). `None`: nothing rendered yet.
-    fn begin_compose(&mut self, key: (u32, Id)) -> Option<Arc<Texture>> {
-        let base = self.win.get(&(key.0, key.1.index)).filter(|t| t.gen == key.1.gen)?.tex.clone();
-        let fits = |c: &Tex| c.gen == key.1.gen && [c.tex.desc.w, c.tex.desc.h] == [base.desc.w, base.desc.h];
+    /// A badge layer draws at its window pass's size, which can change before the app draws
+    /// its first frame after a resize. It copies the retained image where both images have
+    /// pixels and clears the rest to transparent black. With no window pass the retained
+    /// size is used. Returns `None` when there is no retained image to compose over.
+    fn begin_compose(&mut self, key: (u32, Id), size: Option<[u32; 2]>) -> Option<Arc<Texture>> {
+        let base = self.win.get(key.0, key.1.index).filter(|t| t.gen == key.1.gen)?.tex.clone();
+        let [w, h] = size.unwrap_or([base.desc.w, base.desc.h]);
+        let fits = |c: &Tex| c.gen == key.1.gen && [c.tex.desc.w, c.tex.desc.h] == [w, h];
         let composed = match self.badged.get(&key.1.index)?.as_ref().filter(|c| fits(c)) {
             Some(c) => c.tex.clone(),
             None => {
-                let tex = Texture::new(self.dev.clone(), TextureObj { format: format::BGRA8, w: base.desc.w, h: base.desc.h, depth: 1, mips: 1,
+                let tex = Texture::new(self.dev.clone(), TextureObj { format: format::BGRA8, w, h, depth: 1, mips: 1,
                     usage: usage::RENDER_TARGET | usage::SAMPLED, bytes: 0, imported: false, uploaded: 0, lent: None })
                     .map_err(|e| eprintln!("[hal-d3d11] badge layer image: {e}")).ok()?.in_pool(Pool::WindowCopies);
                 self.badged.insert(key.1.index, Some(Tex { gen: key.1.gen, tex: tex.clone() }));
                 tex
             }
         };
-        unsafe { self.dev.ctx.CopyResource(composed.res.as_ID3D11Resource(), base.res.as_ID3D11Resource()) };
+        if w > base.desc.w || h > base.desc.h {
+            unsafe { self.dev.ctx.ClearRenderTargetView(&composed.rtv[0], &[0.0; 4]) };
+        }
+        self.copy_overlap(&base, &composed);
         Some(composed)
+    }
+
+    fn copy_overlap(&self, source: &Texture, image: &Texture) {
+        let area = D3D11_BOX { left: 0, top: 0, front: 0, right: source.desc.w.min(image.desc.w), bottom: source.desc.h.min(image.desc.h), back: 1 };
+        unsafe { self.dev.ctx.CopySubresourceRegion(image.res.as_ID3D11Resource(), 0, 0, 0, 0, source.res.as_ID3D11Resource(), 0, Some(&area)) };
     }
 
     /// A composed window layer's texture `layer` takes the borrower's newest frame of host window
     /// `window` (`Gpu::layer_copy`): the window's retained image (every frame renders into it),
     /// over the area both have.
     pub(super) fn copy_into_layer(&mut self, s: &mut Session, window: Id, layer: Id) -> bool {
-        let Some(source) = self.win.get(&(HOST, window.index)).filter(|t| t.gen == window.gen).map(|t| t.tex.clone()) else { return true };
+        let Some(source) = self.win.get(HOST, window.index).filter(|t| t.gen == window.gen).map(|t| t.tex.clone()) else { return true };
         let Some(image) = self.resolve(s, layer) else { return true };
         if source.desc.format != image.desc.format || Arc::ptr_eq(&source, &image) { return true }
-        let area = D3D11_BOX { left: 0, top: 0, front: 0, right: source.desc.w.min(image.desc.w), bottom: source.desc.h.min(image.desc.h), back: 1 };
-        unsafe { self.dev.ctx.CopySubresourceRegion(image.res.as_ID3D11Resource(), 0, 0, 0, 0, source.res.as_ID3D11Resource(), 0, Some(&area)) };
+        self.copy_overlap(&source, &image);
         true
     }
 
@@ -446,6 +447,7 @@ impl D3d11 {
             return None;
         }
         let Some(packet) = view.frames.get(packet as usize) else { s.bad(); return None };
+        let Some(stream) = exec::packet_uniforms(view, packet) else { s.bad(); return None };
         let (Some(pr), Some(dr)) = (slice(packet.passes, view.passes.len()), slice(packet.draws, view.draws.len())) else { s.bad(); return None };
         if view.passes[pr.clone()].iter().any(|p| slice(p.draws, view.draws.len()).is_none_or(|r| r.start < dr.start || r.end > dr.end)) {
             s.bad();
@@ -464,17 +466,16 @@ impl D3d11 {
         let layered = is_window && !pick && key.0 == HOST && self.badged.contains_key(&key.1.index);
         let badges = layered && kind & target::BADGES != 0;
         if badges {
-            self.compose = self.begin_compose(key);
+            let window_pass = view.passes[pr.clone()].iter().find(|p| p.kind != crate::types::pass_kind::COMPUTE && p.color.iter().all(|c| c.is_none()));
+            let size = window_pass.map(|p| p.viewport)
+                .map(|v| [(v[0] + v[2]).ceil().max(1.0) as u32, (v[1] + v[3]).ceil().max(1.0) as u32]);
+            self.compose = self.begin_compose(key, size);
             // an opaque panel or a window layer (`target::OVERLAY`) needs nothing under it: with
             // no frame of the window kept yet (an app parked before it drew under the layer) the
             // window's retained image is made at the window pass's size and composed over as it is
-            if self.compose.is_none() && kind & target::OVERLAY != 0 {
-                let window_pass = view.passes[pr.clone()].iter().find(|p| p.kind != crate::types::pass_kind::COMPUTE && p.color.iter().all(|c| c.is_none()));
-                if let Some(v) = window_pass.map(|p| p.viewport) {
-                    let size = [(v[0] + v[2]).ceil().max(1.0) as u32, (v[1] + v[3]).ceil().max(1.0) as u32];
-                    if self.window_storage(s, target, size, now).is_ok() {
-                        self.compose = self.begin_compose(key);
-                    }
+            if let Some(size) = size.filter(|_| self.compose.is_none() && kind & target::OVERLAY != 0) {
+                if self.window_storage(s, target, size, now).is_ok() {
+                    self.compose = self.begin_compose(key, Some(size));
                 }
             }
             if self.compose.is_none() {
@@ -485,6 +486,14 @@ impl D3d11 {
                     self.complete.submit(batch);
                 }
                 return Some(exec::SubmittedFrame { deps: Vec::new(), window: false });
+            }
+        }
+        if !stream.is_empty() {
+            if let Err(e) = self.cb_arena.fill(&self.dev, stream) {
+                self.compose = None;
+                eprintln!("[hal-d3d11] uniform stream: {e}");
+                s.bad();
+                return None;
             }
         }
         let mut deps = Vec::new();
@@ -547,9 +556,9 @@ impl D3d11 {
             let encoded = if pass.kind == crate::types::pass_kind::COMPUTE {
                 self.encode_compute(s, pass, view, timer.as_mut()).map(|_| None)
             } else if split_pass == Some(pass_index) {
-                self.encode_split(s, target, pass, records, view, now, &mut deps).map(|(image, sp)| { split = Some(sp); image })
+                self.encode_split(s, target, pass, records, view, stream, now, &mut deps).map(|(image, sp)| { split = Some(sp); image })
             } else {
-                self.encode_pass(s, target, is_window, pick, pass, draws, view, now, &mut deps)
+                self.encode_pass(s, target, is_window, pick, pass, draws, view, stream, now, &mut deps)
             };
             if let (Some(q), Some(t)) = (stamps, &timer) {
                 unsafe { self.dev.ctx.End(t.stamp(q + 1).as_ID3D11Asynchronous()) };
@@ -564,7 +573,7 @@ impl D3d11 {
                         b.pass(session.string(pass.name).unwrap_or("compute"), makepad_gpu_trace::kind::COMPUTE, 0, 0, "", 0)
                     })
                 } else { gpu_prof::record_pass(key, session, sid, pass.name, pick, v[2] as u32, v[3] as u32, &rec.attach, rec.bytes, &rec.records, timed, |pipeline| {
-                    pipes.get(&(sid, pipeline.index)).map(|p| ShaderFacts { name: gpu_prof::shader_name(session, &p.state.src.desc), stats: None, source: None })
+                    pipes.get(sid, pipeline.index).map(|p| ShaderFacts { name: gpu_prof::shader_name(session, &p.state.src.desc), stats: None, source: None })
                 }) };
                 if let (Some(pi), Some(q), Some((_, passes))) = (pi.filter(|_| timed), stamps, timer.as_mut().and_then(|t| t.prof.as_mut())) {
                     passes.push((pi, q));
@@ -628,7 +637,7 @@ impl D3d11 {
                         pass.load[0] = pass_load::LOAD;
                         pass.load[4] = pass_load::CLEAR;
                         let draws = &view.draws[slice(range, view.draws.len()).unwrap_or(0..0)];
-                        let encoded = self.encode_pass(s, target, true, false, &pass, draws, view, now, &mut deps);
+                        let encoded = self.encode_pass(s, target, true, false, &pass, draws, view, stream, now, &mut deps);
                         self.give_back_shared();
                         if let Err(e) = encoded { eprintln!("[hal-d3d11] retained segment: {e}"); }
                     }
@@ -656,14 +665,15 @@ impl D3d11 {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn encode_pass(&mut self, s: &mut Session, target: Id, is_window: bool, pick: bool, pass: &Pass, draws: &[Draw], view: &CmdView,
+    fn encode_pass(&mut self, s: &mut Session, target: Id, is_window: bool, pick: bool, pass: &Pass, draws: &[Draw], view: &CmdView, stream: &[u8],
         now: u64, deps: &mut Vec<LentRef>) -> Result<Option<Arc<Texture>>, String> {
         let v = pass.viewport;
         if v.iter().any(|v| !v.is_finite() || *v < 0.0) || v[2] <= 0.0 || v[3] <= 0.0 {
             return Err("invalid pass viewport".into());
         }
         // the views side by side (`Pass::view_rects`): each draw runs once per view in this pass
-        let mut pviews = exec::pass_views(pass, view.arena).map_err(|e| format!("pass not drawn: {e}"))?;
+        let align = self.info.effective_uniform_align();
+        let mut pviews = exec::pass_views(pass, view.arena, stream, align).map_err(|e| format!("pass not drawn: {e}"))?;
         let viewed = pass.view_rects.len != 0;
         let mut size = [(v[0] + v[2]).ceil() as u32, (v[1] + v[3]).ceil() as u32];
         // an upper segment renders the window's draws into its own image at its rect
@@ -681,7 +691,7 @@ impl D3d11 {
             }
             None => v,
         };
-        // a badge layer is drawn over what the window has (a resize may be landing)
+        // a badge layer is drawn into its composed image (the frame's size)
         if let Some(c) = self.compose.as_ref().filter(|_| is_window) {
             size = [size[0].min(c.desc.w), size[1].min(c.desc.h)];
         }
@@ -763,25 +773,25 @@ impl D3d11 {
             rec.attach = parts.join(", ");
         }
         // ---- lay out the draws' transient bytes
+        if pass.uniforms.len > 4096 * 16 {
+            return Err(format!("a {}-byte uniform block exceeds D3D11's 64 KiB constant buffer", pass.uniforms.len));
+        }
         let mut sc = std::mem::take(&mut self.scratch);
         sc.clear();
-        // each view's block of the pass uniforms, laid out once for the pass
-        // SAFETY: the Slice is the caller's memory, borrowed for this hal_submit call
-        let pass_bytes = unsafe { pass.uniforms.as_bytes() };
-        if pviews[0].block.len() > 4096 * 16 {
-            self.scratch = sc;
-            return Err(format!("a {}-byte uniform block exceeds D3D11's 64 KiB constant buffer", pviews[0].block.len()));
-        }
-        let pass_cbs: Vec<Option<(u32, u32)>> = pviews.iter().map(|pv| (!pv.block.is_empty()).then(|| sc.bytes.put_cb(&pass_bytes[pv.block.clone()]))).collect();
         for d in draws {
             s.stats.draws += 1;
+            let Some(cull) = Draw::cull_mode(d.flags) else {
+                s.bad();
+                s.stats.skipped_draws += 1;
+                continue;
+            };
             if d.index[1] == 0 || d.inst.count == 0 {
                 continue;
             }
-            match self.prepare(s, pass, d, view.arena, pick, &colors, &depth, target_size, &mut sc, now, deps) {
+            match self.prepare(s, pass, d, cull, view.arena, stream, align, pick, &colors, &depth, target_size, &mut sc, now, deps) {
                 Ok(Some(p)) => {
                     if let Some(rec) = self.prof.as_mut() {
-                        let size = |id: Id| self.buf.get(&(s.id, id.index)).filter(|b| b.gen == id.gen).map_or(0, |b| b.buf.size);
+                        let size = |id: Id| self.buf.get(s.id, id.index).filter(|b| b.gen == id.gen).map_or(0, |b| b.buf.size);
                         let geo = size(d.vb) + size(d.ib);
                         rec.records.push(gpu_prof::DrawRecord::new(s, d, view.arena, v[2], v[3], depth.is_some(), p.program.desc.instance_stride as u64 * 4, geo, p.program.textures.len()));
                     }
@@ -795,8 +805,12 @@ impl D3d11 {
                 }
             }
         }
-        self.cb_arena.fill(&self.dev, &sc.bytes.cb)?;
-        self.word_arena.fill(&self.dev, &sc.bytes.words)?;
+        if !sc.bytes.cb.is_empty() {
+            if let Err(e) = self.tail_cb.fill(&self.dev, &sc.bytes.cb) {
+                self.scratch = sc;
+                return Err(e);
+            }
+        }
 
         // ---- the pass
         let ctx = self.dev.ctx.clone();
@@ -831,16 +845,27 @@ impl D3d11 {
             ctx.IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         }
         let mut shaders_bound: Option<*const Program> = None;
+        let mut instance_slot = None;
+        let stream_cb = Some(self.cb_arena.buf.clone());
+        let tail_cb = Some(self.tail_cb.buf.clone());
         for p in &sc.prepared {
             unsafe {
                 if shaders_bound != Some(Arc::as_ptr(&p.program)) {
                     shaders_bound = Some(Arc::as_ptr(&p.program));
+                    let next = p.program.instance_slot();
+                    if let Some(old) = instance_slot.filter(|slot| Some(*slot) != next) {
+                        ctx.VSSetShaderResources(old, Some(&[NO_SRV]));
+                        s.stats.binds += 1;
+                    }
+                    instance_slot = next;
                     ctx.VSSetShader(Some(&p.program.vs), None);
                     ctx.PSSetShader(Some(&p.program.ps), None);
                     ctx.IASetInputLayout(p.program.layout.as_ref());
+                    s.stats.binds += 3;
                     if !p.program.samplers.is_empty() {
                         ctx.VSSetSamplers(0, Some(&p.program.samplers));
                         ctx.PSSetSamplers(0, Some(&p.program.samplers));
+                        s.stats.binds += 2;
                     }
                 }
                 ctx.OMSetBlendState(p.blend.as_ref(), Some(&[0.0; 4]), 0xffff_ffff);
@@ -853,32 +878,43 @@ impl D3d11 {
                 let offset = 0u32;
                 ctx.IASetVertexBuffers(0, 1, Some(&p.vb as *const _), Some(&stride), Some(&offset));
                 ctx.IASetIndexBuffer(Some(&p.ib), p.index_format, 0);
-                let arena = Some(self.cb_arena.buf.clone());
+                s.stats.binds += 2;
                 for (slot, first, count) in &sc.cbs[p.cbs.clone()] {
-                    ctx1.VSSetConstantBuffers1(*slot, 1, Some(&arena as *const _), Some(first as *const u32), Some(count as *const u32));
-                    ctx1.PSSetConstantBuffers1(*slot, 1, Some(&arena as *const _), Some(first as *const u32), Some(count as *const u32));
+                    if *count == 0 {
+                        ctx.VSSetConstantBuffers(*slot, Some(&[None]));
+                        ctx.PSSetConstantBuffers(*slot, Some(&[None]));
+                    } else {
+                        ctx1.VSSetConstantBuffers1(*slot, 1, Some(&stream_cb), Some(first), Some(count));
+                        ctx1.PSSetConstantBuffers1(*slot, 1, Some(&stream_cb), Some(first), Some(count));
+                    }
+                    s.stats.binds += 2;
+                }
+                if let Some(first) = p.pick_cb {
+                    ctx1.VSSetConstantBuffers1(PICK_SLOT, 1, Some(&tail_cb), Some(&first), Some(&WINDOW_CONSTANTS));
+                    ctx1.PSSetConstantBuffers1(PICK_SLOT, 1, Some(&tail_cb), Some(&first), Some(&WINDOW_CONSTANTS));
+                    s.stats.binds += 2;
                 }
                 for (slot, buf) in &sc.ubufs[p.ubufs.clone()] {
                     ctx.VSSetConstantBuffers(*slot, Some(std::slice::from_ref(buf)));
                     ctx.PSSetConstantBuffers(*slot, Some(std::slice::from_ref(buf)));
+                    s.stats.binds += 2;
                 }
                 let srvs = &sc.srvs[p.srvs.clone()];
                 if !srvs.is_empty() {
                     ctx.VSSetShaderResources(0, Some(srvs));
                     ctx.PSSetShaderResources(0, Some(srvs));
+                    s.stats.binds += 2;
                 }
-                if let (Some(slot), Some(words)) = (p.program.instance_slot(), &p.inst_words) {
-                    let view = match words {
-                        Some(v) => Some(v.clone()),
-                        None => self.word_arena.words.clone(),
-                    };
-                    ctx.VSSetShaderResources(slot, Some(&[view]));
+                if let Some(slot) = instance_slot {
+                    ctx.VSSetShaderResources(slot, Some(std::slice::from_ref(&p.inst_words)));
+                    s.stats.binds += 1;
                 }
                 for (slot, srv) in &p.storage {
                     ctx.VSSetShaderResources(*slot, Some(std::slice::from_ref(srv)));
                     ctx.PSSetShaderResources(*slot, Some(std::slice::from_ref(srv)));
+                    s.stats.binds += 2;
                 }
-                for (pv, block) in pviews.iter().zip(&pass_cbs) {
+                for pv in &pviews {
                     if viewed {
                         // the view's rect is its viewport and bounds its scissor; the draw's
                         // scissor is relative to the rect
@@ -894,13 +930,21 @@ impl D3d11 {
                         ctx.RSSetViewports(Some(&[D3D11_VIEWPORT { TopLeftX: r[0], TopLeftY: r[1], Width: r[2], Height: r[3], MinDepth: 0.0, MaxDepth: 1.0 }]));
                         ctx.RSSetScissorRects(Some(&[RECT { left: x0, top: y0, right: x1, bottom: y1 }]));
                     }
-                    if let (Some(slot), Some((first, count))) = (p.pass_slot, block) {
-                        ctx1.VSSetConstantBuffers1(slot, 1, Some(&arena as *const _), Some(first as *const u32), Some(count as *const u32));
-                        ctx1.PSSetConstantBuffers1(slot, 1, Some(&arena as *const _), Some(first as *const u32), Some(count as *const u32));
+                    if let Some(slot) = p.pass_slot {
+                        if pv.uniforms.is_empty() {
+                            ctx.VSSetConstantBuffers(slot, Some(&[None]));
+                            ctx.PSSetConstantBuffers(slot, Some(&[None]));
+                        } else {
+                            let (first, count) = cb_window(pv.uniforms);
+                            ctx1.VSSetConstantBuffers1(slot, 1, Some(&stream_cb), Some(&first), Some(&count));
+                            ctx1.PSSetConstantBuffers1(slot, 1, Some(&stream_cb), Some(&first), Some(&count));
+                        }
+                        s.stats.binds += 2;
                     }
                     for (_, count, base_cb) in &sc.ranges[p.ranges.clone()] {
                         if p.program.instance_slot().is_some() {
-                            ctx1.VSSetConstantBuffers1(INST_BASE_SLOT, 1, Some(&arena as *const _), Some(base_cb as *const u32), Some(&WINDOW_CONSTANTS as *const u32));
+                            ctx1.VSSetConstantBuffers1(INST_BASE_SLOT, 1, Some(&tail_cb as *const _), Some(base_cb as *const u32), Some(&WINDOW_CONSTANTS as *const u32));
+                            s.stats.binds += 1;
                         }
                         ctx.DrawIndexedInstanced(p.index_count, *count, p.index_first, 0, 0);
                     }
@@ -921,13 +965,13 @@ impl D3d11 {
             }
         }
         if hosted {
-            self.win.insert((s.id, target.index), Tex { gen: target.gen, tex: window.as_ref().unwrap().clone() });
+            self.win.insert(s.id, target.index, Tex { gen: target.gen, tex: window.as_ref().unwrap().clone() });
         }
         Ok(window)
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn prepare(&mut self, s: &mut Session, pass: &Pass, d: &Draw, arena: &[u8], pick: bool, colors: &[(usize, Arc<Texture>)], depth: &Option<Arc<Texture>>,
+    fn prepare(&mut self, s: &mut Session, pass: &Pass, d: &Draw, cull: CullMode, arena: &[u8], stream: &[u8], align: u32, pick: bool, colors: &[(usize, Arc<Texture>)], depth: &Option<Arc<Texture>>,
         target_size: [u32; 2], sc: &mut PassScratch, now: u64, deps: &mut Vec<LentRef>) -> Result<Option<Prepared>, String> {
         for id in read_ids(arena, d.tex).chain(read_ids(arena, d.pick_tex)) {
             match exec::lent_state(s, s.id, id) {
@@ -944,44 +988,34 @@ impl D3d11 {
                 }
             }
         }
-        let Some(state) = self.pipe.get(&(s.id, d.pipeline.index)).filter(|p| p.gen == d.pipeline.gen).map(|p| p.state.clone()) else {
+        let Some(state) = self.pipe.get(s.id, d.pipeline.index).filter(|p| p.gen == d.pipeline.gen).map(|p| p.state.clone()) else {
             s.stale();
             return Ok(None);
         };
         // still compiling, or failed: the app paints again when it hears PipelineReady
         let Some(program) = state.ready().cloned() else { return Ok(None) };
         let sid = s.id;
-        let buffer = |me: &Self, id: Id| me.buf.get(&(sid, id.index)).filter(|b| b.gen == id.gen).map(|b| b.buf.clone());
-        let vb = if d.vb.is_none() { None } else { Some(buffer(self, d.vb).ok_or("missing vertex buffer")?) };
-        let ib = buffer(self, d.ib).ok_or("missing index buffer")?;
+        let buf_map = self.buf.session(sid);
+        let buffer = |id: Id| buf_map.and_then(|m| m.get(id.index)).filter(|b| b.gen == id.gen).map(|b| b.buf.clone());
+        let vb = if d.vb.is_none() { None } else { Some(buffer(d.vb).ok_or("missing vertex buffer")?) };
+        let ib = buffer(d.ib).ok_or("missing index buffer")?;
         let width = if d.flags & Draw::INDEX_U32 != 0 { 4 } else { 2 };
         if (d.index[0] as u64 + d.index[1] as u64) * width > ib.size {
             return Err("index range exceeds buffer".into());
         }
 
         // instances: the word view and the first instance in it
-        let stride_words = program.desc.instance_stride as usize;
-        let mut inst_words = None;
-        let mut first = 0u32;
-        if program.instance_slot().is_some() {
-            if d.inst.kind == Inst::BUFFER {
-                let b = buffer(self, d.inst.id).ok_or("missing instance buffer")?;
-                let end = (d.inst.off as u64 + d.inst.count as u64) * stride_words as u64 * 4;
-                if end > b.size {
-                    return Err("instance range exceeds storage".into());
-                }
-                inst_words = Some(b.words.clone());
-                first = d.inst.off;
-            } else {
-                // SAFETY: the Slice is the caller's memory, borrowed for this hal_submit call
-                let data = unsafe { d.inst.data.as_bytes() };
-                if (d.inst.count as usize) * stride_words * 4 > data.len() {
-                    return Err("inline instance range exceeds data".into());
-                }
-                first = sc.bytes.put_words(data, stride_words * 4);
-                inst_words = Some(None);
+        if d.inst.id.is_none() && program.instance_slot().is_some() { return Err("a draw without instance data for a pipeline that reads instances".into()); }
+        let inst_words = if !d.inst.id.is_none() && program.instance_slot().is_some() {
+            let b = buffer(d.inst.id).ok_or("missing instance buffer")?;
+            let end = (d.inst.off as u64 + d.inst.count as u64) * program.desc.instance_stride as u64 * 4;
+            if end > b.size {
+                return Err("instance range exceeds storage".into());
             }
-        }
+            b.words.clone()
+        } else {
+            None
+        };
 
         // uniform blocks into the frame constant buffer
         let cbs_at = sc.cbs.len();
@@ -989,16 +1023,16 @@ impl D3d11 {
         let pass_slot = program.slot(pipeline_binding::PASS);
         for (which, source) in [(pipeline_binding::DRAW_CALL, d.uniforms[0]),
             (pipeline_binding::DRAW_LIST, d.uniforms[1]), (pipeline_binding::DYN, d.uniforms[2]), (pipeline_binding::SCOPE, d.uniforms[3])] {
+            exec::uniform_slice(stream, source, align).ok_or("invalid uniform range")?;
             let Some(slot) = program.slot(which) else { continue };
-            // SAFETY: the Slice is the caller's memory, borrowed for this hal_submit call
-            let data = unsafe { source.as_bytes() };
-            if data.is_empty() {
+            if source.is_empty() {
+                sc.cbs.push((slot, 0, 0));
                 continue;
             }
-            if data.len() > 4096 * 16 {
-                return Err(format!("a {}-byte uniform block exceeds D3D11's 64 KiB constant buffer", data.len()));
+            if source.len > 4096 * 16 {
+                return Err(format!("a {}-byte uniform block exceeds D3D11's 64 KiB constant buffer", source.len));
             }
-            let (at, count) = sc.bytes.put_cb(data);
+            let (at, count) = cb_window(source);
             sc.cbs.push((slot, at, count));
         }
         let ubufs_at = sc.ubufs.len();
@@ -1007,7 +1041,7 @@ impl D3d11 {
                 continue;
             }
             let id = d.ubufs.get(i).copied().unwrap_or(Id::NONE);
-            let b = if id.is_none() { None } else { buffer(self, id) };
+            let b = if id.is_none() { None } else { buffer(id) };
             sc.ubufs.push((*slot, b.map(|b| b.buf.clone())));
         }
 
@@ -1024,10 +1058,10 @@ impl D3d11 {
             if count == 0 {
                 continue;
             }
-            let base = first + start;
-            let mut window = [0u8; 16];
-            window[..4].copy_from_slice(&base.to_le_bytes());
-            let (at, _) = sc.bytes.put_cb(&window);
+            let base = d.inst.off + start;
+            let at = if program.instance_slot().is_some() {
+                sc.bytes.put_window([base, 0, 0, 0])
+            } else { 0 };
             sc.ranges.push((base, count, at));
         }
 
@@ -1051,7 +1085,7 @@ impl D3d11 {
             }
         }
         // a pick draw: its id and twin mask at b12, the id twin of texture i at t(textures + 1 + i)
-        if pick {
+        let pick_cb = if pick {
             let mut mask = 0u32;
             sc.srvs.resize(srvs_at + program.textures.len() + 1, None);
             for (i, shp) in program.textures.iter().enumerate() {
@@ -1073,12 +1107,8 @@ impl D3d11 {
                 };
                 sc.srvs.push(Some(twin.view(shape::TEX2D)?));
             }
-            let mut words = [0u8; 16];
-            words[..4].copy_from_slice(&d.pick.to_le_bytes());
-            words[4..8].copy_from_slice(&mask.to_le_bytes());
-            let (at, count) = sc.bytes.put_cb(&words);
-            sc.cbs.push((PICK_SLOT, at, count));
-        }
+            Some(sc.bytes.put_window([d.pick, mask, 0, 0]))
+        } else { None };
 
         // fixed function: per-attachment blend/write, depth, cull, scissor
         let raw = program.desc.blend & pipeline_blend::RAW != 0;
@@ -1105,7 +1135,6 @@ impl D3d11 {
             return Ok(None);
         }
         let depth_state = if depth.is_none() { 0 } else { (if d.flags & Draw::DEPTH_WRITE != 0 { 1 } else { 2 }) + if d.flags & Draw::DEPTH_GREATER != 0 { 2 } else { 0 } };
-        let cull = if d.flags & Draw::CULL != 0 { 1 } else { 0 };
         let draw_scissor = (!d.scissor.iter().any(|n| n.is_nan())).then_some(d.scissor);
         let scissor = if d.scissor.iter().any(|n| n.is_nan()) || pass.view_rects.len != 0 {
             // (a pass's views clip the draw's scissor to each view at draw time)
@@ -1134,11 +1163,14 @@ impl D3d11 {
         crate::compute::validate_draw(s, d, arena, &program.storage)?;
         if d.storage_buffers.len as usize != program.storage.len() { return Err("draw storage count mismatch".into()); }
         let mut storage = Vec::new();
-        for (i, binding) in program.storage.iter().enumerate() {
-            let id = id_at(arena, d.storage_buffers, i);
-            let b = self.buf.get(&(s.id, id.index)).filter(|b| b.gen == id.gen).ok_or("stale draw storage buffer")?;
-            storage.push((binding.index, b.buf.words.clone()));
-            s.ledger.touch(Kind::Buffer, id.index, id.gen, s.frame, now);
+        if !program.storage.is_empty() {
+            let buf_map = self.buf.session(sid).ok_or("stale draw storage buffer")?;
+            for (i, binding) in program.storage.iter().enumerate() {
+                let id = id_at(arena, d.storage_buffers, i);
+                let b = buf_map.get(id.index).filter(|b| b.gen == id.gen).ok_or("stale draw storage buffer")?;
+                storage.push((binding.index, b.buf.words.clone()));
+                s.ledger.touch(Kind::Buffer, id.index, id.gen, s.frame, now);
+            }
         }
         Ok(Some(Prepared {
             storage, program,
@@ -1152,10 +1184,10 @@ impl D3d11 {
             ranges: ranges_at..sc.ranges.len(),
             blend,
             depth_state,
-            cull,
+            cull: cull as usize,
             scissor,
             draw_scissor,
-            pass_slot,
+            pass_slot, pick_cb,
             index_first: d.index[0],
             index_count: d.index[1],
         }))

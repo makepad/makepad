@@ -1,5 +1,4 @@
-//! The record of the Splash a run used (local/agent_state/wasm/DESIGN.md
-//! "Splash shaking"): a web build's under the trace host
+//! The record of the Splash a run used ("Splash shaking"): a web build's under the trace host
 //! (`makepad-web-trace`), or a native run's with
 //! `MAKEPAD_SPLASH_TRACE=<file>` (written at shutdown, or by
 //! [`Cx::splash_trace_exit`] before a process exits on its own).

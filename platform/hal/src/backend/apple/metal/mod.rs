@@ -31,6 +31,7 @@ use crate::buffers::{CmdView, PipelineBlob};
 use crate::cmds::PipelineLayout;
 use crate::ledger::{Kind, LedgerEntry};
 use crate::session::*;
+use crate::table::SessionTable;
 use crate::types::*;
 use device::{Device, Done, Mailbox};
 use timing::Failure;
@@ -91,11 +92,11 @@ pub struct Metal {
     leases: crate::lease::Pool<compute::LeaseBlock>,
     dev: Device,
     info: HalInfo,
-    tex: FastMap<(u32, u32), Tex>,
-    buf: FastMap<(u32, u32), Buf>,
-    pipe: FastMap<(u32, u32), pipeline::Pipe>,
-    compute: FastMap<(u32, u32), compute::Pipe>,
-    win: FastMap<(u32, u32), Win>,
+    tex: SessionTable<Tex>,
+    buf: SessionTable<Buf>,
+    pipe: SessionTable<pipeline::Pipe>,
+    compute: SessionTable<compute::Pipe>,
+    win: SessionTable<Win>,
     /// App aliases resolve to host storage; lending never moves or frees that storage.
     window_aliases: FastMap<(u32, Id), Id>,
     overlays: FastMap<Id, frame::Overlay>,
@@ -112,7 +113,11 @@ pub struct Metal {
     restores: FastMap<Id, Win>,
     /// Pick targets whose latest replay skipped a not-yet-ready draw.
     pick_pending: std::collections::HashSet<(u32, Id)>,
+    /// Texture generations named as attachments by ordinary draw passes.
+    pass_targets: HashSet<(u32, Id)>,
     batch: Option<frame::Batch>,
+    /// Owners of command buffers committed while encoding, credited when the world is available.
+    committed: Vec<Option<u32>>,
     frame_scratch: frame::FrameScratch,
     ticket_pool: Arc<frame::TicketPool>,
     name_interner: HashSet<Arc<str>>,
@@ -137,6 +142,8 @@ pub struct Metal {
     /// `frame::depth_only`'s and `frame::pass_samples`' scratch: the (pipeline, blend) pairs of a
     /// pass already asked
     depth_only_seen: Vec<(u32, bool)>,
+    /// Distinct pipeline generations and blend modes in the pass being planned before submit.
+    work_ahead_seen: Vec<(Id, bool)>,
     /// an MSAA pass into a window layer's segment drew single sampled, and said so
     segment_msaa_said: bool,
     /// an MSAA pass made a twin of an attachment (`frame::twins`): passes drawn single sampled
@@ -171,6 +178,16 @@ pub struct Metal {
     /// (`pipeline::Compiled`), and when that session closed or the next took one
     kept: Vec<pipeline::Compiled>,
     kept_ns: u64,
+}
+
+fn device_uniform_align(device: ObjcId) -> u32 {
+    const MTL_GPU_FAMILY_APPLE1: i64 = 1001;
+    let apple_gpu: bool = unsafe {
+        if msg_send![device, respondsToSelector: sel!(supportsFamily:)] {
+            msg_send![device, supportsFamily: MTL_GPU_FAMILY_APPLE1]
+        } else { false }
+    };
+    if apple_gpu { 16 } else { 256 }
 }
 
 impl Metal {
@@ -209,6 +226,7 @@ impl Metal {
         }
         let threads: MTLSize = unsafe { msg_send![dev.device, maxThreadsPerThreadgroup] };
         let info = HalInfo {
+            uniform_align: device_uniform_align(dev.device), max_uniform_block: 65_536,
             session: 0,
             backend: backend_id::METAL,
             dialect: dialect::MSL,
@@ -243,12 +261,12 @@ impl Metal {
         Some(Metal {
             dev,
             info,
-            tex: FastMap::default(),
+            tex: SessionTable::default(),
             leases: Default::default(),
-            buf: FastMap::default(),
-            pipe: FastMap::default(),
-            compute: FastMap::default(),
-            win: FastMap::default(),
+            buf: SessionTable::default(),
+            pipe: SessionTable::default(),
+            compute: SessionTable::default(),
+            win: SessionTable::default(),
             window_aliases: FastMap::default(),
             overlays: FastMap::default(),
             badged: FastMap::default(),
@@ -256,7 +274,9 @@ impl Metal {
             copied_out: false,
             restores: FastMap::default(),
             pick_pending: Default::default(),
+            pass_targets: Default::default(),
             batch: None,
+            committed: Vec::new(),
             frame_scratch: Default::default(),
             ticket_pool: Default::default(),
             name_interner: Default::default(),
@@ -273,6 +293,7 @@ impl Metal {
             capture: None,
             capture_ns: 0,
             depth_only_seen: Vec::new(),
+            work_ahead_seen: Vec::new(),
             segment_msaa_said: false,
             twinned: false,
             prof: Vec::new(),
@@ -293,10 +314,6 @@ impl Metal {
         })
     }
 
-    pub fn device_name(&self) -> &str {
-        &self.dev.name
-    }
-
     fn window_key(&self, sid: u32, window: Id) -> (u32, Id) {
         self.window_aliases.get(&(sid, window)).map_or((sid, window), |host| (HOST, *host))
     }
@@ -306,7 +323,7 @@ impl Metal {
         if let Some(Some(composed)) = self.badged.get(&id.index).filter(|_| owner == HOST) {
             if composed.gen == id.gen { return Some(composed); }
         }
-        self.win.get(&(owner, id.index)).filter(|w| w.gen == id.gen).or_else(|| {
+        self.win.get(owner, id.index).filter(|w| w.gen == id.gen).or_else(|| {
             if owner != HOST { return None; }
             self.overlays.get(&id).and_then(|o| o.base.as_ref()).or_else(|| self.restores.get(&id))
         })
@@ -321,8 +338,8 @@ impl Metal {
     }
 
     /// The first outcome of a pipeline's compile ends its pending count.
-    fn announce(pipes: &mut FastMap<(u32, u32), pipeline::Pipe>, s: &mut Session, id: Id) {
-        if let Some(p) = pipes.get_mut(&(s.id, id.index)).filter(|p| p.gen == id.gen) {
+    fn announce(pipes: &mut SessionTable<pipeline::Pipe>, s: &mut Session, id: Id) {
+        if let Some(p) = pipes.get_mut(s.id, id.index).filter(|p| p.gen == id.gen) {
             if !std::mem::replace(&mut p.announced, true) {
                 s.pipelines_pending = s.pipelines_pending.saturating_sub(1);
             }
@@ -408,7 +425,7 @@ impl Metal {
                     if let Some(s) = world.session_mut(sid) {
                         if s.pipelines.get(sid, id).is_ok() {
                             Self::announce(&mut self.pipe, s, id);
-                            if let Some(p) = self.compute.get_mut(&(sid, id.index)).filter(|p| p.gen == id.gen) {
+                            if let Some(p) = self.compute.get_mut(sid, id.index).filter(|p| p.gen == id.gen) {
                                 if !std::mem::replace(&mut p.announced, true) { s.pipelines_pending = s.pipelines_pending.saturating_sub(1); }
                             }
                             s.events.pipeline_ready(id);
@@ -433,7 +450,7 @@ impl Metal {
                     if let Some(s) = world.session_mut(sid) {
                         if s.pipelines.get(sid, id).is_ok() {
                             Self::announce(&mut self.pipe, s, id);
-                            if let Some(p) = self.compute.get_mut(&(sid, id.index)).filter(|p| p.gen == id.gen) {
+                            if let Some(p) = self.compute.get_mut(sid, id.index).filter(|p| p.gen == id.gen) {
                                 if !std::mem::replace(&mut p.announced, true) { s.pipelines_pending = s.pipelines_pending.saturating_sub(1); }
                             }
                             s.events.pipeline_failed(id, log.as_bytes());
@@ -489,11 +506,11 @@ impl Metal {
                 .filter(|id| {
                     let transient = s.textures.get(sid, *id).is_ok_and(|e| e.val.usage & usage::TRANSIENT != 0);
                     let last = s.ledger.get(Kind::Texture, id.index).map_or(now, |l| l.last_used_ns.max(l.created_ns));
-                    transient && now.saturating_sub(last) >= TRANSIENT_IDLE_NS && self.tex.get(&(sid, id.index)).is_some_and(|t| t.gen == id.gen && t.last_bound <= completed)
+                    transient && now.saturating_sub(last) >= TRANSIENT_IDLE_NS && self.tex.get(sid, id.index).is_some_and(|t| t.gen == id.gen && t.last_bound <= completed)
                 })
                 .collect();
             for id in idle {
-                if let Some(t) = self.tex.remove(&(sid, id.index)) {
+                if let Some(t) = self.tex.remove(sid, id.index) {
                     self.dev.retire(Box::new(t));
                     if let Some(l) = s.ledger.get_mut(Kind::Texture, id.index) {
                         l.bytes = 0;
@@ -510,7 +527,7 @@ impl Metal {
             for sid in world.session_ids() {
                 let Some(s) = world.session(sid) else { continue };
                 for id in s.buffers.keys_of(sid) {
-                    let Some(b) = self.buf.get(&(sid, id.index)).filter(|b| b.gen == id.gen && b.evictable && b.last_bound <= completed) else { continue };
+                    let Some(b) = self.buf.get(sid, id.index).filter(|b| b.gen == id.gen && b.evictable && b.last_bound <= completed) else { continue };
                     let last = s.ledger.get(Kind::Buffer, id.index).map_or(0, |l| l.last_used_ns.max(l.created_ns));
                     victims.push((last, sid, id, b.allocated()));
                 }
@@ -521,7 +538,7 @@ impl Metal {
                 if held <= low {
                     break;
                 }
-                if let Some(b) = self.buf.remove(&(sid, id.index)) {
+                if let Some(b) = self.buf.remove(sid, id.index) {
                     self.dev.retire(Box::new(b));
                 }
                 if let Some(s) = world.session_mut(sid) {
@@ -563,7 +580,11 @@ impl Backend for Metal {
         let _pool = Pool::new();
         exec::submit(self, world, sid, view);
         self.account_host_layers(world);
-        self.end_batch();
+        self.end_session_batch(world, sid);
+    }
+
+    fn work_ahead(&mut self, world: &World, sid: u32, view: &CmdView) -> Option<Box<dyn FnOnce() + Send>> {
+        self.plan_work_ahead(world, sid, view)
     }
 
     fn host_gpu(&mut self) -> Option<&mut dyn Gpu> {
@@ -591,7 +612,7 @@ impl Backend for Metal {
         if sid == HOST && !self.restores.is_empty() {
             if let Some(s) = world.session_mut(HOST) { self.restore_overlays(s, now); }
             self.account_host_layers(world);
-            self.end_batch();
+            self.end_session_batch(world, HOST);
         }
         if let Some(s) = world.session_mut(sid) {
             self.media.step(&mut media::MetalSink { dev: &self.dev, tex: &mut self.tex, now }, s);
@@ -605,7 +626,7 @@ impl Backend for Metal {
         let trim = world.session(sid).and_then(|s| {
             s.textures
                 .iter_of(sid)
-                .filter(|(id, e)| e.val.usage & usage::TRANSIENT != 0 && self.tex.contains_key(&(sid, id.index)))
+                .filter(|(id, e)| e.val.usage & usage::TRANSIENT != 0 && self.tex.contains(sid, id.index))
                 .filter_map(|(id, _)| {
                     s.ledger.get(Kind::Texture, id.index)
                         .map(|l| l.last_used_ns.max(l.created_ns) + TRANSIENT_IDLE_NS)
@@ -624,7 +645,7 @@ impl Backend for Metal {
     fn session_closed(&mut self, world: &mut World, sid: u32) {
         self.native_windows.close(sid, None);
         // commands this session left pending belong to its objects: they go out first
-        self.end_batch();
+        self.end_session_batch(world, sid);
         let lent: Vec<_> = self.window_aliases.iter().filter(|((s, _), _)| *s == sid).map(|((_, id), host)| (*id, *host)).collect();
         let now = world.now();
         for (id, host) in lent {
@@ -635,37 +656,29 @@ impl Backend for Metal {
             let ids: Vec<_> = self.overlays.keys().chain(self.restores.keys()).copied().collect();
             for id in ids { self.drop_overlay(id); }
         }
-        self.end_batch();
+        self.end_session_batch(world, HOST);
         self.media.session_closed(sid);
-        let own = |k: &(u32, u32)| k.0 == sid;
-        let tex: Vec<_> = self.tex.keys().filter(|k| own(k)).copied().collect();
-        for k in tex {
-            if let Some(t) = self.tex.remove(&k) {
-                self.dev.retire(Box::new(t));
-            }
+        for (_, t) in self.tex.take_session(sid) {
+            self.dev.retire(Box::new(t));
         }
-        let buf: Vec<_> = self.buf.keys().filter(|k| own(k)).copied().collect();
-        for k in buf {
-            if let Some(b) = self.buf.remove(&k) {
-                self.dev.retire(Box::new(b));
-            }
+        for (_, b) in self.buf.take_session(sid) {
+            self.dev.retire(Box::new(b));
         }
         // an app session's compiled pipelines wait for the next session (a restart in place makes
         // the same ones again); what the session before left and this one did not take goes
+        let pipes = self.pipe.take_session(sid);
         if sid != HOST {
-            self.kept = self.pipe.iter().filter(|(k, _)| own(k)).filter_map(|(_, p)| p.state.compiled(&p.desc)).collect();
+            self.kept = pipes.iter().filter_map(|(_, p)| p.state.compiled(&p.desc)).collect();
             self.kept_ns = crate::clock_ns();
         }
-        self.pipe.retain(|k, _| !own(k));
-        self.compute.retain(|k, _| !own(k));
-        let win: Vec<_> = self.win.keys().filter(|k| own(k)).copied().collect();
-        for k in win {
-            if let Some(w) = self.win.remove(&k) {
-                self.dev.retire(Box::new(w.tex));
-            }
+        drop(pipes);
+        self.compute.take_session(sid);
+        for (_, w) in self.win.take_session(sid) {
+            self.dev.retire(Box::new(w.tex));
         }
         self.pick_pending.retain(|(session, _)| *session != sid);
-        self.layer_sizes.retain(|k, _| !own(k));
+        self.pass_targets.retain(|(session, _)| *session != sid);
+        self.layer_sizes.retain(|k, _| k.0 != sid);
         if let Some(shell) = self.shell {
             shell.session_closed(sid);
         }
@@ -698,18 +711,19 @@ impl Gpu for Metal {
         let label = Self::label(s, Self::attr_of(s, Kind::Texture, id));
         let tex = create_texture(self.dev.device, t, id.gen, label)?;
         t.bytes = allocated_size(tex.obj.as_id());
-        if let Some(old) = self.tex.insert((s.id, id.index), tex) {
+        if let Some(old) = self.tex.insert(s.id, id.index, tex) {
             self.dev.retire(Box::new(old));
         }
         Ok(())
     }
 
     fn texture_update(&mut self, s: &mut Session, id: Id, t: &TextureObj, mip: u16, rect: [u32; 4], layer: u32, data: &[u8]) {
-        let Some(tex) = self.tex.get(&(s.id, id.index)).filter(|x| x.gen == id.gen) else { return };
+        let Some(tex) = self.tex.get(s.id, id.index).filter(|x| x.gen == id.gen) else { return };
         let texture = tex.obj.clone();
         let [x, y, w, h] = rect;
         let (row, rows) = row_layout(t.format, w, h);
         let (_, seq) = self.ensure_batch();
+        self.batch.as_mut().unwrap().owner.get_or_insert(s.id);
         // uploads come from host buffers freed right after the call (the font service's atlas
         // rectangles): same address and length is not same content
         let Some(loc) = self.dev.arena_put_transient(data, seq) else {
@@ -725,9 +739,10 @@ impl Gpu for Metal {
 
     fn texture_update_3d(&mut self, s: &mut Session, id: Id, t: &TextureObj,
         origin: [u32; 3], extent: [u32; 3], data: &[u8]) -> Result<(), String> {
-        let tex = self.tex.get(&(s.id, id.index)).filter(|tex| tex.gen == id.gen).ok_or("missing Metal volume")?;
+        let tex = self.tex.get(s.id, id.index).filter(|tex| tex.gen == id.gen).ok_or("missing Metal volume")?;
         let texture = tex.obj.clone();
         let (_, seq) = self.ensure_batch();
+        self.batch.as_mut().unwrap().owner.get_or_insert(s.id);
         let loc = self.dev.arena_put_volume(data, seq).ok_or("Metal staging allocation failed")?;
         let (bytes_per_row, rows) = row_layout(t.format, extent[0], extent[1]);
         self.uploads.push(Upload { texture, staging: loc.buffer, offset: loc.offset, bytes_per_row, rows,
@@ -737,8 +752,9 @@ impl Gpu for Metal {
 
     fn texture_destroy(&mut self, sid: u32, id: Id) {
         self.pick_pending.remove(&(sid, id));
-        if self.tex.get(&(sid, id.index)).is_some_and(|t| t.gen <= id.gen) {
-            if let Some(t) = self.tex.remove(&(sid, id.index)) {
+        self.pass_targets.remove(&(sid, id));
+        if self.tex.get(sid, id.index).is_some_and(|t| t.gen <= id.gen) {
+            if let Some(t) = self.tex.remove(sid, id.index) {
                 self.dev.retire(Box::new(t));
             }
         }
@@ -753,19 +769,19 @@ impl Gpu for Metal {
     }
 
     fn capture_buffer(&mut self, sid: u32, id: Id) -> Option<Vec<u8>> {
-        let b = self.buf.get(&(sid, id.index)).filter(|b| b.gen == id.gen)?;
+        let b = self.buf.get(sid, id.index).filter(|b| b.gen == id.gen)?;
         // SAFETY: a shared buffer of at least `size` bytes; writes happen on this thread only
         Some(unsafe { std::slice::from_raw_parts(b.contents, b.size as usize) }.to_vec())
     }
 
     fn texture_share(&mut self, s: &mut Session, id: Id) {
-        let handle = self.tex.get(&(s.id, id.index)).filter(|t| t.gen == id.gen).map_or(0, |t| t.surface_id as u64);
+        let handle = self.tex.get(s.id, id.index).filter(|t| t.gen == id.gen).map_or(0, |t| t.surface_id as u64);
         s.events.texture_shared(id, handle);
     }
 
     fn texture_import(&mut self, s: &mut Session, id: Id, handle: u64, kind: u32) -> Option<TextureObj> {
         let (tex, w, h, fmt) = import_surface(self.dev.device, IOSurfaceID::try_from(handle).ok()?, id.gen, kind)?;
-        if let Some(old) = self.tex.insert((s.id, id.index), tex) {
+        if let Some(old) = self.tex.insert(s.id, id.index, tex) {
             self.dev.retire(Box::new(old));
         }
         let usage = if kind == texture_handle::NATIVE { usage::SAMPLED | usage::RENDER_TARGET } else { usage::SAMPLED };
@@ -775,67 +791,73 @@ impl Gpu for Metal {
     fn buffer_create(&mut self, s: &mut Session, id: Id, b: &mut BufferObj) -> Result<(), String> {
         let buf = Buf::new(self.dev.device, id.gen, b.size).ok_or_else(|| format!("a {} byte buffer could not be allocated", b.size))?;
         b.bytes = buf.allocated();
-        if let Some(old) = self.buf.insert((s.id, id.index), buf) {
+        if let Some(old) = self.buf.insert(s.id, id.index, buf) {
             self.dev.retire(Box::new(old));
         }
         Ok(())
     }
 
-    fn buffer_update(&mut self, s: &mut Session, id: Id, b: &mut BufferObj, off: u64, data: &[u8]) {
-        let Some(size) = self.buf.get(&(s.id, id.index)).filter(|b| b.gen == id.gen).map(|b| b.size) else { s.bad(); return; };
-        if off.checked_add(data.len() as u64).is_none_or(|end| end > size) {
-            eprintln!("[hal-metal] buffer {id:?} upload offset={off} bytes={} exceeds buffer size={size}", data.len());
-            s.bad(); return;
-        }
-        if b.kind & buffer_kind::KIND_MASK == buffer_kind::STORAGE {
-            // Storage may contain GPU writes: never copy its contents on the CPU.
-            // A queued blit preserves untouched bytes and orders the update with dispatches.
-            let Some(dst) = self.buf.get(&(s.id, id.index)).filter(|b| b.gen == id.gen).map(|b| b.buffer.clone()) else { return; };
-            if data.is_empty() { return; }
-            let staging: ObjcId = unsafe { msg_send![self.dev.device, newBufferWithBytes: data.as_ptr() as *const std::ffi::c_void length: data.len() as u64 options: MTLResourceOptions::StorageModeShared] };
-            let Some(staging) = NonNull::new(staging).map(RcObjcId::from_owned) else { s.bad(); return; };
-            let (cb, seq) = self.ensure_batch();
+    fn buffer_update_parts(&mut self, s: &mut Session, id: Id, b: &mut BufferObj, parts: BufferParts<'_>) {
+        let append = b.kind & buffer_kind::APPEND != 0;
+        // SAFETY (both iterators): called inside the hal_submit call that lent the parts.
+        let blit_batch = if !append && b.kind & buffer_kind::KIND_MASK == buffer_kind::STORAGE {
+            if !unsafe { parts.iter() }.any(|(_, data)| !data.is_empty()) { return; }
+            let batch = self.ensure_batch();
             self.flush_uploads();
-            unsafe {
-                let encoder: ObjcId = msg_send![cb, blitCommandEncoder];
-                let _: () = msg_send![encoder, copyFromBuffer: staging.as_id() sourceOffset: 0u64 toBuffer: dst.as_id() destinationOffset: off size: data.len() as u64];
-                let _: () = msg_send![encoder, endEncoding];
+            Some(batch)
+        } else { None };
+        let Some(buf) = self.buf.get_mut(s.id, id.index).filter(|b| b.gen == id.gen) else { s.bad(); return; };
+        for (off, data) in unsafe { parts.iter() } {
+            let size = buf.size;
+            if !append && off.checked_add(data.len() as u64).is_none_or(|end| end > size) {
+                eprintln!("[hal-metal] buffer {id:?} upload offset={off} bytes={} exceeds buffer size={size}", data.len());
+                s.bad(); continue;
             }
-            self.buf.get_mut(&(s.id, id.index)).unwrap().last_bound = seq;
-            self.dev.retire(Box::new(staging));
-            return;
-        }
-        let completed = self.dev.completed.load(std::sync::atomic::Ordering::Acquire);
-        let Some(buf) = self.buf.get_mut(&(s.id, id.index)).filter(|x| x.gen == id.gen) else { return };
-        if !writable_in_place(buf, completed) {
-            let covers_all = off == 0 && data.len() as u64 >= buf.size;
-            match copy_on_write(self.dev.device, buf, covers_all) {
-                Some(new) => {
-                    let old = std::mem::replace(buf, new);
-                    self.dev.retire(Box::new(old));
-                    b.bytes = buf.allocated();
+            if let Some((cb, seq)) = blit_batch {
+                // Storage may contain GPU writes: never copy its contents on the CPU.
+                // A queued blit preserves untouched bytes and orders the update with dispatches.
+                if data.is_empty() { continue; }
+                let staging: ObjcId = unsafe { msg_send![self.dev.device, newBufferWithBytes: data.as_ptr() as *const std::ffi::c_void length: data.len() as u64 options: MTLResourceOptions::StorageModeShared] };
+                let Some(staging) = NonNull::new(staging).map(RcObjcId::from_owned) else { s.bad(); continue; };
+                unsafe {
+                    let encoder: ObjcId = msg_send![cb, blitCommandEncoder];
+                    let _: () = msg_send![encoder, copyFromBuffer: staging.as_id() sourceOffset: 0u64 toBuffer: buf.buffer.as_id() destinationOffset: off size: data.len() as u64];
+                    let _: () = msg_send![encoder, endEncoding];
                 }
-                None => {
-                    s.stats.bad_args += 1;
-                    return;
+                buf.last_bound = seq;
+                self.dev.retire(Box::new(staging));
+                continue;
+            }
+            if !append && !writable_in_place(buf, self.dev.completed.load(std::sync::atomic::Ordering::Acquire)) {
+                let covers_all = off == 0 && data.len() as u64 >= buf.size;
+                match copy_on_write(self.dev.device, buf, covers_all) {
+                    Some(new) => {
+                        let old = std::mem::replace(buf, new);
+                        self.dev.retire(Box::new(old));
+                        b.bytes = buf.allocated();
+                    }
+                    None => {
+                        s.stats.bad_args += 1;
+                        continue;
+                    }
                 }
             }
+            if let Err(error) = fill(buf, off, data) { eprintln!("[hal-metal] {error}"); s.bad(); }
         }
-        if let Err(error) = fill(buf, off, data) { eprintln!("[hal-metal] {error}"); s.bad(); }
     }
 
     fn buffer_readbacks(&mut self, s: &mut Session, req: u32, ranges: &[BufferReadRange]) { self.read_compute_buffers(s, req, ranges); }
 
     fn buffer_destroy(&mut self, sid: u32, id: Id) {
-        if self.buf.get(&(sid, id.index)).is_some_and(|b| b.gen <= id.gen) {
-            if let Some(b) = self.buf.remove(&(sid, id.index)) {
+        if self.buf.get(sid, id.index).is_some_and(|b| b.gen <= id.gen) {
+            if let Some(b) = self.buf.remove(sid, id.index) {
                 self.dev.retire(Box::new(b));
             }
         }
     }
 
     fn buffer_evictable(&mut self, sid: u32, id: Id) {
-        if let Some(b) = self.buf.get_mut(&(sid, id.index)).filter(|b| b.gen == id.gen) {
+        if let Some(b) = self.buf.get_mut(sid, id.index).filter(|b| b.gen == id.gen) {
             b.evictable = true;
         }
     }
@@ -856,14 +878,14 @@ impl Gpu for Metal {
         let state = pipeline::create(&self.dev, s.id, id, s.font_frames.clone(), source, &blob.desc, s.string(blob.desc.name).unwrap_or("unnamed"), taken);
         let stats = crate::gpu_prof::source_stats(source).into();
         let prof_source = crate::gpu_prof::keep_sources().then(|| state.source.clone());
-        self.pipe.insert((s.id, id.index), pipeline::Pipe { gen: id.gen, state, desc: blob.desc, storage: crate::compute::records(blob.raw, blob.desc.storage_buffers).unwrap_or_default(), bindings: blob.bindings.as_slice().into(), announced: ready, stats, source: prof_source });
+        self.pipe.insert(s.id, id.index, pipeline::Pipe { gen: id.gen, state, desc: blob.desc, storage: crate::compute::records(blob.raw, blob.desc.storage_buffers).unwrap_or_default(), bindings: blob.bindings.as_slice().into(), announced: ready, stats, source: prof_source });
         if ready { PipeStatus::Ready } else { PipeStatus::Pending }
     }
 
     /// Only a live graphics pipeline has Metal render states to wait for. Other ids can
     /// take the executor's layout acknowledgement and still require their own base answer.
     fn pipeline_wanted_in(&mut self, s: &mut Session, id: Id, layout: u32, desc: &PipelineLayout) -> bool {
-        let Some(pipe) = self.pipe.get(&(s.id, id.index)).filter(|p| p.gen == id.gen) else { return false };
+        let Some(pipe) = self.pipe.get(s.id, id.index).filter(|p| p.gen == id.gen) else { return false };
         let count = desc.colors.iter().position(|f| *f == PipelineLayout::ABSENT).unwrap_or(desc.colors.len());
         let mut formats = [MTLPixelFormat::BGRA8Unorm; 4];
         for (slot, &format) in formats.iter_mut().zip(&desc.colors[..count]) {
@@ -874,16 +896,23 @@ impl Gpu for Metal {
             n @ (2 | 4 | 8) if self.info.msaa & u32::from(n) != 0 => n,
             _ => 1,
         };
-        pipe.state.want_layout(&self.dev, layout, &formats[..count], samples);
+        let depth = if desc.depth == PipelineLayout::ABSENT {
+            MTLPixelFormat::Invalid
+        } else if format::is_depth(desc.depth) {
+            mtl_format(desc.depth).unwrap_or(MTLPixelFormat::Depth32Float)
+        } else {
+            MTLPixelFormat::Depth32Float
+        };
+        pipe.state.want_layout(&self.dev, layout, &formats[..count], depth, samples);
         true
     }
 
     fn pipeline_destroy(&mut self, sid: u32, id: Id) -> bool {
-        if self.compute.get(&(sid, id.index)).is_some_and(|p| p.gen <= id.gen) {
-            return self.compute.remove(&(sid, id.index)).is_some_and(|p| !p.announced);
+        if self.compute.get(sid, id.index).is_some_and(|p| p.gen <= id.gen) {
+            return self.compute.remove(sid, id.index).is_some_and(|p| !p.announced);
         }
-        if self.pipe.get(&(sid, id.index)).is_some_and(|p| p.gen <= id.gen) {
-            return self.pipe.remove(&(sid, id.index)).is_some_and(|p| !p.announced);
+        if self.pipe.get(sid, id.index).is_some_and(|p| p.gen <= id.gen) {
+            return self.pipe.remove(sid, id.index).is_some_and(|p| !p.announced);
         }
         false
     }
@@ -910,7 +939,7 @@ impl Gpu for Metal {
             self.drop_overlay(id);
             if let Some(Some(composed)) = self.badged.remove(&id.index) { self.dev.retire(Box::new(composed.tex)); }
         }
-        if let Some(w) = self.win.remove(&(sid, id.index)) {
+        if let Some(w) = self.win.remove(sid, id.index) {
             self.dev.retire(Box::new(w.tex));
         }
         self.layer_sizes.remove(&(sid, id.index));
@@ -1011,7 +1040,7 @@ impl exec::DeviceReset for Metal {
         // The old device's work: what was encoded is committed, its threads stop, its command
         // buffers run out (bounded) and what they answer is delivered before the tables are
         // emptied; what answers later comes through its mailbox (`retired`), after the reset.
-        self.end_batch();
+        self.end_session_batch(world, HOST);
         self.dev.stop_workers();
         if !self.dev.settle(OLD_DEVICE_SETTLE) {
             eprintln!("[hal-metal] device reset: the old device's work still runs after {OLD_DEVICE_SETTLE:?}; its answers come later");
@@ -1038,7 +1067,9 @@ impl exec::DeviceReset for Metal {
         self.leases = Default::default();
         self.kept.clear();
         self.depth_only_seen.clear();
+        self.work_ahead_seen.clear();
         self.pick_pending.clear();
+        self.pass_targets.clear();
         self.twinned = false;
         self.prof.clear();
         self.prof_key = None;
@@ -1053,6 +1084,7 @@ impl exec::DeviceReset for Metal {
         self.native_windows.device_replaced(device);
         self.media.device_replaced(device);
         self.info.set_device_name(&self.dev.name);
+        self.info.uniform_align = device_uniform_align(device);
         self.info.device_kind = if self.dev.unified_memory { device_kind::INTEGRATED } else { device_kind::DISCRETE };
         Ok(())
     }

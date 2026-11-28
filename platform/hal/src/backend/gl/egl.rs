@@ -405,7 +405,7 @@ impl Context {
             #[cfg(target_os = "linux")]
             if let Some(wl) = &self.wayland { (wl.destroy)(window.wl_window); }
         }
-        // the native lease (window.native.keep) drops after EGL and wl_egl_window let go of it
+        // the native lease drops after EGL and wl_egl_window let go of the window
     }
 
     pub fn close_session(&mut self, sid: u32) {

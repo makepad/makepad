@@ -4,6 +4,7 @@
 //! sort by bytes; "idle" = a texture-like handle not used for N frames, or never.
 //! Reports are plain data (no references into the tables), so any thread can analyse one.
 
+use crate::table::DENSE_MAX;
 use crate::types::{Attr, StrId};
 use crate::FastMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -23,6 +24,15 @@ pub enum Kind {
 impl Kind {
     /// The kinds with tables (`World::count`).
     pub const ALL: [Kind; 4] = [Kind::Texture, Kind::Buffer, Kind::Pipeline, Kind::Window];
+
+    #[inline]
+    fn table_slot(self) -> Option<usize> {
+        match self {
+            Kind::Texture | Kind::Buffer | Kind::Pipeline | Kind::Window => Some(self as usize),
+            Kind::Backend => None,
+        }
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Kind::Texture => "texture",
@@ -177,7 +187,7 @@ impl Drop for Charge {
 
 /// What the ledger records for one handle. `detail` is the report's kind label
 /// ("render target", "depth", "instance buffers", ...), chosen by the executor at create time.
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct LedgerEntry {
     pub kind: Kind,
     pub detail: &'static str,
@@ -201,9 +211,42 @@ pub struct LedgerEntry {
     pub note: &'static str,
 }
 
+/// Only this stamp is read or written when a draw touches a dense handle.
+#[derive(Clone, Copy, Debug, Default)]
+struct TouchSlot {
+    gen: Option<u32>,
+    last_used_frame: u64,
+    last_used_ns: u64,
+}
+
+impl TouchSlot {
+    fn merge(&self, entry: LedgerEntry) -> LedgerEntry {
+        LedgerEntry { last_used_frame: self.last_used_frame, last_used_ns: self.last_used_ns, ..entry }
+    }
+}
+
+enum LedgerSlot {
+    Dense(usize, usize),
+    Backend(usize),
+    Overflow,
+}
+
+#[inline]
+fn ledger_slot(kind: Kind, index: u32) -> LedgerSlot {
+    match kind.table_slot() {
+        Some(k) if index < DENSE_MAX => LedgerSlot::Dense(k, index as usize),
+        None if (index as usize) < Pool::ALL.len() => LedgerSlot::Backend(index as usize),
+        _ => LedgerSlot::Overflow,
+    }
+}
+
 #[derive(Default, Debug)]
 pub struct Ledger {
-    entries: FastMap<(Kind, u32), LedgerEntry>,
+    touch: [Vec<TouchSlot>; Kind::ALL.len()],
+    meta: [Vec<Option<LedgerEntry>>; Kind::ALL.len()],
+    backend: [Option<LedgerEntry>; Pool::ALL.len()],
+    overflow: FastMap<(Kind, u32), LedgerEntry>,
+    len: usize,
     /// every create / destroy ever seen, per site (churn)
     sites: FastMap<StrId, SiteCounts>,
     /// What the device says this process holds (set by backends that can ask: Metal's
@@ -226,45 +269,102 @@ impl Ledger {
         let s = self.sites.entry(e.attr.site).or_default();
         s.handles += 1;
         s.bytes += e.bytes;
-        self.entries.insert((e.kind, e.index), e);
-    }
-
-    pub fn remove(&mut self, kind: Kind, index: u32) {
-        self.entries.remove(&(kind, index));
-    }
-
-    /// Marks the handle used by `frame` (a draw sampled / drew / rendered to it).
-    pub fn touch(&mut self, kind: Kind, index: u32, gen: u32, frame: u64, now_ns: u64) {
-        if let Some(e) = self.entries.get_mut(&(kind, index)) {
-            if e.gen == gen {
-                e.last_used_frame = frame;
-                e.last_used_ns = now_ns;
+        let old = match ledger_slot(e.kind, e.index) {
+            LedgerSlot::Dense(k, i) => {
+                if i >= self.meta[k].len() {
+                    self.meta[k].resize(i + 1, None);
+                    self.touch[k].resize(i + 1, TouchSlot::default());
+                }
+                self.touch[k][i] = TouchSlot {
+                    gen: Some(e.gen), last_used_frame: e.last_used_frame, last_used_ns: e.last_used_ns,
+                };
+                self.meta[k][i].replace(e)
             }
+            LedgerSlot::Backend(i) => self.backend[i].replace(e),
+            LedgerSlot::Overflow => self.overflow.insert((e.kind, e.index), e),
+        };
+        if old.is_none() {
+            self.len += 1;
         }
     }
 
-    pub fn get(&self, kind: Kind, index: u32) -> Option<&LedgerEntry> {
-        self.entries.get(&(kind, index))
+    pub fn remove(&mut self, kind: Kind, index: u32) {
+        let old = match ledger_slot(kind, index) {
+            LedgerSlot::Dense(k, i) => {
+                let Some(slot) = self.touch[k].get_mut(i) else { return };
+                slot.gen = None;
+                self.meta[k][i].take()
+            }
+            LedgerSlot::Backend(i) => self.backend[i].take(),
+            LedgerSlot::Overflow => self.overflow.remove(&(kind, index)),
+        };
+        if old.is_some() {
+            self.len -= 1;
+        }
     }
 
+    /// Marks the handle used by `frame` (a draw sampled / drew / rendered to it).
+    #[inline]
+    pub fn touch(&mut self, kind: Kind, index: u32, gen: u32, frame: u64, now_ns: u64) {
+        let entry = match ledger_slot(kind, index) {
+            LedgerSlot::Dense(k, i) => {
+                if let Some(slot) = self.touch[k].get_mut(i) {
+                    if slot.gen == Some(gen) {
+                        slot.last_used_frame = frame;
+                        slot.last_used_ns = now_ns;
+                    }
+                }
+                return;
+            }
+            LedgerSlot::Backend(i) => self.backend[i].as_mut(),
+            LedgerSlot::Overflow => self.overflow.get_mut(&(kind, index)),
+        };
+        if let Some(e) = entry.filter(|e| e.gen == gen) {
+            e.last_used_frame = frame;
+            e.last_used_ns = now_ns;
+        }
+    }
+
+    pub fn get(&self, kind: Kind, index: u32) -> Option<LedgerEntry> {
+        match ledger_slot(kind, index) {
+            LedgerSlot::Dense(k, i) => self.meta[k].get(i)?.map(|e| self.touch[k][i].merge(e)),
+            LedgerSlot::Backend(i) => self.backend[i],
+            LedgerSlot::Overflow => self.overflow.get(&(kind, index)).copied(),
+        }
+    }
+
+    /// Returns the cold entry. Dense handles keep their current `last_used_frame` and
+    /// `last_used_ns` in the touch table. Use `get` to read them and `touch` to update them.
     pub fn get_mut(&mut self, kind: Kind, index: u32) -> Option<&mut LedgerEntry> {
-        self.entries.get_mut(&(kind, index))
+        match ledger_slot(kind, index) {
+            LedgerSlot::Dense(k, i) => self.meta[k].get_mut(i)?.as_mut(),
+            LedgerSlot::Backend(i) => self.backend[i].as_mut(),
+            LedgerSlot::Overflow => self.overflow.get_mut(&(kind, index)),
+        }
     }
 
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.len
     }
 
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.len == 0
     }
 
     pub fn total_bytes(&self) -> u64 {
-        self.entries.values().map(|e| e.bytes).sum()
+        self.meta.iter().flatten().flatten()
+            .chain(self.backend.iter().flatten())
+            .chain(self.overflow.values())
+            .map(|e| e.bytes)
+            .sum()
     }
 
-    pub fn entries(&self) -> impl Iterator<Item = &LedgerEntry> {
-        self.entries.values()
+    pub fn entries(&self) -> impl Iterator<Item = LedgerEntry> + '_ {
+        self.meta.iter().zip(&self.touch)
+            .flat_map(|(meta, touch)| meta.iter().zip(touch))
+            .filter_map(|(entry, stamp)| entry.map(|e| stamp.merge(e)))
+            .chain(self.backend.iter().flatten().copied())
+            .chain(self.overflow.values().copied())
     }
 
     /// The backend's pool rows (`Kind::Backend`), one per pool with objects in it.
@@ -273,11 +373,11 @@ impl Ledger {
             let (bytes, objects) = (pools.bytes(pool), pools.objects(pool));
             let index = pool as u32;
             if objects == 0 {
-                self.entries.remove(&(Kind::Backend, index));
+                self.remove(Kind::Backend, index);
                 continue;
             }
             let note = if pools.no_size[pool as usize].load(Ordering::Relaxed) { NO_SIZE } else { "" };
-            match self.entries.get_mut(&(Kind::Backend, index)) {
+            match &mut self.backend[pool as usize] {
                 Some(e) => {
                     e.bytes = bytes;
                     e.objects = objects;
@@ -285,28 +385,26 @@ impl Ledger {
                     e.last_used_frame = frame;
                     e.last_used_ns = now_ns;
                 }
-                None => {
-                    self.entries.insert(
-                        (Kind::Backend, index),
-                        LedgerEntry {
-                            kind: Kind::Backend,
-                            detail: pool.name(),
-                            index,
-                            gen: 0,
-                            bytes,
-                            format: 0,
-                            width: 0,
-                            height: 0,
-                            mips: 0,
-                            attr: Attr::default(),
-                            created_ns: now_ns,
-                            created_frame: frame,
-                            last_used_frame: frame,
-                            last_used_ns: now_ns,
-                            objects,
-                            note,
-                        },
-                    );
+                slot @ None => {
+                    *slot = Some(LedgerEntry {
+                        kind: Kind::Backend,
+                        detail: pool.name(),
+                        index,
+                        gen: 0,
+                        bytes,
+                        format: 0,
+                        width: 0,
+                        height: 0,
+                        mips: 0,
+                        attr: Attr::default(),
+                        created_ns: now_ns,
+                        created_frame: frame,
+                        last_used_frame: frame,
+                        last_used_ns: now_ns,
+                        objects,
+                        note,
+                    });
+                    self.len += 1;
                 }
             }
         }
@@ -317,8 +415,7 @@ impl Ledger {
     pub fn report(&self, session: u32, strings: &FastMap<StrId, String>, frame: u64, idle_frames: u64) -> Report {
         let name = |id: StrId| strings.get(&id).cloned().filter(|_| id != 0);
         let mut items: Vec<ReportItem> = self
-            .entries
-            .values()
+            .entries()
             .map(|e| {
                 let site = name(e.attr.site).unwrap_or_default();
                 let owner = name(e.attr.label)
@@ -464,4 +561,60 @@ impl Report {
         self.by_site = group(&self.items, |i| i.site.clone());
         self.churn.extend(o.churn);
     }
+}
+
+#[cfg(test)]
+#[test]
+fn ledger_inline_touch_syncs_report_and_ignores_stale_gen() {
+    let mut ledger = Ledger::default();
+    let texture = LedgerEntry {
+        kind: Kind::Texture, detail: "texture", index: 5, gen: 2, bytes: 4,
+        format: 0, width: 1, height: 1, mips: 1, attr: Attr::default(),
+        created_ns: 10, created_frame: 1, last_used_frame: 2, last_used_ns: 20, objects: 1, note: "",
+    };
+    let rows = [
+        texture,
+        LedgerEntry { index: crate::types::LENT_BASE + 1, gen: 1, ..texture },
+        LedgerEntry { kind: Kind::Window, detail: "window", gen: 0, ..texture },
+    ];
+    ledger.add(LedgerEntry { gen: 1, last_used_frame: 1, last_used_ns: 10, ..texture });
+    for row in rows {
+        ledger.add(row);
+        ledger.touch(row.kind, row.index, row.gen.wrapping_sub(1), 75, 8_000);
+        let entry = ledger.get(row.kind, row.index).unwrap();
+        assert_eq!((entry.last_used_frame, entry.last_used_ns), (2, 20), "stale touch changed {row:?}");
+        ledger.touch(row.kind, row.index, row.gen, 99, 12_345);
+    }
+    assert_eq!(ledger.len(), rows.len(), "replacing a generation added a row");
+
+    let report = ledger.report(1, &FastMap::default(), 103, 5);
+    assert_eq!(report.items.len(), rows.len());
+    assert!(report.idle.is_empty(), "the touched textures are only four frames idle");
+    for row in rows {
+        let item = report.items.iter().find(|i| (i.kind, i.index) == (row.kind, row.index)).unwrap();
+        assert_eq!((item.last_used_frame, item.idle_frames), (99, Some(4)), "report for {row:?}");
+        let entry = ledger.get(row.kind, row.index).unwrap();
+        assert_eq!((entry.last_used_frame, entry.last_used_ns), (99, 12_345), "get for {row:?}");
+        let entry = ledger.entries().find(|e| (e.kind, e.index) == (row.kind, row.index)).unwrap();
+        assert_eq!((entry.last_used_frame, entry.last_used_ns), (99, 12_345), "entries for {row:?}");
+    }
+    for row in rows {
+        ledger.remove(row.kind, row.index);
+        ledger.touch(row.kind, row.index, row.gen, 100, 13_000);
+        assert!(ledger.get(row.kind, row.index).is_none(), "touch revived {row:?}");
+    }
+    assert_eq!(ledger.len(), 0);
+    assert_eq!(ledger.entries().count(), 0);
+
+    let pools = Pools::default();
+    pools.set(Pool::Staging, 8, 1);
+    ledger.set_pools(&pools, 101, 14_000);
+    pools.set(Pool::Staging, 16, 2);
+    ledger.set_pools(&pools, 102, 15_000);
+    assert_eq!((ledger.len(), ledger.total_bytes()), (1, 16), "pool refresh replaces its row");
+    let pool = ledger.get(Kind::Backend, Pool::Staging as u32).unwrap();
+    assert_eq!((pool.objects, pool.created_frame, pool.last_used_ns), (2, 101, 15_000));
+    pools.set(Pool::Staging, 0, 0);
+    ledger.set_pools(&pools, 103, 16_000);
+    assert!(ledger.is_empty(), "empty pool still counted");
 }

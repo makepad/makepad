@@ -17,7 +17,7 @@ use crate::{
     makepad_live_id::*,
     makepad_math::*,
     thread::SignalToUI,
-    window::{CxWindowPool, WindowId},
+    window::WindowId,
 };
 use makepad_hal::{buffers::{read_domains, read_drag_items, read_items, read_strs}, domain_state, input, window_state, HalEvent, Id};
 use std::{cell::Cell, rc::Rc, sync::{Arc, Mutex}};
@@ -147,6 +147,15 @@ fn touch_state(phase: u32) -> TouchState {
 }
 
 impl Cx {
+    pub(crate) fn hal_cancel_internal_drag(&mut self) {
+        let hal_drag = self.hal.internal_drag_items.take().is_some();
+        let internal_drag = self.drag_drop.cancel_internal_drag();
+        if hal_drag || internal_drag {
+            self.call_event_handler(&Event::DragEnd);
+            self.drag_drop.cycle_drag();
+        }
+    }
+
     /// Feeds one HAL event to Cx. Returns false when the app is done (the last window closed).
     pub(crate) fn hal_intake(&mut self, time_ns: u64, event: HalEvent<'_>) -> bool {
         let time = self.hal.secs(time_ns);
@@ -249,6 +258,9 @@ impl Cx {
             }
             HalEvent::MouseCancel { window, x, y, button, mods } => {
                 let window_id = window_id(window);
+                if MouseButton::from_bits_retain(button).is_primary() {
+                    self.hal_cancel_internal_drag();
+                }
                 if self.windows.is_valid(window_id) {
                     self.dispatch_hosted_mouse_cancel(&makepad_studio_protocol::RemoteMouseUp {
                         time, x, y, button_raw_bits: button,
@@ -619,6 +631,7 @@ impl Cx {
                     }
                     self.call_event_handler(&Event::WindowGotFocus(window_id));
                 } else {
+                    self.hal_cancel_internal_drag();
                     self.call_event_handler(&Event::WindowLostFocus(window_id));
                 }
             }
@@ -683,6 +696,7 @@ impl Cx {
                 let user_closed = crate::remote::take_window_close_requested(window_id.id()) || self.windows[window_id].is_created;
                 let title = self.windows[window_id].create_title.clone();
                 self.a11y.close_window(window_id);
+                self.hal_cancel_internal_drag();
                 self.call_event_handler(&Event::WindowClosed(WindowClosedEvent { window_id }));
                 self.windows[window_id].is_created = false;
                 if user_closed {
@@ -782,7 +796,7 @@ impl Cx {
                     self.call_event_handler(&Event::MouseUp(MouseUpEvent {
                         abs: dvec2(-100000.0, -100000.0),
                         button: MouseButton::PRIMARY,
-                        window_id: CxWindowPool::id_zero(),
+                        window_id,
                         modifiers: Default::default(),
                         time,
                     }));
@@ -847,7 +861,11 @@ impl Cx {
                 // the window's focus has its own event; the surface is the backend's (it rebuilds
                 // the swapchain and reports the geometry), Cx only paints into the new one
                 makepad_hal::lifecycle::FOCUS_GAINED | makepad_hal::lifecycle::FOCUS_LOST => {}
-                makepad_hal::lifecycle::SURFACE_LOST => self.hal.surface_lost = true,
+                makepad_hal::lifecycle::SURFACE_LOST => {
+                    self.hal.surface_lost = true;
+                    self.remote_activity.clear_held();
+                    self.hal_cancel_internal_drag();
+                }
                 makepad_hal::lifecycle::SURFACE_AVAILABLE => {
                     self.hal.surface_lost = false;
                     self.hal_repaint_all(RepaintAll::SurfaceBack);
@@ -1051,10 +1069,7 @@ impl Cx {
                 self.hal_a11y_presented();
                 // a draw item's backing is reusable once the frame that last read it is done
                 self.textures.1.serials.complete(frame);
-                let pool = self.task_pool();
-                // a freed draw item's retained buffer goes with it
-                let frames = &mut self.hal.frames;
-                self.draw_lists.retire_free_items_with_ids(&pool, frame, |list, item, _| frames.inst_release((list.index(), item)));
+                self.fb_retire_free_items(frame);
                 self.poll_texture_lifetimes();
                 self.hal.frames_done += 1;
                 match self.hal.hosted.as_mut().map(|h| h.completed(window, frame)) {
@@ -1120,8 +1135,8 @@ impl Cx {
                 }
             }
             HalEvent::BufferEvicted { buffer } => {
-                let evicted = self.hal.frames.buffer_evicted(buffer);
-                for &(list, item) in &evicted {
+                let Some(evicted) = self.hal.frames.buffer_evicted(buffer) else { return true };
+                for (list, item) in evicted {
                     if list < self.draw_lists.0.pool.len() && !self.draw_lists.is_slot_freed(list) {
                         let items = &mut self.draw_lists.0.pool[list].item.draw_items;
                         if item < items.len() {
@@ -1133,9 +1148,7 @@ impl Cx {
                         }
                     }
                 }
-                if !evicted.is_empty() {
-                    self.hal_repaint_all(RepaintAll::BufferEvicted);
-                }
+                self.hal_repaint_all(RepaintAll::BufferEvicted);
             }
             HalEvent::TextureEvicted { texture } => {
                 // the HAL gave back the storage of a transient target nothing used for a while:
@@ -1272,9 +1285,7 @@ impl Cx {
         self.hal.device_generation += 1;
         let serial = self.frame_submission_serial();
         self.textures.1.serials.complete(serial);
-        let pool = self.task_pool();
-        let frames = &mut self.hal.frames;
-        self.draw_lists.retire_free_items_with_ids(&pool, serial, |list, item, _| frames.inst_release((list.index(), item)));
+        self.fb_retire_free_items(serial);
         self.poll_texture_lifetimes();
         let textures = &self.textures;
         let reupload = |slot: usize, gen: u64| {
@@ -1446,7 +1457,11 @@ impl Cx {
     pub(crate) fn hal_service_signals(&mut self) -> bool {
         let _phase = crate::thread::ui_phase(crate::thread::UiPhase::Signals);
         let internal_signal = SignalToUI::check_and_clear_internal_signal();
-        let ui_signal = SignalToUI::check_and_clear_ui_signal();
+        // `makepad run`'s sources moved (a checkout, its upstream, an update's progress): the
+        // runner woke us, and the app hears a Signal to read them (makepad_hal::sources)
+        let sources = makepad_hal::sources::sources_generation();
+        let sources_moved = std::mem::replace(&mut self.hal.sources_seen, sources) != sources;
+        let ui_signal = SignalToUI::check_and_clear_ui_signal() | sources_moved;
         let hook_signal = SignalToUI::check_and_clear_hook_signal();
         let mut did = false;
         if internal_signal || ui_signal {
@@ -1510,6 +1525,65 @@ pub(crate) unsafe fn texture_readback_pixels(record: makepad_hal::lease::Record)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mouse_cancel_and_focus_loss_end_internal_drag() {
+        use crate::window::WindowHandle;
+        use std::{cell::RefCell, time::{Duration, Instant}};
+
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let seen = events.clone();
+        let clock = Rc::new(Cell::new(Instant::now()));
+        let event_clock = clock.clone();
+        let mut cx = Cx::new(Box::new(move |cx, event| {
+            // Observe the dispatched events even with the remote endpoint off in the harness.
+            cx.remote_activity.note_native_at(event, false, event_clock.get());
+            match event {
+                Event::MouseMove(_) => seen.borrow_mut().push("move"),
+                Event::Drag(_) => seen.borrow_mut().push("drag"),
+                Event::DragEnd => seen.borrow_mut().push("end"),
+                Event::Drop(_) => seen.borrow_mut().push("drop"),
+                _ => {}
+            }
+        }));
+        let first = WindowHandle::new(&mut cx);
+        let other = WindowHandle::new(&mut cx);
+        for id in [first.window_id(), other.window_id()] {
+            cx.windows[id].is_created = true;
+            cx.hal.windows.entry(id.id()).or_default().confirmed = true;
+        }
+        let window = hal_window_id(first.window_id());
+        let moved = |window| HalEvent::MouseMove { window, x: 1.0, y: 2.0, dx: 0.0, dy: 0.0, mods: 0 };
+        let cancel = |button: MouseButton| HalEvent::MouseCancel { window, x: 1.0, y: 2.0, button: button.bits(), mods: 0 };
+        for (hal_drag, end) in [
+            (true, cancel(MouseButton::PRIMARY)),
+            (false, HalEvent::Focus { window, focused: false }),
+            (true, HalEvent::Lifecycle { kind: makepad_hal::lifecycle::SURFACE_LOST }),
+            (false, HalEvent::Closed { window }),
+        ] {
+            if hal_drag {
+                cx.hal.internal_drag_items = Some(Arc::new(Vec::new()));
+            } else {
+                cx.drag_drop.start_internal_drag(Vec::new());
+            }
+            events.borrow_mut().clear();
+            cx.hal_intake(0, cancel(MouseButton::SECONDARY));
+            cx.hal_intake(0, moved(window));
+            assert_eq!(&*events.borrow(), &["move", "drag"], "secondary cancel preserves a primary drag");
+            assert!(cx.remote_activity.held_at(clock.get()));
+
+            let clear_only = !matches!(end, HalEvent::MouseCancel { .. });
+            clock.set(clock.get() + Duration::from_secs(3));
+            events.borrow_mut().clear();
+            assert!(cx.hal_intake(0, end));
+            assert_eq!(&*events.borrow(), &["end"], "the drag ends exactly once without a drop");
+            if clear_only {
+                assert!(!cx.remote_activity.active_at(clock.get()), "cleanup preserved the last input time");
+            }
+            cx.hal_intake(0, moved(hal_window_id(other.window_id())));
+            assert_eq!(&*events.borrow(), &["end", "move"], "the next move reaches the app without a drag");
+        }
+    }
 
     #[test]
     fn every_pass_painting_again_most_frames_is_logged_with_its_causes() {

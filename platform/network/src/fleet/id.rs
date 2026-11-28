@@ -1,5 +1,5 @@
 //! Fleet identity: the one identity system of every networked service we run
-//! (the AI hub, Desk Link, relaxhub, the asset store's sync, Sandbox rooms).
+//! (the AI hub, the remote desktop link, relaxhub, the asset store's sync, game rooms).
 //! Operator guide: tools/fleet-identity.md.
 //!
 //! **Keys.** Every machine has its own P-256 key, `<fleet dir>/id.key`
@@ -32,7 +32,7 @@
 //!   MKID <credential>.<unix time>.<ECDSA-P256(id.key, "mkid1 proof|<server cert sha256 hex>|<time>") hex>
 //! ```
 //!
-//! (the HTTP `Authorization` value; Desk Link's hello carries the same text).
+//! (the HTTP `Authorization` value; the remote desktop link's hello carries the same text).
 //! No secret crosses the wire: a proof is useless against any other server
 //! (another certificate) and goes stale after [`PROOF_WINDOW`].
 //!

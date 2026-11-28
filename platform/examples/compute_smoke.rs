@@ -139,7 +139,7 @@ pub fn run() {
     w.compute_pass(2, 2, &dispatches);
     w.pass(Pass { color: [TARGET, Id::NONE, Id::NONE, Id::NONE], viewport: [0., 0., 4., 4.], load: [pass_load::CLEAR; 5], ..Default::default() });
     let buffers = w.put_ids(&storage); let textures = w.put_ids(&sampled);
-    w.draw(Draw { pipeline: DRAW, vb: VB, ib: IB, index: [0, 3], inst: Inst::inline(Slice::EMPTY, 1), scissor: [f32::NAN; 4], storage_buffers: buffers, tex: textures, ..Default::default() });
+    w.draw(Draw { pipeline: DRAW, vb: VB, ib: IB, index: [0, 3], inst: Inst::none(1), scissor: [f32::NAN; 4], storage_buffers: buffers, tex: textures, ..Default::default() });
     w.frame_end(TARGET, target::TEXTURE);
     w.read_buffers(1, &[BufferReadRange { id: DATA, offset: 0, len: 68 }]); w.read_buffers(2, &[BufferReadRange { id: RESULT, offset: 0, len: 36 }]); w.texture_readback(TARGET, 3, [0, 0, 4, 4]);
     let submitted = Instant::now();

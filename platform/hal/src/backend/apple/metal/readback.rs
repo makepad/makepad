@@ -46,7 +46,7 @@ impl Metal {
         let sid = s.id;
         let (owner, physical) = self.window_key(sid, window);
         let source = self.retained_window(owner, physical);
-        let destination = self.tex.get(&(sid, texture.index)).filter(|t| t.gen == texture.gen);
+        let destination = self.tex.get(sid, texture.index).filter(|t| t.gen == texture.gen);
         let Some((source, destination)) = source.zip(destination) else {
             s.events.readback(req, readback::FAILED, [0; 4], None);
             return;
@@ -130,8 +130,8 @@ impl Metal {
         let Ok(entry) = s.textures.get(sid, id) else { return done(None) };
         let t = entry.val.clone();
         let tex = match t.lent {
-            Some(l) => self.tex.get(&(l.child, l.tex.index)).filter(|x| x.gen == l.tex.gen),
-            None => self.tex.get(&(sid, id.index)).filter(|x| x.gen == id.gen),
+            Some(l) => self.tex.get(l.child, l.tex.index).filter(|x| x.gen == l.tex.gen),
+            None => self.tex.get(sid, id.index).filter(|x| x.gen == id.gen),
         };
         let Some(tex) = tex.map(|x| x.obj.clone()) else { return done(None) };
         if format::is_depth(t.format) {
@@ -202,7 +202,7 @@ impl Metal {
             s.events.readback(req, readback::INCOMPLETE, rect, None);
             return;
         }
-        let (Some(tex), Ok(entry)) = (self.tex.get(&(sid, id.index)).filter(|t| t.gen == id.gen), s.textures.get(sid, id)) else {
+        let (Some(tex), Ok(entry)) = (self.tex.get(sid, id.index).filter(|t| t.gen == id.gen), s.textures.get(sid, id)) else {
             // the storage was given back, or it is an import without one
             s.events.readback(req, readback::FAILED, rect, None);
             return;
@@ -228,7 +228,7 @@ impl Metal {
                 // Both panels and window layers keep the borrower's full frame in the base.
                 overlay.base.as_ref()
             } else {
-                self.win.get(&(owner, physical.index)).filter(|w| w.gen == physical.gen)
+                self.win.get(owner, physical.index).filter(|w| w.gen == physical.gen)
                     .or_else(|| self.restores.get(&physical))
             }
         } else {

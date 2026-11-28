@@ -602,7 +602,10 @@ impl CxDrawDamage {
                 geometry_id.slot_index() as u64,
                 geometry_id.generation(),
                 cx.geometries[geometry_id].data_generation,
-                options.alpha_blend as u64 | (options.depth_write as u64) << 1 | (options.backface_culling as u64) << 2,
+                options.alpha_blend as u64
+                    | (options.depth_write as u64) << 1
+                    | (options.cull_mode as u64) << 2
+                    | (options.depth_test_greater as u64) << 4,
             ]);
             key.extend(options.scissor.map_or([u64::MAX; 2], |[x, y, w, h]| {
                 [(x as u64) << 32 | y as u64, (w as u64) << 32 | h as u64]

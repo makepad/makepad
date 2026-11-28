@@ -26,7 +26,7 @@
 
 use crate::annex_b;
 use crate::stream_debug::{self as dbg, hex_hr};
-use crate::stream_decoder::DecodedFrame;
+use crate::stream_decoder::{DecodedFrame, PictureBuffers};
 use crate::stream_encoder::StreamVideoCodec;
 use crate::windows_encoder::{ensure_media_foundation, hr_err};
 use crate::windows_mft;
@@ -131,6 +131,7 @@ pub struct WindowsStreamDecoder {
     /// The output type's colour (the stream's VUI as the decoder reports it).
     color: VideoColor,
     pending_pts: VecDeque<i64>,
+    buffers: PictureBuffers,
     packets_in: u64,
     frames_out: u64,
     pumps: u64,
@@ -179,6 +180,7 @@ impl WindowsStreamDecoder {
             output_stride: 0,
             color: VideoColor::BT709,
             pending_pts: VecDeque::new(),
+            buffers: PictureBuffers::default(),
             packets_in: 0,
             frames_out: 0,
             pumps: 0,
@@ -283,11 +285,12 @@ impl WindowsStreamDecoder {
         Ok(())
     }
 
-    pub fn push_packet(
+    pub fn push_packet_into(
         &mut self,
         annex_b_data: &[u8],
         pts_100ns: i64,
-    ) -> Result<Vec<DecodedFrame>, VideoFileError> {
+        out: &mut Vec<DecodedFrame>,
+    ) -> Result<(), VideoFileError> {
         // See `WindowsStreamEncoder::push_frame_nv12`'s identical comment —
         // this type is `Send` and may be called from a different thread
         // than the one that constructed it; re-assert MTA membership here.
@@ -303,9 +306,8 @@ impl WindowsStreamDecoder {
                 .err()
                 .unwrap_or(HRESULT(0))
         };
-        let mut frames = Vec::new();
         if hr.0 == MF_E_NOTACCEPTING.0 {
-            frames = self.drain_available()?;
+            self.drain_available(out)?;
             hr = unsafe {
                 self.transform
                     .ProcessInput(0, &sample, 0)
@@ -328,15 +330,13 @@ impl WindowsStreamDecoder {
             return Err(VideoFileError::with_code("IMFTransform::ProcessInput", hr.0));
         }
         self.pending_pts.push_back(pts_100ns);
-        frames.extend(self.drain_available()?);
-        Ok(frames)
+        self.drain_available(out)
     }
 
     /// Drives the pull side until the decoder asks for more input. Type
     /// errors re-negotiate and retry; a too-small caller buffer re-reads
     /// the stream info and retries; every produced sample becomes a frame.
-    fn drain_available(&mut self) -> Result<Vec<DecodedFrame>, VideoFileError> {
-        let mut frames = Vec::new();
+    fn drain_available(&mut self, out: &mut Vec<DecodedFrame>) -> Result<(), VideoFileError> {
         let mut renegotiations = 0;
         loop {
             let provided = if self.provides_samples {
@@ -404,7 +404,8 @@ impl WindowsStreamDecoder {
             let height = self.height as usize;
             let uv_height = height.div_ceil(2);
             let stride = self.output_stride.max(width);
-            let mut nv12 = vec![0u8; width * (height + uv_height)];
+            let mut nv12 = self.buffers.take();
+            nv12.resize(width * (height + uv_height), 0);
             if stride * (height + uv_height) <= bytes.len() {
                 for row in 0..height {
                     nv12[row * width..(row + 1) * width]
@@ -418,6 +419,7 @@ impl WindowsStreamDecoder {
             } else {
                 let copy_len = nv12.len().min(bytes.len());
                 nv12[..copy_len].copy_from_slice(&bytes[..copy_len]);
+                nv12[copy_len..].fill(0);
             }
             unsafe { buffer.Unlock() }.map_err(|e| hr_err("Unlock(out)", e))?;
             let pts_100ns = self.pending_pts.pop_front().unwrap_or(0);
@@ -428,18 +430,31 @@ impl WindowsStreamDecoder {
                     self.frames_out, width, height, len, stride, pts_100ns
                 )
             });
-            frames.push(DecodedFrame { width: self.width, height: self.height, nv12, pts_100ns, gpu: None, color: self.color });
+            out.push(DecodedFrame { width: self.width, height: self.height, nv12, pts_100ns, gpu: None, color: self.color });
         }
-        Ok(frames)
+        Ok(())
+    }
+
+    pub fn recycle(&mut self, nv12: Vec<u8>) {
+        self.buffers.recycle(nv12);
+    }
+
+    pub fn allocated_buffers(&self) -> u64 {
+        self.buffers.allocated
+    }
+
+    pub fn ready_into(&mut self, out: &mut Vec<DecodedFrame>) -> Result<(), VideoFileError> {
+        ensure_media_foundation()?;
+        self.drain_available(out)
     }
 
     /// Asks the decoder for everything it still holds (`COMMAND_DRAIN`);
     /// reference pictures survive, so streaming can continue afterwards.
-    pub fn flush(&mut self) -> Result<Vec<DecodedFrame>, VideoFileError> {
+    pub fn flush_into(&mut self, out: &mut Vec<DecodedFrame>) -> Result<(), VideoFileError> {
         ensure_media_foundation()?;
         unsafe { self.transform.ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0) }
             .map_err(|e| hr_err("ProcessMessage(COMMAND_DRAIN)", e))?;
-        self.drain_available()
+        self.drain_available(out)
     }
 }
 

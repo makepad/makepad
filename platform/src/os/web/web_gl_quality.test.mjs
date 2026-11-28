@@ -471,13 +471,29 @@ function mock_gl() {
     MAX_VERTEX_UNIFORM_VECTORS: 5,
     MAX_FRAGMENT_UNIFORM_VECTORS: 6,
     MAX_VERTEX_ATTRIBS: 7,
+    MAX_ARRAY_TEXTURE_LAYERS: 8,
+    MAX_UNIFORM_BUFFER_BINDINGS: 9,
+    UNIFORM_BUFFER_OFFSET_ALIGNMENT: 10,
+    MAX_UNIFORM_BLOCK_SIZE: 11,
+    MAX_VERTEX_TEXTURE_IMAGE_UNITS: 12,
+    MAX_TEXTURE_IMAGE_UNITS: 13,
+    MAX_COMBINED_TEXTURE_IMAGE_UNITS: 14,
+    createSampler() { return {}; },
+    samplerParameteri() {},
     getParameter(parameter) {
       calls.set(parameter, (calls.get(parameter) || 0) + 1);
+      if (parameter === this.MAX_VERTEX_TEXTURE_IMAGE_UNITS) return 20;
+      if (parameter === this.MAX_TEXTURE_IMAGE_UNITS) return 24;
+      if (parameter === this.MAX_COMBINED_TEXTURE_IMAGE_UNITS) return 40;
       if (parameter === this.MAX_TEXTURE_SIZE) return 8192;
       if (parameter === this.MAX_CUBE_MAP_TEXTURE_SIZE) return 4096;
       if (parameter === this.MAX_RENDERBUFFER_SIZE) return 4096;
       if (parameter === this.MAX_VIEWPORT_DIMS) return new Int32Array([6144, 3072]);
+      if (parameter === this.MAX_UNIFORM_BUFFER_BINDINGS) return 36;
+      if (parameter === this.UNIFORM_BUFFER_OFFSET_ALIGNMENT) return 64;
+      if (parameter === this.MAX_UNIFORM_BLOCK_SIZE) return 32768;
       if (parameter === this.MAX_VERTEX_ATTRIBS) return 16;
+      if (parameter === this.MAX_ARRAY_TEXTURE_LAYERS) return 2048;
       return 256;
     },
     getExtension() {
@@ -525,15 +541,25 @@ test("GL limits are queried once and canvas MSAA is opt-in", () => {
   assert.deepEqual(first.subject.webgl_limits, {
     max_texture_size: 8192,
     max_cube_map_texture_size: 4096,
+    max_array_texture_layers: 2048,
+    max_vertex_texture_units: 20, max_fragment_texture_units: 24, max_combined_texture_units: 40,
     max_width: 4096,
     max_height: 3072,
   });
   assert.equal(first.subject.init_webgl_context(), true);
+  assert.equal(first.subject.max_uniform_buffer_bindings, 36);
+  assert.equal(first.subject.gpu_info.uniform_buffer_offset_alignment, 64);
+  assert.equal(first.subject.gpu_info.max_uniform_block_size, 32768);
   assert.equal(first.gl.calls.get(first.gl.MAX_TEXTURE_SIZE), 1);
   assert.equal(first.gl.calls.get(first.gl.MAX_CUBE_MAP_TEXTURE_SIZE), 1);
   assert.equal(first.gl.calls.get(first.gl.MAX_RENDERBUFFER_SIZE), 1);
   assert.equal(first.gl.calls.get(first.gl.MAX_VIEWPORT_DIMS), 1);
   assert.equal(first.gl.calls.get(first.gl.MAX_VERTEX_ATTRIBS), 1);
+  assert.equal(first.gl.calls.get(first.gl.MAX_ARRAY_TEXTURE_LAYERS), 1);
+
+  for (const limit of [first.gl.MAX_VERTEX_TEXTURE_IMAGE_UNITS, first.gl.MAX_TEXTURE_IMAGE_UNITS, first.gl.MAX_COMBINED_TEXTURE_IMAGE_UNITS]) {
+    assert.equal(first.gl.calls.get(limit), 1);
+  }
 
   const opted_in = webgl_subject({ antialias: "" });
   assert.equal(opted_in.subject.init_webgl_context(), true);
@@ -749,7 +775,7 @@ test("a restored context starts empty, enables its extensions again and tells th
     vaos: [{ gl_vao: {} }],
     textures: [{}, {}],
     framebuffers: [{}],
-    instance_data_textures: new Map([[0, { texture: {} }]]),
+    instance_slabs: new Map([[0, { gl_buf: {}, mirror: {} }]]),
     _sampler_fallback_textures: new Map([[1, {}]]),
     _invalid_texture_upload_ids: new Set([3]),
     pending_webgl_shader_count: 1,
@@ -772,7 +798,7 @@ test("a restored context starts empty, enables its extensions again and tells th
   for (const table of ["draw_shaders", "array_buffers", "index_buffers", "vaos", "textures", "framebuffers"]) {
     assert.deepEqual(subject[table], [], table);
   }
-  assert.equal(subject.instance_data_textures.size, 0);
+  assert.equal(subject.instance_slabs.size, 0, "the lost context's instance slabs are forgotten");
   assert.equal(subject._sampler_fallback_textures.size, 0);
   assert.equal(subject._invalid_texture_upload_ids.size, 0);
   assert.equal(subject.pending_webgl_shader_count, 0);
@@ -1240,13 +1266,142 @@ function blend_subject() {
     to_wasm: { ToWasmWebGLShadersDone() {} },
     schedule_webgl_shader_summary() {},
     preflight_webgl_draw() {
-      return { ok: true, geometry_buffer: { gl_buf: buffer }, instance_buffer: { gl_buf: buffer }, index_buffer: { gl_buf: buffer, index_type: 0 }, indices: 6, instances: 1 };
+      return {
+        ok: true, geometry_buffer: { gl_buf: buffer }, instance_buffer: { gl_buf: buffer },
+        index_buffer: { gl_buf: buffer, index_type: 0 }, indices: 6,
+        instance_ranges: [{ first: 0, count: 1 }], instance_stride: 4, layout: { instance: { active: [] } },
+      };
     },
-    upload_uniform_buffer_from_ptr() {}, bind_uniform_block() {},
   });
   subject.FromWasmSetDefaultDepthAndBlendMode();
   return { subject, gl, state, draws };
 }
+
+test("cull_mode caches enable/cullFace and switches Front/Back/None", () => {
+  const { subject, gl, draws } = blend_subject();
+  const calls = [];
+  Object.assign(gl, mock_gl(), {
+    FRONT: 0x0404, BACK: 0x0405,
+    enable(cap) { if (cap === gl.CULL_FACE) calls.push("enable"); },
+    disable(cap) { if (cap === gl.CULL_FACE) calls.push("disable"); },
+    cullFace(face) { calls.push(face); },
+  });
+  function draw(cull_mode, expected) {
+    const before = draws.length;
+    subject.FromWasmDrawCall({ shader_id: 1, vao_id: 1, alpha_blend: true, cull_mode });
+    assert.equal(draws.length, before + 1);
+    assert.deepEqual(calls.splice(0), expected);
+  }
+
+  draw(0, ["disable"]);
+  draw(0, []);
+  draw(1, ["enable", gl.BACK]);
+  draw(1, []);
+  draw(2, [gl.FRONT]);
+  draw(2, []);
+  draw(1, [gl.BACK]);
+  draw(0, ["disable"]);
+
+  // Lose the context with front-face culling enabled. Restore starts disabled, facing back.
+  draw(2, ["enable", gl.FRONT]);
+  const { draw_shaders, vaos } = subject;
+  subject.to_wasm.ToWasmGpuReset = () => Object.assign(subject, { draw_shaders, vaos });
+  subject.do_wasm_pump = () => {};
+  subject.webgl_context_lost = true;
+  subject.handle_webgl_context_restored();
+  draw(0, []);
+  draw(1, ["enable"]);
+  draw(2, [gl.FRONT]);
+});
+
+test("cull_mode Front culls CCW on both canvas and texture passes", () => {
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = 32;
+  const gl = canvas.getContext("webgl2", { preserveDrawingBuffer: true });
+  assert.ok(gl, "the pixel guard requires a WebGL2 context");
+  const subject = Object.assign(Object.create(web_gl.WasmWebGL.prototype), {
+    gl, canvas, memory: { buffer: new ArrayBuffer(128) },
+  });
+  subject.reset_webgl_objects();
+  subject.setup_webgl_context();
+  const program = gl.createProgram();
+  const compile = (type, source) => {
+    const shader = gl.createShader(type);
+    gl.shaderSource(shader, source);
+    gl.compileShader(shader);
+    assert.ok(gl.getShaderParameter(shader, gl.COMPILE_STATUS), gl.getShaderInfoLog(shader));
+    gl.attachShader(program, shader);
+    gl.deleteShader(shader);
+  };
+  compile(gl.VERTEX_SHADER, `#version 300 es
+    layout(location=0) in vec2 position;
+    uniform float mp_clip_y_flip;
+    void main() {
+      gl_Position = vec4(position, 0.0, 1.0);
+      if (mp_clip_y_flip > 0.5) gl_Position.y = -gl_Position.y;
+    }`);
+  compile(gl.FRAGMENT_SHADER, `#version 300 es
+    precision mediump float;
+    out vec4 color;
+    void main() { color = vec4(1.0); }`);
+  gl.linkProgram(program);
+  assert.ok(gl.getProgramParameter(program, gl.LINK_STATUS), gl.getProgramInfoLog(program));
+  const clip_y_flip_loc = gl.getUniformLocation(program, "mp_clip_y_flip");
+  assert.ok(clip_y_flip_loc);
+  const float_attr = { type_code: 0, gl_type: gl.FLOAT, offset: 0 };
+  subject.draw_shaders[0] = {
+    program, version: 1, clip_y_flip_loc, texture_locs: [],
+    geom_attribs: [{ ...float_attr, loc: 0, size: 2, stride: 8 }],
+    inst_attribs: [{ ...float_attr, loc: -1, size: 1, stride: 4 }],
+  };
+
+  // The left quad is counter-clockwise and the right quad is clockwise.
+  const vertices = new Float32Array(subject.memory.buffer, 8, 12);
+  vertices.set([-1, -1, 0, -1, 1, -1, -1, 1, 0, 1, 1, 1]);
+  const indices = new Uint16Array(subject.memory.buffer, 56, 12);
+  indices.set([0, 1, 4, 0, 4, 3, 1, 5, 2, 1, 4, 5]);
+  const empty = { ptr: 0, len: 0 };
+  subject.FromWasmAllocArrayBuffer({ buffer_id: 0, data: { ptr: vertices.byteOffset, len: vertices.length }, byte_data: empty });
+  subject.FromWasmAllocIndexBuffer({ buffer_id: 0, index_width: 2, data: empty, byte_data: { ptr: indices.byteOffset, len: indices.byteLength } });
+  const row = { slab_slot: 0, backing_generation: 1, region: { index: 0, gen: 1 }, byte_off: 0, byte_len: 4 };
+  subject.FromWasmCreateInstanceSlab({ ...row, capacity_bytes: 4 });
+  subject.FromWasmWriteInstanceRegion({ ...row, parts: [{ ptr: 80, len: 4 }] });
+  subject.FromWasmAllocVao({ ...row, vao_id: 0, shader_id: 0, geom_ib_id: 0, geom_vb_id: 0, instance_byte_offset: 0 });
+  const range = { off: 0, len: 0 };
+  const args = {
+    shader_id: 0, vao_id: 0, index_width: 2, instance_ranges: [{ first: 0, count: 1 }],
+    pass_uniforms: range, draw_list_uniforms: range, draw_call_uniforms: range, user_uniforms: range, live_uniforms: range,
+  };
+  const fbo = gl.createFramebuffer();
+  const texture = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, texture);
+  gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, 32, 32);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
+  assert.equal(gl.checkFramebufferStatus(gl.FRAMEBUFFER), gl.FRAMEBUFFER_COMPLETE);
+  gl.clearColor(0, 0, 0, 1);
+  const black = [0, 0, 0, 255], white = [255, 255, 255, 255];
+  for (const target of [fbo, null]) {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, target);
+    subject.texture_pass_front_face_cw = target === fbo;
+    for (const [cull_mode, left, right] of [[0, white, white], [1, white, black], [2, black, white]]) {
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      subject.FromWasmDrawCall({ ...args, cull_mode });
+      for (const [x, expected] of [[8, left], [24, right]]) {
+        const pixel = new Uint8Array(4);
+        gl.readPixels(x, 16, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
+        assert.deepEqual(Array.from(pixel), expected, `${target ? "texture" : "canvas"}, mode ${cull_mode}, x=${x}`);
+      }
+    }
+  }
+  gl.deleteFramebuffer(fbo);
+  gl.deleteTexture(texture);
+  gl.deleteVertexArray(subject.vaos[0].gl_vao);
+  gl.deleteBuffer(subject.array_buffers[0].gl_buf);
+  gl.deleteBuffer(subject.index_buffers[0].gl_buf);
+  gl.deleteBuffer(subject.instance_slabs.get(0).gl_buf);
+  gl.deleteProgram(program);
+});
 
 test("Add blends color and alpha with ONE/ONE and restores Over after the draw", () => {
   const { subject, gl, state, draws } = blend_subject();
@@ -1292,4 +1447,146 @@ test("unsupported Add fails once with its shader name and missing float capabili
   subject.ext_float_blend = null;
   assert.equal(subject.add_blend_error(3), null, "RGBA16F only needs EXT_color_buffer_float");
   assert.equal(subject.add_blend_error(0), null, "normalized targets need no float extension");
+});
+
+test("webgl2_multi_sampler_same_texture_and_unit_limit", () => {
+  const inputs = [
+    { name: "tex_img", ty: "sampler2D", slot: 0, stages: 2, filter: 0, address: 1, compare: false, anisotropy: 1 },
+    { name: "mp_s1_img", ty: "sampler2D", slot: 0, stages: 2, filter: 1, address: 0, compare: false, anisotropy: 16 },
+  ];
+  const range = { off: 0, len: 0 };
+  const args = {
+    shader_id: 1, vao_id: 1, textures: [7], index_width: 2, instance_ranges: [{ first: 0, count: 1 }],
+    pass_uniforms: range, draw_list_uniforms: range, draw_call_uniforms: range, user_uniforms: range, live_uniforms: range,
+  };
+  const { subject, gl, draws } = blend_subject();
+  const created = [], assigned = [], bound = [], images = [], deleted = [];
+  let unit;
+  Object.assign(gl, {
+    TEXTURE0: 100, TEXTURE_2D: 101, TEXTURE_2D_ARRAY: 102, FLOAT: 103,
+    TEXTURE_MIN_FILTER: 1, TEXTURE_MAG_FILTER: 2, TEXTURE_WRAP_S: 3, TEXTURE_WRAP_T: 4, TEXTURE_WRAP_R: 5,
+    LINEAR: 6, NEAREST: 7, LINEAR_MIPMAP_LINEAR: 8, NEAREST_MIPMAP_LINEAR: 9, REPEAT: 10, CLAMP_TO_EDGE: 11,
+    getProgramParameter: program => program.linked,
+    getProgramInfoLog: () => "driver link log", getShaderParameter: () => true,
+    getUniformLocation: (_, name) => ["mp_inst_data", ...inputs.map(b => b.name)].includes(name) ? { name } : null,
+    getUniformBlockIndex: () => 0xffff_ffff, INVALID_INDEX: 0xffff_ffff, getAttribLocation: () => -1,
+    createSampler() { const sampler = { id: created.length, params: {} }; created.push(sampler); return sampler; },
+    samplerParameteri: (sampler, key, value) => { sampler.params[key] = value; },
+    samplerParameterf: (sampler, key, value) => { sampler.params[key] = value; },
+    uniform1i: (loc, value) => assigned.push([loc.name, value]),
+    activeTexture: value => { unit = value - gl.TEXTURE0; },
+    bindSampler: (unit, sampler) => bound.push([unit, sampler]),
+    bindTexture: (target, texture) => images.push([unit, target, texture]),
+    deleteProgram: program => deleted.push(program),
+  });
+  const image = { _texture_target: gl.TEXTURE_2D, _filterable: true }, mirror = {};
+  const vao = subject.vaos[1];
+  const slab = { gl_buf: vao.instance_gl_buf, valid: true, backing_generation: 1, regions: new Map([[0, { gen: 1, byte_off: 0, byte_len: 4 }]]),
+    mirror, dirty: new Map() };
+  Object.assign(vao, { geom_vb_id: 0, geom_ib_id: 0, slab_slot: 0, backing_generation: 1, region: { index: 0, gen: 1 },
+    byte_off: 0, byte_len: 4, instance_start: 0 });
+  Object.assign(subject, {
+    array_buffers: [{ valid: true, gl_buf: vao.geometry_gl_buf, byte_length: 24 }],
+    instance_slabs: new Map([[0, slab]]),
+    index_buffers: [{ valid: true, gl_buf: vao.index_gl_buf, index_width: 2, length: 3, max_index: 2 }],
+    textures: [], max_vertex_attribs: 8,
+    nearest_samplers: Array.from({ length: 8 }, (_, id) => ({ nearest: id })),
+    anisotropy_ext: { TEXTURE_MAX_ANISOTROPY_EXT: 12 }, max_anisotropy: 8,
+    webgl_limits: { max_vertex_texture_units: 1, max_fragment_texture_units: 2, max_combined_texture_units: 3 },
+  });
+  delete subject.preflight_webgl_draw;
+  subject.textures[7] = image;
+  const descriptor = linked => ({
+    shader_id: 1, shader_name: "two_samplers", program: { linked }, vsh: {}, fsh: {}, status_ms: 0,
+    geometry_slots: 0, instance_slots: 1, vertex: "uniform highp usampler2DArray mp_inst_data;",
+    textures: inputs,
+  });
+  assert.equal(subject.finish_webgl_shader(descriptor(true)), true);
+  assert.deepEqual(assigned, [["tex_img", 0], ["mp_s1_img", 1], ["mp_inst_data", 2]]);
+  assert.equal(created.length, 2);
+  for (const axis of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T, gl.TEXTURE_WRAP_R]) {
+    assert.equal(created[0].params[axis], gl.CLAMP_TO_EDGE);
+    assert.equal(created[1].params[axis], gl.REPEAT);
+  }
+  assert.deepEqual(created.map(s => [s.params[gl.TEXTURE_MIN_FILTER], s.params[gl.TEXTURE_MAG_FILTER]]),
+    [[gl.NEAREST_MIPMAP_LINEAR, gl.NEAREST], [gl.LINEAR_MIPMAP_LINEAR, gl.LINEAR]]);
+  assert.equal(created[1].params[subject.anisotropy_ext.TEXTURE_MAX_ANISOTROPY_EXT], 8);
+  subject.FromWasmDrawCall(args);
+  assert.equal(draws.length, 1);
+  assert.deepEqual(images, [[0, gl.TEXTURE_2D, image], [1, gl.TEXTURE_2D, image], [2, gl.TEXTURE_2D_ARRAY, mirror]]);
+  assert.deepEqual(bound, [[0, created[0]], [1, created[1]], [2, null]]);
+  image._filterable = false;
+  subject.FromWasmDrawCall(args);
+  assert.deepEqual(bound.slice(3), [[0, subject.nearest_samplers[2]], [1, subject.nearest_samplers[0]], [2, null]]);
+  subject.webgl_limits.max_combined_texture_units = 2;
+  for (const linked of [true, false]) {
+    const rejected = descriptor(linked);
+    assert.equal(subject.finish_webgl_shader(rejected), false);
+    assert.equal(deleted.at(-1), rejected.program);
+    const message = gl_messages.errors.at(-1).join(" ");
+    assert.match(message, /compile_fail\.units shader two_samplers/);
+    assert.match(message, /vertex=1 \(max 1\), fragment=2 \(max 2\), combined=3 \(max 2\)/);
+    assert.match(message, /logical_textures=1, extra_sampler_pairs=1, pick_twins=0, inst_data=1/);
+    if (!linked) assert.match(message, /driver link log/);
+  }
+  assert.equal(created.length, 2, "overflow creates no shader samplers");
+  assert.equal(assigned.length, 3, "draws and rejected links assign no units");
+
+  const canvas = document.createElement("canvas");
+  canvas.width = 2;
+  canvas.height = 1;
+  const gpu = canvas.getContext("webgl2", { antialias: false, preserveDrawingBuffer: true });
+  assert.ok(gpu, "pixel readback needs WebGL2");
+  const live = Object.assign(Object.create(web_gl.WasmWebGL.prototype), {
+    gl: gpu, canvas, memory: { buffer: new ArrayBuffer(128) },
+    to_wasm: { ToWasmWebGLShadersDone() {} }, schedule_webgl_shader_summary() {},
+  });
+  live.reset_webgl_objects();
+  live.setup_webgl_context();
+  live.parallel_shader_compile = null;
+  live.FromWasmCompileWebGLShader({
+    shader_id: 1, shader_name: "two_samplers", textures: inputs.map(b => ({ ...b, anisotropy: 1 })),
+    geometry_slots: 2, instance_slots: 1,
+    vertex: `#version 300 es
+      in vec2 packed_geometry_0;
+      void main() { gl_Position = vec4(packed_geometry_0, 0., 1.); }`,
+    pixel: `#version 300 es
+      precision highp float;
+      uniform sampler2D tex_img;
+      uniform sampler2D mp_s1_img;
+      out vec4 color;
+      void main() {
+        vec2 uv = vec2(1.5, 0.5);
+        color = gl_FragCoord.x < 1.0 ? texture(tex_img, uv) : texture(mp_s1_img, uv);
+      }`,
+  });
+  assert.equal(live.draw_shaders[1].linked, true);
+  new Float32Array(live.memory.buffer, 8, 6).set([-1, -1, 3, -1, -1, 3]);
+  new Uint16Array(live.memory.buffer, 32, 3).set([0, 1, 2]);
+  // BGRA words with intensity 254 give an exactly representable half-intensity blend.
+  new Uint32Array(live.memory.buffer, 64, 4).set([0xfffe0000, 0xff0000fe, 0xff0000fe, 0xfffe0000]);
+  const empty = { ptr: 0, len: 0 };
+  live.FromWasmAllocTextureImage2D_BGRAu8_32({ texture_id: 7, width: 2, height: 2, data: { ptr: 64, len: 4 } });
+  gpu.bindTexture(gpu.TEXTURE_2D, live.textures[7]);
+  assert.equal(gpu.getTexParameter(gpu.TEXTURE_2D, gpu.TEXTURE_MAX_LEVEL), 0);
+  live.FromWasmAllocArrayBuffer({ buffer_id: 0, data: { ptr: 8, len: 6 }, byte_data: empty });
+  live.FromWasmAllocIndexBuffer({ buffer_id: 0, index_width: 2, data: empty, byte_data: { ptr: 32, len: 6 } });
+  const row = { slab_slot: 0, backing_generation: 1, region: { index: 0, gen: 1 }, byte_off: 0, byte_len: 4 };
+  live.FromWasmCreateInstanceSlab({ ...row, capacity_bytes: 4 });
+  live.FromWasmWriteInstanceRegion({ ...row, parts: [{ ptr: 40, len: 4 }] });
+  live.FromWasmAllocVao({ ...row, vao_id: 1, shader_id: 1, geom_ib_id: 0, geom_vb_id: 0, instance_byte_offset: 0 });
+  gpu.disable(gpu.DITHER);
+  live.FromWasmDrawCall(args);
+  const pixels = new Uint8Array(8);
+  gpu.readPixels(0, 0, 2, 1, gpu.RGBA, gpu.UNSIGNED_BYTE, pixels);
+  assert.equal(gpu.getError(), gpu.NO_ERROR);
+  assert.deepEqual([...pixels], [254, 0, 0, 255, 127, 0, 127, 255]);
+  for (const b of live.draw_shaders[1].texture_locs) gpu.deleteSampler(b.sampler);
+  for (const sampler of live.nearest_samplers) gpu.deleteSampler(sampler);
+  gpu.deleteProgram(live.draw_shaders[1].program);
+  gpu.deleteTexture(live.textures[7]);
+  gpu.deleteVertexArray(live.vaos[1].gl_vao);
+  gpu.deleteBuffer(live.array_buffers[0].gl_buf);
+  gpu.deleteBuffer(live.index_buffers[0].gl_buf);
+  gpu.deleteBuffer(live.instance_slabs.get(0).gl_buf);
 });

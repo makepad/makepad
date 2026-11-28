@@ -1,5 +1,5 @@
 //! May this process touch the local network? THE one rule, asked by every code path that would
-//! (fleet AI discovery and its beacons, gateway probes, connections to LAN hosts, Sandbox rooms,
+//! (fleet AI discovery and its beacons, gateway probes, connections to LAN hosts, game rooms,
 //! voice links, motion sinks, asset-server discovery and sync).
 //!
 //! Why it exists: on macOS every such operation (an outgoing TCP connection or UDP send/connect to
@@ -121,7 +121,8 @@ pub fn may_reach_host(host: &str) -> bool {
 /// Call it right before a connect or send to an address that may be a LAN host.
 pub fn check(site: &str, addr: SocketAddr) -> std::io::Result<()> {
     let ok = may_reach(addr.ip());
-    audit(site, &addr.to_string(), is_local_network(addr.ip()), ok);
+    // Some callers check every datagram: name the target only when the audit is on.
+    if crate::socket_audit::enabled() { audit(site, &addr.to_string(), is_local_network(addr.ip()), ok); }
     if ok {
         Ok(())
     } else {

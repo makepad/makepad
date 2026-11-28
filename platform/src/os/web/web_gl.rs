@@ -7,7 +7,10 @@ use crate::{
     makepad_math::*,
     makepad_wasm_bridge::*,
     os::web::from_wasm::*,
-    os::web::CxOs,
+    os::web::{to_wasm::ToWasmInstanceUploadFailed, CxOs, SlabBacking},
+    draw_list::{CxDrawItems, ItemRegion},
+    instance_store::{RegionRef, RegionUse, SlabEvent},
+    retained_instances::RetainedAllocationBudget,
     texture::{CxTexturePool, TextureFormat, TextureId, TextureUpdated},
 };
 use std::collections::BTreeSet;
@@ -73,29 +76,25 @@ impl Cx {
             geometry.dirty_indices = true;
         }
 
+        // Retired items' plain regions, then the freed items themselves: a publication's last
+        // user releases its region. Their VAOs go; the rows' slabs stay with the store.
+        self.draw_lists.release_retired_regions(&mut self.os.regions.store);
+        let pool = self.task_pool();
+        let regions = &mut self.os.regions;
         self.draw_lists
-            .retire_free_items(&self.task_pool(), self.repaint_id, |item| {
+            .retire_free_items_with_ids(&pool, self.repaint_id, |list, index, item| {
+                regions.release_item((list.index(), index), item);
                 let os = &mut item.os;
-                if let Some(id) = os.inst_vb_id {
-                    array_buffer_ids.push(id);
-                    os.inst_vb_generation = os.inst_vb_generation.wrapping_add(1);
-                }
                 if let Some(vao) = &mut os.vao {
                     vao_ids.push(vao.vao_id);
                     // Preserve the id high-water mark while ensuring reuse
-                    // emits FromWasmAllocVao and recreates its two UBOs.
+                    // emits FromWasmAllocVao.
                     vao.shader_id = None;
-                    vao.inst_vb_id = None;
+                    vao.inst = None;
                     vao.geom_vb_id = None;
                     vao.geom_ib_id = None;
                 }
-                os.uniforms_recording_gen = None;
-                os.draw_call_uniforms_gen = None;
-                os.user_uniforms_gen = None;
-                os.inst_capacity = 0;
-                os.retained_publication = None;
                 os.retained_failed = 0;
-                os.inst_charge.take()
             });
 
         for _ in 0..WEBGL_RESOURCE_RETIREMENT_SLOTS_PER_SAFE_POINT {
@@ -111,6 +110,7 @@ impl Cx {
             pass.main_draw_list_id = None;
             pass.parent = crate::draw_pass::CxDrawPassParent::None;
             pass.attached_by = None;
+            pass.readers.clear();
             pass.paint_dirty = false;
             pass.live_with_parent = false;
             pass.repaint_requested = false;
@@ -139,6 +139,7 @@ impl Cx {
             return;
         }
         self.os.from_wasm(FromWasmFreeWebGLResources {
+            instance_slabs: Vec::new(),
             array_buffer_ids,
             index_buffer_ids,
             vao_ids,
@@ -150,9 +151,8 @@ impl Cx {
     /// After the browser restored a lost WebGL context: every object of the
     /// old one is gone and the page's tables of them are empty. What the CPU
     /// side keeps is marked to upload again on its next draw (vec textures
-    /// from their data, geometries, instance buffers, VAOs and their uniform
-    /// buffers), programs are compiled again when a pass first draws them,
-    /// render targets are allocated again by their next pass, and every pass
+    /// from their data, geometries, instance buffers and VAOs). Programs are
+    /// compiled again on first draw, render targets are allocated by their next pass, and every pass
     /// with a draw list repaints. The old context's frames are over, so every
     /// submitted serial counts as complete (the upload budget frees what they
     /// held). Buffer, VAO and texture ids keep their numbers: an upload to an
@@ -174,6 +174,12 @@ impl Cx {
             geometry.os.vb_generation = geometry.os.vb_generation.wrapping_add(1);
             geometry.os.ib_generation = geometry.os.ib_generation.wrapping_add(1);
         }
+        // The page's slabs went with the context: every region is invalid, and so is every
+        // publication binding. Items write their rows again on their next draw.
+        self.os.regions.store.drop_all();
+        self.os.regions.store.take_events();
+        self.os.regions.clear_publications();
+        self.os.slab_backings.clear();
         for slot in &mut self.draw_lists.0.pool {
             let draw_list = &mut slot.item;
             for index in 0..draw_list.draw_items.len() {
@@ -184,17 +190,12 @@ impl Cx {
                 let os = &mut draw_item.os;
                 if let Some(vao) = &mut os.vao {
                     vao.shader_id = None;
-                    vao.inst_vb_id = None;
+                    vao.inst = None;
                     vao.geom_vb_id = None;
                     vao.geom_ib_id = None;
                 }
-                os.uniforms_recording_gen = None;
-                os.draw_call_uniforms_gen = None;
-                os.user_uniforms_gen = None;
-                os.inst_capacity = 0;
-                os.retained_publication = None;
                 os.retained_failed = 0;
-                os.inst_charge = None;
+                draw_item.retained_gpu_evicted = true;
             }
         }
         for slot in &mut self.passes.0.pool {
@@ -219,6 +220,7 @@ impl Cx {
         &mut self,
         draw_pass_id: DrawPassId,
         draw_list_id: DrawListId,
+        pass_uniforms: WUniformRange,
         zbias: &mut f32,
         zbias_step: f32,
     ) {
@@ -234,7 +236,7 @@ impl Cx {
             self.publications.set_envelope(allowance / 4);
             crate::log!("retained-upload budgets: process_allowance={} allocation_limit={} source=web_process_allowance_fallback", allowance, allowance / 4);
         }
-        let shaders_pending = self.os.webgl_shaders_pending != 0;
+        let mut draw_list_uniforms: Option<WUniformRange> = None;
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_order_len = self.draw_lists[draw_list_id].draw_item_order_len();
         // Exploded z-layer view: z is the call's nesting depth, not paint order.
@@ -255,6 +257,9 @@ impl Cx {
             if let Some(sub_list_id) =
                 self.draw_lists[draw_list_id].draw_items[draw_item_id].sub_list()
             {
+                // a slot that holds a sub-list now lets go of the rows it drew before
+                let key = (draw_list_id.index(), draw_item_id);
+                self.os.regions.release_item(key, self.draw_lists[draw_list_id].draw_items.binding_mut(draw_item_id));
                 // A retained sub-list its owner dropped between the parent's
                 // last record and this paint: the slot may already hold
                 // another widget's list. Nothing to draw here.
@@ -276,181 +281,95 @@ impl Cx {
                 // list reported. See `CxDrawList::zbias_hold`.
                 if let Some(steps) = self.draw_lists[sub_list_id].zbias_hold {
                     let mut held = *child_zbias;
-                    self.render_view(draw_pass_id, sub_list_id, &mut held, 0.0);
+                    self.render_view(draw_pass_id, sub_list_id, pass_uniforms, &mut held, 0.0);
                     *child_zbias += steps as f32 * zbias_step;
                 } else {
-                    self.render_view(draw_pass_id, sub_list_id, child_zbias, zbias_step);
+                    self.render_view(draw_pass_id, sub_list_id, pass_uniforms, child_zbias, zbias_step);
                 }
             } else {
+                // the reader serial of this pass: it submits after its walk
+                let serial = self
+                    .textures
+                    .1
+                    .serials
+                    .submitted
+                    .load(std::sync::atomic::Ordering::Acquire)
+                    + 1;
                 let (draw_list, upload_budget) =
                     self.draw_lists.list_and_upload_budget(draw_list_id);
-                let draw_list_recording_gen = draw_list.recording_gen;
-                //view.platform.uni_vw.update_with_f32_data(device, &view.uniforms);
-                let draw_item = &mut draw_list.draw_items[draw_item_id];
-                let draw_call = if let Some(draw_call) = draw_item.kind.draw_call_mut() {
-                    draw_call
-                } else {
+                let key = (draw_list_id.index(), draw_item_id);
+                let Some(shader_index) = draw_list.draw_items[draw_item_id]
+                    .kind
+                    .draw_call()
+                    .map(|call| call.draw_shader_id.index)
+                else {
+                    // an emptied slot draws nothing: what it drew goes
+                    self.os
+                        .regions
+                        .release_item(key, draw_list.draw_items.binding_mut(draw_item_id));
                     continue;
                 };
-
-                let sh = &self.draw_shaders[draw_call.draw_shader_id.index];
+                let sh = &self.draw_shaders[shader_index];
                 if sh.pipeline_id.is_none() {
                     // shader didnt compile somehow
                     continue;
                 }
-
-                // A publication the browser refused to upload is final for
-                // that content: skipped, never retried every frame. Changed
-                // content is a new publication and gets a fresh attempt.
-                if draw_item.os.retained_failed != 0
-                    && draw_item
-                        .retained_instances
-                        .as_ref()
-                        .is_some_and(|publication| publication.id() == draw_item.os.retained_failed)
-                {
+                let slots = sh.mapping.instances.total_slots;
+                let count = {
+                    let item = &draw_list.draw_items[draw_item_id];
+                    // A publication whose region write the page refused stays off screen
+                    // until its content changes: a new publication gets a fresh attempt.
+                    if item.os.retained_failed != 0
+                        && item
+                            .retained_instances
+                            .as_ref()
+                            .is_some_and(|publication| publication.id() == item.os.retained_failed)
+                    {
+                        continue;
+                    }
+                    if item.retained_instances.is_some() {
+                        item.retained_instance_count
+                    } else if slots == 0 {
+                        0
+                    } else {
+                        item.instances.as_ref().map_or(0, |rows| rows.len() / slots)
+                    }
+                };
+                if count == 0 || slots == 0 {
+                    // nothing to draw, nothing owed: the content is consumed as it is, and
+                    // the rows the item drew before go
+                    let item = draw_list.draw_items.binding_mut(draw_item_id);
+                    self.os.regions.release_item(key, item);
+                    item.instance_upload_pending = false;
+                    item.retained_gpu_evicted = false;
+                    item.retained_instance_id =
+                        item.retained_instances.as_ref().map_or(0, |p| p.id());
+                    item.resident_schema = item.retained_schema;
+                    if let Some(call) = item.kind.draw_call_mut() {
+                        call.instance_dirty = false;
+                        call.resolve_zbias(*zbias, sploded, uniforms_gen);
+                    }
+                    *zbias += zbias_step;
                     continue;
                 }
-
-                if (draw_call.instance_dirty
-                    || draw_item.os.inst_vb_id.is_none()
-                    || draw_item.retained_gpu_evicted)
-                    && !(draw_item.retained_gpu_evicted
-                        && draw_item.retained_instances.is_some()
-                        && draw_item.retained_instance_count == 0)
-                {
-                    upload_budget.allocations.collect_for_frame(
-                        self.repaint_id,
-                        self.textures
-                            .1
-                            .serials
-                            .completed
-                            .load(std::sync::atomic::Ordering::Acquire),
-                    );
-                    let bytes = draw_item.retained_instances.as_ref().map_or_else(
-                        || draw_item.instances.as_ref().map_or(0, |v| v.len() * 4),
-                        |p| p.byte_len(),
-                    );
-                    let plan = draw_item
-                        .retained_instances
-                        .as_ref()
-                        .and_then(|publication| {
-                            draw_item
-                                .os
-                                .retained_publication
-                                .as_ref()
-                                .filter(|_| draw_item.os.inst_capacity != 0)
-                                .map(|previous| publication.upload_plan(previous))
-                        });
-                    // Plain instances update their buffer in place (the page
-                    // grows its storage to the next power of two and shrinks
-                    // it below a quarter, see upload_numeric_buffer): a new
-                    // charge only when that storage is re-specified, so an
-                    // animated item re-uploading every frame holds one
-                    // allocation, not one per frame until the GPU catches up.
-                    let plain_capacity = bytes.next_power_of_two().max(256);
-                    let replaces = if draw_item.retained_instances.is_none() {
-                        draw_item.os.inst_vb_id.is_none()
-                            || draw_item.os.inst_charge.is_none()
-                            || plain_capacity != draw_item.os.inst_capacity
-                                && (bytes > draw_item.os.inst_capacity || bytes.saturating_mul(4) < draw_item.os.inst_capacity)
-                    } else {
-                        draw_item.os.inst_vb_id.is_none()
-                        || bytes > draw_item.os.inst_capacity
-                        || plan.as_ref().is_none_or(|plan| {
-                            !plan.can_update_in_place()
-                                || plan.writes.iter().any(|range| {
-                                    range.start
-                                        < draw_item
-                                            .os
-                                            .retained_publication
-                                            .as_ref()
-                                            .unwrap()
-                                            .float_len()
-                                })
-                        })
-                    };
-                    if replaces {
-                        let capacity = plain_capacity;
-                        // Accounting only: the storage an item needs is
-                        // allocated (a refused upload drew nothing, and a
-                        // budget that stayed full drew nothing at all). Real
-                        // exhaustion shows as GL OUT_OF_MEMORY on the page.
-                        let charge = upload_budget.allocations.reserve_visible(capacity);
-                        draw_item.os.inst_capacity = capacity;
-                        draw_item.os.inst_charge = Some(charge);
-                    }
-                    draw_item.instance_upload_pending = false;
-                    draw_call.instance_dirty = false;
-                    draw_item.retained_instance_id =
-                        draw_item.retained_instances.as_ref().map_or(0, |v| v.id());
-                    draw_item.resident_schema = draw_item.retained_schema;
-                    draw_item.retained_gpu_evicted = false;
-                    if draw_item.os.inst_vb_id.is_none() {
-                        draw_item.os.inst_vb_id = Some(self.os.vertex_buffers);
-                        self.os.vertex_buffers += 1;
-                    }
-
-                    let copy_started = Cx::monotonic_now();
-                    let uploaded = if let Some(retained) = &draw_item.retained_instances {
-                        let full = vec![0..retained.float_len()];
-                        let ranges = plan
-                            .as_ref()
-                            .map_or(full.as_slice(), |plan| plan.writes.as_slice());
-                        let mut writes = Vec::new();
-                        let mut uploaded = 0;
-                        for range in ranges {
-                            for (offset, data) in retained.data_slices(range.clone()) {
-                                writes.push(WRetainedBufferWrite {
-                                    destination_slot: offset,
-                                    data: WasmPtrF32::new(data),
-                                });
-                                uploaded += std::mem::size_of_val(data);
-                            }
-                        }
-                        self.os.from_wasm(FromWasmRetainedArrayUpdate {
-                            buffer_id: draw_item.os.inst_vb_id.unwrap(),
-                            slot_count: retained.float_len(),
-                            capacity_bytes: draw_item.os.inst_capacity,
-                            replace: replaces,
-                            copies: plan.as_ref().map_or_else(Vec::new, |plan| {
-                                plan.copies
-                                    .iter()
-                                    .map(|copy| WRetainedBufferCopy {
-                                        source_slot: copy.source.start,
-                                        destination_slot: copy.destination,
-                                        slot_count: copy.source.len(),
-                                    })
-                                    .collect()
-                            }),
-                            writes,
-                        });
-                        draw_item.os.retained_publication = Some(retained.clone());
-                        uploaded
-                    } else {
-                        self.os.from_wasm(FromWasmAllocArrayBuffer {
-                            buffer_id: draw_item.os.inst_vb_id.unwrap(),
-                            data: WasmPtrF32::new(draw_item.instances.as_deref().unwrap()),
-                            byte_data: WasmPtrU8::new(&[]),
-                        });
-                        draw_item.os.retained_publication = None;
-                        bytes
-                    };
-                    if replaces {
-                        draw_item.os.inst_vb_generation =
-                            draw_item.os.inst_vb_generation.wrapping_add(1);
-                    }
-                    upload_budget.stats.bytes = upload_budget.stats.bytes.saturating_add(uploaded);
+                let copy_started = Cx::monotonic_now();
+                let (held, uploaded) = self.os.instance_rows(
+                    &mut upload_budget.allocations,
+                    &mut draw_list.draw_items,
+                    WebInstanceDraw { key, list_gen: draw_list_id.generation(), slots, count, serial },
+                );
+                if uploaded != 0 {
+                    upload_budget.stats.bytes =
+                        upload_budget.stats.bytes.saturating_add(uploaded as usize);
                     upload_budget.stats.install_us = upload_budget.stats.install_us.saturating_add(
                         ((Cx::monotonic_now() - copy_started).max(0.0) * 1_000_000.0) as u64,
                     );
-                    draw_call.instance_dirty = false;
-                    draw_item.retained_instance_id =
-                        draw_item.retained_instances.as_ref().map_or(0, |v| v.id());
-                    draw_item.resident_schema = draw_item.retained_schema;
-                    draw_item.retained_gpu_evicted = false;
                 }
+                let draw_item = &mut draw_list.draw_items[draw_item_id];
+                let draw_call = draw_item.kind.draw_call_mut().unwrap();
                 draw_call.resolve_zbias(*zbias, sploded, uniforms_gen);
                 *zbias += zbias_step;
+                let Some(held) = held else { continue };
 
                 // update/alloc textures?
                 for i in 0..sh.mapping.textures.len() {
@@ -563,36 +482,42 @@ impl Cx {
                 }
                 geometry.dirty = geometry.dirty_vertices || geometry.dirty_indices;
 
+                let mut instance_ranges = Vec::<WInstanceRange>::new();
+                draw_item.draw_ranges(held.rows, &mut instance_ranges);
+                if instance_ranges.is_empty() {
+                    continue;
+                }
+
                 // lets check if our vao is still valid
                 if draw_item.os.vao.is_none() {
                     draw_item.os.vao = Some(CxOsDrawCallVao {
                         vao_id: self.os.vaos,
-                        shader_id: None,
-                        inst_vb_id: None,
-                        geom_vb_id: None,
-                        geom_ib_id: None,
-                        inst_vb_generation: 0,
-                        geom_vb_generation: 0,
-                        geom_ib_generation: 0,
+                        ..Default::default()
                     });
                     self.os.vaos += 1;
                 }
 
                 let vao = draw_item.os.vao.as_mut().unwrap();
-
-                if vao.inst_vb_id != draw_item.os.inst_vb_id
-                    || vao.geom_vb_id != geometry.os.vb_id
+                let inst = WebInstanceBinding {
+                    slab: held.slab,
+                    generation: self.os.slab_backings[held.slab as usize].generation,
+                    region_index: held.region.index,
+                    region_gen: held.region.gen,
+                    byte_off: u64::from(held.first_row) * u64::from(held.stride),
+                    byte_len: u64::from(held.rows) * u64::from(held.stride),
+                };
+                // A move inside the same backing keeps the VAO and updates its instance offset.
+                let rebinds = vao.geom_vb_id != geometry.os.vb_id
                     || vao.geom_ib_id != geometry.os.ib_id
                     || vao.shader_id != sh.pipeline_id
-                    || vao.inst_vb_generation != draw_item.os.inst_vb_generation
                     || vao.geom_vb_generation != geometry.os.vb_generation
                     || vao.geom_ib_generation != geometry.os.ib_generation
-                {
+                    || vao.inst.is_none_or(|old| (old.slab, old.generation) != (inst.slab, inst.generation));
+                if rebinds || vao.inst != Some(inst) {
                     vao.shader_id = sh.pipeline_id.clone();
-                    vao.inst_vb_id = draw_item.os.inst_vb_id;
+                    vao.inst = Some(inst);
                     vao.geom_vb_id = geometry.os.vb_id;
                     vao.geom_ib_id = geometry.os.ib_id;
-                    vao.inst_vb_generation = draw_item.os.inst_vb_generation;
                     vao.geom_vb_generation = geometry.os.vb_generation;
                     vao.geom_ib_generation = geometry.os.ib_generation;
 
@@ -601,39 +526,26 @@ impl Cx {
                         shader_id: vao.shader_id.unwrap(),
                         geom_ib_id: vao.geom_ib_id.unwrap(),
                         geom_vb_id: vao.geom_vb_id.unwrap(),
-                        inst_vb_id: draw_item.os.inst_vb_id.unwrap(),
+                        slab_slot: inst.slab,
+                        backing_generation: inst.generation,
+                        region: WInstanceRegion { index: inst.region_index, gen: inst.region_gen },
+                        byte_off: inst.byte_off as usize,
+                        byte_len: inst.byte_len as usize,
+                        instance_byte_offset: inst.byte_off as usize,
                     });
-                    draw_item.os.uniforms_recording_gen = None;
-                    draw_item.os.draw_call_uniforms_gen = None;
-                    draw_item.os.user_uniforms_gen = None;
                 }
 
-                let pass_uniforms: &[f32] = self.passes[draw_pass_id].pass_uniforms.as_slice();
-                let instances = if sh.mapping.instances.total_slots == 0 {
-                    0
-                } else if draw_item.retained_instances.is_some() {
-                    draw_item.retained_instance_count
-                } else {
-                    draw_item.instances.as_ref().map_or(0, |instances| {
-                        instances.len() / sh.mapping.instances.total_slots
-                    })
-                };
-                if instances == 0 {
-                    continue;
-                }
+                let draw_call = draw_item.kind.draw_call().unwrap();
                 if sh.mapping.flags.debug_draw {
-                    CxDrawShaderMapping::debug_dump_shader_draw_call(
-                        "webgl",
-                        draw_item_id,
-                        sh,
-                        draw_call,
-                        draw_item
-                            .retained_instances
-                            .as_ref()
-                            .map(|v| v.data())
-                            .unwrap_or_else(|| draw_item.instances.as_deref().unwrap()),
-                        instances,
-                    );
+                    let data = draw_item.retained_instances.as_ref()
+                        .map(|publication| publication.data())
+                        .unwrap_or_else(|| draw_item.instances.as_deref().unwrap());
+                    for range in &instance_ranges {
+                        CxDrawShaderMapping::debug_dump_shader_draw_call(
+                            "webgl", draw_item_id, sh, draw_call,
+                            &data[range.first as usize * slots..], range.count as usize,
+                        );
+                    }
                 }
 
                 let mut textures = [None; DRAW_CALL_TEXTURE_SLOTS];
@@ -643,42 +555,22 @@ impl Cx {
                     }
                 }
 
-                let reset_draw_uniforms =
-                    draw_item.os.uniforms_recording_gen != Some(draw_list_recording_gen);
-                let upload_draw_call_uniforms = reset_draw_uniforms
-                    || draw_item.os.draw_call_uniforms_gen != Some(draw_call.uniforms_gen);
-                let upload_user_uniforms = reset_draw_uniforms
-                    || draw_item.os.user_uniforms_gen != Some(draw_call.uniforms_gen);
-                let draw_call_uniforms: &[f32] = if upload_draw_call_uniforms {
-                    draw_call.draw_call_uniforms.as_slice()
-                } else {
-                    &[]
-                };
-                let user_uniforms = if upload_user_uniforms {
-                    draw_call.dyn_uniforms.as_slice()
-                } else {
-                    &[]
-                };
-                if !shaders_pending {
-                    draw_item.os.uniforms_recording_gen = Some(draw_list_recording_gen);
-                    if upload_draw_call_uniforms {
-                        draw_item.os.draw_call_uniforms_gen = Some(draw_call.uniforms_gen);
-                    }
-                    if upload_user_uniforms {
-                        draw_item.os.user_uniforms_gen = Some(draw_call.uniforms_gen);
-                    }
-                }
-
-                let pass_uniforms_gen = self.passes[draw_pass_id].pass_uniforms_gen;
-                let draw_list_uniforms_gen = draw_list.uniforms_gen;
-                let uniforms_gen = draw_call.uniforms_gen;
-                let live_uniforms_gen = sh.mapping.scope_uniforms_gen;
-                debug_assert_ne!(pass_uniforms_gen, 0);
-                debug_assert_ne!(draw_list_uniforms_gen, 0);
-                debug_assert_ne!(uniforms_gen, 0);
-                debug_assert_ne!(live_uniforms_gen, 0);
-
+                let draw_list_uniforms = *draw_list_uniforms.get_or_insert_with(|| {
+                    self.os.uniforms
+                        .put_f32s(draw_list.draw_list_uniforms.as_slice())
+                        .into()
+                });
+                let draw_call_uniforms = self.os.uniforms
+                    .put_draw_call(draw_call.draw_call_uniforms.as_slice())
+                    .into();
+                let user_uniforms = self.os.uniforms
+                    .put_dyn(draw_call.uniforms_gen, &draw_call.dyn_uniforms)
+                    .into();
+                let live_uniforms = self.os.uniforms
+                    .put_scope(shader_index, sh.mapping.scope_uniforms_gen, &sh.mapping.scope_uniforms_buf)
+                    .into();
                 self.os.from_wasm(FromWasmDrawCall {
+                    instance_ranges,
                     custom_uniforms: sh
                         .mapping
                         .uniform_buffers
@@ -704,24 +596,12 @@ impl Cx {
                     alpha_blend: draw_call.options.alpha_blend && (sh.mapping.color_format.blends() || sh.mapping.blend_op == DrawShaderBlendOp::Add),
                     blend_max: sh.mapping.blend_op == DrawShaderBlendOp::Max,
                     blend_add: sh.mapping.blend_op == DrawShaderBlendOp::Add,
-                    backface_culling: draw_call.options.backface_culling,
-                    pass_uniforms: WasmPtrF32::new(pass_uniforms),
-                    pass_uniforms_gen_lo: pass_uniforms_gen as u32,
-                    pass_uniforms_gen_hi: (pass_uniforms_gen >> 32) as u32,
-                    draw_list_uniforms: WasmPtrF32::new(draw_list.draw_list_uniforms.as_slice()),
-                    draw_list_uniforms_gen_lo: draw_list_uniforms_gen as u32,
-                    draw_list_uniforms_gen_hi: (draw_list_uniforms_gen >> 32) as u32,
-                    draw_call_uniforms: WasmPtrF32::new(draw_call_uniforms),
-                    draw_call_uniforms_gen_lo: uniforms_gen as u32,
-                    draw_call_uniforms_gen_hi: (uniforms_gen >> 32) as u32,
-                    user_uniforms: WasmPtrF32::new(user_uniforms),
-                    user_uniforms_gen_lo: uniforms_gen as u32,
-                    user_uniforms_gen_hi: (uniforms_gen >> 32) as u32,
-                    live_uniforms: WasmPtrF32::new(&sh.mapping.scope_uniforms_buf),
-                    live_uniforms_gen_lo: live_uniforms_gen as u32,
-                    live_uniforms_gen_hi: (live_uniforms_gen >> 32) as u32,
-                    reset_draw_uniforms,
-                    const_table: WasmPtrF32::new(&[]),
+                    cull_mode: draw_call.options.cull_mode as u32,
+                    pass_uniforms,
+                    draw_list_uniforms,
+                    draw_call_uniforms,
+                    user_uniforms,
+                    live_uniforms,
                     textures,
                 });
                 draw_item.consumed_instance_id = draw_item.retained_instance_id;
@@ -736,9 +616,6 @@ impl Cx {
                 } else {
                     0
                 };
-                if let Some(charge) = &draw_item.os.inst_charge {
-                    charge.submitted(draw_item.consumed_serial);
-                }
                 if let Some((block, _)) = draw_item.shared.as_ref() {
                     // The lease's receipt under the pass's serial; the frame
                     // frontier (`poll_texture_lifetimes`) completes it.
@@ -760,6 +637,8 @@ impl Cx {
                 }
             }
         }
+        // a list that recorded fewer items lets go of the discarded tail's rows
+        self.os.regions.release_spares(draw_list_id.index(), &mut self.draw_lists[draw_list_id].draw_items);
         /*
         if let Some(_) = &self.views[view_id].debug {
             let mut s = String::new();
@@ -923,7 +802,7 @@ impl Cx {
 
     pub fn setup_render_pass(&mut self, draw_pass_id: DrawPassId, to_texture: bool) -> Vec2d {
         self.passes[draw_pass_id].paint_dirty = false;
-        // the bake transaction's paint receipt (whole draws: ranges ignored)
+        // the bake transaction's paint receipt
         self.passes[draw_pass_id].painted_serial = self.repaint_id;
         // its targets hold this repaint's picture for the passes after it
         self.passes[draw_pass_id].painted_repaint = self.repaint_id;
@@ -999,7 +878,10 @@ impl Cx {
         let mut zbias = 0.0;
         let zbias_step = self.passes[draw_pass_id].zbias_step;
 
-        self.render_view(draw_pass_id, draw_list_id, &mut zbias, zbias_step);
+        let pass_uniforms = self.os.uniforms
+            .put_f32s(self.passes[draw_pass_id].pass_uniforms.as_slice())
+            .into();
+        self.render_view(draw_pass_id, draw_list_id, pass_uniforms, &mut zbias, zbias_step);
         let serial = self.textures.1.serials.submit();
         self.readback_pass_submitted(draw_pass_id, serial);
     }
@@ -1103,7 +985,10 @@ impl Cx {
         let mut zbias = 0.0;
         let zbias_step = self.passes[draw_pass_id].zbias_step;
 
-        self.render_view(draw_pass_id, draw_list_id, &mut zbias, zbias_step);
+        let pass_uniforms = self.os.uniforms
+            .put_f32s(self.passes[draw_pass_id].pass_uniforms.as_slice())
+            .into();
+        self.render_view(draw_pass_id, draw_list_id, pass_uniforms, &mut zbias, zbias_step);
         let serial = self.textures.1.serials.submit();
         self.readback_pass_submitted(draw_pass_id, serial);
         if !self.textures.1.readbacks.slots.is_empty() {
@@ -1173,12 +1058,18 @@ impl Cx {
                         continue;
                     }
                 };
-                let textures: Vec<WTextureInput> = cx_shader
-                    .mapping
-                    .textures
-                    .iter()
-                    .map(|v| v.to_from_wasm_texture_input())
-                    .collect();
+                let mapping = &cx_shader.mapping;
+                let textures = match mapping.glsl_texture_bindings.iter()
+                    .map(|binding| WTextureInput::from_binding(mapping, binding))
+                    .collect::<Result<Vec<_>, _>>()
+                {
+                    Ok(textures) => textures,
+                    Err(error) => {
+                        crate::error!("WebGL shader {}: {}", cx_shader.debug_id, error);
+                        self.draw_shaders.compile_set.remove(&draw_shader_id);
+                        continue;
+                    }
+                };
                 let compact = cx_shader.mapping.geometry_is_compact()
                     || cx_shader.mapping.instances.has_compact();
                 let (geom_attribs, inst_attribs) = if compact {
@@ -1213,7 +1104,7 @@ impl Cx {
             let mut pipeline_id = shader.pipeline_id;
             if pipeline_id.is_none() {
                 for (index, ds) in self.draw_shaders.os_shaders.iter().enumerate() {
-                    if ds.in_vertex == vertex && ds.in_pixel == pixel && ds.color_format == color_format && ds.blend_op == blend_op {
+                    if ds.in_vertex == vertex && ds.in_pixel == pixel && ds.color_format == color_format && ds.blend_op == blend_op && ds.textures == textures {
                         pipeline_id = Some(index);
                         break;
                     }
@@ -1221,7 +1112,7 @@ impl Cx {
             }
 
             if pipeline_id.is_none() {
-                let shp = CxOsDrawShader::new(vertex, pixel, color_format, blend_op);
+                let shp = CxOsDrawShader::new(vertex, pixel, color_format, blend_op, textures);
                 let shader_id = self.draw_shaders.os_shaders.len();
                 self.os.from_wasm(FromWasmCompileWebGLShader {
                     shader_id,
@@ -1240,7 +1131,7 @@ impl Cx {
                     pixel: shp.pixel.clone(),
                     geometry_slots,
                     instance_slots,
-                    textures,
+                    textures: shp.textures.clone(),
                     geom_attribs,
                     inst_attribs,
                 });
@@ -1284,8 +1175,261 @@ impl Cx {
     }
 }
 
+/// One draw's instance rows: whose they are and what this draw reads.
+struct WebInstanceDraw {
+    key: (usize, usize),
+    list_gen: u64,
+    slots: usize,
+    count: usize,
+    serial: u64,
+}
+
+fn f32_bytes(rows: &[f32]) -> &[u8] {
+    // SAFETY: f32 has no padding, and u8 has alignment 1.
+    unsafe { std::slice::from_raw_parts(rows.as_ptr().cast(), std::mem::size_of_val(rows)) }
+}
+
+impl CxOs {
+    /// The store's slab events, in stream order: a Destroy of a slot goes out before its
+    /// next Create. Each Create charges its whole capacity once; Destroy drops that charge,
+    /// which the budget collects once its last reader completed.
+    fn apply_slab_events(&mut self, budget: &mut RetainedAllocationBudget) {
+        let mut destroyed = Vec::new();
+        for event in self.regions.store.take_events() {
+            match event {
+                SlabEvent::Create { slab, bytes } => {
+                    self.free_slabs(&mut destroyed);
+                    self.last_backing_generation = self.last_backing_generation.wrapping_add(1).max(1);
+                    let generation = self.last_backing_generation;
+                    let at = slab as usize;
+                    if self.slab_backings.len() <= at {
+                        self.slab_backings.resize_with(at + 1, Default::default);
+                    }
+                    self.slab_backings[at] = SlabBacking { generation, charge: Some(budget.reserve_physical(bytes)) };
+                    self.from_wasm(FromWasmCreateInstanceSlab {
+                        slab_slot: slab,
+                        backing_generation: generation,
+                        capacity_bytes: bytes as f64,
+                    });
+                }
+                SlabEvent::Destroy { slab } => {
+                    if let Some(backing) = self.slab_backings.get_mut(slab as usize) {
+                        if backing.generation != 0 {
+                            destroyed.push(WInstanceSlab { slab_slot: slab, backing_generation: backing.generation });
+                        }
+                        *backing = SlabBacking::default();
+                    }
+                }
+            }
+        }
+        self.free_slabs(&mut destroyed);
+    }
+
+    fn free_slabs(&mut self, slabs: &mut Vec<WInstanceSlab>) {
+        if slabs.is_empty() {
+            return;
+        }
+        self.from_wasm(FromWasmFreeWebGLResources {
+            instance_slabs: std::mem::take(slabs),
+            array_buffer_ids: Vec::new(),
+            index_buffer_ids: Vec::new(),
+            vao_ids: Vec::new(),
+            texture_ids: Vec::new(),
+            framebuffer_ids: Vec::new(),
+        });
+    }
+
+    fn write_region(&mut self, held: ItemRegion, byte_off: u64, bytes: u64, parts: Vec<WasmPtrU8>) {
+        let generation = self.slab_backings.get(held.slab as usize).map_or(0, |b| b.generation);
+        self.from_wasm(FromWasmWriteInstanceRegion {
+            slab_slot: held.slab,
+            backing_generation: generation,
+            region: WInstanceRegion { index: held.region.index, gen: held.region.gen },
+            byte_off: byte_off as usize,
+            byte_len: bytes as usize,
+            parts,
+        });
+    }
+
+    /// The region and its backing's charge stay until this draw's serial completes.
+    fn pin(&mut self, held: ItemRegion, serial: u64) {
+        self.regions.store.drawn(held.region, serial);
+        if let Some(charge) = self.slab_backings.get(held.slab as usize).and_then(|b| b.charge.as_ref()) {
+            charge.submitted(serial);
+        }
+    }
+
+    /// Make an item's rows resident in the page's slabs and pin them through this draw's
+    /// serial, as native's `fb_instances` does: a publication prefix (or a shared block, whole)
+    /// is written once for all its users, a recording into a fresh region when it changed.
+    /// Returns the item's region and the bytes written.
+    fn instance_rows(
+        &mut self,
+        budget: &mut RetainedAllocationBudget,
+        items: &mut CxDrawItems,
+        draw: WebInstanceDraw,
+    ) -> (Option<ItemRegion>, u64) {
+        let item = items.binding_mut(draw.key.1);
+        if item.retained_instances.is_some() {
+            self.regions.release_plain(item);
+        }
+        if let Some(publication) = &item.retained_instances {
+            let id = publication.id();
+            let block = item.shared.as_ref().map(|(block, _)| block);
+            let (held, written) =
+                match self.regions.publication(draw.key, draw.list_gen, publication, block, draw.count, draw.slots) {
+                    RegionUse::Reuse(held) => (held, 0),
+                    RegionUse::Write { held, byte_off, bytes } => {
+                        self.apply_slab_events(budget);
+                        let parts = match block {
+                            Some(block) => vec![WasmPtrU8::new(f32_bytes(block.data()))],
+                            None => publication
+                                .data_slices(0..(bytes / 4) as usize)
+                                .map(|(_, part)| WasmPtrU8::new(f32_bytes(part)))
+                                .collect(),
+                        };
+                        self.write_region(held, byte_off, bytes, parts);
+                        if let Some(block) = block {
+                            block.receipt().mark_ready();
+                        }
+                        (held, bytes)
+                    }
+                };
+            self.pin(held, draw.serial);
+            item.instance_upload_pending = false;
+            item.retained_gpu_evicted = false;
+            item.retained_instance_id = id;
+            item.resident_schema = item.retained_schema;
+            if let Some(call) = item.kind.draw_call_mut() {
+                call.instance_dirty = false;
+            }
+            return (Some(held), written);
+        }
+        // an item that stopped being retained lets go of its publication region
+        self.regions.release_publication(draw.key);
+        let decision = self.regions.recording(items, draw.key.1, draw.count, draw.slots);
+        let item = &mut items.buffer[draw.key.1];
+        if decision.is_none() && item.instances.as_ref().is_none_or(|r| r.refused()) {
+            return (None, 0);
+        }
+        item.instance_upload_pending = false;
+        item.retained_gpu_evicted = false;
+        item.resident_schema = item.retained_schema;
+        if let Some(call) = item.kind.draw_call_mut() {
+            call.instance_dirty = false;
+        }
+        let Some(decision) = decision else { return (None, 0) };
+        let (held, written) = match decision {
+            RegionUse::Reuse(held) => (held, 0),
+            RegionUse::Write { held, byte_off, bytes } => {
+                self.apply_slab_events(budget);
+                let rows = &item.instances.as_ref().unwrap()[..draw.count * draw.slots];
+                self.write_region(held, byte_off, bytes, vec![WasmPtrU8::new(f32_bytes(rows))]);
+                (held, bytes)
+            }
+        };
+        self.pin(held, draw.serial);
+        (Some(held), written)
+    }
+}
+
+impl Cx {
+    /// The instance store's once-per-repaint close: spares age, a mostly dead slab starts
+    /// evacuating, and an evacuated one drops what stayed behind.
+    pub(crate) fn webgl_instance_frame_end(&mut self) {
+        let submitted = self.frame_submission_serial();
+        let completed = self.textures.1.serials.completed.load(std::sync::atomic::Ordering::Acquire);
+        self.os.regions.store.end_frame(submitted, completed);
+        self.os.apply_slab_events(&mut self.draw_lists.1.allocations);
+    }
+
+    fn webgl_instance_user(&mut self, list: usize, index: usize) -> Option<&mut crate::draw_list::CxDrawItem> {
+        if list >= self.draw_lists.0.pool.len() || self.draw_lists.is_slot_freed(list) {
+            return None;
+        }
+        let items = &mut self.draw_lists.0.pool[list].item.draw_items;
+        (index < items.len()).then(|| items.binding_mut(index))
+    }
+
+    /// The page could not create or fill instance storage (`ToWasmInstanceUploadFailed`).
+    /// A reply for a backing that is no longer live is ignored.
+    pub(crate) fn webgl_instance_upload_failed(&mut self, failed: ToWasmInstanceUploadFailed) {
+        let live = self.os.slab_backings.get(failed.slab_slot as usize).map_or(0, |b| b.generation);
+        if live == 0 || live != failed.backing_generation {
+            return;
+        }
+        if failed.scope == 1 {
+            let Some(region) = failed.region else { return };
+            let token = RegionRef { index: region.index, gen: region.gen };
+            let key = self.os.regions.inst.iter().find(|(_, rec)| rec.held.region == token).map(|(key, _)| *key);
+            if let Some(key) = key {
+                // A publication prefix: final for that content, for every user of it.
+                let users: Vec<(usize, usize)> = self
+                    .os
+                    .regions
+                    .inst_items
+                    .iter()
+                    .filter(|(_, (_, used))| *used == key)
+                    .map(|(user, _)| *user)
+                    .collect();
+                for (list, index) in users {
+                    self.os.regions.release_publication((list, index));
+                    if let Some(item) = self.webgl_instance_user(list, index) {
+                        item.os.retained_failed = key.0;
+                        item.instance_upload_pending = false;
+                    }
+                }
+                crate::error!("WebGL refused the instance rows of publication {}; that content stays off screen until it changes", key.0);
+            } else {
+                // A recording's rows: written again on the item's next draw.
+                for slot in &mut self.draw_lists.0.pool {
+                    for index in 0..slot.item.draw_items.len() {
+                        let item = slot.item.draw_items.binding_mut(index);
+                        if item.instance_region.is_some_and(|held| held.region == token) {
+                            self.os.regions.release_plain(item);
+                            if let Some(call) = item.kind.draw_call_mut() {
+                                call.instance_dirty = true;
+                            }
+                        }
+                    }
+                }
+                crate::error!("WebGL refused a recording's instance rows; they are written again on its next draw");
+            }
+            return;
+        }
+        // The backing or its texture mirror is gone: as for a native slab eviction, its
+        // regions are written again into a new backing on their users' next draw.
+        let users = self.os.regions.evict_slab(failed.slab_slot);
+        self.os.apply_slab_events(&mut self.draw_lists.1.allocations);
+        for (list, index) in users {
+            if let Some(item) = self.webgl_instance_user(list, index) {
+                item.retained_gpu_evicted = true;
+                if let Some(call) = item.kind.draw_call_mut() {
+                    call.instance_dirty = true;
+                }
+            }
+        }
+        crate::error!(
+            "WebGL instance slab {} lost its {}; its rows are written again",
+            failed.slab_slot,
+            if failed.scope == 2 { "texture mirror" } else { "backing" }
+        );
+        // One repaint per refusal; a refusal right after the repaint the last one asked for
+        // waits for the app's next frame, so an allocation the browser keeps refusing never
+        // turns into a repaint loop.
+        if self.os.backing_refusal_repaint == 0 || self.os.backing_refusal_repaint + 1 < self.repaint_id {
+            self.os.backing_refusal_repaint = self.repaint_id;
+            for slot in &mut self.passes.0.pool {
+                if slot.item.main_draw_list_id.is_some() {
+                    slot.item.paint_dirty = true;
+                }
+            }
+        }
+    }
+}
+
 impl CxOsDrawShader {
-    pub fn new(in_vertex: String, in_pixel: String, color_format: DrawShaderColorFormat, blend_op: DrawShaderBlendOp) -> Self {
+    pub fn new(in_vertex: String, in_pixel: String, color_format: DrawShaderColorFormat, blend_op: DrawShaderBlendOp, textures: Vec<WTextureInput>) -> Self {
         let vertex = format!(
             "#version 300 es
 #define VIEW_ID 0
@@ -1293,6 +1437,7 @@ precision highp float;
 precision highp int;
 precision highp sampler2D;
 precision highp sampler2DShadow;
+precision highp sampler2DArray;
 vec4 sample2d(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y));}}
 vec4 sample2d_lod(sampler2D sampler, vec2 pos, float lod){{return textureLod(sampler, vec2(pos.x, pos.y), lod);}}
 vec4 samplecube(samplerCube sampler, vec3 dir){{return texture(sampler, dir);}}
@@ -1309,6 +1454,7 @@ precision highp float;
 precision highp int;
 precision highp sampler2D;
 precision highp sampler2DShadow;
+precision highp sampler2DArray;
 vec4 sample2d(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y));}}
 vec4 sample2d_lod(sampler2D sampler, vec2 pos, float lod){{return textureLod(sampler, vec2(pos.x, pos.y), lod);}}
 vec4 samplecube(samplerCube sampler, vec3 dir){{return texture(sampler, dir);}}
@@ -1319,6 +1465,7 @@ vec4 depth_clip(vec4 w, vec4 c, float clip){{return c;}}
         );
 
         Self {
+            textures,
             in_vertex,
             in_pixel,
             vertex,
@@ -1335,14 +1482,25 @@ pub struct CxOsPass {}
 #[derive(Clone, Default)]
 pub struct CxOsDrawList {}
 
+/// The slab region a VAO's instance attributes read: the page's backing (slot and
+/// generation) and the region in it.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub struct WebInstanceBinding {
+    pub slab: u32,
+    pub generation: u32,
+    pub region_index: u32,
+    pub region_gen: u32,
+    pub byte_off: u64,
+    pub byte_len: u64,
+}
+
 #[derive(Default, Clone)]
 pub struct CxOsDrawCallVao {
     pub vao_id: usize,
     pub shader_id: Option<usize>,
-    pub inst_vb_id: Option<usize>,
+    pub inst: Option<WebInstanceBinding>,
     pub geom_vb_id: Option<usize>,
     pub geom_ib_id: Option<usize>,
-    pub inst_vb_generation: u64,
     pub geom_vb_generation: u64,
     pub geom_ib_generation: u64,
 }
@@ -1350,21 +1508,14 @@ pub struct CxOsDrawCallVao {
 #[derive(Default, Clone)]
 pub struct CxOsDrawCall {
     pub vao: Option<CxOsDrawCallVao>,
-    pub inst_vb_id: Option<usize>,
-    pub inst_vb_generation: u64,
-    pub inst_capacity: usize,
-    pub retained_publication: Option<crate::retained_instances::RetainedInstances>,
-    /// The publication whose upload the browser refused (0 = none). That
+    /// The publication whose region write the page refused (0 = none). That
     /// content is not drawn and not retried; a new publication is tried.
     pub retained_failed: u64,
-    pub inst_charge: Option<crate::retained_instances::RetainedAllocation>,
-    pub uniforms_recording_gen: Option<u64>,
-    pub draw_call_uniforms_gen: Option<u64>,
-    pub user_uniforms_gen: Option<u64>,
 }
 
 #[derive(Clone)]
 pub struct CxOsDrawShader {
+    pub textures: Vec<WTextureInput>,
     pub color_format: DrawShaderColorFormat,
     pub blend_op: DrawShaderBlendOp,
     pub in_vertex: String,
@@ -1441,6 +1592,7 @@ impl Cx {
         // actual object until previously queued commands are done. Delete all
         // FBO references too. Future use creates a new WebGL object at this id.
         self.os.from_wasm(FromWasmFreeWebGLResources {
+            instance_slabs: Vec::new(),
             texture_ids: vec![id.0],
             framebuffer_ids,
             array_buffer_ids: Vec::new(),

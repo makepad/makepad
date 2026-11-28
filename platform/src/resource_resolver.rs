@@ -199,6 +199,11 @@ impl ResourceResolver {
     /// grows underneath cannot exceed it).
     pub fn read(&self, name: &str, max_bytes: u64) -> Result<Vec<u8>, ResourceError> {
         let path = self.resolve(name)?;
+        // Windows refuses to open a directory with access denied, not an
+        // is-a-directory error, so ask first: every OS gives the same answer.
+        if std::fs::metadata(&path).map_err(|e| ResourceError::Io(format!("{name}: {e}")))?.is_dir() {
+            return Err(ResourceError::InvalidPath(format!("{name}: not a file")));
+        }
         let file = std::fs::File::open(&path).map_err(|e| ResourceError::Io(format!("{name}: {e}")))?;
         let meta = file.metadata().map_err(|e| ResourceError::Io(format!("{name}: {e}")))?;
         if !meta.is_file() {

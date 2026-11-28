@@ -80,7 +80,7 @@ impl NativeApps {
             transport::active(!self.layers.is_empty());
             self.aliases.remove(&(key.0, layer.alias));
             for (buffer, _) in layer.current.into_iter().chain(layer.latest) { self.retire(layer.wire, buffer); }
-            gpu.tex.remove(&(key.0, layer.alias.index));
+            gpu.tex.remove(key.0, layer.alias.index);
             if let Some(s) = world.session_mut(key.0) { let _ = s.textures.remove(key.0, layer.alias); }
             transport::request(NativeAppRequest::Destroy { id: layer.wire }, None);
             world.to_session(key.0, |q| q.native_layer_state(key.1, state::CLOSED, 0, 0, &[]));
@@ -158,7 +158,7 @@ impl NativeApps {
             if *sid != s.id { continue; }
             let Some(latest) = layer.latest else {
                 if let Some((buffer, _)) = layer.current.take() {
-                    gpu.tex.remove(&(s.id, layer.alias.index));
+                    gpu.tex.remove(s.id, layer.alias.index);
                     retired.push((layer.wire, buffer));
                 }
                 continue;
@@ -169,7 +169,7 @@ impl NativeApps {
             object.imported = true; object.bytes = 0;
             if let Ok(entry) = s.textures.get_mut(s.id, layer.alias) { entry.val = object; }
             else if s.textures.insert(s.id, layer.alias, s.id, object).is_err() { continue; }
-            gpu.tex.insert((s.id, layer.alias.index), Texture { gen: layer.alias.gen, image: image.clone() });
+            gpu.tex.insert(s.id, layer.alias.index, Texture { gen: layer.alias.gen, image: image.clone(), painted: 0 });
             if let Some(old) = layer.current.replace(latest).filter(|old| old.0 != latest.0) { retired.push((layer.wire, old.0)); }
         }
         for (id, buffer) in retired { self.retire(id, buffer); }

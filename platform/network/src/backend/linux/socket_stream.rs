@@ -5,7 +5,7 @@ use std::{
     net::{Shutdown, TcpStream},
     ptr,
     sync::OnceLock,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crate::tls::{engine::SocketPump, TlsEngine, TlsIdentity};
@@ -365,9 +365,14 @@ impl NativeEngine {
 type OpenSslStream = SocketPump;
 
 impl SocketPump {
-    fn connect(tcp: TcpStream, host: &str, verify: bool) -> io::Result<Self> {
+    fn connect(
+        tcp: TcpStream,
+        host: &str,
+        verify: bool,
+        deadline: Option<Instant>,
+    ) -> io::Result<Self> {
         let native = NativeEngine::client(Some(host), verify, None, false)?;
-        Self::handshake(tcp, TlsEngine::start(native, None, false, None)?, None)
+        Self::handshake(tcp, TlsEngine::start(native, None, false, None)?, deadline)
     }
 }
 
@@ -382,9 +387,11 @@ impl SocketStream {
         port: &str,
         use_tls: bool,
         ignore_ssl_cert: bool,
+        timeout: Option<Duration>,
     ) -> io::Result<Self> {
         let port_number: u16 = port.parse().map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "bad port"))?;
-        let tcp_stream = crate::lan::connect_host("socket stream", host, port_number, None)?;
+        let deadline = SocketPump::handshake_deadline(timeout.filter(|_| use_tls))?;
+        let tcp_stream = crate::lan::connect_host("socket stream", host, port_number, timeout)?;
         let _ = tcp_stream.set_nodelay(true);
 
         if use_tls {
@@ -392,6 +399,7 @@ impl SocketStream {
                 tcp_stream,
                 host,
                 !ignore_ssl_cert,
+                deadline,
             )?))
         } else {
             Ok(SocketStream::Plain(tcp_stream))
@@ -468,13 +476,19 @@ impl SocketStream {
         }
     }
 
-    pub fn into_tls(self, host: &str, ignore_ssl_cert: bool) -> io::Result<Self> {
+    pub fn into_tls(
+        self,
+        host: &str,
+        ignore_ssl_cert: bool,
+        timeout: Option<Duration>,
+    ) -> io::Result<Self> {
         match self {
             SocketStream::Tls(stream) => Ok(SocketStream::Tls(stream)),
             SocketStream::Plain(tcp_stream) => Ok(SocketStream::Tls(OpenSslStream::connect(
                 tcp_stream,
                 host,
                 !ignore_ssl_cert,
+                SocketPump::handshake_deadline(timeout)?,
             )?)),
         }
     }

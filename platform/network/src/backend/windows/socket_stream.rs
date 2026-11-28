@@ -34,11 +34,24 @@ impl BoolCompletedImpl for Completed {
         Ok(())
     }
 }
-unsafe fn wait_action(action: &AsyncAction) -> Result<(), HRESULT> {
+unsafe fn wait_connect(action: &AsyncAction, timeout: Option<Duration>) -> io::Result<()> {
     let (tx, rx) = mpsc::channel();
-    action.put_Completed(&ActionCompleted::implement(Box::new(Completed(tx))))?;
-    rx.recv().map_err(|_| HRESULT(0x80004005u32 as i32))?;
-    action.GetResults()
+    let connect_error = |err: HRESULT| io_other(format!("StreamSocket connect: {err}"));
+    action.put_Completed(&ActionCompleted::implement(Box::new(Completed(tx)))).map_err(connect_error)?;
+    let disconnected = || connect_error(HRESULT(0x80004005u32 as i32));
+    if let Some(limit) = timeout {
+        match rx.recv_timeout(limit) {
+            Ok(()) => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                let _ = AsyncInfo::query(action.as_raw()).and_then(|info| info.Cancel());
+                return Err(io::Error::new(io::ErrorKind::TimedOut, "socket connect timed out"));
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => return Err(disconnected()),
+        }
+    } else {
+        rx.recv().map_err(|_| disconnected())?;
+    }
+    action.GetResults().map_err(connect_error)
 }
 unsafe fn wait_count(operation: &UInt32Operation) -> Result<u32, HRESULT> {
     let (tx, rx) = mpsc::channel();
@@ -71,7 +84,11 @@ impl SocketStream {
         port: &str,
         use_tls: bool,
         ignore_ssl_cert: bool,
+        timeout: Option<Duration>,
     ) -> io::Result<Self> {
+        if timeout.is_some() {
+            crate::lan::check_host("socket stream", host)?;
+        }
         let (socket, reader, writer) = unsafe {
             // The WinRT socket is agile and used only by the networking workers.
             let host_name = HostNameFactory::factory("Windows.Networking.HostName")
@@ -111,8 +128,7 @@ impl SocketStream {
                 socket.ConnectAsync(&host_name, &service_name)
             }
             .map_err(|err| io_other(format!("StreamSocket connect: {err}")))?;
-            wait_action(&connect)
-                .map_err(|err| io_other(format!("StreamSocket connect: {err}")))?;
+            wait_connect(&connect, timeout)?;
             let input = socket
                 .get_InputStream()
                 .map_err(|err| io_other(format!("InputStream: {err}")))?;

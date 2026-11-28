@@ -308,7 +308,7 @@ impl Cx {
             }
             let name = fb.intern(&pass.name);
             fb.w.compute_pass(name, name, &dispatches);
-            fb.w.frame_end(Id::NONE, hal::target::COMPUTE);
+            fb.frame_end(Id::NONE, hal::target::COMPUTE);
             if crate::gpu_frame_timer::enabled() {
                 let group = before.and_then(|p| self.get_pass_window_id(p)).map(|window|
                     (window.id() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ self.repaint_id);

@@ -175,7 +175,9 @@ pub trait Gpu {
     /// backend with compute (`info_flags::COMPUTE`): Metal's new buffers are cleared, Vulkan's
     /// are zeroed before the next submission, D3D11's are cleared on the GPU.
     fn buffer_create(&mut self, s: &mut Session, id: Id, b: &mut BufferObj) -> Result<(), String>;
-    fn buffer_update(&mut self, s: &mut Session, id: Id, b: &mut BufferObj, off: u64, data: &[u8]);
+    /// Writes `parts` into the buffer in order, as one `buffer_update` each would. The decoder
+    /// gives only parts inside the buffer, at least one (`BufferUpdate` is a one-part call).
+    fn buffer_update_parts(&mut self, s: &mut Session, id: Id, b: &mut BufferObj, parts: BufferParts<'_>);
     fn buffer_destroy(&mut self, sid: u32, id: Id);
     fn buffer_readbacks(&mut self, s: &mut Session, req: u32, _ranges: &[BufferReadRange]) {
         s.events.buffer_leases(req, readback::NO_RASTER, Vec::new());
@@ -213,6 +215,11 @@ pub trait Gpu {
     /// backend cannot read it).
     fn capture_buffer(&mut self, _sid: u32, _id: Id) -> Option<Vec<u8>> {
         None
+    }
+    /// Snapshots the buffer at the packet boundary. A backend with queued GPU uploads
+    /// delivers its snapshot after the copy completes.
+    fn capture_buffer_async(&mut self, s: &mut Session, id: Id, done: Box<dyn FnOnce(Option<Vec<u8>>) + Send>) {
+        done(self.capture_buffer(s.id, id))
     }
     fn window_copy(&mut self, s: &mut Session, _window: Id, _texture: Id, req: u32) {
         s.events.readback(req, readback::NO_RASTER, [0; 4], None);
@@ -292,6 +299,7 @@ pub enum LentState {
 /// keeps the pass's mapping), as Metal does, never dropped -- a dropped pass drew nothing every
 /// frame (a target sized a pixel under its pass at a fractional scale). Counted, and logged once
 /// per target: a pass is sized as its target (`Cx::pass_pixel_size`), so this is a caller's bug.
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub fn clamped_pass(s: &mut Session, target: Id, size: [u32; 2], fits: [u32; 2], dpi: f32) {
     s.stats.clamped_passes += 1;
     if s.clamped_pass_targets.contains(&target) { return; }
@@ -303,6 +311,7 @@ pub fn clamped_pass(s: &mut Session, target: Id, size: [u32; 2], fits: [u32; 2],
 /// not sampled (no `usage::SAMPLED`), that this pass clears (or does not care about) rather than
 /// loads, and that no later pass of the submit loads, is read by nobody: it stays in tile memory
 /// (store DontCare), the w x h x 4 bytes are never written out.
+#[cfg(any(target_vendor = "apple", target_os = "linux", target_os = "android"))]
 pub fn depth_kept(s: &Session, sid: u32, pass: &Pass, view: &CmdView, depth: Id) -> bool {
     let sampled = s.textures.get(sid, depth).map_or(true, |e| e.val.usage & usage::SAMPLED != 0);
     if sampled || pass.load[4] == pass_load::LOAD {
@@ -319,6 +328,7 @@ pub fn depth_kept(s: &Session, sid: u32, pass: &Pass, view: &CmdView, depth: Id)
 /// geometry makes it spill them, so their storage is one a mid-pass flush can write), and
 /// its end resolves them. A backend that cuts the pass into several render passes (a split
 /// frame of the GPU profiler) keeps them too.
+#[cfg(any(target_vendor = "apple", target_os = "linux", target_os = "android"))]
 pub fn twins_kept(pass: &Pass, view: &CmdView) -> bool {
     /// A pass's colour attachments: its colour targets, or (none named) the window's own in slot 0.
     fn colours(p: &Pass) -> impl Iterator<Item = usize> + '_ {
@@ -336,23 +346,36 @@ pub fn twins_kept(pass: &Pass, view: &CmdView) -> bool {
     view.passes[at + 1..].iter().any(|p| p.samples > 1 && loads(p, pass))
 }
 
+/// The part of the batch's uniform stream owned by this packet.
+pub fn packet_uniforms<'a>(view: &CmdView<'a>, packet: &FramePacket) -> Option<&'a [u8]> {
+    let start = packet.uniforms.off as usize;
+    view.uniforms.get(start..start.checked_add(packet.uniforms.len as usize)?)
+}
+
+pub fn uniform_slice(stream: &[u8], r: Range, align: u32) -> Option<&[u8]> {
+    if r.is_empty() { return Some(&[]); }
+    if r.off.checked_rem(align)? != 0 { return None; }
+    let start = r.off as usize;
+    stream.get(start..start.checked_add(r.len as usize)?)
+}
+
 /// One view of a pass ([`Pass::view_rects`]): where it draws (x, y, w, h in target pixels) and
 /// its block of the pass's uniforms (a byte range of [`Pass::uniforms`]).
 #[derive(Clone, Debug, PartialEq)]
 pub struct PassView {
     pub rect: [f32; 4],
-    pub block: std::ops::Range<usize>,
+    pub uniforms: Range,
 }
 
 /// A pass's views: its `view_rects`, each with its block of the uniforms, or without rects the
 /// one view of its viewport with all of them. A pass whose rects break the rules of
 /// [`Pass::view_rects`] is refused, saying why: the backends draw nothing of it.
-pub fn pass_views_into(pass: &Pass, arena: &[u8], views: &mut Vec<PassView>) -> Result<(), &'static str> {
+pub fn pass_views_into(pass: &Pass, arena: &[u8], stream: &[u8], align: u32, views: &mut Vec<PassView>) -> Result<(), &'static str> {
     views.clear();
     let n = pass.view_rects.len as usize;
-    let len = pass.uniforms.len();
+    uniform_slice(stream, pass.uniforms, align).ok_or("invalid pass uniform range")?;
     if n == 0 {
-        views.push(PassView { rect: pass.viewport, block: 0..len });
+        views.push(PassView { rect: pass.viewport, uniforms: pass.uniforms });
         return Ok(());
     }
     if pass.views >= 2 {
@@ -361,19 +384,21 @@ pub fn pass_views_into(pass: &Pass, arena: &[u8], views: &mut Vec<PassView>) -> 
     if pass.damage.len != 0 {
         return Err("view rects in a pass with damage");
     }
-    if len % n != 0 {
-        return Err("the pass uniforms do not split into a block per view rect");
+    if n > 1 && (pass.uniform_stride < pass.uniforms.len || pass.uniform_stride % align != 0) {
+        return Err("invalid pass uniform stride");
     }
     let v = pass.viewport;
-    let size = len / n;
-    views.reserve(n);
+
     for (i, r) in read_rects(arena, pass.view_rects).enumerate() {
         let inside = r.iter().all(|x| x.is_finite()) && r[2] > 0.0 && r[3] > 0.0
             && r[0] >= v[0] && r[1] >= v[1] && r[0] + r[2] <= v[0] + v[2] && r[1] + r[3] <= v[1] + v[3];
         if !inside {
             return Err("a view rect outside the pass viewport");
         }
-        views.push(PassView { rect: r, block: i * size..(i + 1) * size });
+        let off = (i as u32).checked_mul(pass.uniform_stride).and_then(|at| pass.uniforms.off.checked_add(at)).ok_or("pass uniform offset overflow")?;
+        let uniforms = Range { off, len: pass.uniforms.len };
+        uniform_slice(stream, uniforms, align).ok_or("invalid view uniform range")?;
+        views.push(PassView { rect: r, uniforms });
     }
     if views.len() != n {
         return Err("view rects past the end of the arena");
@@ -382,9 +407,10 @@ pub fn pass_views_into(pass: &Pass, arena: &[u8], views: &mut Vec<PassView>) -> 
 }
 
 /// Returns the pass's views in a new vector.
-pub fn pass_views(pass: &Pass, arena: &[u8]) -> Result<Vec<PassView>, &'static str> {
+#[cfg(any(windows, target_os = "linux", target_os = "android"))]
+pub fn pass_views(pass: &Pass, arena: &[u8], stream: &[u8], align: u32) -> Result<Vec<PassView>, &'static str> {
     let mut views = Vec::new();
-    pass_views_into(pass, arena, &mut views)?;
+    pass_views_into(pass, arena, stream, align, &mut views)?;
     Ok(views)
 }
 
@@ -440,6 +466,82 @@ fn drop_frame(world: &mut World, sid: u32, target: Id, packet: u32, view: &CmdVi
     world.retire_frame(sid, target, frame, now);
 }
 
+#[allow(clippy::too_many_arguments)]
+/// `BufferUpdate` and `BufferUpdateParts`: one lookup, one clock span and one backend call for
+/// all the parts. A part outside the buffer is rejected alone, as its own update would be.
+fn update_buffer(gpu: &mut dyn Gpu, s: &mut Session, sid: u32, id: Id, parts: BufferParts<'_>) {
+    let Ok(e) = s.buffers.get_mut(sid, id) else { s.stale(); return };
+    let size = e.val.size;
+    let fits = |(off, data): &(u64, &[u8])| off.checked_add(data.len() as u64).is_some_and(|end| end <= size);
+    // SAFETY (each `iter`): the parts are the caller's memory, borrowed for this hal_submit call
+    let rejected = unsafe { parts.iter() }.filter(|p| !fits(p)).count();
+    let kept: Vec<(u64, &[u8])>;
+    let parts = if rejected == 0 {
+        parts
+    } else {
+        for (off, data) in unsafe { parts.iter() }.filter(|p| !fits(p)) {
+            eprintln!("[hal] buffer upload rejected: session={sid} buffer={id:?} offset={off} bytes={} size={size}", data.len());
+        }
+        s.stats.bad_args += rejected as u64;
+        kept = unsafe { parts.iter() }.filter(fits).collect();
+        BufferParts::list(&kept)
+    };
+    if parts.is_empty() { return; }
+    let bytes = parts.total();
+    e.val.uploaded += bytes;
+    let mut b = e.val.clone();
+    s.stats.upload_bytes += bytes;
+    s.stats.buffer_updates += 1;
+    s.stats.buffer_parts += parts.len() as u64;
+    let started = clock_ns();
+    gpu.buffer_update_parts(s, id, &mut b, parts);
+    s.stats.upload_ns += clock_ns().saturating_sub(started);
+    // the device may have replaced the storage: its size is the ledger's
+    if let Ok(e) = s.buffers.get_mut(sid, id) {
+        e.val = b.clone();
+    }
+    if let Some(l) = s.ledger.get_mut(Kind::Buffer, id.index) {
+        if l.gen == id.gen {
+            l.bytes = b.bytes;
+        }
+    }
+}
+
+pub(crate) fn upload_texture(gpu: &mut dyn Gpu, s: &mut Session, id: Id, t: &TextureObj, mip: u16, rect: [u32; 4], layer: u32, data: &[u8]) {
+    let started = clock_ns();
+    gpu.texture_update(s, id, t, mip, rect, layer, data);
+    s.stats.upload_ns += clock_ns().saturating_sub(started);
+    s.stats.upload_bytes += data.len() as u64;
+}
+
+/// Counts the packet's bytes and timings each time the backend executes it.
+fn execute_frame(gpu: &mut dyn Gpu, s: &mut Session, target: Id, kind: u32, packet: u32, view: &CmdView, now: u64) -> Option<SubmittedFrame> {
+    if let Some(p) = view.frames.get(packet as usize) {
+        let elements = |r: Range| (r.off as usize)..(r.off as usize).saturating_add(r.len as usize);
+        if let Some(draws) = view.draws.get(elements(p.draws)) {
+            for d in draws {
+                s.stats.instance_rows += if d.inst_ranges.len == 0 {
+                    u64::from(d.inst.count)
+                } else {
+                    crate::buffers::read_pairs(view.arena, d.inst_ranges).map(|[_, rows]| u64::from(rows)).sum::<u64>()
+                };
+            }
+        }
+        s.stats.uniform_bytes += u64::from(p.uniforms.len);
+        s.stats.build_ns += p.meta.build_end_ns.saturating_sub(p.meta.build_start_ns);
+        let [start, end] = p.meta.phases[2];
+        if start != 0 && start != s.last_walk_start_ns {
+            s.stats.walk_ns += end.saturating_sub(start);
+            s.last_walk_start_ns = start;
+        }
+    }
+    let sid = s.id;
+    let started = clock_ns();
+    let submitted = gpu.frame(s, sid, target, kind, packet, view, now);
+    s.stats.exec_ns += clock_ns().saturating_sub(started);
+    submitted
+}
+
 /// Session 0's badge layer frame for its window `window`: kept on the window (one without draws
 /// ends the layer), then composed over the window's retained image and presented; or, while
 /// the borrower's frame of the beat it is for is coming (`World::badge_rides`), shown with that
@@ -493,7 +595,7 @@ fn badge_frame(gpu: &mut dyn Gpu, world: &mut World, sid: u32, window: Id, kind:
     let Some(s) = world.session_mut(HOST) else { return };
     let prev_frame = s.frame;
     // a last frame without draws shows the window without its layer, then the layer goes
-    let submitted = !covered && gpu.frame(s, HOST, window, kind, 0, &kept.view(), now).is_some();
+    let submitted = !covered && execute_frame(gpu, s, window, kind, 0, &kept.view(), now).is_some();
     if !submitted {
         s.frame = prev_frame;
     }
@@ -591,7 +693,7 @@ fn replay_badges(gpu: &mut dyn Gpu, world: &mut World, window: Id, now: u64) {
         .filter(|w| !w.val.overlay.as_ref().is_some_and(|o| o.composed))
         .and_then(|w| w.val.badges.clone()) else { return };
     let frame = s.frame;
-    let _ = gpu.frame(s, HOST, window, target::WINDOW | target::BADGES | target::REPLAY, 0, &kept.view(), now);
+    let _ = execute_frame(gpu, s, window, target::WINDOW | target::BADGES | target::REPLAY, 0, &kept.view(), now);
     // a replay is not a frame of session 0's: its frame counter stays
     s.frame = frame;
 }
@@ -648,6 +750,7 @@ pub fn submit(gpu: &mut dyn Gpu, world: &mut World, sid: u32, view: &CmdView) {
     let now = world.now();
     if let Some(s) = world.session_mut(sid) {
         s.events.set_time(now);
+        s.stats.commands += view.cmds.len() as u64;
     }
     #[cfg(not(target_arch = "wasm32"))]
     let prof = crate::gpu_prof::submit_begin(sid);
@@ -702,6 +805,7 @@ pub trait DeviceReset: Gpu {
 
 /// A backend noticed its device is gone: every session hears `DeviceLost` once, with the
 /// generation of the device that was lost. Returns that generation.
+#[relax_api::relax_api(loader = "the HAL's backends report a lost device: JIT code hears of it as the `DeviceLost` event")]
 pub fn device_lost(world: &mut World) -> u32 {
     let generation = world.device_generation;
     for sid in world.session_ids() {
@@ -742,6 +846,7 @@ pub fn device_reset(b: &mut dyn DeviceReset, world: &mut World) -> bool {
 
 /// Android's GLES fallback: `gpu` makes every texture and buffer again and takes the lent windows.
 /// Sessions hear `BackendChanged`, so they make their pipelines in its dialect, then `DeviceReset`.
+#[cfg(target_os = "android")]
 pub fn backend_changed(gpu: &mut dyn Gpu, world: &mut World, info: HalInfo) {
     make_objects_again(gpu, world);
     for sid in world.session_ids() {
@@ -1275,7 +1380,7 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
                 crate::framecap::on_frame(gpu, s, sid, target, kind, packet, view, now);
             }
             let prev_frame = s.frame;
-            let Some(submitted) = gpu.frame(s, sid, target, kind, packet, view, now) else {
+            let Some(submitted) = execute_frame(gpu, s, target, kind, packet, view, now) else {
                 s.frame = prev_frame;
                 drop_frame(world, sid, target, packet, view, now);
                 return;
@@ -1466,6 +1571,7 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
                 s.events.gpu_prof_recording(&rec.encode());
             }
         }
+        HalCmd::GpuProfStop {} => crate::gpu_prof::app_stop(sid),
         HalCmd::WindowScreenOrigin { id, origin, has } => {
             crate::a11y::set_screen_origin(crate::a11y::window_key(sid, id.index), has.then_some((origin[0], origin[1])));
         }
@@ -1766,7 +1872,7 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
                         s.stats.bad_args += 1;
                     } else {
                         e.val.uploaded += data.len() as u64;
-                        gpu.texture_update(s, id, &t, mip, rect, layer, data);
+                        upload_texture(gpu, s, id, &t, mip, rect, layer, data);
                     }
                 }
                 Err(_) => s.stale(),
@@ -1787,7 +1893,11 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
                 s.bad();
                 return;
             }
-            match gpu.texture_update_3d(s, id, &t, [x, y, z], [w, h, d], data) {
+            s.stats.upload_bytes += data.len() as u64;
+            let started = clock_ns();
+            let result = gpu.texture_update_3d(s, id, &t, [x, y, z], [w, h, d], data);
+            s.stats.upload_ns += clock_ns().saturating_sub(started);
+            match result {
                 Ok(()) => s.textures.get_mut(sid, id).unwrap().val.uploaded += data.len() as u64,
                 Err(reason) => {
                     eprintln!("[hal] volume upload {id:?}: {reason}");
@@ -1872,6 +1982,7 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
             if let Ok(e) = s.buffers.get_mut(sid, id) {
                 e.val = obj.clone();
             }
+            s.stats.buffer_creates += 1;
             s.ledger.add(LedgerEntry {
                 kind: Kind::Buffer,
                 detail: buffer_detail(kind),
@@ -1894,28 +2005,10 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
         HalCmd::BufferUpdate { id, off, bytes } => {
             // SAFETY: as TextureUpdate
             let data = unsafe { bytes.as_bytes() };
-            match s.buffers.get_mut(sid, id) {
-                Ok(e) => {
-                    if off.checked_add(data.len() as u64).is_some_and(|end| end <= e.val.size) {
-                        e.val.uploaded += data.len() as u64;
-                        let mut b = e.val.clone();
-                        gpu.buffer_update(s, id, &mut b, off, data);
-                        // the device may have replaced the storage: its size is the ledger's
-                        if let Ok(e) = s.buffers.get_mut(sid, id) {
-                            e.val = b.clone();
-                        }
-                        if let Some(l) = s.ledger.get_mut(Kind::Buffer, id.index) {
-                            if l.gen == id.gen {
-                                l.bytes = b.bytes;
-                            }
-                        }
-                    } else {
-                        eprintln!("[hal] buffer upload rejected: session={sid} buffer={id:?} offset={off} bytes={} size={}", data.len(), e.val.size);
-                        s.stats.bad_args += 1;
-                    }
-                }
-                Err(_) => s.stale(),
-            }
+            update_buffer(gpu, s, sid, id, BufferParts::list(&[(off, data)]));
+        }
+        HalCmd::BufferUpdateParts { id, parts } => {
+            if parts.is_whole() { update_buffer(gpu, s, sid, id, parts) } else { s.bad() }
         }
         HalCmd::BufferReadbacks { req, ranges } => {
             let ranges = crate::compute::records::<BufferReadRange>(ranges, Range { off: 0, len: ranges.len() as u32 });

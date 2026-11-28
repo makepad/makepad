@@ -9,7 +9,7 @@
 //! encoder: `push_packet` waits for the decode callback before returning.
 
 use crate::annex_b;
-use crate::stream_decoder::{DecodedFrame, DecodedPicture};
+use crate::stream_decoder::{DecodedFrame, DecodedPicture, PictureBuffers};
 use crate::stream_encoder::StreamVideoCodec;
 use crate::{VideoColor, VideoFileError};
 use makepad_apple_sys::*;
@@ -39,6 +39,7 @@ struct DecoderShared {
     /// Frames stay the decoder's IOSurface-backed pixel buffers (no CPU copy).
     gpu: bool,
     frames: Vec<DecodedFrame>,
+    buffers: PictureBuffers,
     /// A picture the decoder reported as failed (its status): the caller hears it (and asks for a
     /// key frame) instead of decoding on from a damaged reference.
     failed: Option<OSStatus>,
@@ -113,9 +114,10 @@ unsafe extern "C" fn decode_output_callback(
             return;
         }
     }
+    let mut nv12 = guard.buffers.take();
     drop(guard);
     CVPixelBufferLockBaseAddress(image_buffer, 1); // kCVPixelBufferLock_ReadOnly
-    let mut nv12 = vec![0u8; crate::nv12::nv12_frame_size(width, height)];
+    nv12.resize(crate::nv12::nv12_frame_size(width, height), 0);
     let y_size = width as usize * height as usize;
     {
         let (y_dst, uv_dst) = nv12.split_at_mut(y_size);
@@ -159,7 +161,7 @@ impl AppleStreamDecoder {
             session: std::ptr::null_mut(),
             format_desc: std::ptr::null_mut(),
             gpu,
-            shared: Box::new(Mutex::new(DecoderShared { gpu, frames: Vec::new(), failed: None, stream_color: VideoColor::BT709 })),
+            shared: Box::new(Mutex::new(DecoderShared { gpu, frames: Vec::new(), buffers: PictureBuffers::default(), failed: None, stream_color: VideoColor::BT709 })),
             codec,
             sps: None,
             pps: None,
@@ -267,7 +269,7 @@ impl AppleStreamDecoder {
         Ok(())
     }
 
-    pub fn push_packet(&mut self, annex_b_data: &[u8], pts_100ns: i64) -> Result<Vec<DecodedFrame>, VideoFileError> {
+    pub fn push_packet_into(&mut self, annex_b_data: &[u8], pts_100ns: i64, out: &mut Vec<DecodedFrame>) -> Result<(), VideoFileError> {
         let nals = annex_b::split_annex_b(annex_b_data);
         let mut vcl_nals: Vec<&[u8]> = Vec::new();
         let mut params_updated = false;
@@ -305,7 +307,7 @@ impl AppleStreamDecoder {
             unsafe { self.recreate_session()? };
         }
         if vcl_nals.is_empty() {
-            return Ok(Vec::new());
+            return Ok(());
         }
         if self.session.is_null() {
             return Err(VideoFileError::new(
@@ -373,10 +375,10 @@ impl AppleStreamDecoder {
             }
             VTDecompressionSessionWaitForAsynchronousFrames(self.session);
         }
-        self.drain()
+        self.drain_into(out)
     }
 
-    fn drain(&mut self) -> Result<Vec<DecodedFrame>, VideoFileError> {
+    fn drain_into(&mut self, out: &mut Vec<DecodedFrame>) -> Result<(), VideoFileError> {
         let mut guard = self
             .shared
             .lock()
@@ -385,10 +387,16 @@ impl AppleStreamDecoder {
             guard.frames.clear();
             return Err(VideoFileError::with_code("VTDecompressionSession decode (picture)", status));
         }
-        Ok(guard
-            .frames
-            .drain(..)
-            .collect())
+        out.append(&mut guard.frames);
+        Ok(())
+    }
+
+    pub fn recycle(&mut self, nv12: Vec<u8>) {
+        self.shared.lock().unwrap_or_else(|e| e.into_inner()).buffers.recycle(nv12);
+    }
+
+    pub fn allocated_buffers(&self) -> u64 {
+        self.shared.lock().unwrap_or_else(|e| e.into_inner()).buffers.allocated
     }
 
     /// Whether the session decodes on the hardware decoder (None before a session exists).
@@ -407,13 +415,17 @@ impl AppleStreamDecoder {
         }
     }
 
-    pub fn flush(&mut self) -> Result<Vec<DecodedFrame>, VideoFileError> {
+    pub fn ready_into(&mut self, out: &mut Vec<DecodedFrame>) -> Result<(), VideoFileError> {
+        self.drain_into(out)
+    }
+
+    pub fn flush_into(&mut self, out: &mut Vec<DecodedFrame>) -> Result<(), VideoFileError> {
         unsafe {
             if !self.session.is_null() {
                 VTDecompressionSessionWaitForAsynchronousFrames(self.session);
             }
         }
-        self.drain()
+        self.drain_into(out)
     }
 }
 

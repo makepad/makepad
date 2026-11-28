@@ -19,8 +19,6 @@ pub mod inject;
 #[cfg(target_os = "android")]
 pub use shell::{open, AndroidBackend, AndroidParams};
 #[cfg(target_os = "android")]
-pub use surface::{AndroidEglSurfaces, AndroidSurfaces};
-#[cfg(target_os = "android")]
 pub use jni::register_natives;
 
 #[cfg(target_os = "android")]

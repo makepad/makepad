@@ -1,4 +1,4 @@
-//! RGB <-> NV12 converters (4:2:0) in any [`VideoColor`]'s matrix and range,
+//! RGB <-> NV12 (4:2:0) and RGB -> NV24 (4:4:4) in any [`VideoColor`]'s matrix and range,
 //! with the fixed-point coefficients of [`VideoColor::yuv_to_rgb_fixed`] /
 //! [`VideoColor::rgb_to_yuv_fixed`] (BT.709 limited range is the classic
 //! integer maths). Primaries and HDR transfers are not converted here: a
@@ -58,6 +58,23 @@ pub fn rgbx_to_nv12(rgb: &[u8], width: u32, height: u32, pixel_stride: usize, co
             uv_row[bx * 2] = clamp_u8((sum_u + 2) / 4 + 128);
             uv_row[bx * 2 + 1] = clamp_u8((sum_v + 2) / 4 + 128);
         }
+    }
+}
+
+/// Convert tightly packed RGB or RGBA to NV24: one Y byte per pixel followed
+/// by one interleaved U,V pair per pixel in the same row order.
+pub fn rgbx_to_nv24(rgb: &[u8], width: u32, height: u32, pixel_stride: usize, color: VideoColor, out: &mut Vec<u8>) {
+    let pixels = width as usize * height as usize;
+    let k = color.rgb_to_yuv_fixed();
+    out.resize(pixels * 3, 0);
+    let (y_plane, uv_plane) = out.split_at_mut(pixels);
+    let rgb = &rgb[..pixels * pixel_stride];
+    for ((p, y), uv) in rgb.chunks_exact(pixel_stride).zip(y_plane).zip(uv_plane.chunks_exact_mut(2)) {
+        let (r, g, b) = (i32::from(p[0]), i32::from(p[1]), i32::from(p[2]));
+        let channel = |k: [i32; 3]| (k[0] * r + k[1] * g + k[2] * b) >> 8;
+        *y = clamp_u8(channel(k.ky) + k.y_offset);
+        uv[0] = clamp_u8(channel(k.ku) + 128);
+        uv[1] = clamp_u8(channel(k.kv) + 128);
     }
 }
 
@@ -131,6 +148,26 @@ pub fn nv12_to_rgb8(nv12: &[u8], width: u32, height: u32, color: VideoColor, out
             out[p] = clamp_u8(r);
             out[p + 1] = clamp_u8(g);
             out[p + 2] = clamp_u8(b);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nv24_keeps_chroma_for_each_rgb_pixel() {
+        let rgb = [[0, 0, 0], [255, 0, 0], [0, 0, 255], [0, 0, 0]];
+        let mut out = Vec::new();
+        for stride in [3, 4] {
+            let mut input = Vec::new();
+            for pixel in rgb {
+                input.extend_from_slice(&pixel);
+                if stride == 4 { input.push(173); }
+            }
+            rgbx_to_nv24(&input, 2, 2, stride, VideoColor::BT709, &mut out);
+            assert_eq!(out, [16, 62, 31, 16, 128, 128, 102, 239, 239, 118, 128, 128]);
         }
     }
 }

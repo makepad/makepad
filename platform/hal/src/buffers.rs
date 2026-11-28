@@ -549,7 +549,7 @@ struct UploadChunks {
     at: usize,
 }
 
-/// The smallest chunk: the first holds a frame's small uploads (glyph rects, uniforms) for good.
+/// The first chunk retains storage for small uploads such as glyph rectangles.
 const UPLOAD_CHUNK: usize = 256 << 10;
 
 impl UploadChunks {
@@ -609,6 +609,8 @@ pub struct CmdWriter {
     session: u32,
     cmds: Vec<Cmd>,
     arena: Vec<u8>,
+    uniforms: Vec<u8>,
+    uniform_align: u32,
     uploads: UploadChunks,
     /// A quiet frame retains the high-water storage for volume edits.
     volume_uploads: UploadChunks,
@@ -625,6 +627,7 @@ pub struct CmdWriter {
 }
 
 struct OpenFrame {
+    uniform_base: usize,
     frame: u64,
     meta: FrameMeta,
     pass0: u32,
@@ -664,8 +667,8 @@ impl CmdWriter {
         &self.arena
     }
 
-    /// Copies `v` into the writer's upload memory, for a [`Pass`] / [`Draw`] / [`Inst`] field:
-    /// valid until [`CmdWriter::clear`], whatever happens to `v`.
+    /// Copies `v` into upload memory and returns a slice valid until [`CmdWriter::clear`].
+    /// For a pass or draw uniform block, use [`CmdWriter::put_uniform`].
     pub fn keep<T: Scalar>(&mut self, v: &[T]) -> Slice {
         // SAFETY: a `Scalar` has no padding: every byte of `v` is initialized
         let bytes = unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, std::mem::size_of_val(v)) };
@@ -699,6 +702,22 @@ impl CmdWriter {
     /// `bytes` must stay alive and unchanged until this batch has been submitted.
     pub unsafe fn buffer_update_borrowed(&mut self, id: Id, off: u64, bytes: &[u8]) {
         self.push(Cmd::buffer_update(id, off, Slice::from_bytes(bytes)));
+    }
+
+    /// [`CmdWriter::buffer_update_parts`] without the copies: each part's record points at its
+    /// bytes. Nothing is sent for no parts.
+    ///
+    /// # Safety
+    /// Every part's bytes must stay alive and unchanged until this batch has been submitted.
+    pub unsafe fn buffer_update_parts_borrowed<'b>(&mut self, id: Id, parts: impl IntoIterator<Item = (u64, &'b [u8])>) {
+        let off = self.arena.len();
+        for (dst, bytes) in parts {
+            BufferParts::put_record(&mut self.arena, dst, bytes.as_ptr(), bytes.len());
+        }
+        if self.arena.len() > off {
+            let table = PartsTable(self.range_from(off));
+            self.push(Cmd::buffer_update_parts(id, table));
+        }
     }
 
     /// [`CmdWriter::texture_update`] without the copy: the command points at `bytes`.
@@ -819,10 +838,77 @@ impl CmdWriter {
 
     // ---- frames
 
+    pub fn set_uniform_align(&mut self, align: u32) {
+        assert!(self.open_frame.is_none(), "uniform alignment changed inside a frame");
+        assert!(align.is_power_of_two() && (16..=256).contains(&align));
+        self.uniform_align = align;
+    }
+
+    pub fn uniform_align(&self) -> u32 {
+        if self.uniform_align == 0 { 256 } else { self.uniform_align }
+    }
+
+    /// Appends an already aligned stream and returns its packet-relative base.
+    pub fn put_uniform_stream(&mut self, aligned_bytes: &[u8]) -> u32 {
+        assert_eq!(aligned_bytes.len() % self.uniform_align() as usize, 0);
+        let base = self.open_frame.as_ref().expect("uniform stream outside a frame").uniform_base;
+        let off = (self.uniforms.len() - base).try_into().unwrap();
+        self.uniforms.extend_from_slice(aligned_bytes);
+        off
+    }
+
+    /// Takes an aligned stream and returns its packet-relative base. If the writer's uniform
+    /// buffer is empty, the two buffers swap. Otherwise the bytes are appended and the source
+    /// is cleared, retaining its capacity.
+    pub fn take_uniform_stream(&mut self, aligned_bytes: &mut Vec<u8>) -> u32 {
+        let align = self.uniform_align() as usize;
+        assert_eq!(aligned_bytes.len() & (align - 1), 0);
+        let base = self.open_frame.as_ref().expect("uniform stream outside a frame").uniform_base;
+        let off = (self.uniforms.len() - base).try_into().unwrap();
+        if self.uniforms.is_empty() {
+            std::mem::swap(&mut self.uniforms, aligned_bytes);
+        } else {
+            self.uniforms.extend_from_slice(aligned_bytes);
+            aligned_bytes.clear();
+        }
+        off
+    }
+
+    pub fn put_uniform_bytes(&mut self, bytes: &[u8]) -> Range {
+        if bytes.is_empty() { return Range::default(); }
+        let base = self.open_frame.as_ref().expect("uniform block outside a frame").uniform_base;
+        let start = self.uniforms.len();
+        let range = Range { off: (start - base).try_into().unwrap(), len: bytes.len().try_into().unwrap() };
+        let mask = self.uniform_align() as usize - 1;
+        let stride = (bytes.len().max(16) + mask) & !mask;
+        self.uniforms.reserve(stride);
+        self.uniforms.extend_from_slice(bytes);
+        self.uniforms.resize(start + stride, 0);
+        range
+    }
+
+    pub fn put_uniform<T: Scalar>(&mut self, slice: &[T]) -> Range {
+        // SAFETY: Scalar has no padding. The bytes borrow the slice until the copy returns.
+        self.put_uniform_bytes(unsafe { std::slice::from_raw_parts(slice.as_ptr().cast(), std::mem::size_of_val(slice)) })
+    }
+
+    pub fn put_pass_views_uniforms(&mut self, views: &[&[u8]]) -> (Range, u32) {
+        let Some((first, rest)) = views.split_first() else { return (Range::default(), 0) };
+        let range = self.put_uniform_bytes(first);
+        if rest.is_empty() { return (range, 0); }
+        for view in rest {
+            assert_eq!(view.len(), first.len(), "pass views must have equal-sized uniforms");
+            self.put_uniform_bytes(view);
+        }
+        if range.is_empty() { return (Range::default(), 0); }
+        (range, range.len.max(16).next_multiple_of(self.uniform_align()))
+    }
+
     /// Starts a FramePacket; passes and draws follow, then [`CmdWriter::frame_end`].
     pub fn frame_begin(&mut self, frame: u64, meta: FrameMeta) {
         assert!(self.open_frame.is_none(), "CmdWriter: frame_begin inside a frame");
         self.open_frame = Some(OpenFrame {
+            uniform_base: self.uniforms.len(),
             frame, meta, pass0: self.passes.len() as u32, draw0: self.draws.len() as u32,
             layer0: self.layers.len() as u32, pass_draw0: None, split_pass: None, segment_draw0: 0,
         });
@@ -948,6 +1034,7 @@ impl CmdWriter {
         let packet = self.frames.len() as u32;
         self.frames.push(FramePacket {
             frame: f.frame,
+            uniforms: Range { off: f.uniform_base.try_into().unwrap(), len: (self.uniforms.len() - f.uniform_base).try_into().unwrap() },
             passes: Range { off: f.pass0, len: self.passes.len() as u32 - f.pass0 },
             draws: Range { off: f.draw0, len: self.draws.len() as u32 - f.draw0 },
             layers: Range { off: f.layer0, len: self.layers.len() as u32 - f.layer0 },
@@ -966,6 +1053,7 @@ impl CmdWriter {
                 session: self.session,
                 cmds: Slice::of(&self.cmds),
                 arena: Slice::from_bytes(&self.arena),
+                uniforms: Slice::from_bytes(&self.uniforms),
                 frames: Slice::of(&self.frames),
                 passes: Slice::of(&self.passes),
                 draws: Slice::of(&self.draws),
@@ -977,6 +1065,7 @@ impl CmdWriter {
     /// Empties the writer for the next turn, keeping every allocation.
     pub fn clear(&mut self) {
         self.cmds.clear();
+        self.uniforms.clear();
         self.arena.clear();
         self.uploads.clear(false);
         self.volume_uploads.clear(true);
@@ -990,11 +1079,11 @@ impl CmdWriter {
         self.open_frame = None;
     }
 
-    /// Capacities (cmds, arena bytes, frames, passes, draws, layers, upload bytes): tests show a
+    /// Capacities (cmds, arena bytes, uniforms, frames, passes, draws, layers, upload bytes): tests show a
     /// steady state does not grow.
-    pub fn capacities(&self) -> [usize; 7] {
+    pub fn capacities(&self) -> [usize; 8] {
         let uploads = self.uploads.chunks.iter().chain(&self.volume_uploads.chunks).map(Vec::capacity).sum();
-        [self.cmds.capacity(), self.arena.capacity(), self.frames.capacity(), self.passes.capacity(), self.draws.capacity(), self.layers.capacity(), uploads]
+        [self.cmds.capacity(), self.arena.capacity(), self.uniforms.capacity(), self.frames.capacity(), self.passes.capacity(), self.draws.capacity(), self.layers.capacity(), uploads]
     }
 }
 
@@ -1014,6 +1103,7 @@ pub struct CmdView<'a> {
     pub session: u32,
     pub cmds: &'a [Cmd],
     pub arena: &'a [u8],
+    pub uniforms: &'a [u8],
     pub frames: &'a [FramePacket],
     pub passes: &'a [Pass],
     pub draws: &'a [Draw],
@@ -1031,6 +1121,7 @@ impl CmdBuf {
             session: self.session,
             cmds: self.cmds.as_slice()?,
             arena: self.arena.as_bytes(),
+            uniforms: self.uniforms.as_bytes(),
             frames: self.frames.as_slice()?,
             passes: self.passes.as_slice()?,
             draws: self.draws.as_slice()?,
@@ -1055,7 +1146,9 @@ pub struct EventQueue {
     announced: Option<(u16, u32, u32)>,
 }
 
+#[relax_api::relax_api(marked)]
 impl EventQueue {
+    #[relax_api::relax_api(loader = "the HAL's backends queue leases: JIT code receives them as events")]
     pub fn buffer_leases(&mut self, req: u32, status: u32, leases: Vec<crate::lease::Lease>) {
         let mut records = Vec::with_capacity(leases.len() * crate::lease::Record::SIZE);
         for lease in leases {
@@ -1066,6 +1159,7 @@ impl EventQueue {
         self.buffer_lease_records(req, status, &records);
     }
 
+    #[relax_api::relax_api(loader = "the HAL's backends queue readbacks: JIT code receives them as events")]
     pub fn readback(&mut self, req: u32, status: u32, rect: [u32; 4], lease: Option<crate::lease::Lease>) {
         let mut records = Vec::new();
         if let Some(lease) = lease {

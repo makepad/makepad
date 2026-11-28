@@ -16,3 +16,19 @@ fn the_four_ops_and_the_plain_types_are_marked() {
     }
     assert!(mine.iter().filter(|e| e.kind == PLAIN).all(|e| e.size > 0));
 }
+
+#[test]
+fn stream_decoder_ops_are_marked_in_relax_api_table() {
+    let _ = makepad_hal::clock_ns();
+    let ops: Vec<_> = entries().iter()
+        .filter(|e| e.module.split("::").next() == Some("makepad_hal") && e.kind == OP)
+        .map(|e| (e.key)().to_string())
+        .collect();
+    for name in [
+        "hal_stream_decoder_error", "hal_stream_decoder_open", "hal_stream_decoder_name",
+        "hal_stream_decoder_push", "hal_stream_decoder_poll", "hal_stream_decoder_read",
+        "hal_stream_decoder_release", "hal_stream_decoder_close",
+    ] {
+        assert!(ops.iter().any(|key| key.ends_with(name)), "{name} missing from the HAL op table");
+    }
+}

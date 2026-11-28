@@ -1,5 +1,9 @@
+#[path = "confirmation.rs"]
+mod confirmation;
+
 use crate::file_dialogs::{FileDialog, VirtualFileLimits};
 use crate::print::{PrintId, PrintJob};
+use crate::script::HostGrants;
 
 use crate::ar::{ArCaps, ArConfig, ArHit, ThermalState};
 
@@ -10,7 +14,7 @@ use {
         cx::{Cx, CxRef, GpuBackend, OsType, XrCapabilities},
         display_context::{NativeAppearance, ScreenOrientation, SystemBarAppearance},
         draw_list::DrawListId,
-        draw_pass::{CxDrawPassParent, CxDrawPassRect, DrawPassId},
+        draw_pass::{CxDrawPassParent, CxDrawPassRect, DrawPassId, PassReader},
         dvec2,
         event::keyboard::{CharOffset, ClipboardWrite},
         event::xr::XrAnchor,
@@ -38,6 +42,7 @@ use {
         rc::Rc,
     },
 };
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OpenUrlInPlace {
     Yes,
     No,
@@ -254,6 +259,9 @@ pub enum CxOsOp {
     #[cfg(not(target_arch = "wasm32"))]
     SetOwnChrome(bool),
 
+    OpenUrl { url: String, in_place: OpenUrlInPlace },
+    BrowserUpdateUrl { url: String, replace: bool },
+    BrowserHistoryGo(i32),
     CreateWindow(WindowId),
     CreatePopupWindow {
         window_id: WindowId,
@@ -505,6 +513,9 @@ impl CxOsOp {
             Self::ListDomains(..) => "ListDomains",
             #[cfg(not(target_arch = "wasm32"))]
             Self::SetOwnChrome(..) => "SetOwnChrome",
+            Self::OpenUrl { .. } => "OpenUrl",
+            Self::BrowserUpdateUrl { .. } => "BrowserUpdateUrl",
+            Self::BrowserHistoryGo(..) => "BrowserHistoryGo",
             Self::CreateWindow(..) => "CreateWindow",
             Self::CreatePopupWindow { .. } => "CreatePopupWindow",
             Self::CloseWindow(..) => "CloseWindow",
@@ -1265,7 +1276,9 @@ impl Cx {
     }
 
     pub fn update_macos_menu(&mut self, menu: MacosMenu) {
-        if self.script_data.std.host_io_only() { return; }
+        if !self.script_data.std.has_grant(HostGrants::DESKTOP_SHELL) {
+            return;
+        }
         self.platform_ops.push_back(CxOsOp::UpdateMacosMenu(menu));
     }
 
@@ -1598,6 +1611,9 @@ impl Cx {
     /// app's, 11-06).
     #[track_caller]
     pub fn quit(&mut self) {
+        if !self.script_data.std.has_grant(HostGrants::DESKTOP_SHELL) {
+            return;
+        }
         crate::log!("the app quits: Cx::quit at {}", std::panic::Location::caller());
         crate::cx::relax_quit_started();
         self.platform_ops.push_back(CxOsOp::Quit);
@@ -1608,12 +1624,18 @@ impl Cx {
     /// instead of waiting for the app's `Quit`. Nothing when no quit is held.
     #[track_caller]
     pub fn cancel_quit(&mut self) {
+        if !self.script_data.std.has_grant(HostGrants::DESKTOP_SHELL) {
+            return;
+        }
         crate::log!("the app keeps running: Cx::cancel_quit at {}", std::panic::Location::caller());
         self.platform_ops.push_back(CxOsOp::CancelQuit);
     }
 
     #[track_caller]
     pub fn request_quit(&mut self, reason: QuitReason) -> bool {
+        if !self.script_data.std.has_grant(HostGrants::DESKTOP_SHELL) {
+            return false;
+        }
         #[cfg(target_os = "linux")]
         if std::env::var_os("MAKEPAD_HAL_LOG").is_some() {
             eprintln!("[hal-linux] Cx::request_quit reason={reason:?}");
@@ -1640,14 +1662,24 @@ impl Cx {
         }
     }
 
+    pub fn open_url(&mut self, url: &str, in_place: OpenUrlInPlace) {
+        if !self.script_data.std.has_grant(HostGrants::OPEN_URL) {
+            return;
+        }
+        self.platform_ops.push_back(CxOsOp::OpenUrl { url: url.to_owned(), in_place });
+    }
+
     pub fn browser_update_url(&mut self, url: &str, replace: bool) {
-        if self.script_data.std.host_io_only() { return; }
-        <Self as CxOsApi>::browser_update_url(self, url, replace);
+        if !self.script_data.std.has_grant(HostGrants::BROWSER_NAV) {
+            return;
+        }
+        self.platform_ops.push_back(CxOsOp::BrowserUpdateUrl { url: url.to_owned(), replace });
     }
 
     pub fn browser_history_go(&mut self, delta: i32) {
-        if self.script_data.std.host_io_only() { return; }
-        <Self as CxOsApi>::browser_history_go(self, delta);
+        if delta != 0 && self.script_data.std.has_grant(HostGrants::BROWSER_NAV) {
+            self.platform_ops.push_back(CxOsOp::BrowserHistoryGo(delta));
+        }
     }
 
     // Determines whether to show your application in the dock when it runs. The default value is true.
@@ -1656,12 +1688,18 @@ impl Cx {
     /// deltas keep flowing as MouseMove events; unlock restores the cursor.
     /// Convention: lock on the game's own click, RELEASE ON ESCAPE.
     pub fn lock_mouse_pointer(&mut self, lock: bool) {
+        if !self.script_data.std.has_grant(HostGrants::DESKTOP_SHELL) {
+            return;
+        }
         self.platform_ops.push_back(CxOsOp::LockMousePointer(lock));
     }
 
     /// Call once per frame while holding the lock — keeps the hardware
     /// cursor pinned even when the OS quietly drops the disassociation.
     pub fn repin_mouse_pointer(&mut self) {
+        if !self.script_data.std.has_grant(HostGrants::DESKTOP_SHELL) {
+            return;
+        }
         self.platform_ops.push_back(CxOsOp::RepinMousePointer);
     }
 
@@ -1719,6 +1757,9 @@ impl Cx {
     }
 
     pub fn show_in_dock(&mut self, show: bool) {
+        if !self.script_data.std.has_grant(HostGrants::DESKTOP_SHELL) {
+            return;
+        }
         self.platform_ops.push_back(CxOsOp::ShowInDock(show));
     }
 
@@ -1742,6 +1783,9 @@ impl Cx {
     /// Honored on iOS and macOS, by Android's copy/paste toolbar and splash screen,
     /// by KWin's and some other Linux title bars, and by the window menu on Windows.
     pub fn set_native_appearance(&mut self, appearance: NativeAppearance) {
+        if !self.script_data.std.has_grant(HostGrants::DESKTOP_SHELL) {
+            return;
+        }
         if self.display_context.native_appearance == Some(appearance) {
             return;
         }
@@ -1759,6 +1803,9 @@ impl Cx {
     /// (`preferredScreenEdgesDeferringSystemGestures`), nothing where the OS
     /// has no such gesture.
     pub fn defer_system_gestures(&mut self, edges: ScreenEdges) {
+        if !self.script_data.std.has_grant(HostGrants::DESKTOP_SHELL) {
+            return;
+        }
         if !matches!(self.os_type(), OsType::Ios(_)) {
             return;
         }
@@ -1773,6 +1820,9 @@ impl Cx {
     /// Info.plist does not allow is the app's own error. The latest request
     /// of a frame wins.
     pub fn set_screen_orientation(&mut self, orientation: ScreenOrientation) {
+        if !self.script_data.std.has_grant(HostGrants::DESKTOP_SHELL) {
+            return;
+        }
         if !matches!(self.os_type(), OsType::Android(_) | OsType::Ios(_)) {
             return;
         }
@@ -1786,6 +1836,9 @@ impl Cx {
     /// a video plays. Honored on Android and iOS; nothing elsewhere. The
     /// latest request of a frame wins.
     pub fn set_keep_screen_on(&mut self, on: bool) {
+        if !self.script_data.std.has_grant(HostGrants::DESKTOP_SHELL) {
+            return;
+        }
         if !matches!(self.os_type(), OsType::Android(_) | OsType::Ios(_)) {
             return;
         }
@@ -1798,6 +1851,15 @@ impl Cx {
         if self.platform_ops.iter().find(|o| **o == op).is_none() {
             self.platform_ops.push_back(op);
         }
+    }
+
+    /// Drains and returns the OS operations currently queued on this `Cx`.
+    ///
+    /// Intended for headless tests that inspect queued [`CxOsOp`]s without running a platform
+    /// backend; calling this in a live app discards operations before the backend processes them.
+    #[doc(hidden)]
+    pub fn take_platform_ops(&mut self) -> Vec<CxOsOp> {
+        self.platform_ops.drain(..).collect()
     }
 
     pub fn show_text_ime(&mut self, area: Area, pos: Vec2d) {
@@ -1943,6 +2005,9 @@ impl Cx {
     /// button bounds. The resulting synthetic `WindowGeomChange` is queued so
     /// this can be called from inside normal event/action handlers.
     pub fn set_window_dpi_override(&mut self, window_id: WindowId, dpi_override: Option<f64>) {
+        if !self.script_data.std.has_grant(HostGrants::DESKTOP_SHELL) {
+            return;
+        }
         let dpi_override = dpi_override.and_then(CxWindow::valid_dpi_factor);
         if matches!(self.os_type(), OsType::Macos) {
             self.platform_ops
@@ -2029,6 +2094,9 @@ impl Cx {
     /// started). macOS and Windows; false where unsupported or refused.
     #[cfg(not(target_os = "linux"))]
     pub fn activate_process(&mut self, pid: u32) -> bool {
+        if !self.script_data.std.has_grant(HostGrants::DESKTOP_SHELL) {
+            return false;
+        }
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         return makepad_hal::activate_process(pid);
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -2039,19 +2107,27 @@ impl Cx {
     }
 
     pub fn copy_to_clipboard(&mut self, content: &str) {
+        if !self.script_data.std.has_grant(HostGrants::CLIPBOARD) {
+            return;
+        }
         self.copy_to_clipboard_flavours(ClipboardWrite::text(content));
     }
 
     /// Copies text with its richer flavours (HTML, Markdown) beside it: a paste target takes the
     /// richest it understands. A platform without a flavour's clipboard type offers the rest.
     pub fn copy_to_clipboard_flavours(&mut self, write: ClipboardWrite) {
-        if self.script_data.std.host_io_only() { return; }
+        if !self.script_data.std.has_grant(HostGrants::CLIPBOARD) {
+            return;
+        }
         self.platform_ops.push_back(CxOsOp::CopyToClipboard(write));
     }
 
     /// Open the OS share sheet (Android `ACTION_SEND` chooser) with `content`.
     /// No-op on platforms whose backend doesn't handle `CxOsOp::ShareText`.
     pub fn share_text(&mut self, content: &str) {
+        if !self.script_data.std.has_grant(HostGrants::CLIPBOARD) {
+            return;
+        }
         self.platform_ops
             .push_back(CxOsOp::ShareText(content.to_owned()));
     }
@@ -2059,7 +2135,9 @@ impl Cx {
     /// Sets the primary selection (Linux middle-click paste).
     /// No-op on non-Linux platforms.
     pub fn set_primary_selection(&mut self, content: &str) {
-        if self.script_data.std.host_io_only() { return; }
+        if !self.script_data.std.has_grant(HostGrants::CLIPBOARD) {
+            return;
+        }
         self.platform_ops
             .push_back(CxOsOp::SetPrimarySelection(content.to_owned()));
     }
@@ -2093,7 +2171,9 @@ impl Cx {
     /// or end, and the next drag would find the last one still running. Their
     /// backends drive every drag from the touch stream, cancel included.
     pub fn start_dragging(&mut self, items: Vec<DragItem>) {
-        if self.script_data.std.host_io_only() { return; }
+        if !self.script_data.std.has_grant(HostGrants::DRAG) {
+            return;
+        }
         let files_only = items
             .iter()
             .all(|item| matches!(item, DragItem::FilePath { internal_id: None, .. }));
@@ -2115,6 +2195,11 @@ impl Cx {
         }
     }
 
+    /// Whether a platform-independent in-app drag started by [`Self::start_dragging`] is active.
+    pub fn has_internal_drag(&self) -> bool {
+        self.drag_drop.has_internal_drag()
+    }
+
     /// Starts a native drag-and-drop session that can leave the Makepad app, from the press
     /// in progress in `window_id`: files another app can take (a chat, a mail, the file
     /// manager), each an existing file by absolute path or a [`crate::event::FilePromise`] whose
@@ -2123,7 +2208,9 @@ impl Cx {
     /// Every accepted or rejected request completes with `Event::DragEnd`, so callers release
     /// their gesture state without platform-specific timeouts.
     pub fn start_external_dragging(&mut self, window_id: WindowId, drag: crate::event::DragOut) {
-        if self.script_data.std.host_io_only() { return; }
+        if !self.script_data.std.has_grant(HostGrants::DRAG) {
+            return;
+        }
         self.platform_ops.iter().for_each(|op| {
             if matches!(op, CxOsOp::StartExternalDragging { .. }) {
                 panic!("start external drag twice");
@@ -2376,6 +2463,9 @@ impl Cx {
     }
 
     pub fn request_permission(&mut self, permission: crate::permission::Permission) -> i32 {
+        if !self.script_data.std.has_grant(HostGrants::DEVICE_IO) {
+            return 0;
+        }
         self.permissions_request_id += 1;
         self.platform_ops.push_back(CxOsOp::RequestPermission {
             request_id: self.permissions_request_id,
@@ -2385,6 +2475,9 @@ impl Cx {
     }
 
     pub fn check_permission(&mut self, permission: crate::permission::Permission) -> i32 {
+        if !self.script_data.std.has_grant(HostGrants::DEVICE_IO) {
+            return 0;
+        }
         self.permissions_request_id += 1;
         self.platform_ops.push_back(CxOsOp::CheckPermission {
             request_id: self.permissions_request_id,
@@ -2400,11 +2493,17 @@ impl Cx {
     /// platform, failures arrive as [`Event::LocationError`]. Platforms
     /// without a location service log an error and stay silent.
     pub fn start_location_updates(&mut self) {
+        if !self.script_data.std.has_grant(HostGrants::DEVICE_IO) {
+            return;
+        }
         self.platform_ops.push_back(CxOsOp::StartLocationUpdates);
     }
 
     /// Stop streaming position fixes.
     pub fn stop_location_updates(&mut self) {
+        if !self.script_data.std.has_grant(HostGrants::DEVICE_IO) {
+            return;
+        }
         self.platform_ops.push_back(CxOsOp::StopLocationUpdates);
     }
 
@@ -2645,6 +2744,28 @@ impl Cx {
         cxpass.attached_by = attached_by;
     }
 
+    /// Declare that `reader` samples `producer`. Each declaration replaces the
+    /// reader's previous one. With no draw list open, the read lasts for the
+    /// reader's lifetime or until the producer is detached or withdrawn.
+    pub fn add_pass_reader(
+        &mut self,
+        producer: DrawPassId,
+        reader: DrawPassId,
+        declared_by: Option<DrawListId>,
+    ) {
+        let entry = PassReader {
+            pass: reader,
+            generation: self.passes.0.pool[reader.0].generation,
+            declared_by: declared_by.map(|list| (list, self.draw_lists[list].redraw_id)),
+        };
+        let readers = &mut self.passes[producer].readers;
+        if let Some(previous) = readers.iter_mut().find(|r| r.pass == reader) {
+            *previous = entry;
+        } else {
+            readers.push(entry);
+        }
+    }
+
     /// True when the draw list that attached `draw_pass_id` has been recorded
     /// again since without re-attaching it, or was freed: nothing samples the
     /// pass any more. Its own draw list is frozen at the frame that last began
@@ -2655,7 +2776,16 @@ impl Cx {
     /// geometries under other tiles' meshes: tens of millions of triangles into
     /// a texture nobody read).
     pub fn pass_attachment_is_stale(&self, draw_pass_id: DrawPassId) -> bool {
-        let Some((list_id, redraw_id)) = self.passes[draw_pass_id].attached_by else {
+        self.pass_recording_is_stale(self.passes[draw_pass_id].attached_by)
+    }
+
+    pub(crate) fn pass_reader_is_stale(&self, reader: &PassReader) -> bool {
+        !self.passes.0.is_live_generation(reader.pass.0, reader.generation)
+            || self.pass_recording_is_stale(reader.declared_by)
+    }
+
+    fn pass_recording_is_stale(&self, recording: Option<(DrawListId, u64)>) -> bool {
+        let Some((list_id, redraw_id)) = recording else {
             return false;
         };
         // A dropped list (its widget is gone) keeps its slot and generation
@@ -2878,6 +3008,12 @@ impl Cx {
         self.keyboard.key_focus()
     }
 
+    /// The area queued to hold key focus once the current event settles
+    /// (equals [`Self::key_focus`] when no focus change is pending).
+    pub fn next_key_focus(&self) -> Area {
+        self.keyboard.next_key_focus()
+    }
+
     /// Says whether the widget at `focus_area` takes its keys as typed text: a text field, a code
     /// editor, a terminal, a web page. Only the holder of the key focus can say it (any other area
     /// changes nothing). It says it from its `Hit::KeyFocus`, and again when it turns read-only or
@@ -3012,13 +3148,18 @@ impl Cx {
     }
 
     pub fn http_request(&mut self, request_id: LiveId, request: HttpRequest) {
-        if self.script_data.std.host_io_only() { return; }
+        if !self.script_data.std.has_grant(HostGrants::NETWORK) {
+            return;
+        }
         if let Err(err) = self.net.http_start(request_id, request) {
             crate::error!("http_request failed for {}: {}", request_id.0, err);
         }
     }
 
     pub fn cancel_http_request(&mut self, request_id: LiveId) {
+        if !self.script_data.std.has_grant(HostGrants::NETWORK) {
+            return;
+        }
         if let Err(err) = self.net.http_cancel(request_id) {
             crate::error!("cancel_http_request failed for {}: {}", request_id.0, err);
         }
@@ -3093,7 +3234,9 @@ impl Cx {
         should_loop: bool,
         permission: crate::permission::Permission,
     ) {
-        if self.script_data.std.host_io_only() { return; }
+        if !self.script_data.std.has_grant(video_source_grant(&source)) {
+            return;
+        }
         if let VideoSource::Camera(..) = &source {
             self.pending_camera_playbacks
                 .push(crate::cx::PendingCameraPlayback {
@@ -3256,7 +3399,9 @@ impl Cx {
         autoplay: bool,
         should_loop: bool,
     ) {
-        if self.script_data.std.host_io_only() { return; }
+        if !self.script_data.std.has_grant(video_source_grant(&source)) {
+            return;
+        }
         self.platform_ops.push_back(CxOsOp::PrepareAudioPlayback(
             video_id,
             source,
@@ -3270,7 +3415,9 @@ impl Cx {
     }
 
     pub fn open_system_savefile_dialog(&mut self) {
-        if self.script_data.std.host_io_only() { return; }
+        if !self.script_data.std.has_grant(HostGrants::FILE_DIALOGS) {
+            return;
+        }
         self.platform_ops
             .push_back(CxOsOp::SaveFileDialog(FileDialog::new()));
     }
@@ -3287,7 +3434,9 @@ impl Cx {
     /// On web this should be called directly from a user input handler:
     /// browsers may reject a picker requested after that activation expires.
     pub fn open_select_file_dialog(&mut self, dialog: FileDialog) {
-        if self.script_data.std.host_io_only() { return; }
+        if !self.script_data.std.has_grant(HostGrants::FILE_DIALOGS) {
+            return;
+        }
         self.file_dialogs.begin(&dialog);
         self.platform_ops
             .push_back(CxOsOp::SelectFileDialog(dialog));
@@ -3296,6 +3445,9 @@ impl Cx {
     /// Set the maximum bytes accepted for one virtual file and for one
     /// multi-file selection/drop. Both limits default to 512 MiB.
     pub fn set_virtual_file_limits(&mut self, max_file_size: u64, max_total_size: u64) {
+        if !self.script_data.std.has_grant(HostGrants::FILE_DIALOGS) {
+            return;
+        }
         let limits = VirtualFileLimits {
             max_file_size,
             max_total_size,
@@ -3316,7 +3468,9 @@ impl Cx {
     /// Open the platform's native save panel. The OS asks about
     /// overwriting before answering `SaveFileSelected`.
     pub fn open_save_file_dialog(&mut self, dialog: FileDialog) {
-        if self.script_data.std.host_io_only() { return; }
+        if !self.script_data.std.has_grant(HostGrants::FILE_DIALOGS) {
+            return;
+        }
         self.platform_ops.push_back(CxOsOp::SaveFileDialog(dialog));
     }
 
@@ -3324,6 +3478,9 @@ impl Cx {
     /// The outcome arrives as [`Event::PrintResult`], including on unsupported backends.
     pub fn print_pdf(&mut self, job: PrintJob) -> PrintId {
         let id = PrintId::next();
+        if !self.script_data.std.has_grant(HostGrants::FILE_DIALOGS) {
+            return id;
+        }
         self.platform_ops.push_back(CxOsOp::PrintPdf(id, job));
         id
     }
@@ -3345,13 +3502,17 @@ impl Cx {
     }
 
     pub fn open_system_savefolder_dialog(&mut self) {
-        if self.script_data.std.host_io_only() { return; }
+        if !self.script_data.std.has_grant(HostGrants::FILE_DIALOGS) {
+            return;
+        }
         self.platform_ops
             .push_back(CxOsOp::SaveFolderDialog(FileDialog::new()));
     }
 
     pub fn open_system_openfolder_dialog(&mut self) {
-        if self.script_data.std.host_io_only() { return; }
+        if !self.script_data.std.has_grant(HostGrants::FILE_DIALOGS) {
+            return;
+        }
         self.platform_ops
             .push_back(CxOsOp::SelectFolderDialog(FileDialog::new()));
     }
@@ -3361,13 +3522,24 @@ impl Cx {
     /// [`crate::file_dialogs::FileDialogAction`] in the actions pass —
     /// `FolderSelected` with the chosen path, or `FolderCancelled`.
     pub fn open_select_folder_dialog(&mut self, dialog: FileDialog) {
-        if self.script_data.std.host_io_only() { return; }
+        if !self.script_data.std.has_grant(HostGrants::FILE_DIALOGS) {
+            return;
+        }
         self.platform_ops
             .push_back(CxOsOp::SelectFolderDialog(dialog));
     }
 
     pub fn event_id(&self) -> u64 {
         self.event_id
+    }
+}
+
+fn video_source_grant(source: &VideoSource) -> HostGrants {
+    match source {
+        VideoSource::Network(_) => HostGrants::DEVICE_IO.union(HostGrants::NETWORK),
+        VideoSource::Filesystem(_) => HostGrants::DEVICE_IO.union(HostGrants::LOCAL_RESOURCES),
+        VideoSource::InMemory(_) | VideoSource::Camera(_, _) | VideoSource::PlaybackSession(_)
+        | VideoSource::Session(_) => HostGrants::DEVICE_IO,
     }
 }
 
@@ -3889,6 +4061,306 @@ impl Cx {
 }
 
 #[cfg(test)]
+mod grant_sink_tests {
+    use super::*;
+    use crate::{
+        area::RectArea,
+        draw_list::{CxRectArea, DrawList},
+        event::{DragOut, Hit},
+        native_layer::{NativeContent, NativeLayerMode, NativeLayerOperation},
+        notification::Notification,
+        permission::Permission,
+        tray::TrayIcon,
+        window::WindowHandle,
+    };
+    use makepad_script_std::ScriptStd;
+
+    const DESKTOP_BITS: [HostGrants; 8] = [
+        HostGrants::CLIPBOARD, HostGrants::OPEN_URL, HostGrants::BROWSER_NAV,
+        HostGrants::DESKTOP_SHELL, HostGrants::DRAG, HostGrants::NATIVE_LAYERS,
+        HostGrants::FILE_DIALOGS, HostGrants::DEVICE_IO,
+    ];
+
+    fn context(grants: HostGrants) -> Cx {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.script_data.std.set_grants(grants);
+        cx.platform_ops.clear();
+        cx
+    }
+
+    #[test]
+    fn host_grants_bit_layout_and_algebra() {
+        let mut all = HostGrants::NONE;
+        let mut desktop = HostGrants::NONE;
+        for (index, bit) in [HostGrants::NETWORK, HostGrants::LOCAL_RESOURCES].into_iter()
+            .chain(DESKTOP_BITS).enumerate()
+        {
+            assert_eq!(bit.bits(), 1 << index, "wrong grant at bit {index}");
+            all = all.union(bit);
+            if index >= 2 {
+                desktop = desktop.union(bit);
+            }
+        }
+        assert_eq!(desktop, HostGrants::DESKTOP_ALL, "desktop mask covers exactly the desktop bits");
+        assert_eq!(all, HostGrants::ALL, "host mask covers all ten bits");
+        assert!(all.without(all).is_empty(), "removing all grants leaves the empty mask");
+        assert_eq!(all.without(HostGrants::CLIPBOARD).bits(), 0b11_1111_1011, "only clipboard is removed");
+
+        let cx = Cx::new(Box::new(|_, _| {}));
+        let mut std = ScriptStd::with_network_runtime(cx.net.clone());
+        assert_eq!(std.grants(), HostGrants::ALL, "the main host starts fully granted");
+        std.restrict_grants(HostGrants::NETWORK);
+        assert!(std.net.is_some(), "retaining NETWORK keeps its installed runtime");
+        std.restrict_grants(HostGrants::ALL);
+        assert_eq!(std.grants(), HostGrants::NETWORK, "restriction cannot add a bit");
+        std.set_grants(HostGrants::NONE);
+        assert!(std.net.is_none(), "revoking NETWORK drops its installed runtime");
+    }
+
+    fn check_clipboard_hits(cx: &mut Cx, allowed: bool) {
+        let list = DrawList::new(cx);
+        let draw_list = &mut cx.draw_lists[list.id()];
+        draw_list.rect_areas.push(CxRectArea { rect: Rect::default(), draw_clip: Default::default() });
+        let area = Area::Rect(RectArea { draw_list_id: list.id(), rect_id: 0, redraw_id: draw_list.redraw_id });
+        cx.set_key_focus(area);
+        cx.keyboard.cycle_key_focus_changed();
+        assert!(area.is_valid(cx) && cx.keyboard.has_key_focus(area), "clipboard target must be live and focused");
+        let copy = Event::TextCopy(Default::default()).hits(cx, area);
+        let cut = Event::TextCut(Default::default()).hits(cx, area);
+        if allowed {
+            assert!(matches!(copy, Hit::TextCopy(_)), "a focused clipboard grantee receives copy");
+            assert!(matches!(cut, Hit::TextCut(_)), "a focused clipboard grantee receives cut");
+        } else {
+            assert!(matches!(copy, Hit::Nothing), "copy reached a focused widget without CLIPBOARD");
+            assert!(matches!(cut, Hit::Nothing), "cut reached a focused widget without CLIPBOARD");
+        }
+    }
+
+    // Check each operation at its call site, including its payload and any unexpected queued op.
+    fn expect_op(cx: &mut Cx, allowed: bool, op: CxOsOp) {
+        let name = op.name();
+        let grants = cx.script_data.std.grants();
+        assert_eq!(cx.platform_ops.pop_front(), allowed.then_some(op), "{name} under {grants:?}");
+    }
+
+    fn check_desktop_families(cx: &mut Cx, grants: HostGrants) {
+        let clipboard = grants.contains(HostGrants::CLIPBOARD);
+        check_clipboard_hits(cx, clipboard);
+        cx.copy_to_clipboard("selection");
+        expect_op(cx, clipboard, CxOsOp::CopyToClipboard(ClipboardWrite::text("selection")));
+        let read = cx.read_clipboard();
+        assert_eq!(read, if clipboard { 1 } else { 0 }, "clipboard read ID under {grants:?}");
+        #[cfg(not(target_arch = "wasm32"))]
+        expect_op(cx, clipboard, CxOsOp::ReadClipboard(read));
+
+        let open = grants.contains(HostGrants::OPEN_URL);
+        let url = "https://example.invalid/";
+        cx.open_url(url, OpenUrlInPlace::Yes);
+        expect_op(cx, open, CxOsOp::OpenUrl { url: url.into(), in_place: OpenUrlInPlace::Yes });
+        <Cx as CxOsApi>::open_url(cx, url, OpenUrlInPlace::No);
+        expect_op(cx, open, CxOsOp::OpenUrl { url: url.into(), in_place: OpenUrlInPlace::No });
+
+        let nav = grants.contains(HostGrants::BROWSER_NAV);
+        cx.browser_update_url("/one", false);
+        expect_op(cx, nav, CxOsOp::BrowserUpdateUrl { url: "/one".into(), replace: false });
+        <Cx as CxOsApi>::browser_update_url(cx, "/two", true);
+        expect_op(cx, nav, CxOsOp::BrowserUpdateUrl { url: "/two".into(), replace: true });
+        cx.browser_history_go(1);
+        expect_op(cx, nav, CxOsOp::BrowserHistoryGo(1));
+        <Cx as CxOsApi>::browser_history_go(cx, -1);
+        expect_op(cx, nav, CxOsOp::BrowserHistoryGo(-1));
+        cx.browser_history_go(0);
+        assert!(cx.platform_ops.is_empty(), "zero history delta queued an op under {grants:?}");
+
+        let shell = grants.contains(HostGrants::DESKTOP_SHELL);
+        let id = LiveId(7);
+        cx.update_macos_menu(MacosMenu::Line);
+        expect_op(cx, shell, CxOsOp::UpdateMacosMenu(MacosMenu::Line));
+        let tray = TrayIcon { id, image: Default::default(), tooltip: "tray".into(), menu: vec![], dropdown: false };
+        cx.set_tray(tray.clone());
+        expect_op(cx, shell, CxOsOp::SetTray(tray));
+        cx.remove_tray(id);
+        expect_op(cx, shell, CxOsOp::RemoveTray(id));
+        let note = Notification { id, title: "title".into(), body: "body".into() };
+        cx.post_notification(note.clone());
+        expect_op(cx, shell, CxOsOp::PostNotification(note));
+        cx.remove_notification(id);
+        expect_op(cx, shell, CxOsOp::RemoveNotification(id));
+        cx.show_in_dock(false);
+        expect_op(cx, shell, CxOsOp::ShowInDock(false));
+        cx.lock_mouse_pointer(true);
+        expect_op(cx, shell, CxOsOp::LockMousePointer(true));
+        cx.cancel_quit();
+        expect_op(cx, shell, CxOsOp::CancelQuit);
+        cx.os_type = OsType::Ios(Default::default());
+        cx.defer_system_gestures(ScreenEdges::BOTTOM);
+        expect_op(cx, shell, CxOsOp::DeferSystemGestures(ScreenEdges::BOTTOM));
+        cx.set_screen_orientation(ScreenOrientation::Portrait);
+        expect_op(cx, shell, CxOsOp::SetScreenOrientation(ScreenOrientation::Portrait));
+        cx.set_keep_screen_on(true);
+        expect_op(cx, shell, CxOsOp::SetKeepScreenOn(true));
+        cx.os_type = OsType::Macos;
+        let mut window = WindowHandle::new(cx);
+        let wid = window.window_id();
+        expect_op(cx, shell, CxOsOp::CreateWindow(wid));
+        cx.windows[wid].is_created = true;
+        window.set_title(cx, "New title".into());
+        expect_op(cx, shell, CxOsOp::SetWindowTitle(wid, crate::window::badge_window_title("New title".into())));
+        let visuals = WindowVisuals { transparent: true, ..WindowVisuals::default() };
+        window.set_window_visuals(cx, visuals);
+        expect_op(cx, shell, CxOsOp::SetWindowVisuals(wid, visuals));
+        cx.set_window_dpi_override(wid, Some(2.0));
+        expect_op(cx, shell, CxOsOp::SetWindowDpiOverride(wid, Some(2.0)));
+        assert_eq!(cx.windows[wid].dpi_override, shell.then_some(2.0), "window DPI under {grants:?}");
+
+        let drag = grants.contains(HostGrants::DRAG);
+        cx.start_dragging(vec![DragItem::String { value: "item".into(), internal_id: None }]);
+        assert_eq!(cx.drag_drop.has_internal_drag(), drag, "internal drag under {grants:?}");
+        cx.start_external_dragging(wid, DragOut { items: vec![], image: None });
+        expect_op(cx, drag, CxOsOp::StartExternalDragging { window_id: wid, items: vec![], image: None });
+
+        let native = grants.contains(HostGrants::NATIVE_LAYERS);
+        let content = NativeContent::Web { url: url.into() };
+        let layer = cx.native_layer_new(content.clone());
+        expect_op(cx, native, CxOsOp::NativeLayerCreate { id: layer.id(), content });
+        let mode = if native { NativeLayerMode::Pending } else { NativeLayerMode::Unsupported };
+        assert_eq!(layer.mode(cx), mode, "native-layer creation mode under {grants:?}");
+        cx.native_layer(layer.id()).navigate(url, true);
+        expect_op(cx, native, CxOsOp::NativeLayerOp { id: layer.id(), op: NativeLayerOperation::Navigate { url: url.into(), replace: true } });
+        if native {
+            cx.script_data.std.restrict_grants(grants.without(HostGrants::NATIVE_LAYERS));
+            cx.native_layer(layer.id()).navigate(url, false);
+            assert!(cx.platform_ops.is_empty(), "revoking NATIVE_LAYERS stops operations on a live layer");
+            cx.native_layer(layer.id()).close();
+            expect_op(cx, true, CxOsOp::NativeLayerDestroy { id: layer.id() });
+            cx.script_data.std.set_grants(grants);
+        }
+
+        let dialogs = grants.contains(HostGrants::FILE_DIALOGS);
+        cx.open_select_file_dialog(FileDialog::new());
+        expect_op(cx, dialogs, CxOsOp::SelectFileDialog(FileDialog::new()));
+        let device = grants.contains(HostGrants::DEVICE_IO);
+        let req = cx.request_permission(Permission::Location);
+        assert_eq!(req, if device { 1 } else { 0 }, "permission request ID under {grants:?}");
+        expect_op(cx, device, CxOsOp::RequestPermission { request_id: req, permission: Permission::Location });
+        cx.start_location_updates();
+        expect_op(cx, device, CxOsOp::StartLocationUpdates);
+        assert!(cx.platform_ops.is_empty(), "unexpected trailing ops under {grants:?}: {:?}", cx.platform_ops);
+    }
+
+    #[test]
+    fn each_grant_bit_enables_only_its_own_sink_family() {
+        for bit in DESKTOP_BITS {
+            for grants in [bit, HostGrants::ALL.without(bit)] {
+                let mut cx = context(grants);
+                check_desktop_families(&mut cx, grants);
+            }
+        }
+    }
+
+    fn prepare_media(cx: &mut Cx, source: &VideoSource) {
+        cx.prepare_video_playback_with_permission(
+            LiveId(1), source.clone(), CameraPreviewMode::Auto, 0, cx.null_texture().texture_id(),
+            false, false, Permission::Camera,
+        );
+        cx.prepare_audio_playback(LiveId(2), source.clone(), false, false);
+    }
+
+    #[test]
+    fn none_grants_refuse_every_desktop_sink() {
+        let mut cx = context(HostGrants::NONE);
+        check_desktop_families(&mut cx, HostGrants::NONE);
+        cx.copy_to_clipboard_flavours(ClipboardWrite { html: Some("selection".into()), ..Default::default() });
+        cx.set_primary_selection("selection");
+        cx.share_text("share");
+        cx.repin_mouse_pointer();
+        cx.set_native_appearance(NativeAppearance::Dark);
+        assert_ne!(cx.display_context.native_appearance, Some(NativeAppearance::Dark), "denied appearance changed host state");
+        #[cfg(not(target_os = "linux"))]
+        assert!(!cx.activate_process(1), "denied process activation reported success");
+        cx.quit();
+        assert!(!cx.request_quit(QuitReason::App), "denied quit request reported handled");
+
+        let mut parent = WindowHandle::new(&mut cx);
+        let id = parent.window_id();
+        let pos = dvec2(1., 2.);
+        let size = dvec2(3., 4.);
+        let mut popup = WindowHandle::new_popup(&mut cx, id, pos, size);
+        parent.show_at_tray(&mut cx, LiveId(1), size);
+        parent.show(&mut cx);
+        cx.windows[id].is_created = true;
+        parent.minimize(&mut cx);
+        parent.maximize(&mut cx);
+        parent.fullscreen(&mut cx);
+        parent.normal(&mut cx);
+        parent.set_topmost(&mut cx, true);
+        parent.set_chromeless_when_maximized(&mut cx, true);
+        parent.resize(&mut cx, size);
+        parent.reposition(&mut cx, pos);
+        parent.restore(&mut cx);
+        parent.request_close(&mut cx);
+        parent.set_visible(&mut cx, false);
+        popup.close(&mut cx);
+
+        cx.open_system_savefile_dialog();
+        cx.open_system_openfile_dialog();
+        cx.open_save_file_dialog(FileDialog::new());
+        cx.open_system_savefolder_dialog();
+        cx.open_system_openfolder_dialog();
+        cx.open_select_folder_dialog(FileDialog::new());
+        let limits = cx.virtual_file_limits();
+        cx.set_virtual_file_limits(1, 2);
+        assert_eq!(cx.virtual_file_limits(), limits, "denied picker limits changed host state");
+        let print = cx.print_pdf(PrintJob { pdf: Default::default(), title: "document".into() });
+        assert_ne!(print.0, 0, "denied print still returns its request ID");
+
+        for source in [VideoSource::InMemory(Rc::default()), VideoSource::Network("https://example.invalid/".into()),
+            VideoSource::Filesystem("clip".into()), VideoSource::Camera(Default::default(), Default::default())]
+        {
+            prepare_media(&mut cx, &source);
+        }
+        assert!(cx.pending_camera_playbacks.is_empty(), "denied camera was scheduled");
+        assert_eq!(cx.check_permission(Permission::Location), 0, "denied permission check consumed an ID");
+        assert_eq!(cx.permissions_request_id, 0, "denied device requests advanced the counter");
+        cx.stop_location_updates();
+        assert!(cx.platform_ops.is_empty(), "denied sinks queued {:?}", cx.platform_ops);
+        cx.script_data.std.set_grants(HostGrants::CLIPBOARD);
+        assert_eq!(cx.read_clipboard(), 1, "denied clipboard reads consumed an ID");
+    }
+
+    #[test]
+    fn media_playback_requires_both_device_io_and_source_grant() {
+        use crate::{playback_session::MediaPlaybackSessionId, video_session::VideoFrameSessionId};
+        let mut cx = context(HostGrants::NONE);
+        let device = HostGrants::DEVICE_IO;
+        let net = HostGrants::NETWORK;
+        let local = HostGrants::LOCAL_RESOURCES;
+        for grants in [device, device.union(net), device.union(local), net, local] {
+            cx.script_data.std.set_grants(grants);
+            for (source, needed) in [
+                (VideoSource::InMemory(Rc::default()), device),
+                (VideoSource::Network("https://example.invalid/clip".into()), device.union(net)),
+                (VideoSource::Filesystem("clip".into()), device.union(local)),
+                (VideoSource::PlaybackSession(MediaPlaybackSessionId(1)), device),
+                (VideoSource::Session(VideoFrameSessionId(1)), device),
+            ] {
+                prepare_media(&mut cx, &source);
+                if grants.contains(needed) {
+                    let texture = cx.null_texture().texture_id();
+                    assert_eq!(cx.platform_ops.pop_front(), Some(CxOsOp::PrepareVideoPlayback(
+                        LiveId(1), source.clone(), CameraPreviewMode::Auto, 0, texture, false, false,
+                    )), "video source {source:?} under {grants:?}");
+                    assert_eq!(cx.platform_ops.pop_front(), Some(CxOsOp::PrepareAudioPlayback(
+                        LiveId(2), source.clone(), false, false,
+                    )), "audio source {source:?} under {grants:?}");
+                }
+                assert!(cx.platform_ops.is_empty(), "unexpected ops for {source:?} under {grants:?}: {:?}", cx.platform_ops);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod host_io_tests {
     use super::*;
 
@@ -3907,7 +4379,7 @@ mod host_io_tests {
     #[test]
     fn host_io_native_widget_paths_do_not_enqueue_external_operations() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.script_data.std.restrict_to_host_io();
+        cx.script_data.std.set_grants(HostGrants::NONE);
         let before = cx.platform_ops.len();
         cx.copy_to_clipboard("private");
         cx.set_primary_selection("private");

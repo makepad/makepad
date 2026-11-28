@@ -25,7 +25,7 @@ impl Metal {
         for pass in passes.iter().filter(|p| p.kind == pass_kind::COMPUTE) {
             let Some(dispatches) = compute::records::<Dispatch>(view.arena, pass.dispatches) else { return false; };
             for d in dispatches {
-                let Some(p) = self.compute.get(&(sid, d.pipeline.index)).filter(|p| p.gen == d.pipeline.gen) else { return false; };
+                let Some(p) = self.compute.get(sid, d.pipeline.index).filter(|p| p.gen == d.pipeline.gen) else { return false; };
                 if !matches!(p.state.0.get(), Some(Ok(_))) { return false; }
             }
         }
@@ -46,7 +46,7 @@ impl Metal {
         // the kernel's name on its pipeline: what Metal's validation and GPU tools report
         let label = s.string(blob.desc.name).unwrap_or("compute").to_string();
         let state = Arc::new(State(OnceLock::new()));
-        self.compute.insert((s.id, id.index), Pipe { gen: id.gen, layout, state: state.clone(), announced: false });
+        self.compute.insert(s.id, id.index, Pipe { gen: id.gen, layout, state: state.clone(), announced: false });
         let device = RcObjcId::from_unowned(NonNull::new(self.dev.device).unwrap());
         let mailbox = self.dev.mailbox.clone();
         let sid = s.id;
@@ -105,7 +105,7 @@ impl Metal {
         let dispatches = compute::records::<Dispatch>(view.arena, pass.dispatches).ok_or("invalid dispatch records")?;
         // Preflight the whole pass: never run only a prefix while a later kernel compiles.
         for d in &dispatches {
-            let p = self.compute.get(&(s.id, d.pipeline.index)).filter(|p| p.gen == d.pipeline.gen).ok_or("stale compute pipeline")?;
+            let p = self.compute.get(s.id, d.pipeline.index).filter(|p| p.gen == d.pipeline.gen).ok_or("stale compute pipeline")?;
             match p.state.0.get() { Some(Ok(_)) => {}, Some(Err(e)) => return Err(e.clone()), None => { self.pending_draws += 1; return Err("compute pipeline pending".into()); } }
         }
         let mut indices = Vec::new();
@@ -166,7 +166,7 @@ impl Metal {
         let result = (|| {
             unsafe { let _: () = msg_send![encoder, setLabel: str_to_nsstring(s.string(pass.name).unwrap_or("compute"))]; }
             for d in std::iter::once(dispatch) {
-                let p = &self.compute[&(s.id, d.pipeline.index)];
+                let p = self.compute.get(s.id, d.pipeline.index).expect("validated compute pipeline");
                 let pipeline = p.state.0.get().unwrap().as_ref().unwrap();
                 p.layout.validate_dispatch(s, d, view.arena)?;
                 let params = compute::bytes(view.arena, d.params).ok_or("invalid compute params")?;
@@ -175,14 +175,14 @@ impl Metal {
                 if params.len() != p.layout.desc.push_size as usize || buffers.len() != p.layout.buffers.len() || textures.len() != p.layout.textures.len() { return Err("compute binding count mismatch".into()); }
                 unsafe { let _: () = msg_send![encoder, setComputePipelineState: pipeline.as_id()]; }
                 for (id, binding) in buffers.iter().zip(&p.layout.buffers) {
-                    let b = self.buf.get_mut(&(s.id, id.index)).filter(|b| b.gen == id.gen).ok_or("stale compute buffer")?;
+                    let b = self.buf.get_mut(s.id, id.index).filter(|b| b.gen == id.gen).ok_or("stale compute buffer")?;
                     b.last_bound = seq;
                     unsafe { let _: () = msg_send![encoder, setBuffer: b.buffer.as_id() offset: 0u64 atIndex: binding.index as u64]; }
                 }
                 for (id, binding) in textures.iter().zip(&p.layout.textures) {
                     let desc = &s.textures.get(s.id, *id).map_err(|_| "stale storage texture")?.val;
                     if desc.usage & usage::STORAGE == 0 || desc.format != binding.format { return Err("storage image format/usage mismatch".into()); }
-                    let t = self.tex.get_mut(&(s.id, id.index)).filter(|t| t.gen == id.gen).ok_or("missing storage image")?;
+                    let t = self.tex.get_mut(s.id, id.index).filter(|t| t.gen == id.gen).ok_or("missing storage image")?;
                     t.last_bound = seq;
                     unsafe { let _: () = msg_send![encoder, setTexture: t.obj.as_id() atIndex: binding.index as u64]; }
                 }
@@ -201,7 +201,7 @@ impl Metal {
                     let groups = MTLSize { width: x as u64, height: y as u64, depth: z as u64 };
                     unsafe { let _: () = msg_send![encoder, dispatchThreadgroups: groups threadsPerThreadgroup: threads]; }
                 } else {
-                    let b = self.buf.get_mut(&(s.id, d.indirect_buffer.index)).filter(|b| b.gen == d.indirect_buffer.gen).ok_or("stale indirect buffer")?;
+                    let b = self.buf.get_mut(s.id, d.indirect_buffer.index).filter(|b| b.gen == d.indirect_buffer.gen).ok_or("stale indirect buffer")?;
                     if d.indirect_offset % 4 != 0 || d.indirect_offset.checked_add(12).is_none_or(|end| end > b.size) { return Err("invalid indirect offset".into()); }
                     b.last_bound = seq;
                     unsafe { let _: () = msg_send![encoder, dispatchThreadgroupsWithIndirectBuffer: b.buffer.as_id() indirectBufferOffset: d.indirect_offset threadsPerThreadgroup: threads]; }
@@ -225,7 +225,7 @@ impl Metal {
             let dev = &self.dev;
             let mut reads = Vec::with_capacity(ranges.len());
             for (order, range) in ranges.iter().enumerate() {
-                let source = self.buf.get(&(s.id, range.id.index)).filter(|b| b.gen == range.id.gen).ok_or("stale buffer")?.buffer.clone();
+                let source = self.buf.get(s.id, range.id.index).filter(|b| b.gen == range.id.gen).ok_or("stale buffer")?.buffer.clone();
                 // macOS blits require four-byte offsets and sizes. Keep the padding in
                 // the lease allocation, and expose only the requested byte range.
                 let prefix = range.offset % 4;
@@ -240,7 +240,7 @@ impl Metal {
                 reads.push((source, range.offset - prefix, block, offset, copy_len, lease));
             }
             let (cb, seq) = self.ensure_batch();
-            for range in ranges { self.buf.get_mut(&(s.id, range.id.index)).unwrap().last_bound = seq; }
+            for range in ranges { self.buf.get_mut(s.id, range.id.index).unwrap().last_bound = seq; }
             self.flush_uploads();
             unsafe {
                 let encoder: ObjcId = msg_send![cb, blitCommandEncoder];

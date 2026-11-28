@@ -482,10 +482,17 @@ impl CxA11y {
         rec.area = area;
         rec.list = area.draw_list_id().or(f.list);
         let list = rec.list;
+        let text_at = rec.text_at;
         let mut parts = std::mem::take(&mut rec.drawn_parts);
         let tree = self.windows.get_mut(&w).unwrap();
         for id in &parts {
-            if let Some(part) = tree.records.get_mut(id) { part.area = area; part.list = list; }
+            if let Some(part) = tree.records.get_mut(id) {
+                part.area = area;
+                part.list = list;
+                if part.drawn.is_empty() {
+                    part.text_at = text_at;
+                }
+            }
         }
         parts.clear();
         tree.records.get_mut(&f.id).unwrap().drawn_parts = parts;
@@ -617,6 +624,13 @@ impl CxA11y {
             .then_some((rec.area, rec.node.bounds, rec.node.states))
     }
 
+    /// Update an action target from its widget when it redrew between semantic frames.
+    pub fn refresh_node_area(&mut self, id: NodeId, area: Area) {
+        if let Some(record) = self.windows.values_mut().find_map(|tree| tree.records.get_mut(&id)) {
+            record.area = area;
+        }
+    }
+
     /// `list_redraw` excludes freed lists, including pool slots awaiting reuse. `bounds` runs
     /// after all turtles finish, also updating cached nodes when their view transform moves.
     /// `origin` is an area's unclipped top-left then, which a node's text follows.
@@ -658,6 +672,14 @@ impl CxA11y {
                         // Area; one drawn as an area of its own stands where that area shows.
                         if !rec.drawn.is_empty() && (rec.looked_up == 0 || rec.seen == self.frame) {
                             shown_at(&mut rec.next, bounds(rec.drawn));
+                        } else if let (Some(at), Some(now)) = (rec.text_at, origin(rec.area)) {
+                            let [dx, dy] = [now[0] - at[0], now[1] - at[1]];
+                            if dx != 0.0 || dy != 0.0 {
+                                rec.next.bounds.x += dx;
+                                rec.next.bounds.y += dy;
+                                follow_origin(&mut rec.next, [dx, dy]);
+                                rec.text_at = Some(now);
+                            }
                         }
                     } else {
                         if !rec.area.is_empty() {
@@ -1248,6 +1270,7 @@ impl Cx {
                 if request.action == Actions::FOCUS { self.a11y.requested_focus = request.node; }
                 self.a11y.pending = Some((request.req, ActionResult::Unhandled));
                 self.call_event_handler(&Event::A11yAction(request.clone()));
+                let area = self.a11y.node_area(window, request.node).map_or(area, |(a, _, _)| a);
                 let handled = self
                     .a11y
                     .pending
@@ -2149,6 +2172,60 @@ mod tests {
         cx.call_draw_event(0.0);
         let acked = cx.platform_ops.iter().any(|op| matches!(op, CxOsOp::A11yLookupDone { seq: 3 }));
         assert!(acked && cx.a11y_tree_current(), "the frame that draws every window answers it and builds the tree");
+    }
+
+    #[test]
+    fn a11y_action_uses_the_area_its_widget_refreshed() {
+        use crate::{draw_list::{CxRectArea, DrawList}, event::Event, window::WindowHandle};
+        use std::{cell::Cell, rc::Rc};
+
+        let widget_area = Rc::new(Cell::new(None));
+        let handler_area = widget_area.clone();
+        let mut cx = Cx::new(Box::new(move |cx, event| {
+            if let Event::A11yAction(req) = event {
+                if let Some(area) = handler_area.get() {
+                    cx.a11y.refresh_node_area(req.node, area);
+                }
+            }
+        }));
+        let window = WindowHandle::new(&mut cx);
+        let wid = window.window_id();
+        let list = DrawList::new(&mut cx);
+        cx.draw_lists[list.id()].redraw_id = 1;
+        cx.draw_lists[list.id()].rect_areas.push(CxRectArea {
+            rect: Rect { pos: dvec2(0.0, 0.0), size: dvec2(80.0, 24.0) },
+            draw_clip: (dvec2(0.0, 0.0), dvec2(80.0, 24.0)),
+        });
+        let area = RectArea { draw_list_id: list.id(), rect_id: 0, redraw_id: 1 };
+        cx.a11y.set_consumers(makepad_a11y::consumer::REMOTE);
+        cx.a11y.begin_frame();
+        let r = root(&mut cx.a11y, wid, 1, list.id());
+        let field = cx.a11y.begin_node(2, Some(list.id()));
+        cx.a11y.end_node(field, node(Role::TextField, "Name"), Area::Rect(area));
+        end_root(&mut cx.a11y, r);
+        cx.a11y_finish_frame();
+        cx.a11y.set_consumers(0);
+        cx.draw_lists[list.id()].redraw_id = 2;
+        let fresh_area = Area::Rect(RectArea { redraw_id: 2, ..area });
+
+        let focus = |cx: &mut Cx, req| {
+            cx.dispatch_a11y_action(wid, ActionRequest {
+                req, node: NodeId::widget(2), action: Actions::FOCUS, arg: makepad_a11y::ActionArg::None,
+            });
+            let Some(CxOsOp::A11yActionDone { req: done, result }) = cx.platform_ops.pop_back() else {
+                panic!("missing focus completion");
+            };
+            assert_eq!(done, req);
+            result
+        };
+        assert_eq!(focus(&mut cx, 1), ActionResult::Unsupported as u8);
+        assert_ne!(cx.keyboard.key_focus(), fresh_area);
+
+        widget_area.set(Some(fresh_area));
+        cx.new_draw_event = Default::default();
+        assert_eq!(focus(&mut cx, 2), ActionResult::Fallback as u8);
+        assert_eq!(cx.keyboard.key_focus(), fresh_area);
+        assert!(cx.need_redrawing(), "the focus fallback requests a redraw");
     }
 
     #[test]

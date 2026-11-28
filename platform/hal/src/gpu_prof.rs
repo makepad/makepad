@@ -90,6 +90,8 @@ struct Ring {
 
 struct State {
     epoch: u64,
+    /// the session whose app query started the recording (None: a tool started it)
+    app: Option<u32>,
     interner: Interner,
     rings: HashMap<u32, Ring>,
     open: Vec<Open>,
@@ -128,7 +130,7 @@ fn lock() -> std::sync::MutexGuard<'static, Option<State>> {
 }
 
 /// A backend reports its device once.
-pub fn set_device(info: DeviceInfo) {
+pub(crate) fn set_device(info: DeviceInfo) {
     *DEVICE.lock().unwrap_or_else(|e| e.into_inner()) = Some(info);
 }
 
@@ -219,7 +221,7 @@ fn unix_ms() -> u64 {
 // ------------------------------------------------------------------ the backend's hooks
 
 /// A session's submit begins: the frame it builds. `None` when not recording.
-pub fn submit_begin(sid: u32) -> Option<FrameKey> {
+pub(crate) fn submit_begin(sid: u32) -> Option<FrameKey> {
     if !recording() {
         return None;
     }
@@ -252,7 +254,7 @@ pub fn submit_begin(sid: u32) -> Option<FrameKey> {
 }
 
 /// The frame a session's current submit builds.
-pub fn current(sid: u32) -> Option<FrameKey> {
+pub(crate) fn current(sid: u32) -> Option<FrameKey> {
     if !recording() {
         return None;
     }
@@ -262,7 +264,7 @@ pub fn current(sid: u32) -> Option<FrameKey> {
 }
 
 /// The submit ended: a frame with nothing drawn is dropped, the rest waits for its GPU times.
-pub fn submit_end(key: Option<FrameKey>) {
+pub(crate) fn submit_end(key: Option<FrameKey>) {
     let Some(key) = key else { return };
     let now = crate::clock_ns();
     let mut g = lock();
@@ -410,7 +412,7 @@ impl Build<'_> {
 }
 
 /// Adds to the frame `key` (still being built).
-pub fn with_frame<R>(key: FrameKey, f: impl FnOnce(&mut Build) -> R) -> Option<R> {
+pub(crate) fn with_frame<R>(key: FrameKey, f: impl FnOnce(&mut Build) -> R) -> Option<R> {
     let mut g = lock();
     let st = g.as_mut().filter(|s| s.epoch == key.epoch)?;
     let i = st.find(key)?;
@@ -418,7 +420,7 @@ pub fn with_frame<R>(key: FrameKey, f: impl FnOnce(&mut Build) -> R) -> Option<R
 }
 
 /// An encoder of frame `key` finished on the GPU (any thread).
-pub fn gpu_pass(key: FrameKey, pass: u16, g: PassGpu) {
+pub(crate) fn gpu_pass(key: FrameKey, pass: u16, g: PassGpu) {
     let mut lk = lock();
     let Some(st) = lk.as_mut().filter(|s| s.epoch == key.epoch) else { return };
     let Some(i) = st.find(key) else { return };
@@ -439,8 +441,9 @@ pub fn gpu_pass(key: FrameKey, pass: u16, g: PassGpu) {
     st.settle(i);
 }
 
-/// An encoder of frame `key` that will not answer (its command buffer failed).
-pub fn gpu_none(key: FrameKey) {
+/// An encoder of frame `key` that will not answer (its command buffer failed; Vulkan, D3D11).
+#[cfg(any(windows, target_os = "linux", target_os = "android"))]
+pub(crate) fn gpu_none(key: FrameKey) {
     let mut lk = lock();
     let Some(st) = lk.as_mut().filter(|s| s.epoch == key.epoch) else { return };
     let Some(i) = st.find(key) else { return };
@@ -449,7 +452,8 @@ pub fn gpu_none(key: FrameKey) {
 }
 
 /// Frame `key` reached the display at `ns` (any thread; it may have joined the ring already).
-pub fn shown(key: FrameKey, ns: u64) {
+#[cfg(any(target_vendor = "apple", target_os = "linux", target_os = "android"))]
+pub(crate) fn shown(key: FrameKey, ns: u64) {
     if ns == 0 {
         return;
     }
@@ -476,7 +480,7 @@ static SHOWN_IDS: Mutex<VecDeque<(u64, u64)>> = Mutex::new(VecDeque::new());
 
 /// A pipeline as the GPU profiler names it: its debug name, else its source location and Cx
 /// shader index (`file.rs:line#index`), else the index.
-pub fn shader_name(s: &Session, desc: &PipelineDesc) -> String {
+pub(crate) fn shader_name(s: &Session, desc: &PipelineDesc) -> String {
     if let Some(n) = s.string(desc.name).filter(|n| !n.is_empty()) {
         return n.to_string();
     }
@@ -496,7 +500,8 @@ pub fn shader_name(s: &Session, desc: &PipelineDesc) -> String {
 
 /// The draws that start a run of draws of one pipeline, when frame `key` is a split frame and
 /// the pass has more than one run (a pass of one run is timed whole); empty otherwise.
-pub fn split_runs<T>(key: Option<FrameKey>, pick: bool, draws: &[T], pipeline: impl Fn(&T) -> Id) -> Vec<usize> {
+#[cfg(any(target_vendor = "apple", target_os = "linux", target_os = "android"))]
+pub(crate) fn split_runs<T>(key: Option<FrameKey>, pick: bool, draws: &[T], pipeline: impl Fn(&T) -> Id) -> Vec<usize> {
     if !key.is_some_and(|k| k.split) || pick {
         return Vec::new();
     }
@@ -591,6 +596,7 @@ impl DrawRecord {
         let flags = if d.flags & CmdDraw::BLEND != 0 { df::BLEND } else { 0 }
             | if d.flags & CmdDraw::DEPTH_WRITE != 0 && depth { df::DEPTH_WRITE } else { 0 }
             | if d.flags & CmdDraw::CULL != 0 { df::CULL } else { 0 }
+            | if d.flags & CmdDraw::CULL_FRONT != 0 { df::CULL_FRONT } else { 0 }
             | if depth { df::DEPTH_TEST } else { 0 };
         let counts = DrawCounts { instances: instances as u32, indices: d.index[1], geo_bytes: geo + instances * stride, tex_bytes, textures: bound, area, flags };
         DrawRecord { pipeline: d.pipeline, owner: d.owner, list_name: d.list_name, list: d.list, counts }
@@ -609,7 +615,7 @@ pub struct ShaderFacts {
 /// and its draws join the frame; `timed`: its GPU result follows through [`gpu_pass`]. `shader`
 /// describes a pipeline the recording has not named yet. The pass's index in the frame.
 #[allow(clippy::too_many_arguments)]
-pub fn record_pass(key: FrameKey, s: &Session, sid: u32, name: StrId, pick: bool, w: u32, h: u32, attach: &str, bytes: u64, draws: &[DrawRecord], timed: bool, shader: impl Fn(Id) -> Option<ShaderFacts>) -> Option<u16> {
+pub(crate) fn record_pass(key: FrameKey, s: &Session, sid: u32, name: StrId, pick: bool, w: u32, h: u32, attach: &str, bytes: u64, draws: &[DrawRecord], timed: bool, shader: impl Fn(Id) -> Option<ShaderFacts>) -> Option<u16> {
     let mut name = s.string(name).filter(|n| !n.is_empty()).unwrap_or("main").to_string();
     if pick {
         name.insert_str(0, "pick ");
@@ -651,6 +657,7 @@ pub fn record_pass(key: FrameKey, s: &Session, sid: u32, name: StrId, pick: bool
 
 /// Backends keep each pipeline's generated source for `gpu prof shader` (MAKEPAD_GPU_PROF=1 at
 /// launch: the sources of pipelines made before a later `gpu prof start` are gone otherwise).
+#[relax_api]
 pub fn keep_sources() -> bool {
     static KEEP: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *KEEP.get_or_init(|| relax_api::env::var("MAKEPAD_GPU_PROF").is_ok_and(|v| v == "1"))
@@ -792,7 +799,7 @@ impl State {
 /// Subscribes to session `sid` (default: the busiest recorded, else the first to draw). The
 /// first message is the file prelude and header, then the strings and the frames the ring holds
 /// (`backfill`), then one message per new frame. Recording starts if it was not running.
-pub fn subscribe(sid: Option<u32>, backfill: bool) -> std::sync::mpsc::Receiver<Vec<u8>> {
+pub(crate) fn subscribe(sid: Option<u32>, backfill: bool) -> std::sync::mpsc::Receiver<Vec<u8>> {
     if !recording() {
         start(StartOptions::default());
     }
@@ -815,8 +822,9 @@ pub fn subscribe(sid: Option<u32>, backfill: bool) -> std::sync::mpsc::Receiver<
 }
 
 /// The `gpuprof` remote service (version 1): OPEN with `[sid=<n>] [backfill=0]`; every DATA
-/// message is a run of `.mkgp` chunks (see local/agent_state/relax-campaign/profproto.md).
+/// message is a run of `.mkgp` chunks.
 #[cfg(not(target_arch = "wasm32"))]
+#[relax_api::relax_api(loader = "the loader serves the `gpuprof` stream in its host: JIT code has no use for it")]
 pub fn stream_service() -> makepad_remote::endpoint::Factory {
     std::sync::Arc::new(|_conn, open| {
         let args = Args::parse(&open.args.split_whitespace().map(String::from).collect::<Vec<_>>());
@@ -857,27 +865,30 @@ impl Default for StartOptions {
 }
 
 /// What the current recording ablates: a shader name, or `owner:<a>+<b>` (see [`ablates`]).
-pub fn ablate_target() -> Option<String> {
+#[cfg(any(target_vendor = "apple", target_os = "linux", target_os = "android"))]
+pub(crate) fn ablate_target() -> Option<String> {
     lock().as_ref().and_then(|s| s.ablate.clone())
 }
 
 /// Whether an ablation frame leaves out a draw of pipeline `desc` noted for `owner`. The target
 /// is a shader name (as `gpu prof top by=shader` prints it), or `owner:<a>+<b>...`: every draw
 /// whose owner (`gpu prof top by=owner`) contains each `+`-separated part.
-pub fn ablates(s: &Session, desc: &PipelineDesc, owner: StrId, target: &str) -> bool {
+#[cfg(any(target_vendor = "apple", target_os = "linux", target_os = "android"))]
+pub(crate) fn ablates(s: &Session, desc: &PipelineDesc, owner: StrId, target: &str) -> bool {
     match target.strip_prefix("owner:") {
         Some(parts) => s.string(owner).is_some_and(|o| !o.is_empty() && parts.split('+').all(|p| o.contains(p))),
         None => shader_name(s, desc) == target,
     }
 }
 
-pub fn start(o: StartOptions) {
+pub(crate) fn start(o: StartOptions) {
     let epoch = EPOCH.fetch_add(1, Ordering::Relaxed) + 1;
     // string id 0 is the empty string: "none" for every name field
     let mut interner = Interner::default();
     interner.id("");
     *lock() = Some(State {
         epoch,
+        app: None,
         interner,
         rings: HashMap::new(),
         open: Vec::new(),
@@ -901,7 +912,7 @@ pub fn start(o: StartOptions) {
 }
 
 /// Freezes every session's recording (frames still on the GPU are kept without GPU times).
-pub fn stop() -> Option<HashMap<u32, Recording>> {
+pub(crate) fn stop() -> Option<HashMap<u32, Recording>> {
     REC.store(false, Ordering::Relaxed);
     let mut g = lock();
     let mut st = g.take()?;
@@ -939,7 +950,7 @@ pub(crate) fn end_run() {
 /// Session `sid` ended (it exits, or relaunches empty under the same id): its frames, the ones
 /// still on the GPU and the backend names it gave leave the recording. The default session
 /// (the busiest) and an app's own readout follow the sessions that draw now, never a closed one.
-pub fn session_closed(sid: u32) {
+pub(crate) fn session_closed(sid: u32) {
     let mut g = lock();
     let Some(st) = g.as_mut() else { return };
     st.rings.remove(&sid);
@@ -952,9 +963,12 @@ pub fn session_closed(sid: u32) {
 
 /// An app's own readout (`GpuProfQuery` of session `sid`): the first query starts a recording
 /// kept `keep_s` seconds; later ones answer with that session's frames (None while it has none).
-pub fn app_query(sid: u32, keep_s: u32) -> Option<Recording> {
+pub(crate) fn app_query(sid: u32, keep_s: u32) -> Option<Recording> {
     if !recording() {
         start(StartOptions { keep_s: keep_s as u64, split_every: 0, ..Default::default() });
+        if let Some(st) = lock().as_mut() {
+            st.app = Some(sid);
+        }
         return None;
     }
     let g = lock();
@@ -963,8 +977,15 @@ pub fn app_query(sid: u32, keep_s: u32) -> Option<Recording> {
     Some(st.snapshot(sid))
 }
 
+/// `GpuProfStop` of session `sid`: stops the recording when that session's query started it.
+pub(crate) fn app_stop(sid: u32) {
+    if lock().as_ref().is_some_and(|st| st.app == Some(sid)) {
+        stop();
+    }
+}
+
 /// The recording of session `sid` (default: the one with the most frames).
-pub fn recording_of(sid: Option<u32>) -> Option<Recording> {
+pub(crate) fn recording_of(sid: Option<u32>) -> Option<Recording> {
     let sid = sid.or_else(|| sessions().first().map(|s| s.0))?;
     if let Some(st) = lock().as_ref() {
         return Some(st.snapshot(sid));
@@ -973,6 +994,7 @@ pub fn recording_of(sid: Option<u32>) -> Option<Recording> {
 }
 
 /// `MAKEPAD_GPU_PROF=1` records from launch (`MAKEPAD_GPU_PROF_SPLIT`, `_S`, `_HZ`).
+#[relax_api]
 pub fn start_from_env() {
     if relax_api::env::var("MAKEPAD_GPU_PROF").map_or(true, |v| v != "1") || recording() {
         return;
@@ -1088,7 +1110,7 @@ fn answer(req: &makepad_remote::Req) -> Result<Answer, String> {
 }
 
 /// Answers `gpu prof ...`; false when the request is not one.
-pub fn dispatch(req: &makepad_remote::Req, out: &mut makepad_remote::Out) -> bool {
+pub(crate) fn dispatch(req: &makepad_remote::Req, out: &mut makepad_remote::Out) -> bool {
     if req.cmd != "gpu" || req.pos.first().map(String::as_str) != Some("prof") {
         return false;
     }
@@ -1178,7 +1200,15 @@ mod tests {
         assert_eq!((frames(OLD), frames(NEW)), (1, 1));
         assert_eq!(name(OLD).as_deref(), Some("relaunched"));
         assert_eq!(name(NEW).as_deref(), Some("new"));
+        // an app's stop (`Cx::gpu_prof_stop`) ends only the recording its own query started
+        app_stop(NEW);
+        assert!(recording(), "a recording a tool started runs on past an app's stop");
         stop();
+        assert!(app_query(NEW, 20).is_none(), "the first query starts a recording");
+        app_stop(OLD);
+        assert!(recording(), "another session's stop leaves the app's recording running");
+        app_stop(NEW);
+        assert!(!recording(), "the session whose query started the recording stops it");
     }
 
     #[test]

@@ -66,12 +66,8 @@ pub const GST_STATE_PAUSED: c_uint = 3;
 pub const GST_STATE_PLAYING: c_uint = 4;
 
 pub const GST_STATE_CHANGE_FAILURE: c_int = 0;
-pub const GST_STATE_CHANGE_SUCCESS: c_int = 1;
 pub const GST_STATE_CHANGE_ASYNC: c_int = 2;
 pub const GST_STATE_CHANGE_NO_PREROLL: c_int = 3;
-
-/// Wait until state change completes (`gst_element_get_state` timeout).
-pub const GST_CLOCK_TIME_NONE: GstClockTime = u64::MAX;
 
 // GstFormat
 pub const GST_FORMAT_TIME: c_int = 3;
@@ -90,18 +86,12 @@ pub const GST_MESSAGE_EOS: c_uint = 1 << 0;
 pub const GST_MESSAGE_ERROR: c_uint = 1 << 1;
 pub const GST_MESSAGE_WARNING: c_uint = 1 << 2;
 pub const GST_MESSAGE_BUFFERING: c_uint = 1 << 5;
-pub const GST_MESSAGE_ELEMENT: c_uint = 1 << 15;
-pub const GST_MESSAGE_NEED_CONTEXT: c_uint = 1 << 29;
-pub const GST_MESSAGE_HAVE_CONTEXT: c_uint = 1 << 30;
 /// GST_MESSAGE_EXTENDED | 4
 pub const GST_MESSAGE_STREAM_COLLECTION: c_uint = 0x8000_0004;
-/// GST_MESSAGE_EXTENDED | 5
-pub const GST_MESSAGE_STREAMS_SELECTED: c_uint = 0x8000_0005;
 
 // GstStreamType
 pub const GST_STREAM_TYPE_AUDIO: c_uint = 1 << 1;
 pub const GST_STREAM_TYPE_VIDEO: c_uint = 1 << 2;
-pub const GST_STREAM_TYPE_TEXT: c_uint = 1 << 4;
 
 // GstMapFlags
 pub const GST_MAP_READ: c_uint = 1 << 0;

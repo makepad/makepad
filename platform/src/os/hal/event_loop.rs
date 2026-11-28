@@ -11,6 +11,7 @@
 use crate::{cx::{Cx, OsType}, event::hal_intake::hal_window_id, event::Event};
 use makepad_hal::{hal_open, hal_pump, hal_submit, info_flags, open_flags, EventStore, OpenReq};
 use crate::thread::SignalToUI;
+use crate::ui_progress::{hold, GLOBAL_UI_PROGRESS};
 use crate::pass_load::UiTime;
 use super::loop_watch;
 use std::{cell::RefCell, rc::Rc};
@@ -221,6 +222,7 @@ impl Cx {
     pub fn hal_session_turn(&mut self, timeout_ns: u64, present: bool) -> bool {
         assert!(self.hal.externally_driven);
         if self.hal.info.is_none() { return false; }
+        let _turn = GLOBAL_UI_PROGRESS.enter_turn();
         if !self.hal_pump_events(timeout_ns, PumpWait::Idle) { return false; }
         self.hal_service_signals();
         self.call_event_handler(&Event::Signal);
@@ -249,6 +251,8 @@ impl Cx {
         super::unregister_wake_session(info.session);
         self.hal.info = None;
         self.hal_cancel_buffer_reads();
+        GLOBAL_UI_PROGRESS.mark_exited();
+        crate::remote::on_loop_exit();
     }
 
     pub fn event_loop(cx: Rc<RefCell<Cx>>) {
@@ -362,6 +366,7 @@ impl Cx {
             // the next beat runs them (`run_live_edit_if_needed`)
             || self.pending_script_reapply
             || self.pending_live_edit_request
+            || self.has_pending_live_edit_reload()
             || !self.screenshot_requests.is_empty()
             || !self.draw_shaders.compile_set.is_empty()
             || crate::remote::needs_ticks()
@@ -400,6 +405,7 @@ impl Cx {
     }
 
     fn hal_run(&mut self) {
+        let _loop_guard = GLOBAL_UI_PROGRESS.enter_loop();
         #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
         fn termination_requested() -> bool {
             crate::os::termination_signal::seen()
@@ -483,7 +489,7 @@ impl Cx {
         // the UI thread's time outside the idle wait, from this turn's wake (`pass_load`)
         let mut busy_from = None;
         #[cfg(target_os = "android")]
-        let mut performance_hint = if hosted { None } else { makepad_hal::backend::android::performance_hint::PerformanceHint::for_this_thread(period) };
+        let mut performance_hint = if hosted { None } else { makepad_hal::android::PerformanceHint::for_this_thread(period) };
         'turns: loop {
             self.hal_frames_room();
             // A signal raised with no wake to carry it (before the session opened: its wake
@@ -548,6 +554,8 @@ impl Cx {
             }
             loop_watch::in_pump(timeout > 0);
             self.pass_load.spent(UiTime::Busy, busy_from.take());
+            GLOBAL_UI_PROGRESS.set_hold(hold::GPU_FLIGHT,
+                gpu_wait || !self.hal.in_flight.is_empty() || self.pipelines_pending() > 0);
             let alive = self.hal_guarded(true, |cx| cx.hal_pump_events(timeout, if gpu_wait { PumpWait::Gpu } else { PumpWait::Idle }));
             busy_from = self.pass_load.mark();
             loop_watch::in_pump(false);
@@ -706,6 +714,7 @@ impl Cx {
                 hint.finish_frame(self.repaint_id);
             }
         }
+        GLOBAL_UI_PROGRESS.set_hold(hold::GPU_FLIGHT, false);
         loop_watch::publish(false, false, 0, None, FRAMES_IN_FLIGHT);
         // the session ends: Quit in the last batch makes the HAL free what it owns (textures,
         // buffers, pipelines, windows)
@@ -742,12 +751,18 @@ impl Cx {
         let n = match wait {
             PumpWait::Idle => {
                 let _g = crate::thread::ui_idle();
-                hal_pump(timeout_ns, &mut buf)
+                if timeout_ns > 0 { GLOBAL_UI_PROGRESS.set_in_pump(); }
+                let n = hal_pump(timeout_ns, &mut buf);
+                GLOBAL_UI_PROGRESS.leave_pump_and_begin_turn();
+                n
             }
             PumpWait::Gpu => {
                 let _g = crate::thread::ui_phase(crate::thread::UiPhase::GpuWait);
+                let _hold = GLOBAL_UI_PROGRESS.hold(hold::GPU_FLIGHT);
                 let from = makepad_hal::clock_ns();
+                if timeout_ns > 0 { GLOBAL_UI_PROGRESS.set_in_pump(); }
                 let n = hal_pump(timeout_ns, &mut buf);
+                GLOBAL_UI_PROGRESS.leave_pump_and_begin_turn();
                 // the next beat's `gpu-wait` phase: from the first such wait to the last
                 let waited = &mut self.hal.gpu_waited;
                 if waited[0] == 0 { waited[0] = from; }
@@ -843,6 +858,8 @@ impl Cx {
         }
         let reclaim = self.gpu_admission.take_reclaim();
         if reclaim != 0 { self.hal.frames.w.gpu_reclaim(reclaim); }
+        // instance rows still queued go with this batch: their bytes are valid until it is sent
+        self.hal.frames.flush_inst_runs();
         if self.hal.frames.w.is_empty() {
             self.fb_after_submit();
             return;
@@ -944,7 +961,7 @@ impl Cx {
             if self.need_redrawing() { count("beat: redraw"); }
             if !self.new_next_frames.is_empty() { count("beat: next frame"); }
             if self.demo_time_repaint { count("beat: demo repaint"); }
-            if self.pending_script_reapply || self.pending_live_edit_request { count("beat: live edit"); }
+            if self.pending_script_reapply || self.pending_live_edit_request || self.has_pending_live_edit_reload() { count("beat: live edit"); }
             if !self.screenshot_requests.is_empty() { count("beat: screenshot"); }
             if !self.draw_shaders.compile_set.is_empty() { count("beat: shaders"); }
             if crate::remote::needs_ticks() { count("beat: remote ticks"); }
@@ -1209,6 +1226,7 @@ impl Cx {
         self.compute_pass_repaint_order(&mut passes, tick.unwrap_or(time_now), self.hal.frame_interval);
         if !passes.is_empty() {
             self.repaint_id += 1;
+            GLOBAL_UI_PROGRESS.note_repaint(self.repaint_id);
             fb.stats.repaints += 1;
             if self.hal.glyph_wait.drawn_blank > 0 {
                 self.hal.glyph_wait.blank_frames += 1;

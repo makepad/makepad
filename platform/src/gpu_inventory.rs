@@ -76,8 +76,7 @@ pub struct GpuDrawListBuffers {
     /// Instance data the list holds on the CPU (recording and retained
     /// publication floats).
     pub instance_cpu_bytes: u64,
-    /// GPU instance buffer bytes of the list's items (the HAL ledger); `None` where
-    /// the backend does not report (WebGL).
+    /// Resident publication bytes attributed to this list on native targets.
     pub instance_gpu_bytes: Option<u64>,
 }
 
@@ -295,14 +294,11 @@ fn texel_size(format: &TextureFormat) -> u64 {
     }
 }
 
-/// What the backend measured: allocated bytes per texture, per draw list's instance buffers,
-/// of the geometry buffers, and the device's own total. On native targets this is the HAL's
-/// ledger of the session; a web build's WebGL measures nothing.
+/// HAL allocation measurements and the frame builder's per-list publication bytes.
 #[derive(Default)]
 struct Measured {
     #[cfg(not(target_arch = "wasm32"))]
     textures: std::collections::HashMap<(u32, u32), u64>,
-    #[cfg(not(target_arch = "wasm32"))]
     instances: std::collections::HashMap<usize, u64>,
     geometry: Option<u64>,
     device: Option<u64>,
@@ -322,29 +318,27 @@ impl Measured {
             return Self::default();
         }
         items.truncate((found.count as usize).min(items.len()));
-        let mut buffers = std::collections::HashMap::new();
         let mut m = Self { device: found.has_device.then_some(found.device_allocated), ..Self::default() };
         for item in &items {
             if item.texture {
                 m.textures.insert((item.index, item.gen), item.bytes);
-            } else {
-                buffers.insert((item.index, item.gen), item.bytes);
-                if item.geometry {
-                    *m.geometry.get_or_insert(0) += item.bytes;
-                }
+            } else if item.geometry {
+                *m.geometry.get_or_insert(0) += item.bytes;
             }
         }
-        for (list, id) in cx.hal.frames.instance_buffers() {
-            if let Some(bytes) = buffers.get(&(id.index, id.gen)) {
-                *m.instances.entry(list).or_default() += bytes;
-            }
+        for (list, bytes) in cx.hal.frames.instance_bytes() {
+            *m.instances.entry(list).or_default() += bytes;
         }
         m
     }
 
     #[cfg(target_arch = "wasm32")]
-    fn of(_cx: &Cx) -> Self {
-        Self::default()
+    fn of(cx: &Cx) -> Self {
+        let mut m = Self::default();
+        for (list, bytes) in cx.os.regions.instance_bytes() {
+            *m.instances.entry(list).or_default() += bytes;
+        }
+        m
     }
 
     /// The allocated GPU bytes of a pool texture, where the backend measured them.
@@ -359,15 +353,9 @@ impl Measured {
         None
     }
 
-    /// The GPU bytes of a draw list's instance buffers, where the backend measured them.
-    #[cfg(not(target_arch = "wasm32"))]
+    /// The bytes in this list's resident publication regions.
     fn instances(&self, list: usize) -> Option<u64> {
         Some(self.instances.get(&list).copied().unwrap_or(0))
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    fn instances(&self, _list: usize) -> Option<u64> {
-        None
     }
 }
 
@@ -517,7 +505,7 @@ impl Cx {
             inv.geometries += 1;
             inv.geometry_cpu_bytes += g.vertices.byte_len() as u64 + g.indices.capacity_bytes() as u64;
         }
-        inv.retained_allocation_bytes = self.draw_lists.1.allocations.bytes() as u64;
+        inv.retained_allocation_bytes = self.draw_lists.1.allocations.physical_bytes();
         inv.geometry_gpu_bytes = measured.geometry;
         inv.device_allocated_bytes = measured.device;
         inv

@@ -194,6 +194,7 @@ impl Image {
     /// An image another owner made and keeps (an XR runtime's swapchain image), in `layout`
     /// now: views of it in `desc`'s format (the image must allow that format), never destroyed
     /// here.
+    #[cfg(target_os = "android")]
     pub unsafe fn borrowed(dev: Arc<Device>, desc: TextureObj, image: vk::Image, layout: vk::ImageLayout) -> Result<Arc<Self>, String> {
         Self::adopt(dev, desc, image, vk::DeviceMemory::null(), 0, layout, None, true)
     }
@@ -202,6 +203,7 @@ impl Image {
     /// image, in its depth read-only layout), of a format the HAL has no texture format for
     /// (`format`): `desc` names a depth stand-in (DEPTH32F) for the bookkeeping, its views are
     /// `format`'s. Sampled as a plain 2D array it reads the depth in .r; never destroyed here.
+    #[cfg(target_os = "android")]
     pub unsafe fn borrowed_depth(dev: Arc<Device>, desc: TextureObj, image: vk::Image, format: vk::Format) -> Result<Arc<Self>, String> {
         let range = vk::ImageSubresourceRange::default().aspect_mask(vk::ImageAspectFlags::DEPTH).level_count(1).layer_count(desc.depth);
         let info = vk::ImageViewCreateInfo::default().image(image).format(format).view_type(vk::ImageViewType::TYPE_2D_ARRAY).subresource_range(range);
@@ -217,6 +219,7 @@ impl Image {
 
     /// A bound external-format image (a decoder's picture) sampled through `video`'s Y'CbCr
     /// conversion: its views carry the conversion.
+    #[cfg(target_os = "android")]
     pub unsafe fn external_video(dev: Arc<Device>, desc: TextureObj, image: vk::Image, memory: vk::DeviceMemory, video: super::device::VideoSampler,
         external: Option<Arc<dyn std::any::Any + Send + Sync>>) -> Result<Arc<Self>, String> {
         let mut conversion = vk::SamplerYcbcrConversionInfo::default().conversion(video.conversion);
@@ -232,6 +235,7 @@ impl Image {
     }
 
     /// The layout the image is in now, as its owner says (an acquired swapchain image).
+    #[cfg(target_os = "android")]
     pub fn set_layout(&self, layout: vk::ImageLayout) {
         *lock(&self.layout) = layout;
     }
@@ -368,6 +372,8 @@ pub(crate) struct Buffer {
     /// allocation of its own (`scratch`)
     place: Placement,
     coherent: bool,
+    /// CPU stores to this memory cross the link to a discrete GPU.
+    pub(super) across_link: bool,
     /// a scratch buffer's backend pool (`scratch`); a handle's buffer is on its session's ledger
     _charge: Option<Charge>,
     /// What a kept descriptor set names it by (`sets::serial`).
@@ -394,8 +400,8 @@ impl Buffer {
         let req = unsafe { dev.raw.get_buffer_memory_requirements(buffer) };
         let address = usage.contains(vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS);
         let place = |ty: u32| {
-            let coherent = dev.memory.memory_types[ty as usize].property_flags.contains(vk::MemoryPropertyFlags::HOST_COHERENT);
-            lock(&dev.blocks).place(&dev, ty, address, coherent, &req).map(|p| (p, coherent)).map_err(error)
+            let flags = dev.memory.memory_types[ty as usize].property_flags;
+            lock(&dev.blocks).place(&dev, ty, address, flags.contains(vk::MemoryPropertyFlags::HOST_COHERENT), &req).map(|p| (p, flags)).map_err(error)
         };
         let host = |why: String| {
             let ty = dev.memory_type(req.memory_type_bits, vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT)
@@ -410,8 +416,8 @@ impl Buffer {
         };
         let preferred = vk::MemoryPropertyFlags::DEVICE_LOCAL | vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
         let placed = dev.memory_type(req.memory_type_bits, preferred).and_then(place).or_else(host);
-        let (place, coherent) = match placed { Ok(v) => v, Err(e) => { unsafe { dev.raw.destroy_buffer(buffer, None); } return Err(e); } };
-        let out = Self { dev, buffer, size, bytes: req.size, place, coherent, _charge: None, serial: super::sets::serial() };
+        let (place, flags) = match placed { Ok(v) => v, Err(e) => { unsafe { dev.raw.destroy_buffer(buffer, None); } return Err(e); } };
+        let out = Self::from_placement(dev, buffer, size, req.size, place, flags, None);
         unsafe { out.dev.raw.bind_buffer_memory(buffer, place.memory, place.offset).map_err(error)?; }
         Ok(out)
     }
@@ -421,7 +427,7 @@ impl Buffer {
         let len = self.size.max(16).saturating_sub(from);
         if len == 0 { return Ok(()); }
         unsafe { std::ptr::write_bytes((self.place.mapped as *mut u8).add(from as usize), 0, len as usize); }
-        self.flush()
+        self.flush().map(|_| ())
     }
 
     /// A buffer whose bytes are undefined until written: upload arenas and readback staging,
@@ -436,7 +442,16 @@ impl Buffer {
             // hundred MB/s, a frame's readback took ~90 ms of the copy-out alone
             let readback = usage.contains(vk::BufferUsageFlags::TRANSFER_DST) && !usage.contains(vk::BufferUsageFlags::TRANSFER_SRC);
             let cached = if readback { dev.memory_type(req.memory_type_bits, vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_CACHED).ok() } else { None };
-            let ty = match cached {
+            // An upload arena on a discrete device should accept CPU writes in system memory,
+            // even if the driver's first host-visible coherent type is BAR memory.
+            let host_upload = if pool == Pool::UploadArena && dev.properties.device_type == vk::PhysicalDeviceType::DISCRETE_GPU {
+                let host_bits = (0..dev.memory.memory_type_count).fold(req.memory_type_bits, |bits, i| {
+                    if dev.memory.memory_types[i as usize].property_flags.contains(vk::MemoryPropertyFlags::DEVICE_LOCAL) { bits & !(1 << i) } else { bits }
+                });
+                dev.memory_type(host_bits, vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT)
+                    .or_else(|_| dev.memory_type(host_bits, vk::MemoryPropertyFlags::HOST_VISIBLE)).ok()
+            } else { None };
+            let ty = match cached.or(host_upload) {
                 Some(ty) => ty,
                 None => dev.memory_type(req.memory_type_bits, vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT)
                     .or_else(|_| dev.memory_type(req.memory_type_bits, vk::MemoryPropertyFlags::HOST_VISIBLE))?,
@@ -444,15 +459,20 @@ impl Buffer {
             Ok::<_, String>((super::blocks::own(&dev, ty, false, req.size).map_err(error)?, ty))
         })();
         let (place, ty) = match result { Ok(v) => v, Err(e) => { unsafe { dev.raw.destroy_buffer(buffer, None); } return Err(e); } };
-        let coherent = dev.memory.memory_types[ty as usize].property_flags.contains(vk::MemoryPropertyFlags::HOST_COHERENT);
+        let flags = dev.memory.memory_types[ty as usize].property_flags;
         let charge = Some(dev.pools.charge(pool, req.size));
-        let out = Self { dev, buffer, size, bytes: req.size, place, coherent, _charge: charge, serial: super::sets::serial() };
+        let out = Self::from_placement(dev, buffer, size, req.size, place, flags, charge);
         unsafe { out.dev.raw.bind_buffer_memory(buffer, place.memory, 0).map_err(error)?; }
         Ok(Arc::new(out))
     }
 
+    fn from_placement(dev: Arc<Device>, buffer: vk::Buffer, size: u64, bytes: u64, place: Placement, flags: vk::MemoryPropertyFlags, charge: Option<Charge>) -> Self {
+        let across_link = dev.properties.device_type == vk::PhysicalDeviceType::DISCRETE_GPU && flags.contains(vk::MemoryPropertyFlags::DEVICE_LOCAL);
+        Self { dev, buffer, size, bytes, place, across_link, coherent: flags.contains(vk::MemoryPropertyFlags::HOST_COHERENT), _charge: charge, serial: super::sets::serial() }
+    }
+
     /// Only the HAL encoder writes, to fresh storage or an unleased retained buffer.
-    pub fn write(&self, offset: u64, data: &[u8]) -> Result<(), String> {
+    pub fn write(&self, offset: u64, data: &[u8]) -> Result<bool, String> {
         self.write_unflushed(offset, data)?;
         self.flush()
     }
@@ -472,9 +492,11 @@ impl Buffer {
         vk::MappedMemoryRange::default().memory(self.place.memory).offset(self.place.offset + start).size(end.min(self.place.size) - start)
     }
 
-    pub(super) fn flush(&self) -> Result<(), String> {
-        if self.coherent { return Ok(()); }
-        unsafe { self.dev.raw.flush_mapped_memory_ranges(&[self.range(0, self.place.size)]) }.map_err(error)
+    /// Whether publishing the writes required a driver call.
+    pub(super) fn flush(&self) -> Result<bool, String> {
+        if self.coherent { return Ok(false); }
+        unsafe { self.dev.raw.flush_mapped_memory_ranges(&[self.range(0, self.place.size)]) }.map_err(error)?;
+        Ok(true)
     }
 
     /// Reads `length` bytes from the buffer.

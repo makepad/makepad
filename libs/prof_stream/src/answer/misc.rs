@@ -343,7 +343,7 @@ pub fn frames(a: &mut Answer) {
     if let Some(r) = slow {
         a.more(format!("frame {}", s(r, "frame")));
     }
-    a.more("timeline save (.mkpf: Scope, `file=<x.mkpf> pf ..`)");
+    a.more("timeline save (.mkpf: `file=<x.mkpf> pf ..`)");
 }
 
 pub fn frame(a: &mut Answer) {

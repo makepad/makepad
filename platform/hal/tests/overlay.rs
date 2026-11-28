@@ -453,8 +453,7 @@ fn the_apps_caption_is_the_host_windows() {
     });
 }
 
-/// Session 0's badge layer frame of the host window: one pass, a draw when `draws` (its uniforms
-/// borrowed from a buffer gone after the submit).
+/// Session 0's badge frame for the host window. The writer drops after submission.
 fn badges(hal: &Hal, serial: u64, draws: bool) {
     let mut cmd = CmdWriter::new(HOST);
     cmd.frame_begin(serial, FrameMeta::default());
@@ -462,12 +461,11 @@ fn badges(hal: &Hal, serial: u64, draws: bool) {
     let uniforms: Vec<u8> = (0..32).collect();
     if draws {
         let mut d = Draw::default();
-        d.uniforms[0] = cmd.keep(&uniforms);
+        d.uniforms[0] = cmd.put_uniform_bytes(&uniforms);
         cmd.draw(d);
     }
     cmd.frame_end(HOST_WINDOW, target::WINDOW | target::BADGES);
     hal.submit(&cmd.buf());
-    drop(uniforms);
 }
 
 fn frames_done(events: &[(RawEvent, Vec<u8>)]) -> usize {
@@ -479,9 +477,9 @@ fn a_badge_layer_is_kept_over_every_frame_until_one_without_draws() {
     let (hal, sid) = setup();
     badges(&hal, 21, true);
     let kept = hal.with_world(|w| w.session(HOST).unwrap().windows.get(HOST, HOST_WINDOW).unwrap().val.badges.clone()).expect("kept");
-    // the layer owns what its draw borrowed
     let view = kept.view();
-    assert_eq!(unsafe { view.draws[0].uniforms[0].as_bytes() }, (0..32).collect::<Vec<u8>>().as_slice());
+    let r = view.draws[0].uniforms[0];
+    assert_eq!(&view.uniforms[r.off as usize..(r.off + r.len) as usize], (0..32).collect::<Vec<u8>>().as_slice());
     assert_eq!((view.frames[0].passes.off, view.frames[0].draws.off), (0, 0));
     assert_eq!(frames_done(&take(&hal, HOST)), 1);
     // the app's frames are drawn under it: the app hears of them, session 0 does not again

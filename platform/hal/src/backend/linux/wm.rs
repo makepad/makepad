@@ -37,6 +37,8 @@ relax_api::option_layouts! {
     (Key, f64, f64),
 }
 
+const POINTER_CAPS_JSON: &str = r#"{"makepad_pointer_caps":{"mouse_cancel":true}}"#;
+
 static STATE: OnceLock<Arc<State>> = OnceLock::new();
 
 #[derive(Clone)]
@@ -297,6 +299,7 @@ const RESUME_ENV: &str = "MAKEPAD_WM_RESUME";
 /// boundary and writes stop, so neither side sees half a frame. Empty: nothing to hand over
 /// (not WM-hosted, or the reader did not stop in time); the new image then asks the WM socket
 /// again with the same pid and gets its client back.
+#[relax_api::relax_api(loader = "the loader prepares its exec (the WM's connection crosses it): JIT code has no use for it")]
 pub fn prepare_exec() -> Vec<(String, String)> {
     use std::os::fd::AsRawFd;
     let Some((hub, port, client)) = lock(&HANDOVER).clone() else { return Vec::new() };
@@ -330,6 +333,7 @@ pub fn prepare_exec() -> Vec<(String, String)> {
 }
 
 /// The exec after `prepare_exec` failed: this process goes on with its connection.
+#[relax_api::relax_api(loader = "the runner undoes its exec preparation: JIT code has no use for it")]
 pub fn undo_exec() {
     use std::os::fd::AsRawFd;
     let Some((hub, ..)) = lock(&HANDOVER).clone() else { return };
@@ -826,17 +830,29 @@ impl App {
             }
             StudioToApp::MouseDown(e) => {
                 let Some((recipient, x, y)) = self.pointer_at(e.x, e.y) else { return };
+                // A repeated down after a lost release transfers this bit to its new recipient.
+                self.held.buttons.retain(|owner, held| {
+                    if *owner != recipient { held.bits &= !e.button_raw_bits; }
+                    held.bits != 0
+                });
                 let held = self.held.buttons.entry(recipient).or_insert(HeldButtons { bits: 0, origin: (e.x - x, e.y - y) });
                 held.bits |= e.button_raw_bits;
                 self.state.shared.push(recipient, |q, id| q.mouse_down(id, x, y, e.button_raw_bits, mods(&e.modifiers)));
             }
             StudioToApp::MouseMove(e) => self.pointer_to(e.x, e.y, |q, id, x, y| q.mouse_move(id, x, y, 0.0, 0.0, mods(&e.modifiers))),
             StudioToApp::MouseUp(e) | StudioToApp::MouseCancel(e) => {
-                let Some((recipient, x, y)) = self.pointer_at(e.x, e.y) else { return };
-                if let Some(held) = self.held.buttons.get_mut(&recipient) {
+                let owner = self.held.buttons.iter_mut().find(|(_, held)| held.bits & e.button_raw_bits != 0);
+                let (recipient, x, y) = if let Some((&recipient, held)) = owner {
+                    let (left, top) = held.origin;
                     held.bits &= !e.button_raw_bits;
                     if held.bits == 0 { self.held.buttons.remove(&recipient); }
-                }
+                    self.held.pointer = (e.x, e.y);
+                    (recipient, e.x - left, e.y - top)
+                } else if let Some(point) = self.pointer_at(e.x, e.y) {
+                    point
+                } else {
+                    return;
+                };
                 let release = if matches!(msg, StudioToApp::MouseCancel(_)) {
                     crate::buffers::EventQueue::mouse_cancel
                 } else {
@@ -1261,6 +1277,9 @@ impl App {
         self.hidden = true;
         self.drag_queries.clear();
         self.early.clear();
+        for w in self.windows.values() {
+            self.state.shared.push(w.recipient, |q, id| q.focus(id, false));
+        }
         self.wm_focus.clear();
         for w in self.windows.values_mut() {
             w.awaiting = false;
@@ -1341,6 +1360,13 @@ impl App {
         self.finish_reattach(hub, &sessions);
     }
 
+    fn announce_window(&self, window_id: usize, dropdown: bool) {
+        self.hub.send(vec![
+            AppToStudio::CreateWindow { window_id, kind_id: if dropdown { window_kind::DROPDOWN as usize } else { 0 } },
+            AppToStudio::Custom(POINTER_CAPS_JSON.into()),
+        ]);
+    }
+
     /// Announce this process to the replacement hub before replaying its apps' messages.
     fn finish_reattach(&mut self, hub: Arc<Hub>, sessions: &[u32]) {
         self.hub = hub;
@@ -1352,7 +1378,7 @@ impl App {
         let mut windows: Vec<(Key, usize, bool)> = self.windows.iter().map(|(k, w)| (*k, w.window_id, w.dropdown)).collect();
         windows.sort_by_key(|(_, id, _)| *id);
         for (key, window_id, dropdown) in windows {
-            self.hub.send(vec![AppToStudio::CreateWindow { window_id, kind_id: if dropdown { window_kind::DROPDOWN as usize } else { 0 } }]);
+            self.announce_window(window_id, dropdown);
             if self.hidden_windows.contains(&key) {
                 self.window_op(window_op::MINIMIZE);
             }
@@ -1393,6 +1419,10 @@ impl Shell for App {
                     let geom = self.early.remove(&window_id);
                     let dropdown = kind & 0xff == window_kind::DROPDOWN;
                     let old = self.windows.insert((sid, id), Win { window_id, recipient: (sid, id), requested: false, awaiting: false, ahead: 0, geom, dropdown, host_buttons: false });
+                    if let Some(w) = &old {
+                        self.held.buttons.remove(&w.recipient);
+                        self.state.shared.push(w.recipient, |q, id| q.focus(id, false));
+                    }
                     {
                         let mut s = shell::snapshot();
                         if let Some(w) = old { s.windows.remove(&w.window_id); }
@@ -1404,7 +1434,7 @@ impl Shell for App {
                         });
                     }
                     shell::window_made();
-                    self.hub.send(vec![AppToStudio::CreateWindow { window_id, kind_id: if dropdown { window_kind::DROPDOWN as usize } else { 0 } }]);
+                    self.announce_window(window_id, dropdown);
                     a11y::window(window_id, Some((sid, id)));
                     let focused = self.wm_focus.get(&window_id).copied().unwrap_or(true);
                     self.state.shared.push((sid, id), |q, id| q.focus(id, focused));
@@ -1415,6 +1445,7 @@ impl Shell for App {
                     let Some(key) = self.resolve((sid, id)) else { return };
                     let tile = self.tile_window() == Some(key);
                     if let Some(w) = self.windows.remove(&key) {
+                        self.held.buttons.remove(&w.recipient);
                         shell::snapshot().windows.remove(&w.window_id);
                         a11y::window(w.window_id, None);
                         lock(&self.state.rings).remove(&key);
@@ -1538,13 +1569,20 @@ impl Shell for App {
                     if spent { self.finish_tick(); }
                     self.ask_frame();
                 }
-                // The app resizes its window (`Window::resize`, the remote `resize`): the WM owns
-                // the tile's size, so the request goes to it.
+                // The app resizes a window (`Window::resize`, the remote `resize`): the WM owns
+                // every tile's size, so the request goes to it. The tile asks with
+                // `HostedResize`; a later window is a tile of its own and asks with its id.
                 OsCmd::WindowGeom { id, geom } => {
                     let Some(key) = self.resolve((sid, id)) else { return };
-                    if self.windows.get(&key).is_some_and(|w| !w.dropdown) && self.tile_window() == Some(key) && geom[2] >= 1.0 && geom[3] >= 1.0 {
-                        self.hub.send(vec![AppToStudio::Custom(HostedResize { w: geom[2] as f64, h: geom[3] as f64 }.to_json())]);
-                    }
+                    let Some(w) = self.windows.get(&key).filter(|w| !w.dropdown) else { return };
+                    if geom[2] < 1.0 || geom[3] < 1.0 { return }
+                    let (width, height) = (geom[2] as f64, geom[3] as f64);
+                    let ask = if self.tile_window() == Some(key) {
+                        HostedResize { w: width, h: height }.to_json()
+                    } else {
+                        HostedWindow { x: width, y: height, ..HostedWindow::new(w.window_id, hosted_window_op::RESIZE) }.to_json()
+                    };
+                    self.hub.send(vec![AppToStudio::Custom(ask)]);
                 }
                 OsCmd::Cursor { cursor, .. } => { self.hub.send(vec![AppToStudio::SetCursor(mouse_cursor(cursor))]); }
                 // the flavours go just ahead of the text the studio protocol carries
@@ -1610,6 +1648,7 @@ impl Shell for App {
                 _ => {}
             },
             Op::CloseSession(sid) => {
+                self.held.buttons.retain(|recipient, _| recipient.0 != sid);
                 self.clip_reads.retain(|_, (s, _)| *s != sid);
                 self.dialogs.retain(|_, (s, _)| *s != sid);
                 self.host_messages.retain(|(s, _)| *s != sid);
@@ -1622,7 +1661,10 @@ impl Shell for App {
                 }
                 let closing: Vec<Key> = self.windows.keys().filter(|k| k.0 == sid).copied().collect();
                 for key in closing {
-                    if let Some(w) = self.windows.remove(&key) { shell::snapshot().windows.remove(&w.window_id); }
+                    if let Some(w) = self.windows.remove(&key) {
+                        self.held.buttons.remove(&w.recipient);
+                        shell::snapshot().windows.remove(&w.window_id);
+                    }
                     lock(&self.state.rings).remove(&key);
                     lock(&self.state.in_flight).remove(&key);
                 }
@@ -1638,6 +1680,7 @@ impl Shell for App {
             Op::Lend { host, session, alias } => {
                 let key = (session::HOST, host);
                 if let Some(w) = self.windows.get_mut(&key) {
+                    self.held.buttons.remove(&w.recipient);
                     w.recipient = (session, alias);
                     a11y::window(w.window_id, Some(w.recipient));
                     w.awaiting = false;
@@ -1841,7 +1884,7 @@ mod tests {
     }
 
     #[test]
-    fn an_apps_resize_goes_to_the_wm_for_its_tile_only() {
+    fn an_apps_resize_goes_to_the_wm_named_by_its_window() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let server = std::thread::spawn(move || {
@@ -1850,7 +1893,9 @@ mod tests {
             let mut byte = [0u8];
             while !request.ends_with(b"\r\n\r\n") { stream.read_exact(&mut byte).unwrap(); request.push(byte[0]); }
             stream.write_all(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n").unwrap();
-            AppToStudioVec::deserialize_bin(&read_client_frame(&mut stream).1).unwrap().0
+            let mut sent = Vec::new();
+            while sent.len() < 2 { sent.extend(AppToStudioVec::deserialize_bin(&read_client_frame(&mut stream).1).unwrap().0); }
+            sent
         });
         let state = Arc::new(State { shared: Shared::global(), inbox: Default::default(), hung_up: AtomicBool::new(false), detached: AtomicBool::new(false),
             rings: Default::default(), finished: Default::default(), in_flight: Default::default(), device: Default::default() });
@@ -1863,15 +1908,103 @@ mod tests {
         let (tile, later) = ((9_002, Id::new(1, 1)), (9_002, Id::new(2, 1)));
         app.windows.insert(tile, Win { window_id: 0, recipient: tile, requested: false, awaiting: false, ahead: 0, geom: None, dropdown: false, host_buttons: false });
         app.windows.insert(later, Win { window_id: 1, recipient: later, requested: false, awaiting: false, ahead: 0, geom: None, dropdown: false, host_buttons: false });
-        // a later window is the app's own business; the tile's size is the WM's
+        // Every tile's size is the WM's: a later window asks with its own id (an older WM
+        // ignores the op), so its request never resizes the app's first tile.
         app.command(Op::Cmd(later.0, OsCmd::WindowGeom { id: later.1, geom: [0.0, 0.0, 300.0, 200.0] }));
         app.command(Op::Cmd(tile.0, OsCmd::WindowGeom { id: tile.1, geom: [0.0, 0.0, 640.0, 480.0] }));
         let sent = server.join().unwrap();
-        assert_eq!(sent.len(), 1, "{sent:?}");
-        match &sent[0] {
-            AppToStudio::Custom(json) => assert_eq!(HostedResize::parse(json), Some(HostedResize { w: 640.0, h: 480.0 })),
-            other => panic!("{other:?}"),
+        let [AppToStudio::Custom(later_ask), AppToStudio::Custom(tile_ask)] = &sent[..] else { panic!("{sent:?}") };
+        assert_eq!(HostedResize::parse(later_ask), None, "a later window's resize never reads as the tile's");
+        assert_eq!(HostedWindow::parse(later_ask), Some(HostedWindow { x: 300.0, y: 200.0, ..HostedWindow::new(1, hosted_window_op::RESIZE) }));
+        assert_eq!(HostedResize::parse(tile_ask), Some(HostedResize { w: 640.0, h: 480.0 }));
+    }
+
+    fn wm_connection(state: &Arc<State>) -> (Arc<Hub>, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (wm, _) = listener.accept().unwrap();
+        (Hub::start(client, state.clone()).unwrap(), wm)
+    }
+
+    fn received(hub: &Hub, wm: &mut TcpStream) -> Vec<Vec<AppToStudio>> {
+        // A ping delimits the writes so the old socket can stay writable through detach.
+        hub.frame(0x9, &[]).unwrap();
+        let mut sent = Vec::new();
+        loop {
+            let (opcode, bytes) = read_client_frame(wm);
+            if opcode == 0x9 { return sent; }
+            sent.push(AppToStudioVec::deserialize_bin(&bytes).unwrap().0);
         }
+    }
+
+    fn connected_app(next_window: usize) -> (App, TcpStream) {
+        let state = Arc::new(State { shared: Shared::global(), inbox: Default::default(), hung_up: AtomicBool::new(false), detached: AtomicBool::new(false),
+            rings: Default::default(), finished: Default::default(), in_flight: Default::default(), device: Default::default() });
+        let (hub, wm) = wm_connection(&state);
+        let app = App { state, hub, aux_path: Default::default(), aux: None, pending: Vec::new(), windows: HashMap::new(),
+            early: HashMap::new(), next_window, ticking: false, asked_frame: false, app_drawn: false, hidden: false, clip_reads: HashMap::new(),
+            dialogs: HashMap::new(), next_dialog: 0, host_messages: VecDeque::new(), host_state: Vec::new(), speakers: Vec::new(),
+            next_clip_read: 0, clip_flavours: None, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
+            trays: HashMap::new(), hidden_windows: Default::default(), detached_at: None, reattach_error: None, host_notice: None, passed_over: Vec::new(), held: HeldInput::default(), killed: false, quit_sent: false, stopping: false };
+        (app, wm)
+    }
+
+    #[test]
+    fn wm_shell_announces_pointer_caps_routes_outside_up_and_blurs_on_detach() {
+        use crate::HalEvent;
+        use makepad_studio_protocol::{MouseButton, RemoteMouseDown, RemoteMouseUp};
+
+        let sid = 9_105;
+        let (first, later) = (Id::new(0, 1), Id::new(1, 1));
+        let (mut app, mut wm) = connected_app(0);
+        for (id, left) in [(first, 0.0), (later, 100.0)] {
+            let bounds = [left, 10.0, 80.0, 60.0];
+            app.early.insert(id.index as usize, (bounds, 1.0, None));
+            app.command(Op::Cmd(sid, OsCmd::WindowCreate { id, kind: 0, parent: Id::NONE, geom: [0.0; 4] }));
+        }
+        let check_announcements = |batches: &[Vec<AppToStudio>]| {
+            let mut windows = Vec::new();
+            for batch in batches {
+                if let [AppToStudio::CreateWindow { window_id, .. }, AppToStudio::Custom(caps)] = batch.as_slice() {
+                    assert_eq!(caps, r#"{"makepad_pointer_caps":{"mouse_cancel":true}}"#);
+                    windows.push(*window_id);
+                }
+            }
+            assert_eq!(windows, [0, 1], "both windows announce cancellation support");
+        };
+        check_announcements(&received(&app.hub, &mut wm));
+
+        let button = MouseButton::PRIMARY.bits();
+        let down = |x| StudioToApp::MouseDown(RemoteMouseDown { x, y: 15.0, button_raw_bits: button, ..Default::default() });
+        for cancel in [false, true] {
+            // A lost up in the first window cannot keep ownership after a new down.
+            app.message(down(20.0));
+            app.message(down(120.0));
+            let release = RemoteMouseUp { x: 35.0, y: 22.0, button_raw_bits: button, ..Default::default() };
+            app.message(if cancel { StudioToApp::MouseCancel(release) } else { StudioToApp::MouseUp(release) });
+            let mut edges = Vec::new();
+            lock(&app.state.shared.inbox).remove(&sid).unwrap().drain_with(|e, payload| match e.decode(payload) {
+                Some(HalEvent::MouseUp { window, x, y, button, .. }) => edges.push((false, window, x, y, button)),
+                Some(HalEvent::MouseCancel { window, x, y, button, .. }) => edges.push((true, window, x, y, button)),
+                _ => {}
+            });
+            assert_eq!(edges, [(cancel, later, -65.0, 12.0, button)], "release follows the owning press");
+            assert!(app.held.buttons.is_empty(), "the button had one owner");
+            assert_eq!(app.held.pointer, (35.0, 22.0));
+        }
+        app.detach();
+        let mut blurred = Vec::new();
+        lock(&app.state.shared.inbox).remove(&sid).unwrap().drain_with(|e, payload| {
+            if let Some(HalEvent::Focus { window, focused: false }) = e.decode(payload) {
+                blurred.push(window);
+            }
+        });
+        blurred.sort_by_key(|window| window.index);
+        assert_eq!(blurred, [first, later]);
+        let (hub, mut next_wm) = wm_connection(&app.state);
+        app.finish_reattach(hub, &[sid]);
+        check_announcements(&received(&app.hub, &mut next_wm));
+        app.command(Op::CloseSession(sid));
     }
 
     #[test]
@@ -1906,30 +2039,7 @@ mod tests {
         assert_eq!(may_reattach(Some("keep=0\nlane=\n"), Some("keep=0\nlane=\n")), Ok(()), "a tray joins a WM of its kind that keeps nothing");
         let why = may_reattach(None, Some(node_wm)).unwrap_err();
         assert!(why.contains("no host notice"), "an app whose old WM published no notice rejoins no WM, and says why: {why}");
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let connect = |state: &Arc<State>| {
-            let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-            let (wm, _) = listener.accept().unwrap();
-            (Hub::start(client, state.clone()).unwrap(), wm)
-        };
-        let received = |hub: &Hub, wm: &mut TcpStream| {
-            // A ping delimits the writes so the old socket can stay writable through detach.
-            hub.frame(0x9, &[]).unwrap();
-            let mut sent = Vec::new();
-            loop {
-                let (opcode, bytes) = read_client_frame(wm);
-                if opcode == 0x9 { return sent; }
-                sent.push(AppToStudioVec::deserialize_bin(&bytes).unwrap().0);
-            }
-        };
-        let state = Arc::new(State { shared: Shared::global(), inbox: Default::default(), hung_up: AtomicBool::new(false), detached: AtomicBool::new(false),
-            rings: Default::default(), finished: Default::default(), in_flight: Default::default(), device: Default::default() });
-        let (hub, mut old_wm) = connect(&state);
-        let mut app = App { state, hub, aux_path: Default::default(), aux: None, pending: Vec::new(), windows: HashMap::new(),
-            early: HashMap::new(), next_window: 1, ticking: false, asked_frame: false, app_drawn: false, hidden: false, clip_reads: HashMap::new(),
-            dialogs: HashMap::new(), next_dialog: 0, host_messages: VecDeque::new(), host_state: Vec::new(), speakers: Vec::new(),
-            next_clip_read: 0, clip_flavours: None, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
-            trays: HashMap::new(), hidden_windows: Default::default(), detached_at: None, reattach_error: None, host_notice: None, passed_over: Vec::new(), held: HeldInput::default(), killed: false, quit_sent: false, stopping: false };
+        let (mut app, mut old_wm) = connected_app(1);
         let item = |kind, cmd| MenuItem { parent: 0, kind, cmd, key: 0, str: Default::default() };
         let items = vec![
             (item(menu_kind::ITEM | menu_kind::DISABLED, 1), "Serving".to_string()),
@@ -2053,16 +2163,17 @@ mod tests {
         app.command(Op::CloseSession(closing_sid));
         let during_detach = received(&app.hub, &mut old_wm);
 
-        let (hub, mut next_wm) = connect(&app.state);
+        let (hub, mut next_wm) = wm_connection(&app.state);
         app.finish_reattach(hub, &[sid, answered_sid]);
         let replay: Vec<_> = received(&app.hub, &mut next_wm).into_iter().flatten().collect();
         assert!(matches!(replay.as_slice(), [
-            AppToStudio::CreateWindow { window_id: 0, .. }, AppToStudio::CreateWindow { window_id: 1, .. },
+            AppToStudio::CreateWindow { window_id: 0, .. }, AppToStudio::Custom(first_caps),
+            AppToStudio::CreateWindow { window_id: 1, .. }, AppToStudio::Custom(later_caps),
             AppToStudio::Relay(ChildRelay::SetTray(_)), AppToStudio::Custom(_), ..
-        ]), "the new WM gets the windows and tray before the queued messages: {replay:?}");
+        ] if first_caps == POINTER_CAPS_JSON && later_caps == POINTER_CAPS_JSON), "the new WM gets the windows and tray before the queued messages: {replay:?}");
         let texts: Vec<_> = replay.iter().filter_map(|msg| match msg { AppToStudio::Custom(text) => Some(text.as_str()), _ => None }).collect();
         assert!(!texts.contains(&title) && !texts.contains(&launch), "the old title and the previously delivered launch are never replayed");
-        assert_eq!(texts, [cwd, new_title, other_title, "first", "second"],
+        assert_eq!(texts, [POINTER_CAPS_JSON, POINTER_CAPS_JSON, cwd, new_title, other_title, "first", "second"],
             "each live session's latest title and folder reach the new WM once before the queued messages, in send order");
         assert!(during_detach.is_empty() && app.host_messages.is_empty(), "messages stayed off the old connection and the new WM drained the queue");
         for session in [sid, answered_sid] {
@@ -2109,7 +2220,7 @@ mod tests {
         app.command(Op::Cmd(6, OsCmd::WindowState { id, state: window_state::HIDE }));
         assert!(app.hidden_windows.is_empty(), "a hidden dropdown is not a minimised tile");
         let sent = server.join().unwrap();
-        assert!(matches!(sent[0].as_slice(), [AppToStudio::CreateWindow { window_id: 0, kind_id }] if *kind_id == window_kind::DROPDOWN as usize), "{:?}", sent[0]);
+        assert!(matches!(sent[0].as_slice(), [AppToStudio::CreateWindow { window_id: 0, kind_id }, AppToStudio::Custom(caps)] if *kind_id == window_kind::DROPDOWN as usize && caps == POINTER_CAPS_JSON), "{:?}", sent[0]);
         match sent[1].as_slice() {
             [AppToStudio::Custom(json)] => {
                 let d = HostedDropdown::parse(json).unwrap();

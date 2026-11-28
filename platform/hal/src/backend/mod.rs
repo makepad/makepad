@@ -50,6 +50,7 @@ pub type SessionNotify = std::sync::Arc<dyn Fn(u32, bool) + Send + Sync>;
 
 /// A frame of `kind` that is a window's (not a texture, pick, capture or snapshot pass): its
 /// completion is news for the window's compositor.
+#[cfg(any(target_vendor = "apple", target_os = "linux", target_os = "android"))]
 pub fn window_frame(kind: u32) -> bool {
     kind & !(crate::types::target::CAPTURE | crate::types::target::SNAPSHOT) == crate::types::target::WINDOW
 }
@@ -135,6 +136,7 @@ pub trait Backend: Send {
     fn before_exit(&mut self) {}
     /// The HAL drops this backend for another one while the process goes on (Android moves to
     /// GLES): like [`Backend::before_exit`], and what it still owed its sessions is delivered.
+    #[cfg(target_os = "android")]
     fn retire(&mut self, _world: &mut World) { self.before_exit(); }
     /// Tests and automation: the next step handles the device as lost (removed by the OS) and
     /// replaces it as a real loss does (`exec::device_reset`). Backends without a device reset

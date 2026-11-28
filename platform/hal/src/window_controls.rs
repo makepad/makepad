@@ -71,6 +71,9 @@ pub fn sheet_family(json: &str) -> Option<&str> {
 }
 
 /// Set from the WM's style sheet: 0 not read yet, 0xff read and none, else a `WindowControls`.
+/// The loader's one instance on a host; on the web, where makepad-platform compiles this file in
+/// (no HAL, no loader, no relax_api), a plain static.
+#[cfg_attr(not(target_arch = "wasm32"), relax_api::relax_api)]
 static HOST_CONTROLS: AtomicU8 = AtomicU8::new(0);
 
 /// The window controls of the window manager this process runs under, from its style sheet: the
@@ -79,6 +82,7 @@ static HOST_CONTROLS: AtomicU8 = AtomicU8::new(0);
 /// the sheet), then its `makepad_style` messages (the WM-hosted shell, [`set_host_sheet`]).
 /// `None` without a WM's sheet. Meaningful only where a WM hosts the windows
 /// (`info_flags::WM_HOSTED`).
+#[cfg_attr(not(target_arch = "wasm32"), relax_api::relax_api(loader = "the WM-hosted shell's, which the loader draws: JIT code has no use for it"))]
 pub fn host_window_controls() -> Option<WindowControls> {
     match HOST_CONTROLS.load(Ordering::Acquire) {
         0 => {
@@ -118,11 +122,13 @@ static HOST_CAPTION: Mutex<Option<HostCaption>> = Mutex::new(None);
 
 /// The caption of the WM's style sheet (the WM-hosted shell sets it from the WM's message):
 /// `None` before one came, or without a WM.
+#[cfg_attr(not(target_arch = "wasm32"), relax_api::relax_api(loader = "the WM-hosted shell's, which the loader draws: JIT code has no use for it"))]
 pub fn host_caption() -> Option<HostCaption> {
     *HOST_CAPTION.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// The WM sent its sheet's caption. Returns whether it changed.
+#[cfg_attr(not(target_arch = "wasm32"), relax_api::relax_api(loader = "the WM-hosted shell's, which the loader draws: JIT code has no use for it"))]
 pub fn set_host_caption(caption: HostCaption) -> bool {
     let mut at = HOST_CAPTION.lock().unwrap_or_else(|e| e.into_inner());
     let changed = *at != Some(caption);
@@ -250,6 +256,10 @@ pub mod hosted_window_op {
     /// A WM shows its plain caption over such a full-screen window at the top edge, the only
     /// way out of it by the mouse (the platform's `WindowButtons` under a WM).
     pub const HOST_BUTTONS: u8 = 10;
+    /// Child to host, for a later window: the inner size the app asks for while the window is
+    /// shown (`Window::resize`, the remote `resize`), `x` by `y` points. The first window asks
+    /// with `HostedResize`; a host that does not know this op ignores it.
+    pub const RESIZE: u8 = 11;
 }
 
 /// A hosted app's windows after its first (an output window, a second view): the host

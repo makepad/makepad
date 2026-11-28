@@ -4,10 +4,25 @@ import {
   makepad_device_pixel_ratio,
 } from "./web.js";
 
+const UBO_BINDING_PASS = 0;
+const UBO_BINDING_DRAW_LIST = 1;
+const UBO_BINDING_DRAW_CALL = 2;
+const UBO_BINDING_USER = 3;
+const UBO_BINDING_LIVE = 4;
+const UBO_BINDING_CUSTOM_BASE = 5;
+const STANDARD_UNIFORMS = [
+  "pass_uniforms", "draw_list_uniforms", "draw_call_uniforms", "user_uniforms", "live_uniforms",
+];
+
 const MAKEPAD_WEBGL_FALLBACK_DIMENSION = 2048;
 const MAKEPAD_WEBGL_FALLBACK_VERTEX_ATTRIBS = 16;
 // WebGL's largest vertex attribute stride, in bytes.
 const MAKEPAD_WEBGL_MAX_ATTRIB_STRIDE = 255;
+// The instance data texture's row and its layers' height, in words (WebGL 2's
+// minimum MAX_TEXTURE_SIZE). A layer is one window of 2048 * 2048 words; the
+// shader emitter's INSTANCE_WORD_ROW_SHIFT addresses the same row and layer.
+const MAKEPAD_INSTANCE_WORD_ROW = 2048;
+const MAKEPAD_INSTANCE_WINDOW_WORDS = MAKEPAD_INSTANCE_WORD_ROW * MAKEPAD_INSTANCE_WORD_ROW;
 // No byte or triangle caps of the runtime's own (GPU-SAFETY.md): sizes are
 // bounded by the device's reported limits and by the wasm memory a slice
 // must lie in; a driver that cannot allocate says so (GL_OUT_OF_MEMORY,
@@ -55,6 +70,51 @@ function makepad_webgl_vertex_attrib_limit(value) {
     : MAKEPAD_WEBGL_FALLBACK_VERTEX_ATTRIBS;
 }
 
+const INSTANCE_FAILURE_BACKING = 0;
+const INSTANCE_FAILURE_REGION = 1;
+const INSTANCE_FAILURE_MIRROR = 2;
+
+function makepad_is_u32(value) {
+  return Number.isInteger(value) && value >= 0 && value <= 0xffffffff;
+}
+
+function makepad_instance_region_valid(region) {
+  return makepad_is_u32(region?.index) && makepad_is_u32(region.gen);
+}
+
+// Source offsets for PIXEL_UNPACK_BUFFER are in bytes, texture coordinates in words.
+// Words [first, end) of the bound slab's unpack buffer into its array texture:
+// per layer they cross, a partial head row, whole rows and a partial tail row.
+// Pixel-unpack state is assumed at its defaults (UNPACK_ROW_LENGTH,
+// UNPACK_IMAGE_HEIGHT and UNPACK_SKIP_* 0): any other uploader that changes it
+// restores it.
+function makepad_copy_instance_words(gl, first, end) {
+  const row = MAKEPAD_INSTANCE_WORD_ROW;
+  const put = (word, w, h) => {
+    const at = word % MAKEPAD_INSTANCE_WINDOW_WORDS;
+    gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, at % row, Math.floor(at / row), Math.floor(word / MAKEPAD_INSTANCE_WINDOW_WORDS),
+      w, h, 1, gl.RED_INTEGER, gl.UNSIGNED_INT, word * 4);
+  };
+  while (first < end) {
+    const stop = Math.min(end, (Math.floor(first / MAKEPAD_INSTANCE_WINDOW_WORDS) + 1) * MAKEPAD_INSTANCE_WINDOW_WORDS);
+    const x = first % row;
+    if (x) {
+      const head = Math.min(row - x, stop - first);
+      put(first, head, 1);
+      first += head;
+    }
+    const rows = Math.floor((stop - first) / row);
+    if (rows) {
+      put(first, row, rows);
+      first += rows * row;
+    }
+    if (first < stop) {
+      put(first, stop - first, 1);
+      first = stop;
+    }
+  }
+}
+
 function makepad_safe_product(left, right) {
   if (
     !Number.isSafeInteger(left) ||
@@ -81,6 +141,15 @@ function makepad_safe_sum(left, right) {
   return Number.isSafeInteger(sum) ? sum : null;
 }
 
+function makepad_webgl_attrib_pointer(gl, attr, byte_offset) {
+  const offset = byte_offset + attr.offset;
+  if (attr.integer) {
+    gl.vertexAttribIPointer(attr.loc, attr.size, attr.gl_type, attr.stride, offset);
+  } else {
+    gl.vertexAttribPointer(attr.loc, attr.size, attr.gl_type, !!attr.normalized, attr.stride, offset);
+  }
+}
+
 function makepad_swap_red_blue(value) {
   return ((value & 0xff) << 16) | (value & 0xff00ff00) | ((value >>> 16) & 0xff);
 }
@@ -96,11 +165,17 @@ export function makepad_query_webgl_limits(gl) {
     gl.getParameter(gl.MAX_RENDERBUFFER_SIZE),
   );
   const viewport = gl.getParameter(gl.MAX_VIEWPORT_DIMS);
+  const layers = Number(gl.getParameter(gl.MAX_ARRAY_TEXTURE_LAYERS));
   const max_viewport_width = makepad_webgl_limit(viewport && viewport[0]);
   const max_viewport_height = makepad_webgl_limit(viewport && viewport[1]);
   return {
     max_texture_size,
     max_cube_map_texture_size,
+    max_vertex_texture_units: gl.getParameter(gl.MAX_VERTEX_TEXTURE_IMAGE_UNITS),
+    max_fragment_texture_units: gl.getParameter(gl.MAX_TEXTURE_IMAGE_UNITS),
+    max_combined_texture_units: gl.getParameter(gl.MAX_COMBINED_TEXTURE_IMAGE_UNITS),
+    // WebGL 2's minimum when the context does not say
+    max_array_texture_layers: Number.isSafeInteger(layers) && layers >= 1 ? layers : 256,
     max_width: Math.min(
       max_texture_size,
       max_renderbuffer_size,
@@ -147,12 +222,18 @@ export class WasmWebGL extends WasmWebBrowser {
     if (wasm === undefined) {
       return;
     }
+    this.uniform_stream_buf = null;
+    this.zero_uniform_buf = null;
+    this.uniform_stream_len = 0;
+    this.uniform_stream_ptr = 0;
+    this.bound_ubo = [];
+    this.xr_pass_uniform_buf = null;
+    this.xr_pass_words = null;
     this.draw_shaders = [];
     this.array_buffers = [];
-    // Per instance buffer id: the R32UI texture a shader reads instance
-    // data from when they do not fit its vertex attributes (`mp_inst_data`,
-    // shader_glsl.rs), with the upload it mirrors.
-    this.instance_data_textures = new Map();
+    // Per instance slab slot: its buffer, written regions and lazy R32UI
+    // mirror (texture-fetch shaders, `mp_inst_data` in shader_glsl.rs).
+    this.instance_slabs = new Map();
     this.index_buffers = [];
     this.vaos = [];
     this.textures = [];
@@ -365,38 +446,41 @@ export class WasmWebGL extends WasmWebBrowser {
   FromWasmXrStopPresenting() {}
   // @end xr
 
-  get_uniform_block_binding(program, name) {
-    let gl = this.gl;
-    let index = gl.getUniformBlockIndex(program, name);
-    if (index === gl.INVALID_INDEX) {
+  get_uniform_block_binding(program, name, binding, block_sizes) {
+    const gl = this.gl;
+    const index = gl.getUniformBlockIndex(program, name);
+    if (index === gl.INVALID_INDEX) return null;
+    if (binding >= (this.max_uniform_buffer_bindings || 24)) {
+      this.report_vertex_submission_once("ubo-binding:" + binding, "uniform binding exceeds the device limit", { name, binding });
       return null;
     }
-    gl.uniformBlockBinding(program, index, index);
-    return index;
+    gl.uniformBlockBinding(program, index, binding);
+    if (block_sizes && typeof gl.getActiveUniformBlockParameter === "function") {
+      block_sizes[binding] = gl.getActiveUniformBlockParameter(program, index, gl.UNIFORM_BLOCK_DATA_SIZE) || 0;
+    }
+    return binding;
   }
 
-  upload_uniform_buffer_from_ptr(gl, gl_buf, ptr_f32, gen_lo, gen_hi) {
-    if (!gl_buf || ptr_f32.ptr == 0 || ptr_f32.len == 0) {
+  FromWasmUploadUniformStream({ data }) {
+    const gl = this.gl;
+    this.uniform_stream_len = 0;
+    this.uniform_stream_ptr = 0;
+    const checked = this.make_validated_wasm_view(data, 1, true, "uniform stream", Uint8Array);
+    if (!checked.ok) {
+      this.report_vertex_submission_once("uniform-stream:upload", checked.reason, { data });
       return;
     }
-    if (
-      gl_buf._last_upload_gen_lo === gen_lo &&
-      gl_buf._last_upload_gen_hi === gen_hi
-    ) {
+    if (!this.uniform_stream_buf) this.uniform_stream_buf = gl.createBuffer();
+    if (!this.uniform_stream_buf) {
+      this.report_vertex_submission_once("uniform-stream:allocation", "uniform stream buffer allocation failed", {});
       return;
     }
-    let data = new Float32Array(this.memory.buffer, ptr_f32.ptr, ptr_f32.len);
-    this.upload_uniform_buffer_data(gl, gl_buf, data, gl.DYNAMIC_DRAW);
-    gl_buf._last_upload_gen_lo = gen_lo;
-    gl_buf._last_upload_gen_hi = gen_hi;
-  }
-
-  reset_uniform_buffer_upload_cache(gl_buf) {
-    if (!gl_buf) {
-      return;
-    }
-    gl_buf._last_upload_gen_lo = undefined;
-    gl_buf._last_upload_gen_hi = undefined;
+    gl.bindBuffer(gl.UNIFORM_BUFFER, this.uniform_stream_buf);
+    gl.bufferData(gl.UNIFORM_BUFFER, checked.array, gl.STREAM_DRAW);
+    if (this.bound_ubo) this.bound_ubo.length = 0;
+    // where the stream sits in wasm memory: a view is made at use, as memory may grow meanwhile
+    this.uniform_stream_ptr = data.ptr;
+    this.uniform_stream_len = data.len;
   }
 
   upload_uniform_buffer_data(gl, gl_buf, data, usage = gl.DYNAMIC_DRAW) {
@@ -412,17 +496,86 @@ export class WasmWebGL extends WasmWebBrowser {
     const byte_length = data.byteLength || data.length * 4;
     if (gl_buf._buffer_byte_length !== byte_length) {
       gl.bufferData(target, data, usage);
+      if (target === gl.UNIFORM_BUFFER) this.invalidate_ubo_buffer(gl_buf);
       gl_buf._buffer_byte_length = byte_length;
     } else {
       gl.bufferSubData(target, 0, data);
     }
   }
 
-  bind_uniform_block(gl, binding, gl_buf) {
-    if (binding === null || !gl_buf) {
+  bind_uniform_block(gl, binding, buf, off = 0, len = -1) {
+    if (binding == null || !buf || len === 0) return;
+    const cache = this.bound_ubo || (this.bound_ubo = []);
+    const cur = cache[binding];
+    if (cur && cur.buf === buf && cur.off === off && cur.len === len) return;
+    if (cur) cur.buf = null;
+    if (len > 0) {
+      gl.bindBufferRange(gl.UNIFORM_BUFFER, binding, buf, off, len);
+    } else {
+      gl.bindBufferBase(gl.UNIFORM_BUFFER, binding, buf);
+    }
+    if (cur) {
+      cur.buf = buf;
+      cur.off = off;
+      cur.len = len;
+    } else {
+      cache[binding] = { buf, off, len };
+    }
+  }
+
+  invalidate_ubo_buffer(buf) {
+    if (!buf || !this.bound_ubo) return;
+    for (const entry of this.bound_ubo) {
+      if (entry && entry.buf === buf) entry.buf = null;
+    }
+  }
+
+  effective_uniform_align() {
+    const raw = this.gpu_info?.uniform_buffer_offset_alignment || 256;
+    const clamped = Math.min(256, Math.max(16, raw | 0));
+    let align = 16;
+    while (align < clamped) align <<= 1;
+    return align;
+  }
+
+  effective_max_uniform_block() {
+    const raw = this.gpu_info?.max_uniform_block_size || 65536;
+    return Math.max(16384, raw | 0);
+  }
+
+  ensure_zero_uniform_buf(gl, need) {
+    const max_block = this.effective_max_uniform_block();
+    const target_size = Math.min(max_block, Math.max(256, need));
+    if (this.zero_uniform_buf && (this.zero_uniform_buf._buffer_byte_length || 0) >= target_size) {
+      return this.zero_uniform_buf;
+    }
+    if (!this.zero_uniform_buf) this.zero_uniform_buf = gl.createBuffer();
+    if (!this.zero_uniform_buf) return null;
+    let size = 256;
+    while (size < target_size && size < max_block) size <<= 1;
+    size = Math.min(size, max_block);
+    gl.bindBuffer(gl.UNIFORM_BUFFER, this.zero_uniform_buf);
+    gl.bufferData(gl.UNIFORM_BUFFER, new Uint8Array(size), gl.STATIC_DRAW);
+    this.invalidate_ubo_buffer(this.zero_uniform_buf);
+    this.zero_uniform_buf._buffer_byte_length = size;
+    gl.bindBuffer(gl.UNIFORM_BUFFER, null);
+    return this.zero_uniform_buf;
+  }
+
+  bind_stream_uniform(gl, shader, binding, range) {
+    if (binding == null) return;
+    if (range.len === 0) {
+      const need = Math.max(shader.block_sizes?.[binding] || 0, 16);
+      const zero = this.ensure_zero_uniform_buf(gl, need);
+      if (!zero) throw new Error("zero uniform buffer allocation failed");
+      this.bind_uniform_block(gl, binding, zero);
       return;
     }
-    gl.bindBufferBase(gl.UNIFORM_BUFFER, binding, gl_buf);
+    const align = this.effective_uniform_align();
+    const max_block = this.effective_max_uniform_block();
+    const stride = Math.min(Math.ceil(Math.max(range.len, 16) / align) * align, max_block);
+    const len = Math.min(stride, this.uniform_stream_len - range.off);
+    this.bind_uniform_block(gl, binding, this.uniform_stream_buf, range.off, len);
   }
 
   // With checks on (gl_checks), allocations are checked for a GL error
@@ -913,8 +1066,15 @@ export class WasmWebGL extends WasmWebBrowser {
   sampler_target(ty) {
     const gl = this.gl;
     if (ty === "samplerCube") return gl.TEXTURE_CUBE_MAP;
+    if (ty === "sampler3D") return gl.TEXTURE_3D;
     if (ty === "sampler2DArray") return gl.TEXTURE_2D_ARRAY;
     return gl.TEXTURE_2D;
+  }
+
+  // All current mutable uploads supply level zero, including images with CPU-side mips.
+  set_texture_storage_info(target, texture, filterable, levels = 1) {
+    this.gl.texParameteri(target, this.gl.TEXTURE_MAX_LEVEL, levels - 1);
+    texture._filterable = !!filterable;
   }
 
   configure_texture_parameters(gl, target, nearest, cube) {
@@ -957,6 +1117,8 @@ export class WasmWebGL extends WasmWebBrowser {
       }
       const cube = target === gl.TEXTURE_CUBE_MAP;
       gl.bindTexture(target, texture);
+      this.set_texture_storage_info(target, texture, !shadow);
+      texture._depth = shadow;
       this.configure_texture_parameters(gl, target, false, cube);
       const pixel = new Uint8Array(4);
       const faces = cube
@@ -969,7 +1131,7 @@ export class WasmWebGL extends WasmWebBrowser {
             gl.TEXTURE_CUBE_MAP_NEGATIVE_Z,
           ]
         : [gl.TEXTURE_2D];
-      if (target === gl.TEXTURE_2D_ARRAY) {
+      if (target === gl.TEXTURE_2D_ARRAY || target === gl.TEXTURE_3D) {
         gl.texImage3D(target, 0, gl.RGBA, 1, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
       } else if (shadow) {
         gl.texImage2D(
@@ -1076,6 +1238,7 @@ export class WasmWebGL extends WasmWebBrowser {
     texture._render_target_valid = false;
     try {
       gl.bindTexture(target, texture);
+      this.set_texture_storage_info(target, texture, upload_format !== "rgba32f" || this.float_linear);
       if (allocation_changed) {
         this.configure_texture_parameters(
           gl,
@@ -1426,6 +1589,45 @@ export class WasmWebGL extends WasmWebBrowser {
     return null;
   }
 
+  make_webgl_sampler(address, compare, min_filter, mag_filter, anisotropy) {
+    const gl = this.gl;
+    const sampler = gl.createSampler();
+    if (!sampler) return null;
+    const wrap = [gl.REPEAT, gl.CLAMP_TO_EDGE, gl.CLAMP_TO_EDGE, gl.MIRRORED_REPEAT][address];
+    for (const axis of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T, gl.TEXTURE_WRAP_R]) {
+      gl.samplerParameteri(sampler, axis, wrap);
+    }
+    gl.samplerParameteri(sampler, gl.TEXTURE_MIN_FILTER, min_filter);
+    gl.samplerParameteri(sampler, gl.TEXTURE_MAG_FILTER, mag_filter);
+    if (compare) {
+      gl.samplerParameteri(sampler, gl.TEXTURE_COMPARE_MODE, gl.COMPARE_REF_TO_TEXTURE);
+      gl.samplerParameteri(sampler, gl.TEXTURE_COMPARE_FUNC, gl.LEQUAL);
+    }
+    if (this.anisotropy_ext && anisotropy > 1) {
+      gl.samplerParameterf(sampler, this.anisotropy_ext.TEXTURE_MAX_ANISOTROPY_EXT,
+        Math.min(anisotropy, this.max_anisotropy));
+    }
+    return sampler;
+  }
+
+  texture_unit_error(textures, instance_texture) {
+    const inst_data = Number(instance_texture);
+    let vertex = inst_data, fragment = 0;
+    const slots = new Set();
+    for (const binding of textures) {
+      slots.add(binding.slot);
+      if (binding.stages & 1) vertex++;
+      if (binding.stages & 2) fragment++;
+    }
+    const combined = textures.length + inst_data;
+    const caps = this.webgl_limits;
+    if (vertex <= caps.max_vertex_texture_units && fragment <= caps.max_fragment_texture_units &&
+        combined <= caps.max_combined_texture_units) return null;
+    return `texture unit limit exceeded: need vertex=${vertex} (max ${caps.max_vertex_texture_units}), ` +
+      `fragment=${fragment} (max ${caps.max_fragment_texture_units}), combined=${combined} (max ${caps.max_combined_texture_units}) ` +
+      `[logical_textures=${slots.size}, extra_sampler_pairs=${textures.length - slots.size}, pick_twins=0, inst_data=${inst_data}]`;
+  }
+
   fail_webgl_shader(shader, stage, info_log) {
     if (shader.compile_failed) return;
     let gl = this.gl;
@@ -1434,12 +1636,15 @@ export class WasmWebGL extends WasmWebBrowser {
     );
     if (shader.vsh) gl.deleteShader(shader.vsh);
     if (shader.fsh) gl.deleteShader(shader.fsh);
-    if (shader.program) gl.deleteProgram(shader.program);
-    for (const buffer of [shader.pass_uniform_buf, shader.draw_list_uniform_buf, shader.live_uniform_buf]) {
-      if (buffer) gl.deleteBuffer(buffer);
+    for (const binding of shader.texture_locs || []) {
+      if (binding.sampler) gl.deleteSampler(binding.sampler);
     }
+    if (shader.program) gl.deleteProgram(shader.program);
     for (const entry of shader.custom_uniform_buffers || []) {
-      if (entry && entry.buffer) gl.deleteBuffer(entry.buffer);
+      if (entry && entry.buffer) {
+        this.invalidate_ubo_buffer(entry.buffer);
+        gl.deleteBuffer(entry.buffer);
+      }
     }
     shader.compile_failed = true;
     this.draw_shaders[shader.shader_id] = { compile_failed: true };
@@ -1472,36 +1677,43 @@ export class WasmWebGL extends WasmWebBrowser {
       return false;
     }
     if (!link_ok) {
-      this.fail_webgl_shader(shader, "link", gl.getProgramInfoLog(shader.program));
+      const has_instance_texture = /\buniform\s+(?:highp\s+)?usampler2DArray\s+mp_inst_data\s*;/.test(shader.vertex);
+      const units = this.texture_unit_error(shader.textures, has_instance_texture);
+      const log = gl.getProgramInfoLog(shader.program);
+      this.fail_webgl_shader(shader, units ? "units" : "link", units ? `${units}: ${log}` : log);
       return false;
     }
 
-    let texture_locs = [];
-    for (let i = 0; i < shader.textures.length; i++) {
-      let tex_name = shader.textures[i].name;
-      let loc = gl.getUniformLocation(shader.program, "tex_" + tex_name);
-      if (loc === null) {
-        loc = gl.getUniformLocation(shader.program, "ds_" + tex_name);
-      }
-      texture_locs.push({
-        name: tex_name,
-        ty: shader.textures[i].ty,
-        loc: loc,
-      });
+    const texture_locs = [];
+    for (const binding of shader.textures) {
+      const loc = gl.getUniformLocation(shader.program, binding.name);
+      if (loc !== null) texture_locs.push({ ...binding, loc, unit: texture_locs.length });
     }
-
-    // Instance data past the vertex attributes (shader_glsl.rs).
     const inst_data_loc = gl.getUniformLocation(shader.program, "mp_inst_data");
-
-    let pass_uniform_buf = null;
-    let draw_list_uniform_buf = null;
-    let live_uniform_buf = null;
-    try {
-      pass_uniform_buf = gl.createBuffer();
-      draw_list_uniform_buf = gl.createBuffer();
-      live_uniform_buf = gl.createBuffer();
-    } catch (_error) {
+    const inst_data_unit = inst_data_loc === null ? null : texture_locs.length;
+    const units = this.texture_unit_error(texture_locs, inst_data_unit !== null);
+    if (units) {
+      this.fail_webgl_shader(shader, "units", units);
+      return false;
     }
+
+    shader.texture_locs = texture_locs;
+    gl.useProgram(shader.program);
+    for (const b of texture_locs) {
+      b.target = this.sampler_target(b.ty);
+      b.nearest = this.nearest_samplers[b.address * 2 + Number(b.compare)];
+      b.sampler = this.make_webgl_sampler(b.address, b.compare,
+        b.filter ? gl.LINEAR_MIPMAP_LINEAR : gl.NEAREST_MIPMAP_LINEAR,
+        b.filter ? gl.LINEAR : gl.NEAREST, b.anisotropy);
+      if (!b.sampler || !b.nearest) {
+        this.fail_webgl_shader(shader, "sampler", `cannot allocate sampler for ${b.name}`);
+        return false;
+      }
+      gl.uniform1i(b.loc, b.unit);
+    }
+    if (inst_data_unit !== null) gl.uniform1i(inst_data_loc, inst_data_unit);
+
+    const block_sizes = [0, 0, 0, 0, 0];
     const finished_shader = {
       shader_id: shader.shader_id,
       shader_name: shader.shader_name,
@@ -1530,33 +1742,31 @@ export class WasmWebGL extends WasmWebBrowser {
               shader.instance_slots,
             ),
       inst_data_loc,
+      inst_data_unit,
+      inst_base_loc: gl.getUniformLocation(shader.program, "mp_inst_base"),
       pass_uniforms_binding: this.get_uniform_block_binding(
         shader.program,
-        "passUniforms",
+        "passUniforms", UBO_BINDING_PASS, block_sizes,
       ),
       draw_list_uniforms_binding: this.get_uniform_block_binding(
         shader.program,
-        "draw_listUniforms",
+        "draw_listUniforms", UBO_BINDING_DRAW_LIST, block_sizes,
       ),
       draw_call_uniforms_binding: this.get_uniform_block_binding(
         shader.program,
-        "draw_callUniforms",
+        "draw_callUniforms", UBO_BINDING_DRAW_CALL, block_sizes,
       ),
       user_uniforms_binding: this.get_uniform_block_binding(
         shader.program,
-        "userUniforms",
+        "userUniforms", UBO_BINDING_USER, block_sizes,
       ),
       live_uniforms_binding: this.get_uniform_block_binding(
         shader.program,
-        "liveUniforms",
+        "liveUniforms", UBO_BINDING_LIVE, block_sizes,
       ),
       clip_y_flip_loc: gl.getUniformLocation(shader.program, "mp_clip_y_flip"),
       frag_y_loc: gl.getUniformLocation(shader.program, "mp_frag_y"),
-      pass_uniform_buf,
-      draw_list_uniform_buf,
-      live_uniform_buf,
-      uniform_buffers_valid:
-        !!pass_uniform_buf && !!draw_list_uniform_buf && !!live_uniform_buf,
+      block_sizes,
       texture_locs: texture_locs,
       geometry_slots: shader.geometry_slots,
       instance_slots: shader.instance_slots,
@@ -1832,145 +2042,107 @@ export class WasmWebGL extends WasmWebBrowser {
     buffer.max_index = max_index;
   }
 
-  FromWasmRetainedArrayBuffer(args) {
-    const gl = this.gl;
-    const buffer = this.numeric_buffer_for_update(this.array_buffers, args?.buffer_id, "array");
-    if (!buffer) return;
-    const reject = (reason) => {
-      buffer.retained_capacity = 0;
-      this.report_vertex_submission_once(`retained:${args.buffer_id}:${reason}`, reason, { buffer_id: args.buffer_id });
-    };
-    const checked = this.make_validated_wasm_view(args.data, 4, false, "retained instances", Float32Array);
-    if (!checked.ok || !Number.isSafeInteger(args.first_slot) || args.first_slot < 0 || args.first_slot > args.data.len) {
-      reject(checked.reason || "invalid retained upload range");
-      return;
-    }
-    let bound = false;
-    try {
-      let first = args.first_slot;
-      if (!buffer.gl_buf) buffer.gl_buf = gl.createBuffer();
-      if (!buffer.gl_buf) { reject("retained buffer allocation returned null"); return; }
-      gl.bindBuffer(gl.ARRAY_BUFFER, buffer.gl_buf);
-      bound = true;
-      if (first === 0 || !buffer.retained_capacity || checked.byte_length > buffer.retained_capacity) {
-        let capacity = 256;
-        while (capacity < checked.byte_length) capacity *= 2;
-        gl.bufferData(gl.ARRAY_BUFFER, capacity, gl.STATIC_DRAW);
-        const gl_buf = buffer.gl_buf;
-        this.defer_allocation_check(() => {
-          gl_buf._buffer_byte_length = undefined;
-          if (buffer.gl_buf === gl_buf) {
-            buffer.valid = false;
-            reject("retained buffer allocation failed");
-          }
-        });
-        buffer.retained_capacity = capacity;
-        buffer.gl_buf._buffer_byte_length = capacity;
-        first = 0;
-      }
-      for (let offset = first; offset < checked.element_count; offset += 65536) {
-        gl.bufferSubData(gl.ARRAY_BUFFER, offset * 4, checked.array, offset, Math.min(65536, checked.element_count - offset));
-      }
-      buffer.valid = true;
-      buffer.byte_length = checked.byte_length;
-      buffer.length = checked.element_count;
-      buffer.source_kind = "f32";
-      // Browser/driver owns in-flight backing stores. No fabricated completion.
-    } catch (error) {
-      reject(`retained upload failed: ${error?.message || error}`);
-    } finally {
-      if (bound) { try { gl.bindBuffer(gl.ARRAY_BUFFER, null); } catch (_) {} }
+  report_instance_upload_failed(identity, scope, reason, region) {
+    const failure = { slab_slot: identity?.slab_slot, backing_generation: identity?.backing_generation, scope, region };
+    this.report_vertex_submission_once(`instance-upload:${scope}:${reason}`, reason, failure);
+    if (makepad_is_u32(identity?.slab_slot) && makepad_is_u32(identity.backing_generation)) {
+      this.to_wasm.ToWasmInstanceUploadFailed(failure);
     }
   }
 
-  FromWasmRetainedArrayUpdate(args) {
+  FromWasmCreateInstanceSlab(args) {
     const gl = this.gl;
-    const validInteger = (value) => Number.isSafeInteger(value) && value >= 0;
-    const reject = (reason) => {
-      this.report_vertex_submission_once(
-        `retained-delta:${args?.buffer_id}:${reason}`, reason, { buffer_id: args?.buffer_id });
-      if (validInteger(args?.buffer_id)) {
-        this.to_wasm.ToWasmRetainedUploadFailed({ buffer_id: args.buffer_id });
+    if (!makepad_is_u32(args?.slab_slot) || !makepad_is_u32(args.backing_generation)) {
+      this.report_vertex_submission_once("instance-slab:id", "invalid instance slab identity", args);
+      return;
+    }
+    const existing = this.instance_slabs.get(args.slab_slot);
+    if (existing) {
+      if (existing.backing_generation !== args.backing_generation || existing.capacity_bytes !== args.capacity_bytes) {
+        this.report_instance_upload_failed(args, INSTANCE_FAILURE_BACKING, "instance slab slot is already occupied");
       }
+      return;
+    }
+    const slab = {
+      slab_slot: args.slab_slot, backing_generation: args.backing_generation,
+      capacity_bytes: args.capacity_bytes, written_end: 0, valid: false, gl_buf: null,
+      regions: new Map(), dirty: new Map(), mirror: null, mirror_failed: false,
     };
-    if (!validInteger(args?.buffer_id) || !validInteger(args.slot_count) ||
-        !validInteger(args.capacity_bytes) || args.capacity_bytes < args.slot_count * 4 ||
-        !Array.isArray(args.copies) || !Array.isArray(args.writes)) {
-      reject("invalid retained delta metadata"); return;
+    this.instance_slabs.set(slab.slab_slot, slab);
+    const fail = (reason) => {
+      if (this.instance_slabs.get(slab.slab_slot) !== slab) return;
+      slab.valid = false;
+      if (slab.gl_buf) gl.deleteBuffer(slab.gl_buf);
+      slab.gl_buf = null;
+      this.report_instance_upload_failed(slab, INSTANCE_FAILURE_BACKING, reason);
+    };
+    if (!Number.isSafeInteger(slab.capacity_bytes) || slab.capacity_bytes <= 0 || slab.capacity_bytes % 4) {
+      fail("invalid instance slab capacity");
+      return;
     }
-    const previous = this.array_buffers[args.buffer_id];
-    const byteLength = makepad_safe_product(args.slot_count, 4);
-    if (byteLength === null) { reject("retained delta size overflow"); return; }
-    const writes = [];
-    for (const write of args.writes) {
-      const checked = this.make_validated_wasm_view(write.data, 4, false, "retained segment", Float32Array);
-      if (!checked.ok || !validInteger(write.destination_slot) ||
-          write.destination_slot + checked.element_count > args.slot_count) {
-        reject(checked.reason || "retained segment is outside destination"); return;
-      }
-      if (!args.replace && checked.element_count && write.destination_slot < (previous?.length || 0)) {
-        reject("retained patch requires a replacement backing"); return;
-      }
-      writes.push({ offset: write.destination_slot * 4, data: checked.array });
-    }
-    for (const copy of args.copies) {
-      if (!validInteger(copy.source_slot) || !validInteger(copy.destination_slot) ||
-          !validInteger(copy.slot_count) || !previous?.valid ||
-          copy.source_slot + copy.slot_count > previous.length ||
-          copy.destination_slot + copy.slot_count > args.slot_count ||
-          (!args.replace && copy.source_slot !== copy.destination_slot)) {
-        reject("invalid retained GPU copy range"); return;
-      }
-    }
-    if (!args.replace && (!previous?.valid || args.capacity_bytes > previous.retained_capacity)) {
-      reject("retained update has no compatible backing"); return;
-    }
-    let destination = previous?.gl_buf;
-    let installed = false;
     try {
-      if (args.replace) {
-        destination = gl.createBuffer();
-        if (!destination) { reject("retained allocation returned null"); return; }
-        gl.bindBuffer(gl.COPY_WRITE_BUFFER, destination);
-        gl.bufferData(gl.COPY_WRITE_BUFFER, args.capacity_bytes, gl.STATIC_DRAW);
-        if (args.copies.length) {
-          gl.bindBuffer(gl.COPY_READ_BUFFER, previous.gl_buf);
-          for (const copy of args.copies) {
-            if (copy.slot_count) gl.copyBufferSubData(gl.COPY_READ_BUFFER, gl.COPY_WRITE_BUFFER,
-              copy.source_slot * 4, copy.destination_slot * 4, copy.slot_count * 4);
-          }
-        }
-      } else {
-        gl.bindBuffer(gl.COPY_WRITE_BUFFER, destination);
-      }
-      for (const write of writes) {
-        if (write.data.length) gl.bufferSubData(gl.COPY_WRITE_BUFFER, write.offset, write.data);
-      }
-      destination._buffer_byte_length = args.capacity_bytes;
-      const installed_buffer = this.array_buffers[args.buffer_id] = {
-        gl_buf: destination, valid: true, byte_length: byteLength, length: args.slot_count,
-        retained_capacity: args.capacity_bytes, source_kind: "f32",
-        upload_version: (previous?.upload_version || 0) + 1,
-      };
-      installed = true;
-      if (args.replace) {
-        // A failed allocation sends the whole list again (the page asks for it).
-        this.defer_allocation_check(() => {
-          if (this.array_buffers[args.buffer_id] === installed_buffer) {
-            installed_buffer.valid = false;
-            reject("retained allocation failed");
-          }
-        });
-      }
-      // The command stream retains storage read by earlier draws and copies.
-      if (args.replace && previous?.gl_buf) gl.deleteBuffer(previous.gl_buf);
+      slab.gl_buf = gl.createBuffer();
+      if (!slab.gl_buf) { fail("instance slab allocation returned null"); return; }
+      slab.gl_buf._instance_ledger_role = "slab";
+      gl.bindBuffer(gl.ARRAY_BUFFER, slab.gl_buf);
+      gl.bufferData(gl.ARRAY_BUFFER, slab.capacity_bytes, gl.DYNAMIC_DRAW);
+      slab.valid = true;
+      this.defer_allocation_check(() => fail("instance slab allocation failed"));
     } catch (error) {
-      reject(`retained delta failed: ${error?.message || error}`);
-    } finally {
-      gl.bindBuffer(gl.COPY_READ_BUFFER, null);
-      gl.bindBuffer(gl.COPY_WRITE_BUFFER, null);
-      if (!installed && args.replace && destination) gl.deleteBuffer(destination);
+      fail(`instance slab allocation failed: ${error.message || error}`);
     }
+  }
+
+  FromWasmWriteInstanceRegion(args) {
+    const slab = this.instance_slabs.get(args?.slab_slot);
+    if (!slab || slab.backing_generation !== args.backing_generation) {
+      this.report_instance_upload_failed(args, INSTANCE_FAILURE_BACKING, "instance slab is missing or invalid");
+      return;
+    }
+    if (!slab.valid) return; // Create already reported the failed backing.
+    const { region, byte_off, byte_len, parts } = args;
+    if (!makepad_instance_region_valid(region)) {
+      slab.regions.delete(region?.index);
+      this.report_vertex_submission_once("instance-region:id", "invalid instance region token", args);
+      return;
+    }
+    const fail = (reason) => {
+      slab.regions.delete(region.index);
+      this.report_instance_upload_failed(slab, INSTANCE_FAILURE_REGION, reason, region);
+    };
+    const end = makepad_safe_sum(byte_off, byte_len);
+    if (end === null || end > slab.capacity_bytes || byte_off % 4 || byte_len % 4 || !Array.isArray(parts)) {
+      fail("invalid instance region extent or parts");
+      return;
+    }
+    let size = 0;
+    for (const part of parts) {
+      const checked = this.validate_wasm_slice(part, 1, true, "instance region part");
+      if (!checked.ok) { fail(checked.reason); return; }
+      size += checked.byte_length;
+      if (size > byte_len) break;
+    }
+    if (size !== byte_len) { fail("instance region parts do not fill the destination"); return; }
+    try {
+      const gl = this.gl;
+      const bytes = new Uint8Array(this.memory.buffer);
+      gl.bindBuffer(gl.ARRAY_BUFFER, slab.gl_buf);
+      let offset = byte_off;
+      for (const part of parts) {
+        // The WebGL2 overload reads directly from Wasm. A zero length means
+        // "to the end of the view" to GL, so omit empty segments.
+        if (part.len) gl.bufferSubData(gl.ARRAY_BUFFER, offset, bytes, part.ptr, part.len);
+        offset += part.len;
+      }
+    } catch (error) {
+      fail(`instance region write failed: ${error.message || error}`);
+      return;
+    }
+    const written = { gen: region.gen, byte_off, byte_len };
+    slab.regions.set(region.index, written);
+    if (!byte_len || slab.mirror_failed) return;
+    slab.written_end = Math.max(slab.written_end, end);
+    if (slab.mirror && byte_len > (slab.dirty.get(byte_off)?.byte_len || 0)) slab.dirty.set(byte_off, written);
   }
 
   FromWasmAllocArrayBuffer(args) {
@@ -2058,12 +2230,20 @@ export class WasmWebGL extends WasmWebBrowser {
     buffer.byte_length = checked.byte_length;
     buffer.length = checked.element_count;
     buffer.source_kind = compact ? "bytes" : "f32";
-    buffer.retained_capacity = 0;
   }
 
   preflight_webgl_draw(args, vao, shader) {
     const geometry_buffer = this.array_buffers[vao.geom_vb_id];
-    const instance_buffer = this.array_buffers[vao.inst_vb_id];
+    const instance_buffer = this.instance_slabs.get(vao.slab_slot);
+    if (!instance_buffer?.valid || instance_buffer.backing_generation !== vao.backing_generation) {
+      return { ok: false, reason: "instance slab backing is missing or invalid" };
+    }
+    const written = instance_buffer.regions.get(vao.region.index);
+    if (!written || written.gen !== vao.region.gen || written.byte_off !== vao.byte_off ||
+        written.byte_len !== vao.byte_len) {
+      return { ok: false, reason: "instance region is missing or has a different extent" };
+    }
+    const instance_bytes = written.byte_off + written.byte_len - vao.instance_start;
     const index_buffer = this.index_buffers[vao.geom_ib_id];
     if (!geometry_buffer || !geometry_buffer.valid || !geometry_buffer.gl_buf) {
       return { ok: false, reason: "geometry buffer is missing or invalid" };
@@ -2076,9 +2256,6 @@ export class WasmWebGL extends WasmWebBrowser {
     }
     if (!shader.program) {
       return { ok: false, reason: "shader program allocation failed" };
-    }
-    if (shader.uniform_buffers_valid === false || vao.uniform_buffers_valid === false) {
-      return { ok: false, reason: "uniform buffer allocation failed" };
     }
     const layout = this.validate_webgl_attrib_layout(shader);
     if (!layout.ok) {
@@ -2132,82 +2309,97 @@ export class WasmWebGL extends WasmWebBrowser {
     const instance_stride = shader.inst_data_loc
       ? shader.instance_slots * 4
       : layout.instance.stride;
-    let instances = 0;
+    let resident_rows = 0;
     if (instance_stride === 0) {
-      if (instance_buffer.byte_length !== 0) {
+      if (instance_bytes !== 0) {
         return {
           ok: false,
           reason: "instance buffer has data but no physical attribute stride",
         };
       }
     } else {
-      if (instance_buffer.byte_length % instance_stride !== 0) {
+      if (instance_bytes % instance_stride !== 0 || (shader.inst_data_loc && vao.instance_start % instance_stride)) {
         return { ok: false, reason: "instance buffer contains a partial record" };
       }
-      instances = instance_buffer.byte_length / instance_stride;
-      if (!Number.isSafeInteger(instances)) {
+      resident_rows = instance_bytes / instance_stride;
+      if (!Number.isSafeInteger(resident_rows)) {
         return { ok: false, reason: "instance count is not a safe integer" };
       }
     }
+    const ranges = args.instance_ranges;
+    if (!Array.isArray(ranges)) {
+      return { ok: false, reason: "instance ranges must be an array" };
+    }
+    let drawn_rows = 0;
+    for (const range of ranges) {
+      const end = makepad_safe_sum(range?.first, range?.count);
+      if (end === null || range.count === 0) {
+        return { ok: false, reason: "invalid instance range" };
+      }
+      if (end > resident_rows) {
+        return { ok: false, reason: `instance range [${range.first}, ${end}) exceeds resident row count ${resident_rows}` };
+      }
+      drawn_rows += range.count;
+    }
     const expanded_triangles = makepad_safe_product(
       Math.floor(index_buffer.length / 3),
-      instances,
+      drawn_rows,
     );
     if (expanded_triangles === null) {
       return { ok: false, reason: "expanded triangle count is unsafe" };
     }
 
-    const uniform_slices = [
-      ["pass uniforms", args.pass_uniforms],
-      ["draw-list uniforms", args.draw_list_uniforms],
-      ["draw-call uniforms", args.draw_call_uniforms],
-      ["user uniforms", args.user_uniforms],
-      ["live uniforms", args.live_uniforms],
+    const align = this.effective_uniform_align();
+    const max_block = this.effective_max_uniform_block();
+    const stream_len = this.uniform_stream_len || 0;
+    const standard_bindings = [
+      shader.pass_uniforms_binding,
+      shader.draw_list_uniforms_binding,
+      shader.draw_call_uniforms_binding,
+      shader.user_uniforms_binding,
+      shader.live_uniforms_binding,
     ];
-    for (const [label, slice] of uniform_slices) {
-      const checked = this.validate_wasm_slice(slice, 4, false, label);
-      if (!checked.ok) {
-        return checked;
+    for (let i = 0; i < STANDARD_UNIFORMS.length; i++) {
+      const name = STANDARD_UNIFORMS[i];
+      const binding = standard_bindings[i];
+      const r = args[name];
+      if (!r || !makepad_is_u32(r.off) || !makepad_is_u32(r.len)) {
+        return { ok: false, reason: name + " has an invalid uniform stream range" };
+      }
+      const declared = binding != null ? (shader.block_sizes?.[binding] || 0) : 0;
+      if (declared > max_block) {
+        return { ok: false, reason: name + " uniform block exceeds device limit" };
+      }
+      if (r.len === 0) continue;
+      if (r.off % align !== 0 || r.len > max_block || r.off + r.len > stream_len) {
+        return { ok: false, reason: name + " has an invalid uniform stream range" };
+      }
+      if (binding != null && declared > 0) {
+        const stride = Math.min(Math.ceil(Math.max(r.len, 16) / align) * align, max_block);
+        if (declared > stride || r.off + declared > stream_len) {
+          return { ok: false, reason: name + " uniform block is shorter than shader declaration" };
+        }
       }
     }
-    if (
-      this.xr !== undefined &&
-      this.xr.in_xr_pass &&
-      args.pass_uniforms.len < 48
-    ) {
-      return { ok: false, reason: "XR pass uniform buffer is shorter than 48 f32 values" };
-    }
-
-    const uniform_blocks = [
-      [shader.pass_uniforms_binding, shader.pass_uniform_buf, "pass"],
-      [shader.draw_list_uniforms_binding, shader.draw_list_uniform_buf, "draw-list"],
-      [shader.draw_call_uniforms_binding, vao.draw_call_uniform_buf, "draw-call"],
-      [shader.user_uniforms_binding, vao.user_uniform_buf, "user"],
-      [shader.live_uniforms_binding, shader.live_uniform_buf, "live"],
-    ];
-    for (const [binding, buffer, label] of uniform_blocks) {
-      if (binding !== null && !buffer) {
-        return { ok: false, reason: `${label} uniform buffer allocation failed` };
-      }
+    if (this.xr && this.xr.in_xr_pass && (args.pass_uniforms.len < 48 * 4 || args.pass_uniforms.len % 4 !== 0)) {
+      return { ok: false, reason: "XR pass uniform range must contain at least 48 whole f32 values" };
     }
 
     if (!Array.isArray(shader.texture_locs)) {
       return { ok: false, reason: "shader texture metadata is invalid" };
     }
-    const sampler_textures = new Array(shader.texture_locs.length);
-    for (let i = 0; i < shader.texture_locs.length; i++) {
-      const texture_loc = shader.texture_locs[i];
-      if (!texture_loc || texture_loc.loc == null) {
-        continue;
-      }
-      const texture_id = args.textures && args.textures[i];
-      const expected_target = this.sampler_target(texture_loc.ty);
+    const sampler_textures = [];
+    for (const texture_loc of shader.texture_locs) {
+      const slot = texture_loc.slot;
+      if (sampler_textures[slot]) continue;
+      const texture_id = args.textures && args.textures[slot];
+      const expected_target = texture_loc.target;
       let texture;
       if (texture_id === undefined) {
         texture = this.get_sampler_fallback_texture(expected_target, texture_loc.ty === "sampler2DShadow");
       } else {
         if (!Number.isSafeInteger(texture_id) || texture_id < 0) {
-          return { ok: false, reason: `texture ${i} has an invalid id` };
+          return { ok: false, reason: `texture ${slot} has an invalid id` };
         }
         texture = this.textures[texture_id];
         if (!texture) {
@@ -2245,16 +2437,13 @@ export class WasmWebGL extends WasmWebBrowser {
       if (!texture) {
         return { ok: false, reason: "sampler fallback texture allocation failed" };
       }
-      sampler_textures[i] = texture;
+      sampler_textures[slot] = texture;
     }
 
     let instance_data_texture = null;
     if (shader.inst_data_loc) {
-      const mirrored = this.instance_data_texture(vao.inst_vb_id, instance_buffer);
-      if (!mirrored.ok) {
-        return mirrored;
-      }
-      instance_data_texture = mirrored.texture;
+      instance_data_texture = this.instance_slab_texture(instance_buffer, this.webgl_limits.max_array_texture_layers);
+      if (!instance_data_texture) return { ok: false, reason: "instance slab mirror is unavailable" };
     }
 
     return {
@@ -2266,91 +2455,78 @@ export class WasmWebGL extends WasmWebBrowser {
       sampler_textures,
       instance_data_texture,
       indices: index_buffer.length,
-      instances,
+      instance_ranges: ranges,
+      instance_stride,
     };
   }
 
-  // The instance buffer's words as an R32UI texture (`mp_inst_data`): row
-  // major at the device's widest texture, copied on the GPU from the buffer
-  // (PIXEL_UNPACK_BUFFER) whenever the buffer was uploaded again. Rows grow
-  // to the next power of two and shrink below a quarter, as buffers do, so
-  // instance counts that change every frame update it in place.
-  instance_data_texture(buffer_id, buffer) {
+  // The slab's words as an R32UI array texture of MAKEPAD_INSTANCE_WORD_ROW-word
+  // rows: a slab past one window of words takes as many layers as it needs, so
+  // every draw reads its records whole, wherever they sit in the slab.
+  instance_slab_texture(slab, max_layers) {
+    if (slab.mirror_failed || (slab.mirror && slab.dirty.size === 0)) return slab.mirror;
     const gl = this.gl;
-    if (!this.instance_data_textures) {
-      this.instance_data_textures = new Map();
-    }
-    let entry = this.instance_data_textures.get(buffer_id);
-    if (
-      entry &&
-      entry.buffer === buffer &&
-      entry.upload_version === buffer.upload_version &&
-      entry.gl_buf === buffer.gl_buf &&
-      entry.byte_length === buffer.byte_length
-    ) {
-      return { ok: true, texture: entry.texture };
-    }
-    const words = buffer.byte_length / 4;
-    const max = this.webgl_limits.max_texture_size;
-    const width = max;
-    const rows = Math.max(1, Math.ceil(words / width));
-    if (rows > max) {
-      return { ok: false, reason: `instance data of ${words} words exceed a ${max}x${max} texture` };
-    }
-    let bound_unpack = false;
+    const row = MAKEPAD_INSTANCE_WORD_ROW;
+    const words = slab.capacity_bytes / 4;
+    const rows = Math.max(1, Math.ceil(words / row));
+    const layers = Math.ceil(rows / row);
+    const fail = (reason) => {
+      if (this.instance_slabs.get(slab.slab_slot) !== slab || slab.mirror_failed) return;
+      slab.mirror_failed = true;
+      slab.dirty.clear();
+      if (slab.mirror) gl.deleteTexture(slab.mirror);
+      slab.mirror = null;
+      this.report_instance_upload_failed(slab, INSTANCE_FAILURE_MIRROR, reason);
+    };
     try {
-      if (!entry) {
-        const texture = gl.createTexture();
-        if (!texture) {
-          return { ok: false, reason: "instance data texture allocation returned null" };
+      let first = 0, end = 0;
+      if (!slab.mirror) {
+        if (layers > max_layers) {
+          fail(`instance slab of ${words} words needs ${layers} texture windows and the device takes ${max_layers}`);
+          return null;
         }
-        entry = { texture, rows: 0 };
-        this.instance_data_textures.set(buffer_id, entry);
-      }
-      gl.bindTexture(gl.TEXTURE_2D, entry.texture);
-      let capacity = 1;
-      while (capacity < rows) capacity *= 2;
-      capacity = Math.min(capacity, max);
-      if (entry.rows < rows || (rows * 4 < entry.rows && capacity !== entry.rows)) {
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32UI, width, capacity, 0, gl.RED_INTEGER, gl.UNSIGNED_INT, null);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-        entry.rows = capacity;
-      }
-      if (words > 0) {
-        gl.bindBuffer(gl.PIXEL_UNPACK_BUFFER, buffer.gl_buf);
-        bound_unpack = true;
-        const full_rows = Math.floor(words / width);
-        if (full_rows > 0) {
-          gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width, full_rows, gl.RED_INTEGER, gl.UNSIGNED_INT, 0);
+        if (layers > 1) {
+          console.log(`makepad: instance slab ${slab.slab_slot} of ${words} words spans ${layers} texture windows of ${MAKEPAD_INSTANCE_WINDOW_WORDS} words`);
         }
-        const rest = words - full_rows * width;
-        if (rest > 0) {
-          gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, full_rows, rest, 1, gl.RED_INTEGER, gl.UNSIGNED_INT, full_rows * width * 4);
-        }
+        slab.mirror = gl.createTexture();
+        if (!slab.mirror) { fail("instance slab mirror allocation returned null"); return null; }
+        slab.mirror._instance_ledger_role = "mirror";
+        gl.bindTexture(gl.TEXTURE_2D_ARRAY, slab.mirror);
+        this.set_texture_storage_info(gl.TEXTURE_2D_ARRAY, slab.mirror, false);
+        gl.texImage3D(gl.TEXTURE_2D_ARRAY, 0, gl.R32UI, row, layers > 1 ? row : rows, layers, 0, gl.RED_INTEGER, gl.UNSIGNED_INT, null);
+        gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+        this.defer_allocation_check(() => fail("instance slab mirror allocation failed"));
+        // Seed one contiguous prefix, including gaps between aligned regions.
+        end = Math.min(words, slab.written_end / 4);
+      } else {
+        gl.bindTexture(gl.TEXTURE_2D_ARRAY, slab.mirror);
       }
+      gl.bindBuffer(gl.PIXEL_UNPACK_BUFFER, slab.gl_buf);
+      for (const range of slab.dirty.values()) {
+        const start = range.byte_off / 4;
+        if (start >= words || !range.byte_len) continue;
+        if (start !== end) {
+          makepad_copy_instance_words(gl, first, end);
+          first = start;
+        }
+        end = Math.min(words, start + range.byte_len / 4);
+      }
+      makepad_copy_instance_words(gl, first, end);
+      slab.dirty.clear();
+      return slab.mirror;
     } catch (error) {
-      return { ok: false, reason: `instance data texture upload failed: ${error && error.message ? error.message : String(error)}` };
+      fail(`instance slab mirror upload failed: ${error.message || error}`);
+      return null;
     } finally {
-      if (bound_unpack) {
-        try {
-          gl.bindBuffer(gl.PIXEL_UNPACK_BUFFER, null);
-        } catch (_error) {
-        }
-      }
+      gl.bindBuffer(gl.PIXEL_UNPACK_BUFFER, null);
     }
-    entry.buffer = buffer;
-    entry.upload_version = buffer.upload_version;
-    entry.gl_buf = buffer.gl_buf;
-    entry.byte_length = buffer.byte_length;
-    return { ok: true, texture: entry.texture };
   }
 
   configure_webgl_vao(vao, shader, preflight) {
     const gl = this.gl;
     const layout = preflight.layout;
+    const instance_byte_offset = vao.instance_start + preflight.instance_ranges[0].first * preflight.instance_stride;
     let new_vao = null;
     try {
       new_vao = gl.createVertexArray();
@@ -2360,48 +2536,14 @@ export class WasmWebGL extends WasmWebBrowser {
       gl.bindVertexArray(new_vao);
       gl.bindBuffer(gl.ARRAY_BUFFER, preflight.geometry_buffer.gl_buf);
       for (const attr of layout.geometry.active) {
-        if (attr.integer) {
-          gl.vertexAttribIPointer(
-            attr.loc,
-            attr.size,
-            attr.gl_type,
-            attr.stride,
-            attr.offset,
-          );
-        } else {
-          gl.vertexAttribPointer(
-            attr.loc,
-            attr.size,
-            attr.gl_type,
-            !!attr.normalized,
-            attr.stride,
-            attr.offset,
-          );
-        }
+        makepad_webgl_attrib_pointer(gl, attr, 0);
         gl.enableVertexAttribArray(attr.loc);
         gl.vertexAttribDivisor(attr.loc, 0);
       }
 
       gl.bindBuffer(gl.ARRAY_BUFFER, preflight.instance_buffer.gl_buf);
       for (const attr of layout.instance.active) {
-        if (attr.integer) {
-          gl.vertexAttribIPointer(
-            attr.loc,
-            attr.size,
-            attr.gl_type,
-            attr.stride,
-            attr.offset,
-          );
-        } else {
-          gl.vertexAttribPointer(
-            attr.loc,
-            attr.size,
-            attr.gl_type,
-            !!attr.normalized,
-            attr.stride,
-            attr.offset,
-          );
-        }
+        makepad_webgl_attrib_pointer(gl, attr, instance_byte_offset);
         gl.enableVertexAttribArray(attr.loc);
         gl.vertexAttribDivisor(attr.loc, 1);
       }
@@ -2416,7 +2558,7 @@ export class WasmWebGL extends WasmWebBrowser {
         gl.deleteVertexArray(new_vao);
       }
       this.report_vertex_submission_once(
-        `vao-config:${vao.shader_id}:${vao.geom_vb_id}:${vao.inst_vb_id}`,
+        `vao-config:${vao.shader_id}:${vao.geom_vb_id}:${vao.slab_slot}`,
         `VAO configuration failed: ${error && error.message ? error.message : String(error)}`,
         { vao },
       );
@@ -2429,9 +2571,8 @@ export class WasmWebGL extends WasmWebBrowser {
     vao.shader_version = shader.version;
     vao.geometry_gl_buf = preflight.geometry_buffer.gl_buf;
     vao.instance_gl_buf = preflight.instance_buffer.gl_buf;
+    vao.instance_byte_offset = instance_byte_offset;
     vao.index_gl_buf = preflight.index_buffer.gl_buf;
-    this.reset_uniform_buffer_upload_cache(vao.draw_call_uniform_buf);
-    this.reset_uniform_buffer_upload_cache(vao.user_uniform_buf);
     if (old_gl_vao && typeof gl.deleteVertexArray === "function") {
       gl.deleteVertexArray(old_gl_vao);
     }
@@ -2449,9 +2590,7 @@ export class WasmWebGL extends WasmWebBrowser {
       !Number.isSafeInteger(args.geom_ib_id) ||
       args.geom_ib_id < 0 ||
       !Number.isSafeInteger(args.geom_vb_id) ||
-      args.geom_vb_id < 0 ||
-      !Number.isSafeInteger(args.inst_vb_id) ||
-      args.inst_vb_id < 0
+      args.geom_vb_id < 0
     ) {
       this.report_vertex_submission_once(
         "vao:invalid-metadata",
@@ -2460,28 +2599,44 @@ export class WasmWebGL extends WasmWebBrowser {
       );
       return;
     }
+    const end = makepad_safe_sum(args.byte_off, args.byte_len);
+    if (!makepad_is_u32(args.slab_slot) || !makepad_is_u32(args.backing_generation) ||
+        !makepad_instance_region_valid(args.region) || end === null ||
+        !Number.isSafeInteger(args.instance_byte_offset) ||
+        args.instance_byte_offset < args.byte_off || args.instance_byte_offset > end) {
+      this.free_webgl_vao(args.vao_id);
+      this.report_vertex_submission_once("vao:instance-region", "invalid VAO instance region", args);
+      return;
+    }
     let old_vao = this.vaos[args.vao_id];
+    if (old_vao && old_vao.gl_vao && old_vao.shader_id === args.shader_id &&
+        old_vao.geom_ib_id === args.geom_ib_id && old_vao.geom_vb_id === args.geom_vb_id &&
+        old_vao.slab_slot === args.slab_slot && old_vao.backing_generation === args.backing_generation) {
+      // The rows moved inside the same backing (a rewritten recording, an evacuation):
+      // the GL VAO stays, and the draw re-points the instance
+      // attributes at the new offset. A replaced GL buffer is still caught at the draw.
+      old_vao.region = args.region;
+      old_vao.byte_off = args.byte_off;
+      old_vao.byte_len = args.byte_len;
+      old_vao.instance_start = args.instance_byte_offset;
+      return;
+    }
     if (old_vao && old_vao.gl_vao) {
       gl.deleteVertexArray(old_vao.gl_vao);
     }
-    let draw_call_uniform_buf = old_vao && old_vao.draw_call_uniform_buf;
-    let user_uniform_buf = old_vao && old_vao.user_uniform_buf;
-    try {
-      draw_call_uniform_buf = draw_call_uniform_buf || gl.createBuffer();
-      user_uniform_buf = user_uniform_buf || gl.createBuffer();
-    } catch (_error) {
-    }
-    let vao = (this.vaos[args.vao_id] = {
+    this.vaos[args.vao_id] = {
       gl_vao: null,
       shader_id: args.shader_id,
       geom_ib_id: args.geom_ib_id,
       geom_vb_id: args.geom_vb_id,
-      inst_vb_id: args.inst_vb_id,
-      draw_call_uniform_buf,
-      user_uniform_buf,
-      uniform_buffers_valid: !!draw_call_uniform_buf && !!user_uniform_buf,
+      slab_slot: args.slab_slot,
+      backing_generation: args.backing_generation,
+      region: args.region,
+      byte_off: args.byte_off,
+      byte_len: args.byte_len,
+      instance_start: args.instance_byte_offset,
       ready: false,
-    });
+    };
 
     let shader = this.draw_shaders[args.shader_id];
     if (shader && shader.compile_failed) return;
@@ -2497,45 +2652,50 @@ export class WasmWebGL extends WasmWebBrowser {
     // maximum index and can reject bad geometry before any attrib pointer call.
   }
 
+  free_webgl_vao(id) {
+    const vao = this.vaos[id];
+    if (!vao) return;
+    const gl = this.gl;
+    if (vao.gl_vao) gl.deleteVertexArray(vao.gl_vao);
+    this.vaos[id] = undefined;
+  }
+
   FromWasmFreeWebGLResources(args) {
     const gl = this.gl;
     const array_buffer_ids = new Set(args.array_buffer_ids || []);
     const index_buffer_ids = new Set(args.index_buffer_ids || []);
     const vao_ids = new Set(args.vao_ids || []);
+    const retired_slabs = new Map();
+    for (const { slab_slot, backing_generation } of args.instance_slabs || []) {
+      const slab = this.instance_slabs.get(slab_slot);
+      if (slab && slab.backing_generation === backing_generation) retired_slabs.set(slab_slot, slab);
+    }
 
     // Deleting a buffer does not release it while a VAO still references it.
-    // Find all dependants in one table pass (rather than one scan per id) and
-    // retire their private uniform buffers along with the VAO.
+    // Find and retire all dependent VAOs in one table pass.
     for (let id = 0; id < this.vaos.length; id++) {
       const vao = this.vaos[id];
       if (
         vao &&
         (array_buffer_ids.has(vao.geom_vb_id) ||
-          array_buffer_ids.has(vao.inst_vb_id) ||
+          retired_slabs.get(vao.slab_slot)?.backing_generation === vao.backing_generation ||
           index_buffer_ids.has(vao.geom_ib_id))
       ) {
         vao_ids.add(id);
       }
     }
 
-    for (const id of vao_ids) {
-      const vao = this.vaos[id];
-      if (!vao) continue;
-      if (vao.gl_vao) gl.deleteVertexArray(vao.gl_vao);
-      if (vao.draw_call_uniform_buf) gl.deleteBuffer(vao.draw_call_uniform_buf);
-      if (vao.user_uniform_buf) gl.deleteBuffer(vao.user_uniform_buf);
-      this.vaos[id] = undefined;
-    }
+    for (const id of vao_ids) this.free_webgl_vao(id);
     for (const id of array_buffer_ids) {
-      const mirror = this.instance_data_textures && this.instance_data_textures.get(id);
-      if (mirror) {
-        gl.deleteTexture(mirror.texture);
-        this.instance_data_textures.delete(id);
-      }
       const buffer = this.array_buffers[id];
       if (!buffer) continue;
       if (buffer.gl_buf) gl.deleteBuffer(buffer.gl_buf);
       this.array_buffers[id] = undefined;
+    }
+    for (const slab of retired_slabs.values()) {
+      if (slab.mirror) gl.deleteTexture(slab.mirror);
+      if (slab.gl_buf) gl.deleteBuffer(slab.gl_buf);
+      this.instance_slabs.delete(slab.slab_slot);
     }
     for (const id of index_buffer_ids) {
       const buffer = this.index_buffers[id];
@@ -2574,6 +2734,31 @@ export class WasmWebGL extends WasmWebBrowser {
     }
   }
 
+  draw_webgl_instance_ranges(vao, shader, preflight) {
+    const gl = this.gl;
+    const attributes = preflight.layout.instance.active;
+    for (const { first, count } of preflight.instance_ranges) {
+      const byte_offset = vao.instance_start + first * preflight.instance_stride;
+      if (attributes.length && vao.instance_byte_offset !== byte_offset) {
+        gl.bindBuffer(gl.ARRAY_BUFFER, preflight.instance_buffer.gl_buf);
+        // If a pointer call throws, the next range must set every pointer again.
+        vao.instance_byte_offset = null;
+        for (const attr of attributes) {
+          makepad_webgl_attrib_pointer(gl, attr, byte_offset);
+        }
+        vao.instance_byte_offset = byte_offset;
+      }
+      if (shader.inst_base_loc != null) {
+        const base = byte_offset / preflight.instance_stride;
+        if (shader._inst_base !== base) {
+          gl.uniform1i(shader.inst_base_loc, base);
+          shader._inst_base = base;
+        }
+      }
+      gl.drawElementsInstanced(gl.TRIANGLES, preflight.indices, preflight.index_buffer.index_type, 0, count);
+    }
+  }
+
   FromWasmDrawCall(args) {
     var gl = this.gl;
     if (
@@ -2591,6 +2776,7 @@ export class WasmWebGL extends WasmWebBrowser {
       return;
     }
 
+    if (Array.isArray(args.instance_ranges) && args.instance_ranges.length === 0) return;
     let shader = this.draw_shaders[args.shader_id];
     if (shader && shader.pending) {
       return;
@@ -2692,11 +2878,22 @@ export class WasmWebGL extends WasmWebBrowser {
       } else if (args.blend_max) {
         gl.blendEquationSeparate(gl.MAX, gl.MAX);
       }
-      if (args.backface_culling) {
-        gl.enable(gl.CULL_FACE);
-        gl.cullFace(gl.BACK);
+      const cull_mode = args.cull_mode || 0;
+      if (cull_mode === 0) {
+        if (this.bound_cull_enabled !== false) {
+          gl.disable(gl.CULL_FACE);
+          this.bound_cull_enabled = false;
+        }
       } else {
-        gl.disable(gl.CULL_FACE);
+        if (this.bound_cull_enabled !== true) {
+          gl.enable(gl.CULL_FACE);
+          this.bound_cull_enabled = true;
+        }
+        const face = cull_mode === 2 ? gl.FRONT : gl.BACK;
+        if (this.bound_cull_face !== face) {
+          gl.cullFace(face);
+          this.bound_cull_face = face;
+        }
       }
       // A framebuffer's rows are stored bottom-up: texture passes invert
       // every vertex shader's clip-space Y (`mp_clip_y_flip`, applied after
@@ -2724,46 +2921,12 @@ export class WasmWebGL extends WasmWebBrowser {
       gl.bindVertexArray(vao.gl_vao);
       vao_bound = true;
 
-      if (args.reset_draw_uniforms) {
-        this.reset_uniform_buffer_upload_cache(vao.draw_call_uniform_buf);
-        this.reset_uniform_buffer_upload_cache(vao.user_uniform_buf);
-      }
-
-      this.upload_uniform_buffer_from_ptr(
-        gl,
-        shader.draw_list_uniform_buf,
-        args.draw_list_uniforms,
-        args.draw_list_uniforms_gen_lo,
-        args.draw_list_uniforms_gen_hi,
-      );
-      this.upload_uniform_buffer_from_ptr(
-        gl,
-        vao.draw_call_uniform_buf,
-        args.draw_call_uniforms,
-        args.draw_call_uniforms_gen_lo,
-        args.draw_call_uniforms_gen_hi,
-      );
-      this.upload_uniform_buffer_from_ptr(
-        gl,
-        vao.user_uniform_buf,
-        args.user_uniforms,
-        args.user_uniforms_gen_lo,
-        args.user_uniforms_gen_hi,
-      );
-      this.upload_uniform_buffer_from_ptr(
-        gl,
-        shader.live_uniform_buf,
-        args.live_uniforms,
-        args.live_uniforms_gen_lo,
-        args.live_uniforms_gen_hi,
-      );
-
       if (!shader.custom_uniform_buffers) shader.custom_uniform_buffers = [];
       for (let slot = 0; slot < (args.custom_uniforms || []).length; slot++) {
         const input = args.custom_uniforms[slot];
         let entry = shader.custom_uniform_buffers[slot];
         if (!entry) {
-          entry = { buffer: gl.createBuffer(), binding: this.get_uniform_block_binding(shader.program, input.block_name) };
+          entry = { buffer: gl.createBuffer(), binding: this.get_uniform_block_binding(shader.program, input.block_name, UBO_BINDING_CUSTOM_BASE + slot) };
           shader.custom_uniform_buffers[slot] = entry;
         }
         const checked = this.make_validated_wasm_view(input.data, 1, true, "custom uniforms", Uint8Array);
@@ -2775,81 +2938,54 @@ export class WasmWebGL extends WasmWebBrowser {
         }
         this.bind_uniform_block(gl, entry.binding, entry.buffer);
       }
-      this.bind_uniform_block(gl, shader.pass_uniforms_binding, shader.pass_uniform_buf);
-      this.bind_uniform_block(gl, shader.draw_list_uniforms_binding, shader.draw_list_uniform_buf);
-      this.bind_uniform_block(gl, shader.draw_call_uniforms_binding, vao.draw_call_uniform_buf);
-      this.bind_uniform_block(gl, shader.user_uniforms_binding, vao.user_uniform_buf);
-      this.bind_uniform_block(gl, shader.live_uniforms_binding, shader.live_uniform_buf);
+      this.bind_stream_uniform(gl, shader, shader.draw_list_uniforms_binding, args.draw_list_uniforms);
+      this.bind_stream_uniform(gl, shader, shader.draw_call_uniforms_binding, args.draw_call_uniforms);
+      this.bind_stream_uniform(gl, shader, shader.user_uniforms_binding, args.user_uniforms);
+      this.bind_stream_uniform(gl, shader, shader.live_uniforms_binding, args.live_uniforms);
 
-      for (let i = 0; i < shader.texture_locs.length; i++) {
-        const tex_loc = shader.texture_locs[i];
-        if (!tex_loc || tex_loc.loc == null) {
-          continue;
-        }
-        const target = this.sampler_target(tex_loc.ty);
-        gl.activeTexture(gl.TEXTURE0 + i);
-        gl.bindTexture(target, preflight.sampler_textures[i]);
-        const texture = preflight.sampler_textures[i];
-        if (tex_loc.ty === "sampler2DShadow") {
-          gl.texParameteri(target, gl.TEXTURE_COMPARE_MODE, gl.COMPARE_REF_TO_TEXTURE);
-          gl.texParameteri(target, gl.TEXTURE_COMPARE_FUNC, gl.LEQUAL);
-          gl.texParameteri(target, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-          gl.texParameteri(target, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-          texture._compare_ref = true;
-        } else if (texture._compare_ref) {
-          // A depth texture an earlier draw compared in a shadow sampler:
-          // a plain sampler reads its values, which needs comparison off.
-          gl.texParameteri(target, gl.TEXTURE_COMPARE_MODE, gl.NONE);
-          texture._compare_ref = false;
-        }
-        gl.uniform1i(tex_loc.loc, i);
+      for (const b of shader.texture_locs) {
+        const texture = preflight.sampler_textures[b.slot];
+        gl.activeTexture(gl.TEXTURE0 + b.unit);
+        gl.bindTexture(b.target, texture);
+        gl.bindSampler(b.unit, texture._filterable || (texture._depth && b.compare) ? b.sampler : b.nearest);
       }
       if (shader.inst_data_loc) {
-        const unit = shader.texture_locs.length;
-        gl.activeTexture(gl.TEXTURE0 + unit);
-        gl.bindTexture(gl.TEXTURE_2D, preflight.instance_data_texture);
-        gl.uniform1i(shader.inst_data_loc, unit);
+        gl.activeTexture(gl.TEXTURE0 + shader.inst_data_unit);
+        gl.bindTexture(gl.TEXTURE_2D_ARRAY, preflight.instance_data_texture);
+        gl.bindSampler(shader.inst_data_unit, null);
       }
 
       const xr = this.xr;
-      if (xr !== undefined && xr.in_xr_pass) {
-        const pass_uniforms = new Float32Array(
-          this.memory.buffer,
-          args.pass_uniforms.ptr,
-          args.pass_uniforms.len,
-        );
+      if (xr && xr.in_xr_pass) {
+        const range = args.pass_uniforms;
+        if (shader.pass_uniforms_binding != null) {
+          if (!this.xr_pass_uniform_buf) this.xr_pass_uniform_buf = gl.createBuffer();
+          if (!this.xr_pass_uniform_buf) throw new Error("XR pass buffer allocation failed");
+          const xr_bytes = Math.ceil(Math.max(range.len, shader.block_sizes?.[UBO_BINDING_PASS] || 0) / 4) * 4;
+          if (this.xr_pass_words?.byteLength !== xr_bytes) {
+            this.xr_pass_words = new Float32Array(xr_bytes / 4);
+          }
+          const dst = new Uint8Array(this.xr_pass_words.buffer);
+          dst.set(new Uint8Array(this.memory.buffer, this.uniform_stream_ptr + range.off, range.len));
+          if (xr_bytes > range.len) dst.fill(0, range.len);
+        }
         const draw_eye = (eye) => {
           const viewport = eye.viewport;
           gl.viewport(viewport.x, viewport.y, viewport.width, viewport.height);
-          for (let i = 0; i < 16; i++) pass_uniforms[i] = eye.projection_matrix[i];
-          for (let i = 0; i < 16; i++) pass_uniforms[i + 16] = eye.transform_matrix[i];
-          for (let i = 0; i < 16; i++) pass_uniforms[i + 32] = eye.invtransform_matrix[i];
-          this.upload_uniform_buffer_data(gl, shader.pass_uniform_buf, pass_uniforms);
-          gl.drawElementsInstanced(
-            gl.TRIANGLES,
-            preflight.indices,
-            preflight.index_buffer.index_type,
-            0,
-            preflight.instances,
-          );
+          if (shader.pass_uniforms_binding != null) {
+            this.xr_pass_words.set(eye.projection_matrix, 0);
+            this.xr_pass_words.set(eye.transform_matrix, 16);
+            this.xr_pass_words.set(eye.invtransform_matrix, 32);
+            this.upload_uniform_buffer_data(gl, this.xr_pass_uniform_buf, this.xr_pass_words);
+            this.bind_uniform_block(gl, shader.pass_uniforms_binding, this.xr_pass_uniform_buf);
+          }
+          this.draw_webgl_instance_ranges(vao, shader, preflight);
         };
         draw_eye(xr.left_eye);
         draw_eye(xr.right_eye);
       } else {
-        this.upload_uniform_buffer_from_ptr(
-          gl,
-          shader.pass_uniform_buf,
-          args.pass_uniforms,
-          args.pass_uniforms_gen_lo,
-          args.pass_uniforms_gen_hi,
-        );
-        gl.drawElementsInstanced(
-          gl.TRIANGLES,
-          preflight.indices,
-          preflight.index_buffer.index_type,
-          0,
-          preflight.instances,
-        );
+        this.bind_stream_uniform(gl, shader, shader.pass_uniforms_binding, args.pass_uniforms);
+        this.draw_webgl_instance_ranges(vao, shader, preflight);
       }
     } catch (error) {
       this.report_vertex_submission_once(
@@ -2964,6 +3100,7 @@ export class WasmWebGL extends WasmWebBrowser {
         }
       }
       gl.bindTexture(gl.TEXTURE_2D, texture);
+      this.set_texture_storage_info(gl.TEXTURE_2D, texture, true);
       gl.texSubImage2D(
         gl.TEXTURE_2D,
         0,
@@ -3292,6 +3429,7 @@ export class WasmWebGL extends WasmWebBrowser {
         gl_tex._requested_height = args.height;
         gl_tex._format = tgt.format;
         gl_tex._depth = false;
+        this.set_texture_storage_info(gl.TEXTURE_2D, gl_tex, (tgt.format !== 1 && tgt.format !== 2) || this.float_linear);
         if (tgt.format >= 1 && tgt.format <= 5) {
           // Data targets: 1 R32F (RenderRf32), 2 RGBA32F, 3 RGBA16F,
           // 4 R16F (RenderRf16), 5 R8 (RenderRu8). Float targets are
@@ -3386,6 +3524,7 @@ export class WasmWebGL extends WasmWebBrowser {
         gl_dtex._requested_width = args.width;
         gl_dtex._requested_height = args.height;
         gl_dtex._depth = true;
+        this.set_texture_storage_info(gl.TEXTURE_2D, gl_dtex, false);
         gl_dtex._format = -1;
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
@@ -4043,6 +4182,7 @@ export class WasmWebGL extends WasmWebBrowser {
       try {
         gl_tex._texture_target = gl.TEXTURE_2D;
         gl.bindTexture(gl.TEXTURE_2D, gl_tex);
+        this.set_texture_storage_info(gl.TEXTURE_2D, gl_tex, true);
 
         if (allocation_changed) {
           this.configure_texture_parameters(gl, gl.TEXTURE_2D, false, false);
@@ -4297,10 +4437,19 @@ export class WasmWebGL extends WasmWebBrowser {
 
   // Forgets every object of a lost context: the restored one starts empty.
   reset_webgl_objects() {
+    this.bound_cull_enabled = undefined;
+    this.bound_cull_face = undefined;
     this.render_color_targets = undefined;
+    this.uniform_stream_buf = null;
+    this.zero_uniform_buf = null;
+    this.uniform_stream_len = 0;
+    this.uniform_stream_ptr = 0;
+    this.bound_ubo = [];
+    this.xr_pass_uniform_buf = null;
+    this.xr_pass_words = null;
     this.draw_shaders = [];
     this.array_buffers = [];
-    this.instance_data_textures = new Map();
+    this.instance_slabs = new Map();
     this.index_buffers = [];
     this.vaos = [];
     this.textures = [];
@@ -4395,6 +4544,8 @@ export class WasmWebGL extends WasmWebBrowser {
   // restore (a restored context has no extensions enabled).
   setup_webgl_context() {
     const gl = this.gl;
+    this.bound_cull_enabled = false;
+    this.bound_cull_face = gl.BACK;
     // Query immutable hardware ceilings once per context, then share the
     // cached values with canvas and targets.
     this.webgl_limits = makepad_query_webgl_limits(gl);
@@ -4415,6 +4566,12 @@ export class WasmWebGL extends WasmWebBrowser {
     // per context; Add reports missing support through its shader failure path.
     this.ext_color_buffer_float = gl.getExtension("EXT_color_buffer_float");
     this.ext_float_blend = gl.getExtension("EXT_float_blend");
+    this.float_linear = !!gl.getExtension("OES_texture_float_linear");
+    this.anisotropy_ext = gl.getExtension("EXT_texture_filter_anisotropic");
+    this.max_anisotropy = this.anisotropy_ext
+      ? gl.getParameter(this.anisotropy_ext.MAX_TEXTURE_MAX_ANISOTROPY_EXT) : 1;
+    this.nearest_samplers = Array.from({ length: 8 }, (_, i) =>
+      this.make_webgl_sampler(i >> 1, !!(i & 1), gl.NEAREST_MIPMAP_NEAREST, gl.NEAREST, 1));
     if (!this.ext_color_buffer_float) {
       console.error(
         "makepad: EXT_color_buffer_float unavailable — float render targets (GPU lightmap bake) will not work on this device",
@@ -4427,7 +4584,10 @@ export class WasmWebGL extends WasmWebBrowser {
       gl.MAX_FRAGMENT_UNIFORM_VECTORS,
     );
 
+    this.max_uniform_buffer_bindings = gl.getParameter(gl.MAX_UNIFORM_BUFFER_BINDINGS) || 24;
     this.gpu_info = {
+      uniform_buffer_offset_alignment: gl.getParameter(gl.UNIFORM_BUFFER_OFFSET_ALIGNMENT) || 256,
+      max_uniform_block_size: gl.getParameter(gl.MAX_UNIFORM_BLOCK_SIZE) || 65536,
       min_uniforms: Math.min(max_vertex_uniforms, max_fragment_uniforms),
       min_uniform_vectors: Math.min(max_vertex_uniforms, max_fragment_uniforms),
       float_color_targets: !!this.ext_color_buffer_float,
@@ -4459,11 +4619,12 @@ export class WasmWebGL extends WasmWebBrowser {
 const MAKEPAD_WEBGL_COMMANDS = [
   "FromWasmCompileWebGLShader",
   "FromWasmAllocIndexBuffer",
-  "FromWasmRetainedArrayBuffer",
-  "FromWasmRetainedArrayUpdate",
+  "FromWasmCreateInstanceSlab",
+  "FromWasmWriteInstanceRegion",
   "FromWasmAllocArrayBuffer",
   "FromWasmAllocVao",
   "FromWasmFreeWebGLResources",
+  "FromWasmUploadUniformStream",
   "FromWasmDrawCall",
   "FromWasmAllocTextureImage2D_BGRAu8_32",
   "FromWasmUpdateTextureRect_BGRAu8_32",

@@ -427,7 +427,6 @@ pub struct AndroidMedia {
     sessions: HashMap<u32, SessionMedia>,
 }
 impl AndroidMedia {
-    pub fn new() -> Self { Self::default() }
     fn session(&mut self, sid: u32) -> &mut SessionMedia {
         self.sessions.entry(sid).or_insert_with(|| SessionMedia::new(sid))
     }

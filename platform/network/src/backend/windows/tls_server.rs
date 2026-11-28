@@ -556,6 +556,26 @@ fn owner(name: &str) -> Option<u32> {
     (pid != 0 && id.len() == 32 && id.bytes().all(|v| v.is_ascii_hexdigit())).then_some(pid)
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum OlderKey {
+    Bare,
+    Process(u32),
+}
+
+fn older_key(name: &str) -> Option<OlderKey> {
+    let mut parts = name.strip_prefix("makepad-tls-")?.splitn(3, '-');
+    let fingerprint = parts.next()?;
+    if fingerprint.len() != 24 || !fingerprint.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+        return None;
+    }
+    let Some(pid) = parts.next() else { return Some(OlderKey::Bare) };
+    if !pid.bytes().all(|b| b.is_ascii_digit()) { return None; }
+    let pid = pid.parse::<u32>().ok()?;
+    let counter = parts.next()?;
+    (pid != 0 && !counter.is_empty() && counter.bytes().all(|b| b.is_ascii_digit()))
+        .then_some(OlderKey::Process(pid))
+}
+
 fn process_exited(pid: u32) -> bool {
     const SYNCHRONIZE: u32 = 0x0010_0000;
     unsafe {
@@ -571,11 +591,15 @@ fn process_exited(pid: u32) -> bool {
     }
 }
 
-fn delete_container(provider: usize, name: &[u16]) -> bool {
+fn delete_container(provider: usize, name: &[u16], owner_to_check: Option<u32>) -> bool {
     unsafe {
         let mut key = 0;
         if NCryptOpenKey(provider, &mut key, name.as_ptr(), 0, 0) != 0 { return false; }
-        if NCryptDeleteKey(key, 0) == 0 { return true; } // releases the handle on success
+        // An older build can reuse a name after PID reuse. Check the owner
+        // after opening the key, then delete through that same handle.
+        if owner_to_check.is_none_or(process_exited) && NCryptDeleteKey(key, 0) == 0 {
+            return true; // releases the handle on success
+        }
         NCryptFreeObject(key);
         false
     }
@@ -597,7 +621,8 @@ impl Drop for Provider {
 fn sweep_orphans() -> io::Result<()> {
     let provider = Provider::open()?;
     let mut state = null_mut();
-    let mut orphans = Vec::new();
+    let mut abandoned_sessions = Vec::new();
+    let mut older_process_keys = Vec::new();
     let status = loop {
         let mut entry: *mut KeyName = null_mut();
         let status = unsafe { NCryptEnumKeys(provider.0, null(), &mut entry, &mut state, 0) };
@@ -608,18 +633,26 @@ fn sweep_orphans() -> io::Result<()> {
                 let mut len = 0;
                 while *name.add(len) != 0 { len += 1; }
                 let text = String::from_utf16_lossy(std::slice::from_raw_parts(name, len));
-                if owner(&text).is_some_and(process_exited) { orphans.push(text); }
+                // A bare older key has no known owner. Only queue PID-tagged names.
+                if owner(&text).is_some_and(process_exited) {
+                    abandoned_sessions.push(text);
+                } else if let Some(OlderKey::Process(pid)) = older_key(&text) {
+                    older_process_keys.push((text, pid));
+                }
             }
             NCryptFreeBuffer(entry.cast());
         }
     };
     if !state.is_null() { unsafe { NCryptFreeBuffer(state) }; }
-    // Finish enumerating before modifying the store. Another sweeper can
-    // win a deletion; the per-credential random name is never reused.
-    for name in orphans {
-        if delete_container(provider.0, &wide(&name)) {
-            eprintln!("tls: removed abandoned CNG key {name}");
-        }
+    // Finish enumerating before modifying the store. Count successful deletions
+    // since another sweeper may already have removed a key.
+    let sessions = abandoned_sessions.iter()
+        .filter(|name| delete_container(provider.0, &wide(name), None)).count();
+    let earlier = older_process_keys.iter()
+        .filter(|(name, pid)| delete_container(provider.0, &wide(name), Some(*pid))).count();
+    let removed = sessions + earlier;
+    if removed > 0 {
+        eprintln!("tls: removed {removed} abandoned CNG keys ({sessions} of exited processes' sessions, {earlier} of earlier builds)");
     }
     const NTE_NO_MORE_ITEMS: i32 = 0x8009_002au32 as i32;
     if status != NTE_NO_MORE_ITEMS { return Err(status_error("NCryptEnumKeys", status)); }
@@ -679,7 +712,7 @@ fn store_key(container: &[u16], key: &[u8; 97]) -> io::Result<()> {
 struct StoredKey(Vec<u16>);
 impl Drop for StoredKey {
     fn drop(&mut self) {
-        if !Provider::open().is_ok_and(|provider| delete_container(provider.0, &self.0)) {
+        if !Provider::open().is_ok_and(|provider| delete_container(provider.0, &self.0, None)) {
             eprintln!("tls: could not delete the server's CNG key");
         }
     }
@@ -1239,12 +1272,46 @@ mod tests {
         assert_ne!(first_key, second_key, "one identity, a key per config");
         assert!(stored(&first_key) && stored(&second_key), "each config stored its key");
         let mut exited = std::process::Command::new("cmd.exe").args(["/d", "/c", "exit", "0"]).spawn().unwrap();
-        assert!(exited.wait().unwrap().success());
+        assert!(exited.wait().unwrap().success(), "the child process did not exit successfully");
         let orphan = container_name(exited.id()).unwrap();
         store_key(&orphan, &identity.key).unwrap();
         assert!(stored(&orphan), "the exited process's container exists before the sweep");
+
+        let mut random = [0; 12];
+        crate::tls::os_random(&mut random).unwrap();
+        let bare_name = format!("makepad-tls-{}", crate::tls::to_hex(&random));
+        let older_name = format!("{bare_name}-{}-0", exited.id());
+        assert_eq!(older_key(&bare_name), Some(OlderKey::Bare), "the classifier missed a bare older key");
+        assert_eq!(older_key(&older_name), Some(OlderKey::Process(exited.id())), "the classifier missed the older key's owner");
+        for (name, invalid_part) in [
+            ("makepad-tls-0123456789abcDef01234567", "uppercase hex"),
+            ("makepad-tls-0123456789abcdef0123456", "a 23-digit fingerprint"),
+            ("makepad-tls-0123456789abcdef012345678", "a 25-digit fingerprint"),
+            ("makepad-tls-session-42-0123456789abcdef0123456789abcdef", "a session name"),
+            ("makepad-tls-0123456789abcdef01234567-0-1", "PID zero"),
+            ("makepad-tls-0123456789abcdef01234567-+42-1", "a signed PID"),
+            ("makepad-tls-0123456789abcdef01234567-4294967296-1", "a PID exceeding u32"),
+            ("makepad-tls-0123456789abcdef01234567-42", "a missing counter"),
+            ("makepad-tls-0123456789abcdef01234567-42-", "an empty counter"),
+            ("makepad-tls-0123456789abcdef01234567-42-1-2", "an extra suffix"),
+        ] {
+            assert!(older_key(name).is_none(), "the older-key classifier accepted {invalid_part}: {name}");
+        }
+
+        let bare_key = wide(&bare_name);
+        store_key(&bare_key, &identity.key).unwrap();
+        let bare_guard = StoredKey(bare_key.clone());
+        let older_orphan = wide(&older_name);
+        store_key(&older_orphan, &identity.key).unwrap();
+        let older_live = wide(&format!("{bare_name}-{}-0", std::process::id()));
+        store_key(&older_live, &identity.key).unwrap();
+        let older_live_guard = StoredKey(older_live.clone());
+        assert!(stored(&older_orphan), "the older PID-tagged test key was missing before the sweep");
         sweep_orphans().unwrap();
         assert!(!stored(&orphan), "the sweep left an exited process's container");
+        assert!(!stored(&older_orphan), "the sweep left the exited process's older PID-tagged key");
+        assert!(stored(&older_live), "the sweep removed a live process's older PID-tagged key");
+        assert!(stored(&bare_key), "the sweep removed a bare older key with no known owner");
         assert!(stored(&first_key), "the sweep removed a live process's container");
         drop(first);
         assert!(!stored(&first_key), "a dropped config's key is gone");
@@ -1269,5 +1336,9 @@ mod tests {
         drop(served);
         drop(second);
         assert!(!stored(&second_key), "the last config's key is gone too");
+        drop(older_live_guard);
+        assert!(!stored(&older_live), "the live PID-tagged test key remained after cleanup");
+        drop(bare_guard);
+        assert!(!stored(&bare_key), "the bare older key remained in the store after test cleanup");
     }
 }

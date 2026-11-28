@@ -432,6 +432,7 @@ impl DrawPass {
         let pass = &mut cx.passes[self.draw_pass_id()];
         pass.parent = CxDrawPassParent::None;
         pass.attached_by = None;
+        pass.readers.clear();
     }
 
     /// Stop painting this pass until it is attached and recorded again: no
@@ -442,6 +443,7 @@ impl DrawPass {
         pass.main_draw_list_id = None;
         pass.parent = CxDrawPassParent::None;
         pass.attached_by = None;
+        pass.readers.clear();
         pass.paint_dirty = false;
         // nothing is drawn from it until it records again
         pass.incomplete = false;
@@ -892,6 +894,15 @@ impl TickClock {
     }
 }
 
+/// A pass that samples a producer, and the recording that declared the read.
+#[derive(Clone, Copy)]
+pub(crate) struct PassReader {
+    pub(crate) pass: DrawPassId,
+    /// DrawPassId names a pool slot, which a new reader can reuse.
+    pub(crate) generation: u64,
+    pub(crate) declared_by: Option<(DrawListId, u64)>,
+}
+
 #[derive(Clone)]
 pub struct CxDrawPass {
     pub debug: bool,
@@ -936,6 +947,8 @@ pub struct CxDrawPass {
     /// or by hand (`set_pass_parent`, a hand-built chain); those never go
     /// stale.
     pub attached_by: Option<(DrawListId, u64)>,
+    /// Consumers declared with `Cx::add_pass_reader`, in addition to the parent.
+    pub(crate) readers: Vec<PassReader>,
     /// Set by `Cx::repaint_pass`: the caller asked for this pass by name, so
     /// it paints once even while orphaned (a thumbnail sheet re-executed for
     /// a texture readback). Cleared when the repaint order is computed.
@@ -1153,6 +1166,7 @@ impl Default for CxDrawPass {
             live_with_parent: false,
             background: false,
             attached_by: None,
+            readers: Vec::new(),
             repaint_requested: false,
             repaint_next: false,
             time_owed: false,

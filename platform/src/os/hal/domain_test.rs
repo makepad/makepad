@@ -334,6 +334,8 @@ fn a_covered_child_cx_holds_its_frames() {
     /// 0 shown, 1 covered, 2 done: what the test asks the parent to tell the child
     static WANT: AtomicU32 = AtomicU32::new(0);
     static TOLD: AtomicU32 = AtomicU32::new(u32::MAX);
+    /// how many times the parent has told a child run that it is covered
+    static COVERED_TOLD: AtomicU32 = AtomicU32::new(0);
     /// the test asks the parent to relaunch the (covered) child
     static RELAUNCH: AtomicU32 = AtomicU32::new(0);
 
@@ -406,6 +408,7 @@ fn a_covered_child_cx_holds_its_frames() {
                         let data = makepad_hal::Range { off: 0, len: json.len() as u32 };
                         cx.hal_forward(domain, window, &makepad_hal::RawEvent::app_message(makepad_hal::Id::NONE, data), json.as_bytes());
                         TOLD.store(want, Ordering::SeqCst);
+                        if want == 1 { COVERED_TOLD.fetch_add(1, Ordering::SeqCst); }
                     }
                 }
                 _ => {}
@@ -421,23 +424,29 @@ fn a_covered_child_cx_holds_its_frames() {
             std::thread::sleep(Duration::from_millis(10));
         }
     };
+    // A covered child holds its frames. The covered message may still be in flight once the parent
+    // has sent it, so wait (up to the hang deadline) for a half second with at most one new frame.
+    let holds = |what: &str| -> u32 {
+        let t0 = Instant::now();
+        loop {
+            let held = FRAMES.load(Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(500));
+            let after = FRAMES.load(Ordering::SeqCst);
+            if after - held <= 1 {
+                return after;
+            }
+            assert!(t0.elapsed() < Duration::from_secs(30), "{what} kept drawing: {} frames in the last 0.5 s", after - held);
+        }
+    };
     wait_for("the shown child's frames", &|| FRAMES.load(Ordering::SeqCst) >= 10);
     WANT.store(1, Ordering::SeqCst);
-    wait_for("the parent to say covered", &|| TOLD.load(Ordering::SeqCst) == 1);
-    // the message is in flight for a moment; then nothing more
-    std::thread::sleep(Duration::from_millis(200));
-    let held = FRAMES.load(Ordering::SeqCst);
-    std::thread::sleep(Duration::from_millis(500));
-    let after = FRAMES.load(Ordering::SeqCst);
-    assert!(after - held <= 1, "a covered child drew {} frames in 0.5 s", after - held);
+    wait_for("the parent to say covered", &|| COVERED_TOLD.load(Ordering::SeqCst) == 1);
+    holds("a covered child");
     // relaunched while covered: the new run is told again and holds too
     RELAUNCH.store(1, Ordering::SeqCst);
     wait_for("the relaunched child", &|| STARTS.load(Ordering::SeqCst) == 2);
-    std::thread::sleep(Duration::from_millis(500));
-    let held = FRAMES.load(Ordering::SeqCst);
-    std::thread::sleep(Duration::from_millis(500));
-    let after = FRAMES.load(Ordering::SeqCst);
-    assert!(after - held <= 1, "a covered relaunched child drew {} frames in 0.5 s", after - held);
+    wait_for("the parent to tell the relaunched run it is covered", &|| COVERED_TOLD.load(Ordering::SeqCst) == 2);
+    let after = holds("a covered relaunched child");
     WANT.store(0, Ordering::SeqCst);
     wait_for("the child to resume when shown", &|| FRAMES.load(Ordering::SeqCst) >= after + 10);
     WANT.store(2, Ordering::SeqCst);

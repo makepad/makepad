@@ -1271,6 +1271,43 @@ mod intra_frame_tests {
         }
     }
 
+    #[cfg(not(target_os = "android"))] // The Android still decoder supports HEVC only.
+    #[test]
+    fn first_frame_of_a_long_gop_h264_recording() {
+        let (width, height) = (64, 48);
+        let codec = VideoFileCodec::H264;
+        let options = VideoFileEncoderOptions { codec, width, height, keyframe_only: false, ..Default::default() };
+        let luma_len = (width * height) as usize;
+        let mut first = vec![128u8; nv12::nv12_frame_size(width, height)];
+        first[..luma_len].fill(48);
+        let mut later = first.clone();
+        later[..luma_len].fill(192);
+
+        let path = std::env::temp_dir().join(format!("makepad-long-gop-test-{}.mp4", std::process::id()));
+        let mut encoder = VideoFileEncoder::new(&path.to_string_lossy(), options).expect("open H.264 encoder");
+        encoder.push_frame_nv12(&first, None).expect("push first frame");
+        for _ in 1..8 {
+            encoder.push_frame_nv12(&later, None).expect("push later frame");
+        }
+        encoder.finish().expect("finish recording");
+        let bytes = std::fs::read(&path).expect("read recording");
+        let from_file = decode_first_frame_from_file(&path.to_string_lossy());
+        std::fs::remove_file(path).expect("remove recording");
+
+        let check = |source: &str, result: Result<DecodedVideoFrame, VideoFileError>, expected: &[u8]| {
+            let frame = result.unwrap_or_else(|e| panic!("{source}: {e}"));
+            assert_eq!((frame.width, frame.height), (width, height), "{source}: dimensions");
+            assert_eq!(frame.nv12.len(), expected.len(), "{source}: NV12 length");
+            let worst = frame.nv12.iter().zip(expected).map(|(a, b)| a.abs_diff(*b)).max().unwrap();
+            assert!(worst <= 8, "{source}: NV12 differs from the pushed picture by up to {worst}");
+        };
+        check("long GOP from file", from_file, &first);
+        check("long GOP from bytes", decode_first_frame_from_bytes(&bytes), &first);
+
+        let intra = encode_intra_frame_mp4(&later, width, height, 30, 2_000_000, codec).expect("encode intra still");
+        check("subsequent intra still", decode_first_frame_from_bytes(&intra), &later);
+    }
+
     /// A still's budget is its rate over its frame rate, whatever the two: one asked at 30
     /// frames a second (a rate several times past the encoder's range) comes out the size of
     /// the same budget asked at one frame a second, not cut down to what the range allows.

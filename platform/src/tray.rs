@@ -21,7 +21,7 @@
 //! not a `dropdown` opens its menu on the primary click, and the WM sends it no `TrayClick`. A
 //! tray app outlives a WM restart: its windows and trays come back on the next WM.
 
-use crate::{cx::Cx, cx_api::CxOsOp, makepad_live_id::LiveId, makepad_math::Rect};
+use crate::{cx::Cx, cx_api::CxOsOp, script::HostGrants, makepad_live_id::LiveId, makepad_math::Rect};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct TrayIcon {
@@ -89,7 +89,7 @@ impl Cx {
     /// outside the makepad WM; mobile; web) the shell drops it and `has_tray` stays false, so the
     /// app still ends with its last window.
     pub fn set_tray(&mut self, tray: TrayIcon) {
-        if self.script_data.std.host_io_only() {
+        if !self.script_data.std.has_grant(HostGrants::DESKTOP_SHELL) {
             return;
         }
         let shown = cfg!(any(target_os = "macos", target_os = "windows"))
@@ -101,6 +101,9 @@ impl Cx {
     }
 
     pub fn remove_tray(&mut self, id: LiveId) {
+        if !self.script_data.std.has_grant(HostGrants::DESKTOP_SHELL) {
+            return;
+        }
         self.trays.retain(|t| *t != id);
         self.platform_ops.push_back(CxOsOp::RemoveTray(id));
     }

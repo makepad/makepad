@@ -143,6 +143,50 @@ fn get<'a>(kv: &'a [(String, String)], keys: &[&str]) -> Option<&'a str> {
     keys.iter().find_map(|k| kv.iter().find(|x| x.0 == *k).map(|x| x.1.as_str()))
 }
 
+/// `makepad-remote app <pid|app|socket> <command> [k=v ...]`: prints the answer's lines; exit
+/// status 1 when the answer had an error, 2 when the app cannot be reached.
+pub fn run_command_line(spec: &str, argv: &[String]) -> i32 {
+    if let Some(("--reconnect", call)) = argv.split_first().map(|(flag, rest)| (flag.as_str(), rest)) {
+        return match reconnect_call(spec, call, &mut |line| println!("{line}")) {
+            Ok(false) => 0,
+            Ok(true) => 1,
+            Err(e) => { eprintln!("makepad-remote app: {e}"); 1 }
+        }
+    }
+    // `<host>:<app|pid>` goes through the hub to an app on another machine (a phone that dials in)
+    #[cfg(unix)]
+    let routed = (spec.contains(':') && !spec.contains('/')).then(|| {
+        let bin = std::env::var_os("RELAX_BIN").map(PathBuf::from);
+        crate::hub::connect(bin.as_deref()).map(|hub| crate::Client::routed(&hub, spec))
+    });
+    #[cfg(not(unix))]
+    let routed: Option<Result<crate::Client, String>> = None;
+    let connected = match routed {
+        Some(Ok(c)) => Ok(c),
+        Some(Err(e)) => { eprintln!("makepad-remote app: {e}"); return 2; }
+        None => crate::Client::connect_as(spec, &crate::discovery::Caller::command_line()),
+    };
+    let client = match connected {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("makepad-remote app: {e}");
+            return 2;
+        }
+    };
+    let argv = if argv.is_empty() { vec!["help".to_string()] } else { argv.to_vec() };
+    match run_printed(&client, &argv, &mut |l| {
+        println!("{l}");
+        true
+    }) {
+        Ok(false) => 0,
+        Ok(true) => 1,
+        Err(e) => {
+            eprintln!("makepad-remote app: {e}");
+            2
+        }
+    }
+}
+
 /// [`run`] as a command line prints it: a tool result's inline pictures are written to files in
 /// the app's grab folder and the line names them instead (`image_files`, [`call_image_line`]), so
 /// a shell or a coding agent reads paths, not megabytes of base64. A library caller of [`run`]
@@ -150,6 +194,118 @@ fn get<'a>(kv: &'a [(String, String)], keys: &[&str]) -> Option<&'a str> {
 pub fn run_printed(client: &Client, argv: &[String], each: &mut dyn FnMut(&str) -> bool) -> Result<bool, Error> {
     let dir = std::cell::LazyCell::new(|| grab_dir(client));
     run(client, argv, &mut |l| each(&call_image_line(l, || (*dir).clone())))
+}
+
+/// Run a caller-declared replayable tool call. Only the endpoint file is stable across
+/// restarts; never redial a cached socket or retry after receiving a definitive result.
+pub fn reconnect_call(spec: &str, argv: &[String], print: &mut dyn FnMut(&str)) -> Result<bool, Error> {
+    if !discovery::is_endpoint_file(spec) || argv.first().map(String::as_str) != Some("call") {
+        return Err(Error::Io(io::Error::new(io::ErrorKind::InvalidInput, "--reconnect requires an endpoint file and a replayable call")))
+    }
+    let caller = discovery::Caller::command_line();
+    replay_call(argv, print, || Client::connect_as(spec, &caller), || std::thread::sleep(std::time::Duration::from_secs(1)))
+}
+
+fn replay_call(argv: &[String], print: &mut dyn FnMut(&str), mut connect: impl FnMut() -> Result<Client, Error>, mut pause: impl FnMut()) -> Result<bool, Error> {
+    loop {
+        let run = connect().and_then(|client| {
+            let mut outcome = None;
+            let failed = run_printed(&client, argv, &mut |line| {
+                if let Ok(value) = json::parse_depth(line.as_bytes(), json::TOOL_JSON_DEPTH) {
+                    if value.get("Progress").is_some() { return true }
+                    if let Some(result) = value.get("Result") {
+                        let result = result.as_arr().and_then(|items| items.first()).unwrap_or(result);
+                        let status = result.get("outcome");
+                        if status.is_some_and(|s| s.get("Unavailable").is_some()) { return false }
+                        outcome = Some(status.is_none_or(|s| s.get("Ok").is_none()));
+                    }
+                }
+                print(line);
+                outcome.get_or_insert(true);
+                false
+            })?;
+            Ok(outcome.or(failed.then_some(true)))
+        });
+        match run {
+            Ok(Some(failed)) => return Ok(failed),
+            Ok(None) | Err(Error::LinkLost(_) | Error::Refused(crate::conn::CLOSE_LINK_LOST, _)) => pause(),
+            Err(why) => return Err(why),
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn replay_a_held_call_after_disconnect_and_stop_on_its_result() {
+    use crate::conn::{Open, CLOSE_NORMAL};
+    use crate::endpoint::Endpoint;
+    use std::{os::unix::net::UnixListener, sync::{mpsc, Arc}, time::Duration};
+
+    let root = crate::carrier::unix::test_root().join(format!("replay-{}", std::process::id()));
+    fs::create_dir_all(&root).unwrap();
+    let reference = root.join("endpoint");
+    let serving = |name: &str| {
+        let path = root.join(name);
+        let listener = UnixListener::bind(&path).unwrap();
+        let ep = Endpoint::new(name);
+        let (tx, rx) = mpsc::channel();
+        ep.register("app", 1, Arc::new(move |conn, open| {
+            tx.send((conn.clone(), open)).unwrap();
+            Ok(())
+        }));
+        let server = std::thread::spawn(move || {
+            let sock = listener.accept().unwrap().0;
+            ep.serve(crate::frame::FrameReader::new(Box::new(sock.try_clone().unwrap())),
+                Box::new(sock.try_clone().unwrap()), Box::new(move || { let _ = sock.shutdown(std::net::Shutdown::Both); })).unwrap()
+        });
+        fs::write(&reference, path.to_str().unwrap()).unwrap();
+        (server, rx)
+    };
+    let (first, opened) = serving("first.sock");
+    let (lost, missing) = mpsc::channel();
+    let (resume, resumed) = mpsc::channel();
+    let run = |file: PathBuf, pause: &mut dyn FnMut()| {
+        let mut output = Vec::new();
+        let argv = ["call".into(), "sample.wait".into(), "{}".into()];
+        let failed = replay_call(&argv, &mut |s| output.push(s.to_owned()), || {
+            let path = fs::read_to_string(&file).map_err(|e| Error::LinkLost(e.to_string()))?;
+            Client::connect(&path)
+        }, pause).unwrap();
+        (failed, output)
+    };
+    let file = reference.clone();
+    let waiter = std::thread::spawn(move || run(file.clone(), &mut || {
+        // The listener and reference are gone; resume only when their replacement exists.
+        assert!(!file.exists());
+        lost.send(()).unwrap();
+        resumed.recv_timeout(Duration::from_secs(10)).unwrap();
+    }));
+    let (conn, request) = opened.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert_eq!(request.args, "call sample.wait\n{}");
+    fs::remove_file(&reference).unwrap();
+    conn.close("server stopped");
+    first.join().unwrap();
+    missing.recv_timeout(Duration::from_secs(10)).unwrap();
+    let (second, opened) = serving("second.sock");
+    resume.send(()).unwrap();
+    let (_, Open { channel, args, .. }) = opened.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert_eq!(args, request.args);
+    let success = r#"{"Result":[{"outcome":{"Ok":[]},"text":"pending line"}]}"#;
+    channel.send(success.as_bytes().to_vec()).unwrap();
+    channel.close(CLOSE_NORMAL, "done");
+    assert_eq!(waiter.join().unwrap(), (false, vec![success.to_owned()]));
+    second.join().unwrap();
+
+    let (last, opened) = serving("last.sock");
+    let file = reference.clone();
+    let refused = std::thread::spawn(move || run(file, &mut || panic!("a definitive refusal was retried")));
+    let (_, request) = opened.recv_timeout(Duration::from_secs(10)).unwrap();
+    let ended = r#"{"Result":[{"outcome":{"Refused":[]},"text":"ended"}]}"#;
+    request.channel.send(ended.as_bytes().to_vec()).unwrap();
+    request.channel.close(CLOSE_NORMAL, "done");
+    assert_eq!(refused.join().unwrap(), (true, vec![ended.to_owned()]));
+    last.join().unwrap();
+    fs::remove_dir_all(root).unwrap();
 }
 
 /// [`run_line`] as a command line prints it ([`run_printed`]).
@@ -480,7 +636,7 @@ fn grab_json(r: &Record, path: &Path) -> String {
 
 /// One frame of `window`, written to `out` or the next file of the grab folder.
 fn grab_one(client: &Client, window: Option<usize>, scale: f64, out: Option<&str>) -> Result<(Record, PathBuf), String> {
-    let req = frames::Request { window, scale: Some(scale), raw: false, codec: None, n: Some(1), fps: None, cap: false };
+    let req = frames::Request { window, scale: Some(scale), raw: false, full_chroma: false, codec: None, n: Some(1), fps: None, cap: false };
     let mut got = None;
     frames::fetch(client, &req, &mut |r| {
         got = Some(r);
@@ -518,7 +674,7 @@ fn rec(client: &Client, kv: &[(String, String)]) -> Result<String, String> {
         Some(d) => { std::fs::create_dir_all(d).map_err(|e| format!("rec out: {e}"))?; PathBuf::from(d) }
         None => grab_dir(client)?,
     };
-    let req = frames::Request { window: window_of(kv), scale: Some(get(kv, &["scale"]).and_then(|v| v.parse().ok()).unwrap_or(0.5)), raw, codec: (codec == "rle").then_some("rle"), n: None, fps: Some(fps), cap: true };
+    let req = frames::Request { window: window_of(kv), scale: Some(get(kv, &["scale"]).and_then(|v| v.parse().ok()).unwrap_or(0.5)), raw, full_chroma: false, codec: (codec == "rle").then_some("rle"), n: None, fps: Some(fps), cap: true };
     let started = std::time::Instant::now();
     let (mut count, mut first, mut last, mut size, mut dropped) = (0u64, None::<u64>, 0u64, (0u32, 0u32), 0u64);
     let (mut t_first, mut t_last) = (None::<f64>, 0f64);
@@ -579,12 +735,12 @@ fn rle_to_bmp(w: u32, h: u32, rle: &[u8]) -> Result<Vec<u8>, String> {
 fn gseq(client: &Client, kv: &[(String, String)]) -> Result<String, String> {
     crate::params::validate(kv.iter().map(|(k, _)| k.as_str()), crate::params::GSEQ)?;
     let n = match get(kv, &["n"]).unwrap_or("8").parse::<usize>() {
-        Ok(n @ 1..=64) => n,
-        _ => return Err("gseq n must be an integer in 1..=64".into()),
+        Ok(n @ 1..) => n,
+        _ => return Err("gseq n must be a positive integer".into()),
     };
     let every_ms = match get(kv, &["every_ms"]).unwrap_or("50").parse::<u64>() {
-        Ok(ms @ 8..=60_000) if ms * (n as u64 - 1) <= 60_000 => ms,
-        _ => return Err("gseq every_ms must be 8..=60000; total cadence span must not exceed 60s".into()),
+        Ok(ms @ 8..=60_000) => ms,
+        _ => return Err("gseq every_ms must be 8..=60000".into()),
     };
     let dir = match get(kv, &["out"]) {
         Some(d) => {
@@ -593,7 +749,7 @@ fn gseq(client: &Client, kv: &[(String, String)]) -> Result<String, String> {
         }
         None => grab_dir(client)?,
     };
-    let req = frames::Request { window: window_of(kv), scale: Some(scale_of(kv)), raw: false, codec: None, n: Some(n), fps: Some(1000.0 / every_ms as f64), cap: false };
+    let req = frames::Request { window: window_of(kv), scale: Some(scale_of(kv)), raw: false, full_chroma: false, codec: None, n: Some(n), fps: Some(1000.0 / every_ms as f64), cap: false };
     let (mut paths, mut frame_json, mut pinned) = (Vec::new(), Vec::new(), Vec::new());
     frames::fetch(client, &req, &mut |r| {
         let index = frame_json.len();

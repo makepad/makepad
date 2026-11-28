@@ -56,7 +56,7 @@ impl Signal {
             session,
         }
     }
-    pub fn set(&self) {
+    pub(crate) fn set(&self) {
         self.flag.store(true, Ordering::Release);
         crate::Hal::global().wake_session(self.session);
     }
@@ -79,6 +79,7 @@ pub(crate) trait Sink {
 enum Request {
     Audio {
         direction: Option<usize>,
+        options: u32,
         devices: Vec<u64>,
         entries: audio::Entries,
     },
@@ -348,13 +349,14 @@ impl Media {
                 slot.replace(audio::Entry::from_cmd(entry, ctx));
                 Request::Audio {
                     direction: None,
+                    options: 0,
                     devices: Vec::new(),
                     entries: sm.entries.clone(),
                 }
             }
             HalCmd::AudioUse {
                 dir,
-                options: _,
+                options,
                 devices,
             } => {
                 if dir > 1 || devices.len() % 8 != 0 {
@@ -367,6 +369,7 @@ impl Media {
                 }
                 Request::Audio {
                     direction: Some(dir as usize),
+                    options,
                     devices,
                     entries: sm.entries.clone(),
                 }
@@ -701,6 +704,7 @@ impl Engine {
         match request {
             Request::Audio {
                 direction,
+                options,
                 devices,
                 entries,
             } => {
@@ -733,7 +737,7 @@ impl Engine {
                     );
                     if let Some(p) = &mut self.pulse {
                         if dir == 0 {
-                            p.use_audio_inputs(&self.devices[0]);
+                            p.use_audio_inputs(&self.devices[0], options);
                         } else {
                             p.use_audio_outputs(&self.devices[1]);
                         }

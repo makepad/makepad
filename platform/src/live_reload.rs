@@ -6,10 +6,9 @@ use crate::makepad_script::{
 use makepad_live_reload_core::{
     normalize_path, normalize_path_string, normalize_relative_path_string,
 };
-use std::collections::{BTreeMap, HashSet};
-#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::RwLock;
 
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 use {
@@ -26,15 +25,31 @@ use {
 pub(crate) struct PendingLiveChange {
     file_name: String,
     content: String,
+    is_preview: bool,
+}
+
+/// The last running source for a file while a preview waits for verification.
+/// A disk hot reload can already have installed overrides before the first preview.
+pub(crate) struct PreviewBaseline {
+    text: Option<String>,
+    overrides: Vec<(ScriptModKey, Option<String>)>,
 }
 
 pub struct CxLiveReloadState {
     pub(crate) pending_files: Vec<PendingLiveChange>,
     pub script_mod_overrides: crate::makepad_script::ScriptModOverrides,
+    pub(crate) preview_files: RwLock<HashMap<String, String>>,
+    pub(crate) preview_baselines: HashMap<String, PreviewBaseline>,
     /// Set when overrides were dropped outside the file path (a revert, or a
     /// compiler patch of a design's code under `makepad run`), so the next
     /// live edit re-runs the modules as a DSL change.
     pub(crate) overrides_changed: bool,
+    /// Normalized files whose reverted overrides still need a live-edit pass.
+    pub(crate) pending_reverts: HashSet<String>,
+    /// Counts completed file/override reload passes, including rejected batches.
+    pub(crate) live_edit_seq: u64,
+    /// Stays set while a reload dispatches LiveEdit and its same-tick ScriptReapply.
+    pub(crate) live_edit_active: bool,
     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     pub(crate) file_observer: Option<DesktopHotReloadWatcher>,
 }
@@ -125,7 +140,12 @@ impl Default for CxLiveReloadState {
         Self {
             pending_files: Vec::new(),
             script_mod_overrides: Default::default(),
+            preview_files: RwLock::default(),
+            preview_baselines: HashMap::new(),
             overrides_changed: false,
+            pending_reverts: HashSet::new(),
+            live_edit_seq: 0,
+            live_edit_active: false,
             #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
             file_observer: None,
         }
@@ -135,7 +155,7 @@ impl Default for CxLiveReloadState {
 impl CxLiveReloadState {
     pub fn queue_file_change(&mut self, file_name: String, content: String) {
         self.pending_files
-            .push(PendingLiveChange { file_name, content });
+            .push(PendingLiveChange { file_name, content, is_preview: false });
     }
 }
 
@@ -163,6 +183,121 @@ pub(crate) enum LiveEditTrigger {
 }
 
 impl Cx {
+    /// Resolve a designer request against the VM's registered source files before reading disk.
+    pub fn preview_source_file(&self, file: &str) -> Result<String, String> {
+        let key = normalize_path_string(Path::new(file));
+        let vm = self.script_vm.as_ref().ok_or("no script VM")?;
+        for i in 0..vm.body_count() {
+            let body = vm.body_module_read(i);
+            let Some(module) = body.script_mod() else { continue };
+            if resolve_matching_script_mod_file(module, &key).is_some() {
+                if let Some(path) = Self::resolve_script_mod_path(module) {
+                    return Ok(path);
+                }
+            }
+        }
+        Err(format!("no registered source file for {file}"))
+    }
+
+    pub fn begin_preview_change(&mut self, file: &str) {
+        let key = normalize_path_string(Path::new(file));
+        if self.script_data.live_reload.preview_baselines.contains_key(&key) { return; }
+        let Some(vm) = self.script_vm.as_ref() else { return };
+        let mut active = self.script_data.live_reload.script_mod_overrides.snapshot();
+        let overrides = collect_compiled_sites_for_file(vm, &key).into_iter().map(|site| {
+            let code = active.remove(&site.key);
+            (site.key, code)
+        }).collect();
+        let text = self.active_preview_text(&key);
+        self.script_data.live_reload.preview_baselines.insert(key, PreviewBaseline { text, overrides });
+    }
+
+    /// The scanner pairs preview blocks with compiled sites in source order.
+    /// Edits in an earlier block can move a later one off its original line.
+    pub fn preview_block_index(&self, file: &str, key: &ScriptModKey, block_count: usize) -> Option<usize> {
+        let sites = collect_compiled_sites_for_file(self.script_vm.as_ref()?, file);
+        (sites.len() == block_count)
+            .then(|| sites.iter().position(|site| site.key == *key))
+            .flatten()
+    }
+
+    /// Files in the last reload whose queued text has reached the runtime.
+    pub fn previews_to_verify(&self) -> Vec<String> {
+        let reload = &self.script_data.live_reload;
+        reload.preview_baselines.keys()
+            .filter(|key| !reload.pending_files.iter().any(|p| p.is_preview && p.file_name == key.as_str()))
+            .cloned().collect()
+    }
+
+    pub fn finish_preview_change(&mut self, file: &str, rollback: bool) -> bool {
+        let key = normalize_path_string(Path::new(file));
+        let Some(previous) = self.script_data.live_reload.preview_baselines.remove(&key) else { return false };
+        if rollback {
+            self.clear_preview_text(&key);
+            if let Some(text) = previous.text { self.install_preview_text(&key, text); }
+            let reload = &mut self.script_data.live_reload;
+            for (key, code) in previous.overrides {
+                match code {
+                    Some(code) => reload.script_mod_overrides.insert(&key, &code),
+                    None => { reload.script_mod_overrides.remove(&key); }
+                }
+            }
+            reload.overrides_changed = true;
+            reload.pending_reverts.insert(key);
+        }
+        true
+    }
+
+    pub fn live_edit_seq(&self) -> u64 {
+        self.script_data.live_reload.live_edit_seq
+    }
+
+    pub fn has_pending_live_edit_reload(&self) -> bool {
+        let reload = &self.script_data.live_reload;
+        !reload.pending_files.is_empty() || reload.overrides_changed || !reload.pending_reverts.is_empty()
+    }
+
+    pub fn preview_change_queued(&self, file: Option<&str>) -> bool {
+        let reload = &self.script_data.live_reload;
+        if reload.live_edit_active {
+            return true;
+        }
+        let key = file.map(|f| normalize_path_string(Path::new(f)));
+        reload.pending_files.iter().any(|p| p.is_preview && key.as_ref().is_none_or(|k| *k == p.file_name))
+            || match &key {
+                Some(k) => reload.pending_reverts.contains(k),
+                None => !reload.pending_reverts.is_empty(),
+            }
+    }
+
+    pub fn active_preview_text(&self, file: &str) -> Option<String> {
+        let key = normalize_path_string(Path::new(file));
+        self.script_data.live_reload.preview_files.read().unwrap().get(&key).cloned()
+    }
+
+    pub fn install_preview_text(&mut self, file: &str, text: String) {
+        let key = normalize_path_string(Path::new(file));
+        self.script_data.live_reload.preview_files.write().unwrap().insert(key, text);
+    }
+
+    pub fn clear_preview_text(&mut self, file: &str) {
+        let key = normalize_path_string(Path::new(file));
+        let reload = &mut self.script_data.live_reload;
+        reload.preview_baselines.remove(&key);
+        reload.pending_reverts.remove(&key);
+        reload.preview_files.write().unwrap().remove(&key);
+        reload.pending_files.retain(|change| !change.is_preview || change.file_name != key);
+    }
+
+    pub fn queue_preview_file_change(&mut self, file_name: &str, content: String) {
+        let file_name = normalize_path_string(Path::new(file_name));
+        let reload = &mut self.script_data.live_reload;
+        reload.pending_reverts.remove(&file_name);
+        reload.pending_files.push(PendingLiveChange {
+            file_name, content, is_preview: true,
+        });
+    }
+
     /// Drop every override that a hot reload installed for this file, so the
     /// compiled-in `script_mod!` code is what runs again, and queue the live
     /// edit that re-runs the modules. Returns how many overrides went.
@@ -171,12 +306,17 @@ impl Cx {
     /// never equals the macro's reconstruction of the same block, so it would
     /// only replace one override with an equivalent one.
     pub fn revert_live_edit_file(&mut self, file_name: &str) -> usize {
+        self.clear_preview_text(file_name);
         let Some(script_vm) = self.script_vm.as_ref() else {
             return 0;
         };
         let file_name = normalize_path_string(Path::new(file_name));
         let sites = collect_compiled_sites_for_file(script_vm, &file_name);
-        self.drop_live_edit_overrides(sites)
+        let removed = self.drop_live_edit_overrides(sites);
+        if removed > 0 {
+            self.script_data.live_reload.pending_reverts.insert(file_name);
+        }
+        removed
     }
 
     /// Drops the hot-reload overrides of `sites`; how many there were.
@@ -269,6 +409,7 @@ fn handle_cx_live_edit(cx: &mut Cx) -> LiveEditTrigger {
     // consult, and we want that done before the LiveEdit fires.
     let file_changed = handle_cx_live_edit_files(cx);
     let reverted = std::mem::take(&mut cx.script_data.live_reload.overrides_changed);
+    cx.script_data.live_reload.pending_reverts.clear();
     let manual = std::mem::take(&mut cx.pending_live_edit_request);
 
     if file_changed || reverted {
@@ -402,17 +543,31 @@ fn handle_cx_live_edit_files(cx: &mut Cx) -> bool {
         return false;
     }
 
-    let mut latest_by_file = BTreeMap::<String, String>::new();
+    let mut latest_by_file = BTreeMap::new();
     for change in pending {
         latest_by_file.insert(
             normalize_path_string(Path::new(&change.file_name)),
-            change.content,
+            change,
         );
     }
 
+    for (file, change) in &latest_by_file {
+        if !change.is_preview {
+            cx.clear_preview_text(file);
+        }
+    }
+
+    let has_preview = latest_by_file.values().any(|change| change.is_preview);
+    // The batch is atomic. If any file prevents installation, verify must
+    // see the failure even though no LiveEdit event will reach the app.
+    let mut reject = |file: &str, message: String| {
+        if has_preview { cx.live_edit_errors.push(message.clone()); }
+        log_live_reload_file_error(file, message);
+        false
+    };
+
     let Some(script_vm) = cx.script_vm.as_mut() else {
-        crate::error!("live_reload no script VM available");
-        return false;
+        return reject("live_reload", "no script VM available".into());
     };
 
     let current_overrides = cx
@@ -423,23 +578,26 @@ fn handle_cx_live_edit_files(cx: &mut Cx) -> bool {
     let mut next_overrides = current_overrides.clone();
 
     let mut processed_files = 0usize;
-    for (file_name, content) in latest_by_file {
+    for (file_name, change) in latest_by_file {
+        let content = change.content;
         processed_files += 1;
         let compiled_sites = collect_compiled_sites_for_file(script_vm, &file_name);
         if compiled_sites.is_empty() {
+            if change.is_preview {
+                return reject(&file_name, format!("no compiled script_mod! blocks for {file_name}"));
+            }
             continue;
         }
 
         let extracted = match extract_script_mods_from_rust_file(&file_name, &content) {
             Ok(extracted) => extracted,
             Err(err) => {
-                log_live_reload_file_error(&file_name, err);
-                return false;
+                return reject(&file_name, err);
             }
         };
 
         if extracted.len() != compiled_sites.len() {
-            log_live_reload_file_error(
+            return reject(
                 &file_name,
                 format!(
                     "hot reload could not match script_mod! blocks for {}: runtime has {}, file has {}",
@@ -448,12 +606,11 @@ fn handle_cx_live_edit_files(cx: &mut Cx) -> bool {
                     extracted.len()
                 ),
             );
-            return false;
         }
 
         for (site, extracted) in compiled_sites.iter().zip(extracted.iter()) {
             if extracted.rust_value_count != site.values.len() {
-                log_live_reload_file_error(
+                return reject(
                     &file_name,
                     format!(
                         "hot reload placeholder mismatch in {}: expected {} #(…) values, found {}",
@@ -462,7 +619,6 @@ fn handle_cx_live_edit_files(cx: &mut Cx) -> bool {
                         extracted.rust_value_count
                     ),
                 );
-                return false;
             }
 
             let current_effective = current_overrides
@@ -479,11 +635,7 @@ fn handle_cx_live_edit_files(cx: &mut Cx) -> bool {
             }
 
             if !validate_extracted_script_mod(script_vm, site, extracted) {
-                crate::error!(
-                    "live_reload validation failed for {}",
-                    format_script_mod_site(site)
-                );
-                return false;
+                return reject(&file_name, format!("live_reload validation failed for {}", format_script_mod_site(site)));
             }
         }
 
@@ -497,7 +649,9 @@ fn handle_cx_live_edit_files(cx: &mut Cx) -> bool {
     }
 
     if next_overrides == current_overrides {
-        return false;
+        // A preview hook can install the text and then defer rebuilding the
+        // tree to this reload. Its overrides already match in that case.
+        return has_preview;
     }
 
     cx.script_data.live_reload.script_mod_overrides.replace(next_overrides);
@@ -530,15 +684,8 @@ fn collect_compiled_sites_for_file(
 
     for index in 0..script_vm.body_count() {
         let body = script_vm.body_module_read(index);
-        let Some(script_mod) = body.module() else { continue; };
-        // `script_apply_eval!` bodies are tagged with `__script_source__` as the
-        // first token of their code. They are Rust-driven runtime evals, not static
-        // DSL blocks, so the file extractor cannot match them. Skip them here so
-        // the compiled-site count only reflects `script_mod!` blocks, which the
-        // extractor does understand.
-        if script_mod.view().code.trim_start().starts_with("__script_source__") {
-            continue;
-        }
+        // The Rust file scanner sees only static `script_mod!` blocks.
+        let Some(script_mod) = body.script_mod() else { continue; };
         let Some(compiled_file_name) = resolve_matching_script_mod_file(script_mod, file_name)
         else {
             continue;
@@ -659,6 +806,7 @@ fn resolve_script_mod_file_candidates(script_mod: &ScriptMod) -> Vec<String> {
 #[cfg(relax)]
 impl Cx {
     pub(crate) fn live_code_patched(&mut self, file_name: &str) {
+        self.clear_preview_text(file_name);
         let Some(script_vm) = self.script_vm.as_ref() else { return };
         let file_name = normalize_path_string(Path::new(file_name));
         let sites = collect_compiled_sites_for_file(script_vm, &file_name);
@@ -691,7 +839,7 @@ fn collect_hot_reload_watch_plan(
 
     for index in 0..script_vm.body_count() {
         let body = script_vm.body_module_read(index);
-        let Some(script_mod) = body.module() else { continue; };
+        let Some(script_mod) = body.script_mod() else { continue; };
         let Some(root) = hot_reload_root_for_script_mod(script_mod, &excluded_manifest_paths)
         else {
             continue;
@@ -1127,7 +1275,7 @@ fn find_matching_delim(bytes: &[u8], mut i: usize, open: u8, close: u8) -> Resul
     Err("hot reload hit an unclosed delimiter while scanning Rust source".to_string())
 }
 
-fn skip_non_code_segment(bytes: &[u8], i: usize) -> Result<Option<usize>, String> {
+pub(super) fn skip_non_code_segment(bytes: &[u8], i: usize) -> Result<Option<usize>, String> {
     if i >= bytes.len() {
         return Ok(None);
     }
@@ -1311,6 +1459,63 @@ fn utf8_char_len(byte: u8) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod eval_beside_script_mod_fixture {
+        use crate::makepad_script::*;
+        script_mod! {
+            let seed = #(1.0)
+            seed + 9
+        }
+    }
+
+    #[test]
+    fn script_eval_beside_script_mod_keeps_runtime_site_count_at_one() {
+        use crate::makepad_script::{script, script_eval};
+
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let initial = cx.with_vm(|vm| {
+            let value = eval_beside_script_mod_fixture::script_mod(vm);
+            let _ = script_eval!(vm, { mod.live_reload_test_state = { count: 0 } true });
+            let _ = vm.eval(script! { mod.live_reload_test_state.count = 1 true });
+            let _ = vm.eval(ScriptMod::new(
+                env!("CARGO_MANIFEST_DIR"), module_path!(), file!(), 1, 1, "1;", &[],
+            ));
+            value
+        });
+        assert_eq!(initial.as_f64(), Some(10.0));
+
+        let file = cx.preview_source_file(file!()).expect("script_mod! fixture registers this file");
+        let sites = collect_compiled_sites_for_file(cx.script_vm.as_ref().unwrap(), &file);
+        assert_eq!(sites.len(), 1, "runtime must count only the script_mod! block");
+
+        let edited_source = r#"
+            script_mod! {
+                let seed = #(1.0)
+                seed + 41
+            }
+            fn runtime(vm: &mut ScriptVm) {
+                script_eval!(vm, { mod.live_reload_test_state.count += 1 });
+            }
+        "#;
+        let extracted = extract_script_mods_from_rust_file(&file, edited_source).unwrap();
+        assert_eq!(extracted.len(), 1, "file scanner sees only the script_mod! block");
+
+        cx.validate_live_edit_text(&file, edited_source)
+            .expect("validate_live_edit_text succeeds with runtime 1 == file 1");
+        assert!(
+            cx.install_live_edit_text(&file, edited_source)
+                .expect("install_live_edit_text succeeds with runtime 1 == file 1"),
+            "edited block installs an override"
+        );
+        let reloaded = cx.with_vm(|vm| vm.with_reload(eval_beside_script_mod_fixture::script_mod));
+        assert_eq!(reloaded.as_f64(), Some(42.0), "installed override runs on reload");
+
+        let hot_edited = edited_source.replace("seed + 41", "seed + 99");
+        cx.script_data.live_reload.queue_file_change(file, hot_edited);
+        assert!(handle_cx_live_edit_files(&mut cx), "ordinary hot-reload path accepts the file");
+        let hot_reloaded = cx.with_vm(|vm| vm.with_reload(eval_beside_script_mod_fixture::script_mod));
+        assert_eq!(hot_reloaded.as_f64(), Some(100.0), "hot-reloaded override runs on reload");
+    }
 
     #[test]
     fn extracts_multiple_script_mods() {

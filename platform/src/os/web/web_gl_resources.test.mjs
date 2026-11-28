@@ -62,6 +62,7 @@ function makeHarness() {
   harness.memory = { buffer: new ArrayBuffer(64) };
   harness.draw_shaders = [{ pending: true }];
   harness.array_buffers = [];
+  harness.instance_slabs = new Map();
   harness.index_buffers = [];
   harness.vaos = [];
   harness.textures = [];
@@ -71,11 +72,17 @@ function makeHarness() {
   return harness;
 }
 
+// A resource set's instance rows: a slab slot apart from the ones the batch free below retires.
+const setSlab = id => ({ slab_slot: 100 + id, backing_generation: 7 });
+const setRows = id => ({
+  ...setSlab(id), region: { index: 0, gen: 0 }, byte_off: 0, byte_len: 16, instance_byte_offset: 0,
+});
+
 function allocateResourceSet(harness, id) {
   const ptr = { ptr: 4, len: 4 };
   const empty = { ptr: 0, len: 0 };
   harness.FromWasmAllocArrayBuffer({ buffer_id: id, data: ptr, byte_data: empty });
-  harness.FromWasmAllocArrayBuffer({ buffer_id: id + 1, data: ptr, byte_data: empty });
+  harness.FromWasmCreateInstanceSlab({ ...setSlab(id), capacity_bytes: 16 });
   harness.FromWasmAllocIndexBuffer({
     buffer_id: id,
     data: { ptr: 4, len: 3 },
@@ -87,7 +94,7 @@ function allocateResourceSet(harness, id) {
     shader_id: 0,
     geom_ib_id: id,
     geom_vb_id: id,
-    inst_vb_id: id + 1,
+    ...setRows(id),
   });
   harness.FromWasmAllocTextureImage2D_BGRAu8_32({
     texture_id: id,
@@ -100,9 +107,10 @@ function allocateResourceSet(harness, id) {
 
 function freeResourceSet(harness, id) {
   harness.FromWasmFreeWebGLResources({
-    array_buffer_ids: [id, id + 1],
+    instance_slabs: [setSlab(id)],
+    array_buffer_ids: [id],
     index_buffer_ids: [id],
-    // Deliberately omit the VAO: buffer dependency cleanup must find it.
+    // Deliberately omit the VAO: buffer and slab dependency cleanup must find it.
     vao_ids: [],
     texture_ids: [id],
     framebuffer_ids: [id],
@@ -112,7 +120,10 @@ function freeResourceSet(harness, id) {
 test("WebGL retirement is idempotent, dependency-safe, and bounded across slot reuse", () => {
   const harness = makeHarness();
 
-  // A disjoint live set must survive every cleanup batch.
+  // The packet stream and a disjoint live set survive every cleanup batch.
+  harness.FromWasmUploadUniformStream({ data: { ptr: 4, len: 16 } });
+  const stream = harness.uniform_stream_buf;
+  assert.ok(harness.gl.live.has(stream));
   allocateResourceSet(harness, 10);
   assert.ok(harness.array_buffers[10].valid && harness.index_buffers[10].valid);
   const shared = {
@@ -124,16 +135,17 @@ test("WebGL retirement is idempotent, dependency-safe, and bounded across slot r
   };
   const sharedLiveCount = harness.gl.live.size;
 
-  // Explicit VAO retirement also owns its UBOs, without touching the shared
-  // buffers that VAO happened to reference.
+  // Allocating a VAO does not allocate any private uniform buffers.
   harness.FromWasmAllocVao({
     vao_id: 5,
     shader_id: 0,
     geom_ib_id: 10,
     geom_vb_id: 10,
-    inst_vb_id: 11,
+    ...setRows(10),
   });
+  assert.equal(harness.gl.live.size, sharedLiveCount);
   const explicitVao = harness.vaos[5];
+  explicitVao.gl_vao = harness.gl.createVertexArray();
   harness.FromWasmFreeWebGLResources({
     array_buffer_ids: [],
     index_buffer_ids: [],
@@ -143,9 +155,33 @@ test("WebGL retirement is idempotent, dependency-safe, and bounded across slot r
   });
   assert.equal(harness.vaos[5], undefined);
   assert.ok(!harness.gl.live.has(explicitVao.gl_vao));
-  assert.ok(!harness.gl.live.has(explicitVao.draw_call_uniform_buf));
-  assert.ok(!harness.gl.live.has(explicitVao.user_uniform_buf));
   assert.equal(harness.gl.live.size, sharedLiveCount);
+
+  // Both slabs use the live geometry at 10. Retiring them in one batch
+  // must find every dependent VAO, even those sharing one of the backings.
+  const slabs = [10, 11].map(slab_slot => ({ slab_slot, backing_generation: 1 }));
+  const failed = { slab_slot: 10, backing_generation: 0 };
+  const failures = [];
+  harness.to_wasm = { ToWasmInstanceUploadFailed: msg => failures.push(msg) };
+  const allocate = harness.gl.createBuffer;
+  harness.gl.createBuffer = () => null;
+  harness.FromWasmCreateInstanceSlab({ ...failed, capacity_bytes: 16 });
+  assert.deepEqual(failures, [{ ...failed, scope: 0, region: undefined }], "a null GL buffer reports a backing failure");
+  harness.FromWasmFreeWebGLResources({ instance_slabs: [failed] });
+  harness.gl.createBuffer = allocate;
+  for (const identity of slabs) harness.FromWasmCreateInstanceSlab({ ...identity, capacity_bytes: 16 });
+  for (let id = 0; id < 3; id++) {
+    harness.FromWasmAllocVao({
+      ...slabs[id % 2], vao_id: id, shader_id: 0, geom_ib_id: 10, geom_vb_id: 10,
+      region: { index: id, gen: 0 }, byte_off: 0, byte_len: 16, instance_byte_offset: 0,
+    });
+  }
+  harness.FromWasmFreeWebGLResources({ instance_slabs: slabs });
+  assert.ok([0, 1, 2].every(id => harness.vaos[id] === undefined), "a batch free retires every dependent VAO");
+  assert.ok(!harness.instance_slabs.has(10) && !harness.instance_slabs.has(11), "a batch free removes both slab slots");
+  assert.ok(harness.instance_slabs.has(setSlab(10).slab_slot), "a batch free keeps the live set's slab");
+  assert.equal(harness.gl.live.size, sharedLiveCount, "freeing slabs releases their buffers");
+  assert.equal(harness.array_buffers[10].gl_buf, shared.array, "a slab slot may alias a live geometry buffer id");
 
   let maximumLiveCount = sharedLiveCount;
   for (let cycle = 0; cycle < 100; cycle++) {
@@ -158,8 +194,6 @@ test("WebGL retirement is idempotent, dependency-safe, and bounded across slot r
     assert.equal(harness.vaos[0], undefined);
     assert.equal(harness.array_buffers[0], undefined);
     assert.ok(!harness.gl.live.has(retiredVao.gl_vao));
-    assert.ok(!harness.gl.live.has(retiredVao.draw_call_uniform_buf));
-    assert.ok(!harness.gl.live.has(retiredVao.user_uniform_buf));
     assert.ok(!harness.gl.live.has(retiredArray));
 
     const deletes = harness.gl.deleted.length;
@@ -173,7 +207,8 @@ test("WebGL retirement is idempotent, dependency-safe, and bounded across slot r
   assert.equal(harness.vaos[10].gl_vao, shared.vao);
   assert.equal(harness.textures[10], shared.texture);
   assert.equal(harness.framebuffers[10], shared.framebuffer);
-  assert.ok(maximumLiveCount <= sharedLiveCount + 8);
+  assert.ok(harness.gl.live.has(stream));
+  assert.ok(maximumLiveCount <= sharedLiveCount + 6);
   assert.ok(harness.array_buffers.length <= 12);
   assert.ok(harness.index_buffers.length <= 11);
   assert.ok(harness.vaos.length <= 11);

@@ -116,20 +116,31 @@ fn codec_of(flags: u32) -> Codec {
     if flags & HEVC != 0 { Codec::H265 } else { Codec::H264 }
 }
 
-/// Opens an H.264 (or H.265: `HEVC`) stream of `width` x `height` pictures (width % 4 == 0,
-/// height even) planned for `fps` at `kbps` (0: a rate for the size), encoded on engine
+/// Opens an H.264 (or H.265: `HEVC`) stream of `width` x `height` pictures (width and height even)
+/// planned for `fps` at `kbps` (0: a rate for the size), encoded on engine
 /// `engine`, `flags` (`FULL_CHROMA`, `HEVC`, `CBR`, `SHARP`), at the encoder's quality level `quality`
 /// (0 its fastest; more than it has: its best) with a rate control buffer of `buffer_pictures`
-/// pictures. Its number, 0 when this machine cannot (the error says why).
+/// pictures (`quality`, `buffer_pictures` and `SHARP` are the Linux encoder's controls; Android's
+/// MediaCodec takes only the rate mode). Its number, 0 when this machine cannot (the error says why).
 #[relax_api::relax_api]
 pub fn hal_stream_encoder_open(width: u32, height: u32, fps: u32, kbps: u32, engine: u32, flags: u32, quality: u32, buffer_pictures: u32) -> u64 {
-    let tuning = Tuning { quality, constant: flags & CBR != 0, buffer_pictures: buffer_pictures.max(1), sharp: flags & SHARP != 0 };
+    let tuning = Tuning {
+        constant: flags & CBR != 0,
+        #[cfg(not(target_os = "android"))]
+        quality,
+        #[cfg(not(target_os = "android"))]
+        buffer_pictures: buffer_pictures.max(1),
+        #[cfg(not(target_os = "android"))]
+        sharp: flags & SHARP != 0,
+    };
     #[cfg(target_os = "linux")]
     let opened = StreamEncoder::open(width, height, fps, kbps, engine as usize, flags & FULL_CHROMA != 0, codec_of(flags), tuning);
     #[cfg(target_os = "android")]
     let opened = if flags & FULL_CHROMA != 0 || engine != 0 {
         Err("4:4:4 and tiled stream encoding are Linux's".to_string())
     } else {
+        // MediaCodec has no quality level or picture buffer: the op takes them for Linux's encoder
+        let _ = (quality, buffer_pictures);
         StreamEncoder::open(width, height, fps, kbps, codec_of(flags), tuning)
     };
     match opened {

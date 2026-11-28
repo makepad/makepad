@@ -56,6 +56,8 @@ pub(super) struct DrawMemo {
     pipeline: Option<PipelineMemo>,
     vb: Option<(Id, Arc<Buffer>)>,
     ib: Option<(Id, Arc<Buffer>)>,
+    /// the instance buffer: a run of draws from one slab looks it up, holds it and touches it once
+    inst: Option<(Id, Arc<Buffer>)>,
     images: Option<ImageMemo>,
 }
 
@@ -103,6 +105,14 @@ struct Prepared {
     first_instance: u32,
 }
 
+#[derive(Default)]
+struct PickDraws {
+    issued: usize,
+    absent: usize,
+    unpainted: usize,
+    pipelines: usize,
+}
+
 /// The arena-fed bindings a program can have: five uniform blocks, the pick block, the instances.
 const MAX_DYNAMIC: usize = 8;
 
@@ -111,6 +121,13 @@ fn dynamic_offset(p: &super::pipeline::Program, offsets: &mut [u32; MAX_DYNAMIC]
     let i = p.dynamic.iter().position(|b| *b == slot).filter(|i| *i < MAX_DYNAMIC).ok_or("arena binding missing from the dynamic set")?;
     offsets[i] = u32::try_from(offset).map_err(|_| "arena offset exceeds 32 bits")?;
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct PacketUniforms<'a> {
+    stream: &'a [u8],
+    placed: Placed,
+    align: u32,
 }
 
 /// A pass's view count: 2 for a multiview pass (`Pass::views`), else 1.
@@ -179,6 +196,15 @@ mod scanout_tests {
 }
 
 impl Vulkan {
+    fn zero_uniform_buffer(&mut self) -> Result<Arc<Buffer>, String> {
+        if let Some(buf) = &self.zero_uniforms { return Ok(buf.clone()); }
+        let size = 65_536u64.min(u64::from(self.dev.properties.limits.max_uniform_buffer_range)).max(16_384);
+        let buf = Buffer::scratch(self.dev.clone(), Pool::Fallback, size, vk::BufferUsageFlags::UNIFORM_BUFFER)?;
+        buf.zero(0)?;
+        self.zero_uniforms = Some(buf.clone());
+        Ok(buf)
+    }
+
     fn offscreen(&mut self, s: &mut Session, target: Id, size: [u32; 2], now: u64) -> Result<Arc<Image>, String> {
         self.offscreen_layers(s, target, size, 1, now)
     }
@@ -186,7 +212,7 @@ impl Vulkan {
     /// `offscreen` with `layers` array layers (a multiview window: one per view).
     fn offscreen_layers(&mut self, s: &mut Session, target: Id, size: [u32; 2], layers: u32, now: u64) -> Result<Arc<Image>, String> {
         let (sid, id) = self.window_key(s.id, target);
-        if let Some(t) = self.win.get(&(sid, id.index)).filter(|t| t.gen == id.gen && [t.image.desc.w, t.image.desc.h] == size && t.image.desc.depth == layers) {
+        if let Some(t) = self.win.get(sid, id.index).filter(|t| t.gen == id.gen && [t.image.desc.w, t.image.desc.h] == size && t.image.desc.depth == layers) {
             if sid == s.id { s.ledger.touch(Kind::Window, id.index, id.gen, s.frame, now); }
             return Ok(t.image.clone());
         }
@@ -194,7 +220,7 @@ impl Vulkan {
             usage: usage::RENDER_TARGET | usage::SAMPLED, bytes: 0, imported: false, uploaded: 0, lent: None })?;
         // The host row is reconciled in step; a borrower never owns this allocation.
         if sid == s.id { s.ledger.add(window_row(id, &image, now, s.frame)); }
-        self.win.insert((sid, id.index), Texture { gen: id.gen, image: image.clone() });
+        self.win.insert(sid, id.index, Texture { gen: id.gen, image: image.clone(), painted: 0 });
         Ok(image)
     }
 
@@ -222,7 +248,6 @@ impl Vulkan {
     /// its right edge (bit 0 rightmost): the frame_probe layout, for any app. The copies are the last
     /// writes of the frame, so a picture whose two stamps differ was torn or composited before the
     /// frame completed; a stamp shows which frame a grab or a capture holds
-    /// (local/agent_state/relax-campaign/wmsync-tools/stampcheck.py).
     #[cfg(target_os = "linux")]
     fn stamp_frame(&mut self, image: &Arc<Image>, frame: u64, batch: &mut Batch) {
         let [w, h] = [self.window_px[0].min(image.desc.w), self.window_px[1].min(image.desc.h)];
@@ -262,23 +287,28 @@ impl Vulkan {
         batch.images.push(image.clone());
     }
 
-    /// The image a badge layer frame of host window `key` draws into: the window's retained
-    /// image copied into a free composed image of its size (one a presentation or a snapshot
-    /// still holds is not reused). `None`: nothing rendered yet.
+    /// The image a badge layer frame of host window `key` draws into: a free composed image of
+    /// the frame's own size (`size`: the window's, as the frame draws it; one a presentation or a
+    /// snapshot still holds is not reused) over a copy of the window's retained image where both
+    /// have pixels, cleared past its edge, as Metal composes. The retained image has the size of
+    /// the window's last frame: composed at that size, a layer frame after a resize kept the old
+    /// size until the app drew at the new one (the start screen over an app still starting: a
+    /// makepad WM refused its frames, or showed them in a corner). `None`: nothing rendered yet.
     /// `covered`: an opaque panel or window layer covers the frame, which may be older than the
     /// one last shown.
-    fn begin_compose(&mut self, key: (u32, Id), covered: bool, batch: &mut Batch) -> Option<Arc<Image>> {
+    fn begin_compose(&mut self, key: (u32, Id), covered: bool, size: Option<[u32; 2]>, batch: &mut Batch) -> Option<Arc<Image>> {
         // the retained image is an older frame than the one last shown (the newest went straight
         // to the shell's target): nothing to compose over until the app's next frame lands in it
         if !covered && self.direct.stale((HOST, key.1.index)) { return None; }
-        let base = self.win.get(&(key.0, key.1.index)).filter(|t| t.gen == key.1.gen)?.image.clone();
+        let base = self.win.get(key.0, key.1.index).filter(|t| t.gen == key.1.gen)?.image.clone();
+        let [w, h] = size.unwrap_or([base.desc.w, base.desc.h]);
         let badged = self.badged.get_mut(&key.1.index)?;
         badged.last = None;
-        badged.pool.retain(|i| [i.desc.w, i.desc.h] == [base.desc.w, base.desc.h]);
+        badged.pool.retain(|i| [i.desc.w, i.desc.h] == [w, h]);
         let image = match badged.pool.iter().find(|i| Arc::strong_count(i) == 1) {
             Some(i) => i.clone(),
             None => {
-                let image = Image::new(self.dev.clone(), TextureObj { format: format::BGRA8, w: base.desc.w, h: base.desc.h,
+                let image = Image::new(self.dev.clone(), TextureObj { format: format::BGRA8, w, h,
                     depth: 1, mips: 1, usage: usage::RENDER_TARGET | usage::SAMPLED, bytes: 0, imported: false, uploaded: 0, lent: None })
                     .map_err(|e| eprintln!("[hal-vulkan] badge layer image: {e}")).ok()?.in_pool(Pool::WindowCopies);
                 badged.pool.push(image.clone());
@@ -287,6 +317,12 @@ impl Vulkan {
         };
         trim_spares(&mut badged.pool, &image, SCANOUT_SPARES);
         badged.last = Some(image.clone());
+        if w > base.desc.w || h > base.desc.h {
+            let range = vk::ImageSubresourceRange::default().aspect_mask(vk::ImageAspectFlags::COLOR).level_count(1).layer_count(1);
+            image.transition(batch.cb, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
+            unsafe { self.dev.raw.cmd_clear_color_image(batch.cb, image.image, vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &vk::ClearColorValue { float32: [0.0; 4] }, &[range]); }
+        }
         self.copy_image("badge layer copy", &base, &image, batch);
         Some(image)
     }
@@ -325,7 +361,7 @@ impl Vulkan {
         let source = if !taken { None } else if self.direct.stale((HOST, window.index)) {
             self.direct.newest((HOST, window)).map(|(image, _)| image)
         } else {
-            self.win.get(&(HOST, window.index)).filter(|t| t.gen == window.gen).map(|t| t.image.clone())
+            self.win.get(HOST, window.index).filter(|t| t.gen == window.gen).map(|t| t.image.clone())
         };
         if let Some(source) = source.filter(|i| i.desc.format == image.desc.format && !Arc::ptr_eq(i, &image)) {
             self.copy_image("window layer copy", &source, &image, &mut batch);
@@ -379,7 +415,7 @@ impl Vulkan {
         if let Some(last) = self.badged.get(&id.index).filter(|_| sid == HOST && viewer == HOST).and_then(|b| b.last.clone()) { return Some(last); }
         // the newest frame went straight to the shell's target: a read of this frame takes it from there
         if let Some((image, _)) = self.direct.newest((sid, id)) { return Some(image); }
-        self.win.get(&(sid, id.index)).filter(|t| t.gen == id.gen).map(|t| t.image.clone())
+        self.win.get(sid, id.index).filter(|t| t.gen == id.gen).map(|t| t.image.clone())
     }
 
     fn fallback_image(&mut self, shape: u32, batch: &mut Batch) -> Result<Arc<Image>, String> {
@@ -416,29 +452,48 @@ impl Vulkan {
         // a lost device draws nothing until it is replaced; the sessions heard DeviceLost once
         // (`Vulkan::recover`) and wait for DeviceReset
         if self.dev.lost.load(std::sync::atomic::Ordering::Acquire) { return None; }
-        let Some(packet) = view.frames.get(packet as usize) else { s.bad(); return None };
-        let (Some(pr), Some(dr)) = (slice(packet.passes, view.passes.len()), slice(packet.draws, view.draws.len())) else { s.bad(); return None };
-        if view.passes[pr.clone()].iter().any(|p| slice(p.draws, view.draws.len()).is_none_or(|r| r.start < dr.start || r.end > dr.end)) { s.bad(); return None; }
-        self.flush(); // uploads, including the font service, precede this frame on the one queue
-        let align = self.dev.properties.limits.min_uniform_buffer_offset_alignment.max(self.dev.properties.limits.min_storage_buffer_offset_alignment).max(16);
-        let mut reserve = 0u64;
-        // the damage check draws a window pass a second time, whole
-        let encodes = if damage_check() { 2 } else { 1 };
-        for pass in &view.passes[pr.clone()] {
-            for d in &view.draws[slice(pass.draws, view.draws.len()).unwrap()] {
-                for bytes in d.uniforms.iter().copied().chain([pass.uniforms, d.inst.data]) {
-                    reserve = reserve.saturating_add((bytes.len.max(16) as u64).div_ceil(align) * align * encodes as u64);
+        let pick = kind & target::PICK != 0;
+        let packet = view.frames.get(packet as usize);
+        let pr = packet.and_then(|p| slice(p.passes, view.passes.len()));
+        let paint_attachments = |s: &Session, pass: &Pass| {
+            let sampled_depth = Some(pass.depth).filter(|id| {
+                !id.is_none() && s.textures.get(sid, *id).is_ok_and(|t| t.val.usage & usage::SAMPLED != 0)
+            });
+            pass.color.into_iter().filter(|id| !id.is_none()).chain(sampled_depth)
+        };
+        // A dropped frame still declares which pictures a draw pass is meant to paint.
+        if !pick {
+            if let Some(p) = packet {
+                for pass in view.passes.iter().skip(p.passes.off as usize).take(p.passes.len as usize) {
+                    if pass.kind == crate::types::pass_kind::DRAW {
+                        self.pass_targets.extend(paint_attachments(s, pass).map(|id| (sid, id)));
+                    }
                 }
-                reserve = reserve.saturating_add(align * encodes as u64); // pick block
+            }
+            if pr.is_none() && kind & !target::FLAGS == target::TEXTURE && !target.is_none() {
+                self.pass_targets.insert((sid, target));
             }
         }
+        let Some(packet) = packet else { s.bad(); return None };
+        let (Some(pr), Some(dr)) = (pr, slice(packet.draws, view.draws.len())) else { s.bad(); return None };
+        if view.passes[pr.clone()].iter().any(|p| slice(p.draws, view.draws.len()).is_none_or(|r| r.start < dr.start || r.end > dr.end)) { s.bad(); return None; }
+        let Some(stream) = exec::packet_uniforms(view, packet) else { s.bad(); return None };
+        let align = self.info.effective_uniform_align();
+        let pick_align = self.dev.properties.limits.min_storage_buffer_offset_alignment.max(u64::from(align));
+        let encodes = if damage_check() { 2 } else { 1 };
+        let Some(padded) = stream.len().checked_next_multiple_of(align as usize) else { s.bad(); return None };
+        let reserve = padded as u64 + dr.len() as u64 * pick_align * encodes;
         // a recorded frame times its passes: its batch's timestamp pool is sized for them
         let prof_key = gpu_prof::current(sid);
         let prof_queries = prof_key.map_or(2, |k| prof::queries_for(k, pr.len(), dr.len()));
         let timed_dispatches = view.passes[pr.clone()].iter().filter(|p| p.kind == crate::types::pass_kind::COMPUTE)
             .flat_map(|p| crate::compute::records::<Dispatch>(view.arena, p.dispatches).unwrap_or_default()).filter(|d| d.timer != 0).count() as u32;
         let queries = prof_queries + timed_dispatches * 2;
-        let mut batch = match Batch::new(self.dev.clone(), &self.spares, queries, reserve) {
+        self.kept.tick();
+        // before the batch: a frame that waits for its compute programs leaves the pending
+        // uploads to go on their own (`submit` flushes them)
+        if !self.compute_ready(sid, &view.passes[pr.clone()], view) { return None; }
+        let mut batch = match self.frame_batch(s, queries, reserve) {
             Ok(b) => b,
             Err(e) => {
                 // at the open-file limit an out of memory is reported once, not every frame
@@ -448,12 +503,23 @@ impl Vulkan {
         };
         batch.dispatch_query = prof_queries;
         batch.affinity = Batch::affinity_of(sid, target);
-        self.kept.tick();
-        if !self.compute_ready(sid, &view.passes[pr.clone()], view) { return None; }
+        batch.keep = self.spares.frame_target(batch.affinity, kind);
+        self.frame_affinity.insert(sid, batch.affinity);
+        let placed = if stream.is_empty() { Placed::NONE } else {
+            match batch.put_aligned(stream, u64::from(align), padded as u64) {
+                Ok(placed) => placed,
+                Err(e) => {
+                    eprintln!("[hal-vulkan] uniform stream upload: {e}");
+                    s.bad();
+                    batch.finish(self.queue.as_ref().unwrap(), self.complete.clone(), self.mailbox.clone());
+                    return None;
+                }
+            }
+        };
+        let uniforms = PacketUniforms { stream, placed, align };
         s.frame = packet.frame; s.font_frames.submitted(packet.frame);
         s.stats.max_frame_ns = s.stats.max_frame_ns.max(packet.meta.build_end_ns.saturating_sub(packet.meta.build_start_ns));
         let is_window = kind & !target::FLAGS == target::WINDOW;
-        let pick = kind & target::PICK != 0;
         if let Some(key) = prof_key {
             batch.prof = Some(BatchProf::new(key, if self.dev.timestamp_bits > 0 { prof_queries } else { 0 }));
             batch.prof_key = Some(key);
@@ -477,11 +543,11 @@ impl Vulkan {
             if let Some(size) = size.filter(|_| covered) {
                 self.take_back(s, target, size, &mut batch, now);
             }
-            self.compose = self.begin_compose(layer_key, covered, &mut batch);
+            self.compose = self.begin_compose(layer_key, covered, size, &mut batch);
             if let Some(size) = size.filter(|_| covered && self.compose.is_none()) {
                 // (whatever the retained image holds is covered)
                 if self.offscreen(s, target, size, now).is_ok() {
-                    self.compose = self.begin_compose(layer_key, covered, &mut batch);
+                    self.compose = self.begin_compose(layer_key, covered, Some(size), &mut batch);
                 }
             }
             if self.compose.is_none() {
@@ -522,6 +588,7 @@ impl Vulkan {
             }
             #[cfg(target_os = "linux")] self.native_apps.begin_pass();
             let draws = &view.draws[slice(pass.draws, view.draws.len()).unwrap()];
+            let mut pick_draws = PickDraws::default();
             #[cfg(target_os = "android")]
             if let Some(frame) = native_frame.as_ref().filter(|f| f.composited && pass.color.iter().all(Id::is_none)) {
                 for segment in &frame.segments {
@@ -531,29 +598,56 @@ impl Vulkan {
                     if segment.index != 0 { part.clear = [[0.0; 4]; 4]; }
                     let draws = &view.draws[slice(segment.draws, view.draws.len()).unwrap()];
                     let offset = [segment.rect[0], segment.rect[1]];
-                    match self.encode_pass(s, target, is_window, pick, &part, frame_size, draws, view, &mut batch, now, &mut deps, Some((&segment.slot.image, offset))) {
+                    match self.encode_pass(s, target, is_window, pick.then_some(&mut pick_draws), &part, frame_size, draws, view, uniforms, &mut batch, now, &mut deps, Some((&segment.slot.image, offset))) {
                         Ok(_) => { s.stats.passes += 1; }
-                        Err(e) => { eprintln!("[hal-android-layer] segment: {e}"); s.bad(); return None; }
+                        Err(e) => {
+                            eprintln!("[hal-android-layer] segment: {e}"); s.bad();
+                            // the batch holds the frame's uploads: they still go
+                            self.pay_zeroes();
+                            batch.finish(self.queue.as_ref().unwrap(), self.complete.clone(), self.mailbox.clone());
+                            return None;
+                        }
                     }
                     if segment.index == 0 {
-                        self.win.insert((sid, target.index), Texture { gen: target.gen, image: segment.slot.image.clone() });
+                        self.win.insert(sid, target.index, Texture { gen: target.gen, image: segment.slot.image.clone(), painted: 0 });
                     }
                 }
                 continue;
             }
             let before = s.stats.skipped_draws;
+            let bad_before = s.stats.bad_args;
             let missing = pick && draws.iter().any(|d| read_ids(view.arena, d.pick_tex).any(|t| self.pick_pending.contains(&(sid, t))));
             let mut failed = false;
             #[cfg(target_os = "linux")] let mut window_pass = false;
-            match self.encode_pass(s, target, is_window, pick, pass, frame_size, draws, view, &mut batch, now, &mut deps, None) {
+            match self.encode_pass(s, target, is_window, pick.then_some(&mut pick_draws), pass, frame_size, draws, view, uniforms, &mut batch, now, &mut deps, None) {
                 Ok(image) => {
+                    if !pick {
+                        let whole = s.stats.skipped_draws == before;
+                        for id in paint_attachments(s, pass) {
+                            if let Some(tex) = self.tex.get_mut(sid, id.index).filter(|t| t.gen == id.gen) {
+                                tex.painted = if whole { tex.painted.saturating_add(1) } else { 0 };
+                            }
+                        }
+                    }
                     #[cfg(target_os = "linux")] { window_pass = image.is_some(); }
                     s.stats.passes += 1; if image.is_some() { window_image = image; }
                 }
-                Err(e) => { failed = true; eprintln!("[hal-vulkan] pass: {e}"); s.bad(); s.stats.skipped_draws += draws.len() as u64; }
+                Err(e) => {
+                    failed = true;
+                    if !pick { eprintln!("[hal-vulkan] pass: {e}"); }
+                    s.bad();
+                    s.stats.skipped_draws += draws.len() as u64;
+                }
             }
             #[cfg(target_os = "linux")] self.native_apps.end_pass(sid, pass, !failed, pick, window_pass);
             if pick {
+                let PickDraws { issued, absent, unpainted, pipelines } = pick_draws;
+                if failed || before != s.stats.skipped_draws {
+                    let total = draws.len();
+                    let left_out = total - issued;
+                    let bad = s.stats.bad_args - bad_before;
+                    eprintln!("[hal-vulkan] a pick pass left out {left_out} of {total} draws: {absent} sampled pictures absent, {unpainted} unpainted, {bad} bad arguments, {pipelines} pipelines not ready");
+                }
                 let incomplete = failed || missing || before != s.stats.skipped_draws;
                 for id in pass.color.into_iter().filter(|t| !t.is_none()) {
                     if incomplete { self.pick_pending.insert((sid, id)); } else { self.pick_pending.remove(&(sid, id)); }
@@ -653,7 +747,13 @@ impl Vulkan {
             let semaphore = if composited {
                 match super::share::sync::Semaphore::sync_file(self.dev.clone()) {
                     Ok(s) => Some(s),
-                    Err(e) => { eprintln!("[hal-android-layer] acquire semaphore: {e}"); return None; }
+                    Err(e) => {
+                        eprintln!("[hal-android-layer] acquire semaphore: {e}");
+                        // the batch holds the frame's uploads: they still go
+                        self.pay_zeroes();
+                        batch.finish(self.queue.as_ref().unwrap(), self.complete.clone(), self.mailbox.clone());
+                        return None;
+                    }
                 }
             } else { None };
             if composited {
@@ -700,15 +800,16 @@ impl Vulkan {
         Ok(ms)
     }
 
-    fn encode_pass(&mut self, s: &mut Session, target: Id, is_window: bool, pick: bool, pass: &Pass, frame_size: [u32; 2], draws: &[Draw], view: &CmdView,
+    fn encode_pass(&mut self, s: &mut Session, target: Id, is_window: bool, mut pick_draws: Option<&mut PickDraws>, pass: &Pass, frame_size: [u32; 2], draws: &[Draw], view: &CmdView, uniforms: PacketUniforms<'_>,
         batch: &mut Batch, now: u64, deps: &mut Vec<LentRef>, segment: Option<(&Arc<Image>, [i32; 2])>) -> Result<Option<Arc<Image>>, String> {
+        let pick = pick_draws.is_some();
         let v = pass.viewport;
         let offset = segment.map_or([0, 0], |(_, offset)| offset);
         if v.iter().any(|v| !v.is_finite() || *v < 0.0) || v[2] <= 0.0 || v[3] <= 0.0 { return Err(format!("invalid pass viewport {v:?} (target {target:?}, window {is_window})")); }
         let views = pass_views(pass);
         if views > 1 && (!self.dev.multiview || pick) { return Err("a multiview pass on a device without multiview (or a pick pass)".into()); }
         // the views side by side (`Pass::view_rects`): each draw runs once per view in this render pass
-        let pviews = exec::pass_views(pass, view.arena).map_err(|e| format!("pass not drawn: {e}"))?;
+        let pviews = exec::pass_views(pass, view.arena, uniforms.stream, uniforms.align).map_err(|e| format!("pass not drawn: {e}"))?;
         let viewed = pass.view_rects.len != 0;
         let mut size = [(v[0] + v[2]).ceil() as u32, (v[1] + v[3]).ceil() as u32];
         // A pass into the window image (no colour target of its own) is the frame's size: that image
@@ -716,7 +817,7 @@ impl Vulkan {
         // (a blur at half and a quarter of the window, the run loader's veil, was sized as the window
         // and drawn clipped to its targets).
         if is_window && pass.color.iter().all(|c| c.is_none()) { size = [size[0].max(frame_size[0]), size[1].max(frame_size[1])]; }
-        // a badge layer is drawn over what the window has (a resize may be landing)
+        // a badge layer is drawn into its composed image (the frame's size)
         if let Some(c) = self.compose.as_ref().filter(|_| is_window) { size = [size[0].min(c.desc.w), size[1].min(c.desc.h)]; }
         let mut colors: Vec<(usize, Arc<Image>)> = Vec::new();
         let mut window = None;
@@ -815,25 +916,10 @@ impl Vulkan {
         let prof_key = batch.prof.as_ref().map(|p| p.key);
         // an ablation frame of the GPU profiler leaves out one shader's draws
         let ablate = prof_key.filter(|k| k.ablate && !pick).and_then(|_| gpu_prof::ablate_target());
-        batch.forget_blocks();
         self.draw_memo = DrawMemo::default();
-        // the pass uniforms, placed once for the pass: one block, or a block per view at an aligned
-        // stride in one upload (a view's draws bind the pass block at its dynamic offset)
-        // SAFETY: the Slice is the caller's memory, borrowed for this hal_submit call
-        let pass_bytes = unsafe { pass.uniforms.as_bytes() };
-        let block_len = pviews[0].block.len();
-        let (pass_block, pass_stride) = if viewed {
-            let align = (self.dev.properties.limits.min_uniform_buffer_offset_alignment as usize).max(16);
-            let stride = block_len.max(16).div_ceil(align) * align;
-            let mut packed = vec![0u8; stride * (pviews.len() - 1) + block_len];
-            for (i, v) in pviews.iter().enumerate() {
-                packed[i * stride..i * stride + block_len].copy_from_slice(&pass_bytes[v.block.clone()]);
-            }
-            (batch.put(&packed)?, stride as u64)
-        } else {
-            (batch.put_block(pipeline_binding::PASS, pass_bytes)?, 0)
-        };
-        let view_at = (0..pviews.len() as u64).map(|i| u32::try_from(pass_block.at + i * pass_stride)).collect::<Result<Vec<u32>, _>>()
+        let view_at = pviews.iter().map(|v| {
+            if v.uniforms.is_empty() { Ok(0) } else { u32::try_from(uniforms.placed.at + u64::from(v.uniforms.off)) }
+        }).collect::<Result<Vec<_>, _>>()
             .map_err(|_| "arena offset exceeds 32 bits")?;
         // the damaged rects inside the target, an empty one kept in its place since the draws' masks count them
         let damage: Option<Vec<vk::Rect2D>> = partial.then(|| read_rects(view.arena, pass.damage).map(|[x, y, w, h]| {
@@ -847,9 +933,14 @@ impl Vulkan {
             .filter(|(_, r)| r.extent.width > 0 && r.extent.height > 0).fold(0u32, |mask, (i, _)| mask | 1 << i));
         for d in draws {
             s.stats.draws += 1;
+            if Draw::cull_mode(d.flags).is_none() {
+                s.bad();
+                s.stats.skipped_draws += 1;
+                continue;
+            }
             if d.index[1] == 0 || d.inst.count == 0 { continue; }
             if let Some(t) = ablate.as_deref() {
-                if self.pipe.get(&(s.id, d.pipeline.index)).is_some_and(|p| gpu_prof::ablates(s, &p.desc, d.owner, t)) { continue; }
+                if self.pipe.get(s.id, d.pipeline.index).is_some_and(|p| gpu_prof::ablates(s, &p.desc, d.owner, t)) { continue; }
             }
             // a draw outside the damage isn't drawn, but what it uses mustn't look idle
             if damage_mask.is_some_and(|mask| d.damage & mask == 0) {
@@ -858,11 +949,39 @@ impl Vulkan {
                 for id in read_ids(view.arena, d.tex).filter(|i| !i.is_none()) { s.ledger.touch(Kind::Texture, id.index, id.gen, s.frame, now); }
                 continue;
             }
-            match self.prepare(s, pass, d, view.arena, pick, &render_pass, &attachments, (pass_block, block_len), batch, now, deps) {
+            if let Some(counts) = pick_draws.as_deref_mut() {
+                // prepare resolves sampled images and can allocate fresh storage for an evicted target.
+                let before = (counts.absent, counts.unpainted);
+                let slots = self.pipe.get(s.id, d.pipeline.index).filter(|p| p.gen == d.pipeline.gen).map_or(0, |p| p.state.src.code.textures.len());
+                for i in 0..slots.min(d.tex.len as usize) {
+                    let id = id_at(view.arena, d.tex, i);
+                    if id.is_none() { continue; }
+                    let Ok(entry) = s.textures.get(s.id, id) else { continue };
+                    let t = &entry.val;
+                    if t.usage & usage::RENDER_TARGET == 0 || t.lent.is_some() || t.imported { continue; }
+                    match self.tex.get(s.id, id.index).filter(|tex| tex.gen == id.gen && tex.image.desc.w == t.w && tex.image.desc.h == t.h) {
+                        None => counts.absent += 1,
+                        Some(tex) if tex.painted == 0 && self.pass_targets.contains(&(s.id, id)) => counts.unpainted += 1,
+                        _ => {}
+                    }
+                }
+                if before != (counts.absent, counts.unpainted) {
+                    s.stats.skipped_draws += 1;
+                    continue;
+                }
+            }
+            let stale_before = s.stats.stale_ids;
+            match self.prepare(s, pass, d, view.arena, pick, &render_pass, &attachments, uniforms, batch, now, deps) {
                 Ok(Some(p)) => prepared.push((d, p)),
-                Ok(None) => s.stats.skipped_draws += 1,
+                Ok(None) => {
+                    s.stats.skipped_draws += 1;
+                    // A live draw is held back here only while its pipeline is unavailable.
+                    if let Some(counts) = pick_draws.as_deref_mut() {
+                        if s.stats.stale_ids == stale_before { counts.pipelines += 1; }
+                    }
+                }
                 Err(e) => {
-                    if !(super::pipeline::out_of_memory(&e) && self.dev.out_of_files("draw")) { eprintln!("[hal-vulkan] draw: {e}"); }
+                    if !(super::pipeline::out_of_memory(&e) && self.dev.out_of_files("draw")) && !pick { eprintln!("[hal-vulkan] draw: {e}"); }
                     s.bad(); s.stats.skipped_draws += 1;
                 }
             }
@@ -978,7 +1097,11 @@ impl Vulkan {
             None => None,
         };
         let viewport = vk::Viewport { x: v[0] - offset[0] as f32, y: v[1] + v[3] - offset[1] as f32, width: v[2], height: -v[3], min_depth: 0.0, max_depth: 1.0 };
-        let run_shader = |me: &Self, s: &Session, d: &Draw| me.pipe.get(&(s.id, d.pipeline.index)).map_or_else(|| "?".to_string(), |p| gpu_prof::shader_name(s, &p.desc));
+        let pipe_map = self.pipe.session(s.id);
+        let buf_map = self.buf.session(s.id);
+        let run_shader = |s: &Session, d: &Draw| {
+            pipe_map.and_then(|m| m.get(d.pipeline.index)).map_or_else(|| "?".to_string(), |p| gpu_prof::shader_name(s, &p.desc))
+        };
         let mut split_runs = SplitRuns::<u32>::default();
         let mut records: Vec<gpu_prof::DrawRecord> = Vec::new();
         unsafe {
@@ -991,7 +1114,7 @@ impl Vulkan {
                 split_runs.baseline = Some(q);
             }
             if let (Some(q), Some((d, _))) = (split_q, prepared.first()) {
-                split_runs.run(run_shader(self, s, *d), q + 2, 0);
+                split_runs.run(run_shader(s, *d), q + 2, 0);
                 batch.stamp(q + 2);
             }
             if let Some(q) = whole_q { batch.stamp(q); }
@@ -1018,7 +1141,7 @@ impl Vulkan {
                     self.dev.raw.cmd_end_render_pass(batch.cb);
                     let q = q + 2 + 2 * g as u32;
                     batch.stamp(q - 1);
-                    split_runs.run(run_shader(self, s, d), q, records.len() as u32);
+                    split_runs.run(run_shader(s, d), q, records.len() as u32);
                     batch.stamp(q);
                     self.dev.raw.cmd_begin_render_pass(batch.cb, &vk::RenderPassBeginInfo::default().render_pass(lp.raw).framebuffer(framebuffer)
                         .render_area(area), vk::SubpassContents::INLINE);
@@ -1073,17 +1196,20 @@ impl Vulkan {
                 }
                 if bound.pipeline != p.pipeline.raw {
                     self.dev.raw.cmd_bind_pipeline(batch.cb, vk::PipelineBindPoint::GRAPHICS, p.pipeline.raw);
+                    s.stats.binds += 1;
                     bound.pipeline = p.pipeline.raw;
                     batch.pipelines.push(p.pipeline.clone());
                 }
                 if bound.vertex != p.vertex.buffer {
                     self.dev.raw.cmd_bind_vertex_buffers(batch.cb, 0, &[p.vertex.buffer], &[0]);
+                    s.stats.binds += 1;
                     bound.vertex = p.vertex.buffer;
                     batch.buffers.push(p.vertex.clone());
                 }
                 let index_type = if d.flags & Draw::INDEX_U32 != 0 { vk::IndexType::UINT32 } else { vk::IndexType::UINT16 };
                 if bound.index != (p.index.buffer, index_type) {
                     self.dev.raw.cmd_bind_index_buffer(batch.cb, p.index.buffer, 0, index_type);
+                    s.stats.binds += 1;
                     bound.index = (p.index.buffer, index_type);
                     batch.buffers.push(p.index.clone());
                 }
@@ -1091,22 +1217,28 @@ impl Vulkan {
                 // (a view of the pass binds the set with its own pass block, below)
                 if !viewed || p.pass_offset.is_none() {
                     self.dev.raw.cmd_bind_descriptor_sets(batch.cb, vk::PipelineBindPoint::GRAPHICS, p.pipeline.program.layout, 0, &[p.descriptors], &p.offsets[..dynamic]);
+                    s.stats.binds += 1;
                 }
                 let storage = &p.pipeline.program.storage;
-                if d.storage_buffers.len as usize != storage.len() { s.bad(); continue; }
+                if d.storage_buffers.len as usize != storage.len() { s.bad(); s.stats.skipped_draws += 1; continue; }
                 let mut push = vec![0u8; p.pipeline.program.desc.storage_push_size as usize];
                 let mut valid = true;
                 for (i, binding) in storage.iter().enumerate() {
                     let id = id_at(view.arena, d.storage_buffers, i);
-                    let Some(buffer) = self.buf.get(&(s.id, id.index)).filter(|b| b.gen == id.gen).map(|b| b.buffer.clone()) else { valid = false; break; };
+                    let Some(buffer) = buf_map.and_then(|m| m.get(id.index)).filter(|b| b.gen == id.gen).map(|b| b.buffer.clone()) else { valid = false; break; };
                     let address = self.dev.raw.get_buffer_device_address(&vk::BufferDeviceAddressInfo::default().buffer(buffer.buffer));
                     push[binding.offset as usize..binding.offset as usize + 8].copy_from_slice(&address.to_le_bytes());
                     batch.buffers.push(buffer);
                     s.ledger.touch(Kind::Buffer, id.index, id.gen, s.frame, now);
                 }
-                if !valid { s.bad(); continue; }
-                if !push.is_empty() { self.dev.raw.cmd_push_constants(batch.cb, p.pipeline.program.layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, &push); }
-                if d.inst_ranges.len != 0 && read_pairs(view.arena, d.inst_ranges).count() != d.inst_ranges.len as usize { s.bad(); continue; }
+                if !valid { s.bad(); s.stats.skipped_draws += 1; continue; }
+                if !push.is_empty() {
+                    self.dev.raw.cmd_push_constants(batch.cb, p.pipeline.program.layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, &push);
+                    s.stats.binds += 1;
+                }
+                if d.inst_ranges.len != 0 && read_pairs(view.arena, d.inst_ranges).count() != d.inst_ranges.len as usize { s.bad(); s.stats.skipped_draws += 1; continue; }
+                let bad_before = s.stats.bad_args;
+                let mut drew = false;
                 for (vi, scissor) in &scissors {
                     if viewed {
                         // the view's rect is its viewport, its block of the pass uniforms is bound
@@ -1120,6 +1252,7 @@ impl Vulkan {
                             let mut offsets = p.offsets;
                             offsets[at] = view_at[*vi];
                             self.dev.raw.cmd_bind_descriptor_sets(batch.cb, vk::PipelineBindPoint::GRAPHICS, p.pipeline.program.layout, 0, &[p.descriptors], &offsets[..dynamic]);
+                            s.stats.binds += 1;
                         }
                     }
                     let rect = (scissor.offset.x, scissor.offset.y, scissor.extent.width, scissor.extent.height);
@@ -1132,7 +1265,13 @@ impl Vulkan {
                         if start.checked_add(count).is_none_or(|end| end > d.inst.count) { s.bad(); continue; }
                         let Some(first) = p.first_instance.checked_add(start) else { s.bad(); continue; };
                         self.dev.raw.cmd_draw_indexed(batch.cb, d.index[1], count, d.index[0], 0, first);
+                        drew |= count != 0;
                     }
+                }
+                if s.stats.bad_args != bad_before {
+                    s.stats.skipped_draws += 1;
+                } else if drew {
+                    if let Some(counts) = pick_draws.as_deref_mut() { counts.issued += 1; }
                 }
             }
             self.dev.raw.cmd_end_render_pass(batch.cb);
@@ -1144,10 +1283,8 @@ impl Vulkan {
             let formats: Vec<(usize, u32)> = colors.iter().map(|(i, c)| (*i, c.desc.format)).collect();
             let (attach, bytes) = prof::describe_attachments(pass, &formats, depth.as_ref().map(|d| d.desc.format), v[2] as u64 * v[3] as u64);
             let timed = split_q.is_some() || whole_q.is_some();
-            let (pipes, session): (_, &Session) = (&self.pipe, s);
-            let sid = session.id;
-            let pi = gpu_prof::record_pass(key, session, sid, pass.name, pick, v[2] as u32, v[3] as u32, &attach, bytes, &records, timed, |pipeline| {
-                pipes.get(&(sid, pipeline.index)).map(|p| ShaderFacts { name: gpu_prof::shader_name(session, &p.desc), stats: None, source: None })
+            let pi = gpu_prof::record_pass(key, s, s.id, pass.name, pick, v[2] as u32, v[3] as u32, &attach, bytes, &records, timed, |pipeline| {
+                pipe_map.and_then(|m| m.get(pipeline.index)).map(|p| ShaderFacts { name: gpu_prof::shader_name(s, &p.desc), stats: None, source: None })
             });
             if let (Some(pi), Some(p)) = (pi.filter(|_| timed), batch.prof.as_mut()) {
                 p.passes.push(ProfPass { pass: pi, query: whole_q, split: split_q.map(|_| split_runs) });
@@ -1169,11 +1306,11 @@ impl Vulkan {
         if let Some(depth) = depth { depth.transition(batch.cb, depth.sampled_layout()); }
         if partial && damage_check() {
             if let Some(image) = window.clone() {
-                self.check_partial_repaint(s, target, pass, frame_size, draws, view, batch, now, deps, &image, damage_mask.unwrap_or(0));
+                self.check_partial_repaint(s, target, pass, frame_size, draws, view, uniforms, batch, now, deps, &image, damage_mask.unwrap_or(0));
             }
         }
         if hosted {
-            self.win.insert((s.id, target.index), Texture { gen: target.gen, image: window.as_ref().unwrap().clone() });
+            self.win.insert(s.id, target.index, Texture { gen: target.gen, image: window.as_ref().unwrap().clone(), painted: 0 });
             self.hosted_sizes.insert((s.id, target.index), size);
         }
         #[cfg(target_os = "linux")]
@@ -1184,7 +1321,7 @@ impl Vulkan {
     /// The damage check: the pass we just repainted partially into `image` is rendered whole into an image
     /// of its own too, and the two pictures are compared once the GPU is done with them.
     #[allow(clippy::too_many_arguments)]
-    fn check_partial_repaint(&mut self, s: &mut Session, target: Id, pass: &Pass, frame_size: [u32; 2], draws: &[Draw], view: &CmdView,
+    fn check_partial_repaint(&mut self, s: &mut Session, target: Id, pass: &Pass, frame_size: [u32; 2], draws: &[Draw], view: &CmdView, uniforms: PacketUniforms<'_>,
         batch: &mut Batch, now: u64, deps: &mut Vec<LentRef>, image: &Arc<Image>, damage_mask: u32) {
         let (w, h, fmt) = (image.desc.w, image.desc.h, image.desc.format);
         let len = w as u64 * h as u64 * format::texel_bytes(fmt);
@@ -1208,7 +1345,7 @@ impl Vulkan {
             }
         };
         let full = Pass { damage: Range::default(), damage_since: 0, ..*pass };
-        if let Err(e) = self.encode_pass(s, target, true, false, &full, frame_size, draws, view, batch, now, deps, Some((&whole, [0, 0]))) {
+        if let Err(e) = self.encode_pass(s, target, true, None, &full, frame_size, draws, view, uniforms, batch, now, deps, Some((&whole, [0, 0]))) {
             eprintln!("[hal-damage-check] whole repaint: {e}");
             return;
         }
@@ -1229,7 +1366,7 @@ impl Vulkan {
         let (frame, damage) = (s.frame, read_rects(view.arena, pass.damage).collect::<Vec<_>>());
         // the draws the partial repaint left out, so a difference can name the ones over it
         let left_out: Vec<(String, u32, u32, [f32; 4])> = draws.iter().filter(|d| d.index[1] != 0 && d.inst.count != 0 && d.damage & damage_mask == 0)
-            .map(|d| (self.pipe.get(&(s.id, d.pipeline.index)).map_or_else(|| "?".into(), |p| gpu_prof::shader_name(s, &p.desc)), d.list, d.item, d.bounds))
+            .map(|d| (self.pipe.get(s.id, d.pipeline.index).map_or_else(|| "?".into(), |p| gpu_prof::shader_name(s, &p.desc)), d.list, d.item, d.bounds))
             .collect();
         let texel = format::texel_bytes(fmt) as usize;
         batch.tickets.push(Ticket::FrameCap { staging, len: len as usize * 2, done: Box::new(move |bytes| {
@@ -1265,17 +1402,17 @@ impl Vulkan {
 
     #[allow(clippy::too_many_arguments)]
     fn prepare(&mut self, s: &mut Session, pass: &Pass, d: &Draw, arena: &[u8], pick: bool, render_pass: &RenderPass, attachments: &[Arc<Image>],
-        pass_block: (Placed, usize), batch: &mut Batch, now: u64, deps: &mut Vec<LentRef>) -> Result<Option<Prepared>, String> {
+        uniforms: PacketUniforms<'_>, batch: &mut Batch, now: u64, deps: &mut Vec<LentRef>) -> Result<Option<Prepared>, String> {
         let (mut bins, mut images) = (std::mem::take(&mut self.draw_bins), std::mem::take(&mut self.draw_images));
         bins.clear(); images.clear();
-        let prepared = self.prepare_with(s, pass, d, arena, pick, render_pass, attachments, pass_block, batch, now, deps, &mut bins, &mut images);
+        let prepared = self.prepare_with(s, pass, d, arena, pick, render_pass, attachments, uniforms, batch, now, deps, &mut bins, &mut images);
         (self.draw_bins, self.draw_images) = (bins, images);
         prepared
     }
 
     #[allow(clippy::too_many_arguments)]
     fn prepare_with(&mut self, s: &mut Session, pass: &Pass, d: &Draw, arena: &[u8], pick: bool, render_pass: &RenderPass, attachments: &[Arc<Image>],
-        pass_block: (Placed, usize), batch: &mut Batch, now: u64, deps: &mut Vec<LentRef>, bins: &mut Vec<BufferBinding>,
+        uniforms: PacketUniforms<'_>, batch: &mut Batch, now: u64, deps: &mut Vec<LentRef>, bins: &mut Vec<BufferBinding>,
         images: &mut Vec<ImageBinding>) -> Result<Option<Prepared>, String> {
         let (tex_ids, pick_ids) = (id_bytes(arena, d.tex), id_bytes(arena, d.pick_tex));
         // an earlier draw of the pass named the same textures: their lent state is known and
@@ -1295,7 +1432,7 @@ impl Vulkan {
         let pipeline = match held {
             Some(held) => held,
             None => {
-                let Some(state) = self.pipe.get(&(s.id, d.pipeline.index)).filter(|p| p.gen == d.pipeline.gen).map(|p| p.state.clone()) else { s.stale(); return Ok(None) };
+                let Some(state) = self.pipe.get(s.id, d.pipeline.index).filter(|p| p.gen == d.pipeline.gen).map(|p| p.state.clone()) else { s.stale(); return Ok(None) };
                 // video slots: the samplers their bound images need (a decoder's external-format
                 // picture its conversion's) pick the program
                 let mut video: Vec<super::device::VideoSampler> = Vec::new();
@@ -1317,70 +1454,72 @@ impl Vulkan {
         let p = &pipeline.program;
         // (a program with video slots picks its pipeline by the pictures bound: never kept)
         let keep = p.video.is_empty();
-        let buffer = |id: Id| self.buf.get(&(s.id, id.index)).filter(|b| b.gen == id.gen).map(|b| b.buffer.clone());
+        let buf_map = self.buf.session(s.id);
+        let buffer = |id: Id| buf_map.and_then(|m| m.get(id.index)).filter(|b| b.gen == id.gen).map(|b| b.buffer.clone());
         let same = |held: &Option<(Id, Arc<Buffer>)>, id: Id| held.as_ref().filter(|(at, _)| *at == id).map(|(_, b)| b.clone());
         let (held_vertex, held_index) = (same(&self.draw_memo.vb, d.vb), same(&self.draw_memo.ib, d.ib));
         let (same_vertex, same_index) = (held_vertex.is_some(), held_index.is_some());
+        let held_inst = same(&self.draw_memo.inst, d.inst.id);
+        let same_inst = held_inst.is_some();
+        let mut new_inst = None;
         let vertex = match held_vertex { Some(b) => b, None => buffer(d.vb).ok_or("missing vertex buffer")? };
         let index = match held_index { Some(b) => b, None => buffer(d.ib).ok_or("missing index buffer")? };
         let width = if d.flags & Draw::INDEX_U32 != 0 { 4 } else { 2 };
         if (d.index[0] as u64 + d.index[1] as u64) * width > index.size { return Err("index range exceeds buffer".into()); }
         let mut first_instance = 0;
         let mut offsets = [0u32; MAX_DYNAMIC];
-        if p.code.instance_binding != ABSENT {
+        if d.inst.id.is_none() && p.code.instance_binding != ABSENT { return Err("a draw without instance data for a pipeline that reads instances".into()); }
+        if !d.inst.id.is_none() && p.code.instance_binding != ABSENT {
             let stride = p.desc.instance_stride as u64 * 4;
             let max_range = self.dev.properties.limits.max_storage_buffer_range as u64;
-            let (instance, serial, offset, range) = if d.inst.kind == Inst::BUFFER {
-                let buffer = buffer(d.inst.id).ok_or_else(|| {
-                    let held = self.buf.get(&(s.id, d.inst.id.index)).map_or("nothing".to_string(), |b| format!("generation {}", b.gen));
+            let buffer = match held_inst {
+                Some(b) => b,
+                None => buffer(d.inst.id).ok_or_else(|| {
+                    let held = buf_map.and_then(|m| m.get(d.inst.id.index)).map_or("nothing".to_string(), |b| format!("generation {}", b.gen));
                     format!("missing instance buffer {}.{} of session {}: the backend holds {held} at that index", d.inst.id.index, d.inst.id.gen, s.id)
-                })?;
-                let end = (d.inst.off as u64 + d.inst.count as u64).checked_mul(stride).ok_or("instance range overflow")?;
-                if stride == 0 || end > buffer.size { return Err("instance range exceeds storage".into()); }
-                if buffer.size > max_range { return Err("instance storage exceeds device range".into()); }
-                first_instance = d.inst.off;
-                let (raw, length, serial) = (buffer.buffer, buffer.size, buffer.serial);
-                batch.buffers.push(buffer);
-                (raw, serial, 0, length)
-            } else if d.inst.kind == Inst::INLINE {
-                let data = unsafe { d.inst.data.as_bytes() };
-                if stride == 0 || d.inst.count as u64 * stride > data.len() as u64 { return Err("inline instance range exceeds data".into()); }
-                if data.len() as u64 > max_range { return Err("instance storage exceeds device range".into()); }
-                // (the batch holds the arena)
-                let placed = batch.put(data)?;
-                // the rest of the arena from the draw's offset: one set serves every inline draw
-                // of the arena, whatever its instance count
-                let range = if placed.size <= max_range { vk::WHOLE_SIZE } else { data.len() as u64 };
-                (placed.buffer, placed.serial, placed.at, range)
-            } else { return Err("unknown instance source".into()); };
-            dynamic_offset(p, &mut offsets, p.code.instance_binding, offset)?;
-            bins.push((p.code.instance_binding, vk::DescriptorType::STORAGE_BUFFER_DYNAMIC, vk::DescriptorBufferInfo::default().buffer(instance).range(range), serial));
+                })?,
+            };
+            let end = (d.inst.off as u64 + d.inst.count as u64).checked_mul(stride).ok_or("instance range overflow")?;
+            if stride == 0 || end > buffer.size { return Err("instance range exceeds storage".into()); }
+            if buffer.size > max_range { return Err("instance storage exceeds device range".into()); }
+            first_instance = d.inst.off;
+            bins.push((p.code.instance_binding, vk::DescriptorType::STORAGE_BUFFER_DYNAMIC, vk::DescriptorBufferInfo::default().buffer(buffer.buffer).range(buffer.size), buffer.serial));
+            // (the pass's first draw from this buffer put it in the batch)
+            if !same_inst {
+                batch.buffers.push(buffer.clone());
+                new_inst = Some(buffer);
+            }
         }
-        // the pass's block, placed once for the pass (view 0's: a view binds its own at draw time)
+        let max_range = self.dev.properties.limits.max_uniform_buffer_range;
+        let bind_range = |len: u32| -> Result<u64, String> {
+            if len > max_range { return Err("invalid uniform block size".into()); }
+            let stride = len.max(16).checked_next_multiple_of(uniforms.align).ok_or("uniform block size overflow")?;
+            Ok(u64::from(stride.min(max_range)))
+        };
         let mut pass_offset = None;
-        if p.bindings[pipeline_binding::PASS] != ABSENT {
-            let (placed, len) = pass_block;
-            let slot = p.bindings[pipeline_binding::PASS];
-            if len == 0 || len as u64 > self.dev.properties.limits.max_uniform_buffer_range as u64 { return Err("invalid uniform block size".into()); }
-            dynamic_offset(p, &mut offsets, slot, placed.at)?;
-            pass_offset = p.dynamic.iter().position(|b| *b == slot);
-            bins.push((slot, vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC, vk::DescriptorBufferInfo::default().buffer(placed.buffer).range(len as u64), placed.serial));
+        if d.uniforms.iter().any(|&r| exec::uniform_slice(uniforms.stream, r, uniforms.align).is_none()) {
+            return Err("invalid uniform range".into());
         }
-        for (which, source) in [(pipeline_binding::DRAW_CALL, d.uniforms[0]),
+        for (which, source) in [(pipeline_binding::PASS, pass.uniforms), (pipeline_binding::DRAW_CALL, d.uniforms[0]),
             (pipeline_binding::DRAW_LIST, d.uniforms[1]), (pipeline_binding::DYN, d.uniforms[2]), (pipeline_binding::SCOPE, d.uniforms[3])] {
             let slot = p.bindings[which]; if slot == ABSENT { continue; }
-            let bytes = unsafe { source.as_bytes() };
-            if bytes.is_empty() || bytes.len() as u64 > self.dev.properties.limits.max_uniform_buffer_range as u64 { return Err("invalid uniform block size".into()); }
-            // a block the previous draws already uploaded (the pass's, a draw list's) is not
-            // copied again
-            let placed = batch.put_block(which, bytes)?;
-            dynamic_offset(p, &mut offsets, slot, placed.at)?;
-            bins.push((slot, vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC, vk::DescriptorBufferInfo::default().buffer(placed.buffer).range(bytes.len() as u64), placed.serial));
+            let (buffer, serial, at, range) = if source.is_empty() {
+                let zero = self.zero_uniform_buffer()?;
+                let binding = (zero.buffer, zero.serial, 0, zero.size);
+                batch.buffers.push(zero);
+                binding
+            } else {
+                let placed = uniforms.placed;
+                (placed.buffer, placed.serial, placed.at + u64::from(source.off), bind_range(source.len)?)
+            };
+            dynamic_offset(p, &mut offsets, slot, at)?;
+            if which == pipeline_binding::PASS { pass_offset = p.dynamic.iter().position(|b| *b == slot); }
+            bins.push((slot, vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC, vk::DescriptorBufferInfo::default().buffer(buffer).range(range), serial));
         }
         for (i, slot) in p.bindings[pipeline_binding::BUFFERS..].iter().enumerate() {
             if *slot == ABSENT { continue; }
             let id = d.ubufs[i];
-            let b = self.buf.get(&(s.id, id.index)).filter(|b| b.gen == id.gen).ok_or("missing custom uniform buffer")?;
+            let b = self.buf.get(s.id, id.index).filter(|b| b.gen == id.gen).ok_or("missing custom uniform buffer")?;
             if b.buffer.size > self.dev.properties.limits.max_uniform_buffer_range as u64 { return Err("uniform buffer exceeds device range".into()); }
             bins.push((*slot, vk::DescriptorType::UNIFORM_BUFFER, vk::DescriptorBufferInfo::default().buffer(b.buffer.buffer).range(b.buffer.size), b.buffer.serial));
             batch.buffers.push(b.buffer.clone());
@@ -1461,10 +1600,10 @@ impl Vulkan {
         // buffers, images and samplers serves this draw too: the arena bindings differ only in
         // their dynamic offsets.
         let (set, fresh) = self.kept.set(&self.dev, &mut batch.generations, p, bins, images)?;
-        if fresh { self.write_set(set, bins, images); }
+        if fresh { self.write_set(s, set, bins, images); }
         // (what an earlier draw of the pass named is touched this frame already)
         if !same_pipeline { s.ledger.touch(Kind::Pipeline, d.pipeline.index, d.pipeline.gen, s.frame, now); }
-        let named = [(d.vb, same_vertex), (d.ib, same_index), (d.inst.id, false)].into_iter().chain(d.ubufs.map(|id| (id, false)));
+        let named = [(d.vb, same_vertex), (d.ib, same_index), (d.inst.id, same_inst)].into_iter().chain(d.ubufs.map(|id| (id, false)));
         for (id, _) in named.filter(|(id, same)| !*same && !id.is_none()) { s.ledger.touch(Kind::Buffer, id.index, id.gen, s.frame, now); }
         #[cfg(target_os = "linux")]
         if !same_images { for i in 0..p.code.textures.len() { self.native_apps.sample(s.id, id_at(arena, d.tex, i)); } }
@@ -1481,10 +1620,11 @@ impl Vulkan {
         }
         if !same_vertex { memo.vb = Some((d.vb, vertex.clone())); }
         if !same_index { memo.ib = Some((d.ib, index.clone())); }
+        if let Some(b) = new_inst { memo.inst = Some((d.inst.id, b)); }
         Ok(Some(Prepared { pipeline, vertex, index, descriptors: set, offsets, pass_offset, first_instance }))
     }
 
-    fn write_set(&self, set: vk::DescriptorSet, bins: &[BufferBinding], images: &[ImageBinding]) {
+    fn write_set(&self, s: &mut Session, set: vk::DescriptorSet, bins: &[BufferBinding], images: &[ImageBinding]) {
         // written from a stack chunk: one call for a usual draw, no allocation
         let writes = bins.iter().map(|(slot, ty, info, _)| vk::WriteDescriptorSet::default().dst_set(set).dst_binding(*slot)
             .descriptor_type(*ty).buffer_info(std::slice::from_ref(info)))
@@ -1494,9 +1634,16 @@ impl Vulkan {
         let mut n = 0;
         for w in writes {
             chunk[n] = w; n += 1;
-            if n == chunk.len() { unsafe { self.dev.raw.update_descriptor_sets(&chunk, &[]); } n = 0; }
+            if n == chunk.len() {
+                unsafe { self.dev.raw.update_descriptor_sets(&chunk, &[]); }
+                s.stats.set_writes += n as u64;
+                n = 0;
+            }
         }
-        if n > 0 { unsafe { self.dev.raw.update_descriptor_sets(&chunk[..n], &[]); } }
+        if n > 0 {
+            unsafe { self.dev.raw.update_descriptor_sets(&chunk[..n], &[]); }
+            s.stats.set_writes += n as u64;
+        }
     }
 
     /// `sampler`: a video slot's (a combined image sampler), else a plain sampled image.

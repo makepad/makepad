@@ -58,7 +58,7 @@ fn os_selfcheck() -> &'static OnceLock<OsSelfCheck> {
     &CHECK
 }
 
-pub fn set_os_selfcheck(f: OsSelfCheck) {
+pub(crate) fn set_os_selfcheck(f: OsSelfCheck) {
     let _ = os_selfcheck().set(f);
 }
 
@@ -72,6 +72,7 @@ fn consumer_bits() -> &'static AtomicU32 {
         })
     })
 }
+#[relax_api::relax_api]
 pub fn consumers() -> u32 {
     consumer_bits().load(Ordering::Acquire)
 }
@@ -108,12 +109,14 @@ pub fn window_key(session: u32, window: u32) -> u64 {
 }
 
 /// Hosted shells supply desktop placement separately from their input coordinates.
+#[relax_api::relax_api(loader = "the HAL's hosted shells place a window's accessibility tree on the desktop: JIT code has no use for it")]
 pub fn set_screen_origin(key: u64, origin: Option<(f32, f32)>) {
     #[cfg(target_os = "linux")]
     crate::backend::linux::atspi::geometry(key, origin.filter(|(x,y)| x.is_finite() && y.is_finite()));
     #[cfg(not(target_os = "linux"))]
     let _ = (key, origin);
 }
+#[relax_api::relax_api(loader = "the HAL's shells tell the accessibility backend which window is active: JIT code has no use for it")]
 pub fn set_window_active(key: u64, active: bool) {
     #[cfg(target_os = "linux")]
     crate::backend::linux::atspi::focus(key, active);
@@ -165,16 +168,16 @@ fn drop_session(session: u32) {
 }
 
 /// Reads one window's tree (`window_key(session, window)`). Keep `f` short.
-pub fn with_tree<R>(key: u64, f: impl FnOnce(&Tree) -> R) -> Option<R> {
+pub(crate) fn with_tree<R>(key: u64, f: impl FnOnce(&Tree) -> R) -> Option<R> {
     lock(mirrors()).tree(key).map(f)
 }
 
 /// Reads every tree. Keep `f` short.
-pub fn with_mirror<R>(f: impl FnOnce(&Mirror) -> R) -> R {
+pub(crate) fn with_mirror<R>(f: impl FnOnce(&Mirror) -> R) -> R {
     f(&lock(mirrors()))
 }
 
-pub fn request_consumer(bit: u32, on: bool) {
+pub(crate) fn request_consumer(bit: u32, on: bool) {
     request_consumer_in(Hal::global(), bit, on);
 }
 
@@ -316,6 +319,7 @@ impl Drop for SnapshotHold<'_> {
 
 /// A process-wide lookup sequence for the HAL remote. Zero is reserved for no lookup.
 fn next_lookup_seq() -> u32 {
+    #[relax_api::relax_api]
     static NEXT: AtomicU32 = AtomicU32::new(1);
     loop {
         let seq = NEXT.fetch_add(1, Ordering::Relaxed);
@@ -356,11 +360,12 @@ fn completions() -> &'static (Mutex<Completions>, Condvar) {
 }
 
 /// Enqueue for the owning session. A zero request id is replaced with a process-unique id.
-pub fn inject_action(window: u64, action: ActionRequest) -> u64 {
+pub(crate) fn inject_action(window: u64, action: ActionRequest) -> u64 {
     inject_action_in(Hal::global(), window, action)
 }
 
 pub(crate) fn inject_action_in(hal: &Hal, window: u64, mut action: ActionRequest) -> u64 {
+    #[relax_api::relax_api]
     static NEXT: AtomicU64 = AtomicU64::new(1);
     let sid = (window >> 32) as u32;
     let (done, _) = completions();
@@ -396,6 +401,7 @@ pub(crate) fn inject_action_in(hal: &Hal, window: u64, mut action: ActionRequest
 }
 
 /// Release a fire-and-forget caller's completion slot. The queued action still runs.
+#[relax_api::relax_api(loader = "the HAL's accessibility backends release an action they answered: JIT code has no use for it")]
 pub fn forget_action(req: u64) {
     lock(&completions().0).requests.remove(&req);
 }
@@ -420,6 +426,7 @@ pub(crate) fn close_session(session: u32) {
 }
 
 /// Remote/automation threads only. Timeout leaves the result available for a later wait.
+#[relax_api::relax_api(loader = "the HAL's accessibility backends wait for an action's answer: JIT code has no use for it")]
 pub fn wait_done(req: u64, timeout: Duration) -> Option<u8> {
     let (done, cv) = completions();
     let deadline = Instant::now() + timeout;

@@ -7,13 +7,13 @@
 //! come out with a later push: `push_packet` returns what is ready by then
 //! (a decoder with frame threads holds a few frames: tens of milliseconds of
 //! latency, fine for a camera view; not for a sub-frame realtime stream).
-//! The low-latency decoder waits in each push for that push's picture.
+//! The low-latency decoder waits briefly in each push. Later pictures can be polled.
 //! Planes are read where the buffer's layout puts them and repacked tight.
 
-use crate::linux_decoder::{caps_field, colorimetry_to_color, sample_nv12, BUS_LOOK_NS};
+use crate::linux_decoder::{caps_field, colorimetry_to_color, sample_nv12_into, BUS_LOOK_NS};
 use crate::linux_gst_sys::*;
 use crate::mp4_first_frame::FirstAccessUnit;
-use crate::stream_decoder::{DecodedFrame, StreamVideoCodec};
+use crate::stream_decoder::{DecodedFrame, PictureBuffers, StreamVideoCodec};
 use crate::{VideoColor, VideoFileError};
 use std::ffi::{c_void, CString};
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -27,38 +27,46 @@ pub(crate) struct LinuxStreamDecoder {
     bus: *mut GstBus,
     /// How long a push waits for a picture when none is out yet (0: it doesn't).
     wait_ns: u64,
+    buffers: PictureBuffers,
 }
 
 unsafe impl Send for LinuxStreamDecoder {}
 
 /// How long a low-latency decoder's push waits for its picture: decoding takes about a
-/// millisecond; this is room for a busy machine, and the picture comes with a later push if
-/// it misses.
+/// millisecond. A busy decoder can deliver the picture later through `ready_into`.
 const PICTURE_WAIT_NS: u64 = 20_000_000;
+
+const GST_RUNTIME_MISSING: &str =
+    "GStreamer runtime not found (install gstreamer1.0-plugins-base, -plugins-good, -plugins-bad and -libav)";
 
 impl LinuxStreamDecoder {
     pub fn new(codec: StreamVideoCodec) -> Result<Self, VideoFileError> {
         Self::with_decoder(codec, "decodebin")
     }
 
-    /// A stream decoder that hands each picture out from the push that brought it. GStreamer's
-    /// hardware H.264 and HEVC decoders (NVDEC, VA: the codec base classes, 1.28) release a
-    /// picture of a stream without reordering only when the next one arrives (their output
-    /// check runs before a decoded picture enters the DPB): a picture late, 33 ms at 30 fps.
-    /// libav hands it out once decoded (about 1 ms for a 720p picture on a desktop CPU), so
-    /// it decodes here where installed; else the decoder `decodebin` plugs.
+    /// Decodes each picture as soon as its unit arrives. Requires GStreamer's
+    /// `avdec_h264` or `avdec_h265` (gstreamer1.0-libav) and returns an error if absent.
     pub fn new_low_latency(codec: StreamVideoCodec) -> Result<Self, VideoFileError> {
         let software = match codec { StreamVideoCodec::H264 => "avdec_h264", StreamVideoCodec::Hevc => "avdec_h265" };
-        let mut this = Self::with_decoder(codec, software).or_else(|_| Self::with_decoder(codec, "decodebin"))?;
+        Self::new_low_latency_with(codec, software)
+    }
+
+    fn new_low_latency_with(codec: StreamVideoCodec, decoder: &str) -> Result<Self, VideoFileError> {
+        let gst = LibGst::get().ok_or_else(|| VideoFileError::new(GST_RUNTIME_MISSING))?;
+        if !gst.has_element(decoder) {
+            let codec_name = match codec { StreamVideoCodec::H264 => "H.264", StreamVideoCodec::Hevc => "HEVC" };
+            return Err(VideoFileError::new(format!(
+                "low-latency {codec_name} decode requires GStreamer's {decoder} element (install gstreamer1.0-libav)"
+            )));
+        }
+        let mut this = Self::with_decoder(codec, decoder)?;
         this.wait_ns = PICTURE_WAIT_NS;
         Ok(this)
     }
 
     /// A stream decoder through the `decoder` element (`decodebin`: the one it plugs).
     fn with_decoder(codec: StreamVideoCodec, decoder: &str) -> Result<Self, VideoFileError> {
-        let gst = LibGst::get().ok_or_else(|| VideoFileError::new(
-            "GStreamer runtime not found (install gstreamer1.0-plugins-base, -plugins-good and -libav)",
-        ))?;
+        let gst = LibGst::get().ok_or_else(|| VideoFileError::new(GST_RUNTIME_MISSING))?;
         let caps = match codec {
             StreamVideoCodec::H264 => "video/x-h264,stream-format=byte-stream,alignment=au",
             StreamVideoCodec::Hevc => "video/x-h265,stream-format=byte-stream,alignment=au",
@@ -86,7 +94,7 @@ impl LinuxStreamDecoder {
             let appsink = (gst.gst_bin_get_by_name)(pipeline, sink_name.as_ptr());
             let bus = (gst.gst_element_get_bus)(pipeline);
             gst.give_shared_contexts(pipeline);
-            let this = Self { gst, pipeline, appsrc, appsink, bus, wait_ns: 0 };
+            let this = Self { gst, pipeline, appsrc, appsink, bus, wait_ns: 0, buffers: PictureBuffers::default() };
             if appsrc.is_null() || appsink.is_null() { return Err(VideoFileError::new("stream decoder pipeline lacks its ends")); }
             if (gst.gst_element_set_state)(pipeline, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE {
                 let text = gst.bus_error(bus).unwrap_or_else(|| "pipeline refused PLAYING".into());
@@ -96,7 +104,7 @@ impl LinuxStreamDecoder {
         }
     }
 
-    pub fn push_packet(&mut self, annex_b: &[u8], pts_100ns: i64) -> Result<Vec<DecodedFrame>, VideoFileError> {
+    pub fn push_packet_into(&mut self, annex_b: &[u8], pts_100ns: i64, out: &mut Vec<DecodedFrame>) -> Result<(), VideoFileError> {
         unsafe {
             if let Some(text) = self.gst.bus_drain(self.bus, false) {
                 return Err(VideoFileError::new(format!("stream decoder: {text}")));
@@ -113,31 +121,38 @@ impl LinuxStreamDecoder {
                 return Err(VideoFileError::new("stream decoder refused the packet"));
             }
         }
-        let mut frames = self.drain(0)?;
+        let start = out.len();
+        self.drain_into(0, out)?;
         if self.wait_ns > 0 {
             // Wait for this push's own picture, not just any: one that missed an earlier push's
             // wait (a slow first picture after a rebuild) is ready now, and returning with only
             // it would leave every later picture one push late.
             let own = |frames: &[DecodedFrame]| frames.iter().any(|f| f.pts_100ns == pts_100ns.max(0));
             let deadline = std::time::Instant::now() + std::time::Duration::from_nanos(self.wait_ns);
-            while !own(&frames) {
+            while !own(&out[start..]) {
                 let left = deadline.saturating_duration_since(std::time::Instant::now()).as_nanos() as u64;
                 if left == 0 {
                     break;
                 }
-                let more = self.drain(left)?;
-                if more.is_empty() {
+                let before = out.len();
+                self.drain_into(left, out)?;
+                if out.len() == before {
                     break;
                 }
-                frames.extend(more);
             }
         }
-        Ok(frames)
+        Ok(())
+    }
+
+    pub fn ready_into(&mut self, out: &mut Vec<DecodedFrame>) -> Result<(), VideoFileError> {
+        if let Some(text) = self.gst.bus_drain(self.bus, false) {
+            return Err(VideoFileError::new(format!("stream decoder: {text}")));
+        }
+        self.drain_into(0, out)
     }
 
     /// Frames ready now; `wait_ns` bounds the wait for the first one.
-    fn drain(&mut self, wait_ns: u64) -> Result<Vec<DecodedFrame>, VideoFileError> {
-        let mut frames = Vec::new();
+    fn drain_into(&mut self, wait_ns: u64, out: &mut Vec<DecodedFrame>) -> Result<(), VideoFileError> {
         let mut wait = wait_ns;
         loop {
             let sample = unsafe { (self.gst.gst_app_sink_try_pull_sample)(self.appsink, wait) };
@@ -145,12 +160,12 @@ impl LinuxStreamDecoder {
             wait = 0;
             let frame = unsafe { self.frame(sample) };
             unsafe { (self.gst.gst_mini_object_unref)(sample as *mut c_void) };
-            frames.push(frame?);
+            out.push(frame?);
         }
-        Ok(frames)
+        Ok(())
     }
 
-    unsafe fn frame(&self, sample: *mut GstSample) -> Result<DecodedFrame, VideoFileError> {
+    unsafe fn frame(&mut self, sample: *mut GstSample) -> Result<DecodedFrame, VideoFileError> {
         let caps = (self.gst.gst_sample_get_caps)(sample);
         let caps_text = if caps.is_null() { String::new() } else {
             let s = (self.gst.gst_caps_to_string)(caps);
@@ -162,33 +177,49 @@ impl LinuxStreamDecoder {
         let height: u32 = caps_field(&caps_text, "height").and_then(|v| v.parse().ok()).unwrap_or(0);
         if width == 0 || height == 0 { return Err(VideoFileError::new("stream decoder negotiated no geometry")); }
         let color: VideoColor = colorimetry_to_color(caps_field(&caps_text, "colorimetry").unwrap_or(""), width, height);
-        let nv12 = sample_nv12(self.gst, sample, width, height)?;
+        let nv12 = sample_nv12_into(self.gst, sample, width, height, || self.buffers.take())?;
         let pts = (*((self.gst.gst_sample_get_buffer)(sample) as *const GstBufferRepr)).pts;
         Ok(DecodedFrame { width, height, nv12, pts_100ns: if pts == GST_CLOCK_TIME_NONE { 0 } else { (pts / 100) as i64 }, gpu: None, color })
     }
 
-    pub fn flush(&mut self) -> Result<Vec<DecodedFrame>, VideoFileError> {
-        self.drain(20_000_000)
+    pub fn flush_into(&mut self, out: &mut Vec<DecodedFrame>) -> Result<(), VideoFileError> {
+        self.drain_into(20_000_000, out)
     }
 
-    /// Pushes one access unit and waits for its picture, the frame stamped
-    /// `pts_100ns`, however long the decoder takes. A frame stamped otherwise
-    /// (one a failed picture left behind) is dropped; an error or warning on
-    /// the bus (a decoder drops a picture it cannot decode with a warning)
-    /// fails the picture, and so does the stream's end.
-    fn decode_one(&mut self, annex_b: &[u8], pts_100ns: i64) -> Result<DecodedFrame, VideoFileError> {
-        let mut frames = self.push_packet(annex_b, pts_100ns)?;
+    pub fn recycle(&mut self, nv12: Vec<u8>) {
+        self.buffers.recycle(nv12);
+    }
+
+    pub fn allocated_buffers(&self) -> u64 {
+        self.buffers.allocated
+    }
+
+    /// Pushes one still's access unit and waits for its picture. If it arrives during
+    /// the first bus interval, the decoder can take another still. Otherwise the codec
+    /// may need more input to release its picture, so end the stream to drain it.
+    fn decode_one(mut self, annex_b: &[u8], pts_100ns: i64) -> Result<(DecodedFrame, Option<Self>), VideoFileError> {
+        let mut frames = Vec::new();
+        self.wait_ns = BUS_LOOK_NS;
+        self.push_packet_into(annex_b, pts_100ns, &mut frames)?;
+        let mut draining = false;
         loop {
             if let Some(i) = frames.iter().position(|f| f.pts_100ns == pts_100ns) {
-                return Ok(frames.swap_remove(i));
+                return Ok((frames.swap_remove(i), (!draining).then_some(self)));
             }
             if let Some(text) = self.gst.bus_drain(self.bus, true) {
                 return Err(VideoFileError::new(format!("stream decoder: {text}")));
             }
             if unsafe { (self.gst.gst_app_sink_is_eos)(self.appsink) } != 0 {
-                return Err(VideoFileError::new("stream decoder ended before the picture"));
+                return Err(VideoFileError::new("stream decoder ended with no picture for the access unit"));
             }
-            frames = self.drain(BUS_LOOK_NS)?;
+            if !draining {
+                if unsafe { (self.gst.gst_app_src_end_of_stream)(self.appsrc) } != GST_FLOW_OK {
+                    return Err(VideoFileError::new("stream decoder refused end of stream"));
+                }
+                draining = true;
+            }
+            frames.clear();
+            self.drain_into(BUS_LOOK_NS, &mut frames)?;
         }
     }
 }
@@ -254,7 +285,7 @@ impl Drop for Out {
 /// One picture's access unit (a single intra frame) decoded on a kept stream decoder of the
 /// element that takes it, or a new one. The element is chosen per picture as `decodebin`
 /// would for its file (a hardware decoder's size range rules some pictures out), since a
-/// running pipeline cannot change it. A decoder that failed a picture is dropped.
+/// running pipeline cannot change it. A drained or failed decoder is dropped.
 pub(crate) fn decode_still(au: &FirstAccessUnit) -> Result<DecodedFrame, VideoFileError> {
     let gst = LibGst::get().ok_or_else(|| VideoFileError::new("GStreamer runtime not found"))?;
     let caps = format!(
@@ -283,12 +314,12 @@ pub(crate) fn decode_still(au: &FirstAccessUnit) -> Result<DecodedFrame, VideoFi
             stills = STILL_FREED.wait(stills).unwrap_or_else(|e| e.into_inner());
         }
     };
-    let mut decoder = match out.decoder.take() {
+    let decoder = match out.decoder.take() {
         Some(decoder) => decoder,
         None => LinuxStreamDecoder::with_decoder(au.codec, &out.element)?,
     };
-    let frame = decoder.decode_one(&au.annex_b, STILL_PTS.fetch_add(1, Ordering::Relaxed))?;
-    out.decoder = Some(decoder);
+    let (frame, reusable) = decoder.decode_one(&au.annex_b, STILL_PTS.fetch_add(1, Ordering::Relaxed))?;
+    out.decoder = reusable;
     Ok(frame)
 }
 
@@ -329,11 +360,44 @@ mod tests {
     }
 
     #[test]
+    fn software_avdec_h264_ready_into_collects_late_picture_and_decodes_delta() {
+        use crate::annex_b::{nal_unit_type, split_annex_b, NAL_TYPE_IDR};
+        let gst = LibGst::get().expect("GStreamer runtime");
+        let units = encoded_test_units(gst, 2).expect("GStreamer test-source and x264 encoder pipeline");
+        assert_eq!(units.len(), 2, "the encoder supplies an IDR followed by a delta");
+        let mut decoder = LinuxStreamDecoder::new_low_latency(StreamVideoCodec::H264).expect("low-latency H.264 decoder");
+        decoder.wait_ns = 0;
+        for (i, unit) in units.iter().enumerate() {
+            let pts = i as i64 * 333_333;
+            let idr = split_annex_b(unit).into_iter().any(|nal| nal_unit_type(nal) == NAL_TYPE_IDR);
+            assert_eq!(idr, i == 0, "only the first unit can decode independently");
+            let mut out = Vec::new();
+            decoder.push_packet_into(unit, pts, &mut out).expect("push one unit");
+            loop {
+                decoder.ready_into(&mut out).expect("collect the picture without another push");
+                if !out.is_empty() { break }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            assert_eq!(out.len(), 1, "each push produces exactly one picture");
+            assert_eq!((out[0].pts_100ns, out[0].width, out[0].height), (pts, 320, 240), "the picture matches this unit");
+        }
+    }
+
+    #[test]
+    fn new_low_latency_reports_missing_decoder_element_without_falling_back() {
+        let error = LinuxStreamDecoder::new_low_latency_with(StreamVideoCodec::H264, "makepad_missing_avdec_test")
+            .err().expect("a missing low-latency element must fail to open");
+        assert_eq!(error.to_string(),
+            "low-latency H.264 decode requires GStreamer's makepad_missing_avdec_test element (install gstreamer1.0-libav)",
+            "the error identifies the missing element and its package");
+    }
+
+    #[test]
     fn decodes_a_live_h264_stream_where_gstreamer_is_installed() {
         let gst = LibGst::get().expect("GStreamer runtime");
         let units = encoded_test_units(gst, 30).expect("GStreamer test-source and x264 encoder pipeline");
         assert_eq!(units.len(), 30);
-        let mut decoder = LinuxStreamDecoder::new(StreamVideoCodec::H264).expect("stream decoder");
+        let mut decoder = crate::VideoStreamDecoder::new(StreamVideoCodec::H264).expect("stream decoder");
         let mut frames = Vec::new();
         // paced: a unit goes in while fewer than 4 of the pictures pushed are still to come out.
         // The live sink keeps 4 and drops the oldest, so the 30 pushed at once lost pictures
@@ -367,16 +431,28 @@ mod tests {
         // late). The first push doesn't wait, so its picture is late on purpose, as a slow first
         // picture after a decoder rebuild is: it comes out with the second push, and the later
         // pictures still come out of their own pushes, not one push late.
+        // Every picture's buffer goes back after each push, so the decoder allocates only when
+        // more pictures come out of one push than it has spares: as many as the largest batch.
         let mut decoder = LinuxStreamDecoder::new_low_latency(StreamVideoCodec::H264).expect("low-latency stream decoder");
         let (mut own, mut first_by_second) = (0, false);
+        let (mut out, mut returned, mut reused, mut largest) = (Vec::new(), Vec::new(), 0, 0);
         for (i, unit) in units.iter().enumerate() {
             let pts = i as i64 * 333_333;
             decoder.wait_ns = if i == 0 { 0 } else { PICTURE_WAIT_NS };
-            let frames = decoder.push_packet(unit, pts).expect("push");
-            first_by_second |= i <= 1 && frames.iter().any(|f| f.pts_100ns == 0);
-            own += frames.iter().filter(|f| i > 0 && f.pts_100ns == pts).count();
+            decoder.push_packet_into(unit, pts, &mut out).expect("push");
+            first_by_second |= i <= 1 && out.iter().any(|f| f.pts_100ns == 0);
+            own += out.iter().filter(|f| i > 0 && f.pts_100ns == pts).count();
+            largest = largest.max(out.len());
+            for f in out.drain(..) {
+                assert_eq!(f.nv12.len(), 320 * 240 * 3 / 2, "low latency: picture at {}", f.pts_100ns);
+                reused += usize::from(returned.contains(&f.nv12.as_ptr()));
+                returned.push(f.nv12.as_ptr());
+                decoder.recycle(f.nv12);
+            }
         }
         assert!(first_by_second, "low latency: the late first picture didn't come out by the second push");
         assert!(own >= units.len() - 4, "low latency: {own} of {} later pictures came out of their own push", units.len() - 1);
+        assert_eq!(decoder.allocated_buffers(), largest as u64, "low latency: buffers allocated against the largest batch of {largest}");
+        assert_eq!(reused, returned.len() - largest, "low latency: every picture after the first batch reuses a returned buffer");
     }
 }

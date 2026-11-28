@@ -51,7 +51,7 @@ fn device_loss_reports_only_unfinished_compute() {
         session.compute_in_flight.push_back(InFlightDispatch { frame, kernel, groups: [3, 2, 1], indirect_buffer, indirect_offset: 16 });
     }
     world.frame_done(sid, Id::NONE, target::COMPUTE, 1, 10, 20, [0.0; 2]);
-    makepad_hal::backend::exec::device_lost(&mut world);
+    makepad_hal::device_lost(&mut world);
     let mut store = EventStore::new(sid, 32, 4096);
     let mut buf = store.buf();
     let count = world.session_mut(sid).unwrap().events.drain_into(&mut buf);
@@ -246,28 +246,38 @@ fn an_upload_is_the_writers_copy_from_the_call_on() {
     for (n, run) in runs.iter().enumerate() {
         let id = Id::new(n as u32, 1);
         // each clone is a temporary, freed at the end of its statement
-        if n % 2 == 0 { w.buffer_update(id, 0, &run.clone()); } else { w.texture_update(id, 0, [0, 0, 1, 1], 0, &run.clone()); }
+        let half = run.len() / 2;
+        match n % 4 {
+            0 => w.buffer_update(id, 0, &run.clone()),
+            2 => w.buffer_update_parts(id, &[(0, &run.clone()[..half]), (half as u64, &run.clone()[half..])]),
+            _ => w.texture_update(id, 0, [0, 0, 1, 1], 0, &run.clone()),
+        }
     }
     let kept = w.keep(&[1.5f32, -2.0]);
     // the temporaries' blocks go back to the allocator: take them again and scribble over them
     let scribble: Vec<Vec<u8>> = runs.iter().map(|r| vec![0xee; r.len()]).collect();
     for (n, (cmd, run)) in w.cmds().iter().zip(&runs).enumerate() {
+        // SAFETY: the writer is alive and unchanged since it encoded the command
         let bytes = match cmd.decode(w.arena()) {
-            Some(HalCmd::BufferUpdate { bytes, .. } | HalCmd::TextureUpdate { bytes, .. }) => bytes,
+            Some(HalCmd::BufferUpdate { bytes, .. } | HalCmd::TextureUpdate { bytes, .. }) => unsafe { bytes.as_bytes() }.to_vec(),
+            Some(HalCmd::BufferUpdateParts { parts, .. }) => {
+                let parts: Vec<(u64, &[u8])> = unsafe { parts.iter() }.collect();
+                assert_eq!(parts.iter().map(|p| p.0).collect::<Vec<_>>(), [0, (run.len() / 2) as u64], "upload {n}'s parts are at their offsets");
+                parts.iter().flat_map(|p| p.1.iter().copied()).collect()
+            }
             other => panic!("{other:?}"),
         };
-        // SAFETY: the writer is alive and unchanged since it encoded the command
-        assert!(unsafe { bytes.as_bytes() } == &run[..], "upload {n} is not the bytes of its call");
+        assert!(bytes == run[..], "upload {n} is not the bytes of its call");
     }
     // SAFETY: as above
     assert_eq!(unsafe { kept.as_slice::<f32>() }, Some(&[1.5f32, -2.0][..]));
     drop(scribble);
-    assert!(w.capacities()[6] >= runs.iter().map(Vec::len).sum::<usize>());
+    assert!(w.capacities()[7] >= runs.iter().map(Vec::len).sum::<usize>());
     // the next turn uploads a little: only the first chunk stays
     w.clear();
     w.buffer_update(Id::new(0, 1), 0, &[7; 16]);
     w.clear();
-    assert!(w.capacities()[6] <= 256 << 10, "{} bytes of upload memory stayed after a small turn", w.capacities()[6]);
+    assert!(w.capacities()[7] <= 256 << 10, "{} bytes of upload memory stayed after a small turn", w.capacities()[7]);
 }
 
 #[test]
@@ -441,8 +451,38 @@ fn instance_ranges_are_element_ranges() {
     assert_eq!(hal.with_world(|w| w.session(s).unwrap().stats.bad_args), 0);
 }
 
+#[test]
+fn draw_cull_mode_round_trips_and_rejects_both_bits() {
+    let hal = Hal::new();
+    let sid = open(&hal, 0);
+    let mut w = CmdWriter::new(sid);
+    let target = Id::new(0, 1);
+    let pipeline = Id::new(0, 1);
+    w.texture_create(target, usage::RENDER_TARGET, format::RGBA8, 1, 1, [1, 1], Attr::default());
+    let blob = CmdWriter::pipeline_blob(PipelineDesc::default(), &[], &[], &[]);
+    w.pipeline_create(pipeline, dialect::NONE, Attr::default(), &blob);
+    w.frame_begin(1, FrameMeta::default());
+    w.pass(Pass { color: [target, Id::NONE, Id::NONE, Id::NONE], ..Default::default() });
+    let draw = Draw { pipeline, index: [0, 3], inst: Inst::none(1), ..Default::default() };
+    for (mode, bits) in [(CullMode::None, 0), (CullMode::Back, 2), (CullMode::Front, 128)] {
+        assert_eq!(Draw::cull_flags(mode), bits, "capture encoding for {mode:?}");
+        let flags = Draw::cull_flags(mode) | Draw::BLEND;
+        assert_eq!(Draw::cull_mode(flags), Some(mode), "round trip for {mode:?} with blending");
+        w.draw(Draw { flags, ..draw });
+    }
+    let both = Draw::CULL | Draw::CULL_FRONT;
+    assert_eq!(Draw::cull_mode(both), None);
+    w.draw(Draw { flags: both, ..draw });
+    w.frame_end(target, target::TEXTURE);
+    hal.submit(&w.buf());
+    let stats = hal.with_world(|world| world.session(sid).unwrap().stats);
+    assert_eq!(stats.bad_args, 1, "the conflicting flags report one error");
+    assert_eq!(stats.skipped_draws, 1, "only the conflicting draw is skipped");
+    assert_eq!(stats.draws, 3, "all three valid draws are counted");
+}
+
 fn headless_bytes(f: u32, w: u32, h: u32, d: u32, m: u32) -> u64 {
-    makepad_hal::backend::headless::texture_bytes(f, w, h, d, m)
+    makepad_hal::texture_bytes(f, w, h, d, m)
 }
 
 #[test]
@@ -500,8 +540,40 @@ fn ledger_totals_and_idle() {
     w.texture_create(Id::new(0, 1), usage::RENDER_TARGET, format::RGBA8, 100, 100, [1, 1], a);
     w.texture_create(Id::new(1, 1), usage::RENDER_TARGET, format::RGBA8, 10, 10, [1, 3], Attr { owner: 1, site: 2, label: 4, kind: 0 });
     w.texture_create(Id::new(2, 1), usage::RENDER_TARGET, format::DEPTH32F, 100, 100, [1, 1], Attr { owner: 0, site: 3, label: 0, kind: 0 });
-    w.buffer_create(Id::new(0, 1), buffer_kind::INSTANCE, 5000, a);
     hal.submit(&w.buf());
+    w.clear();
+    let slab = Id::new(0, 1);
+    let before = hal.with_world(|w| w.session(s).unwrap().stats);
+    w.buffer_create(slab, buffer_kind::INSTANCE | buffer_kind::APPEND, 5000, a);
+    w.buffer_update(slab, 0, &[1; 8]);
+    w.buffer_update(slab, 16, &[2; 4]);
+    // the same two writes as one command, 32 bytes on, around a part past the slab's end
+    w.buffer_update_parts(slab, &[(32, &[1; 8]), (4996, &[9; 8]), (48, &[2; 4])]);
+    hal.submit(&w.buf());
+    let after = hal.with_world(|w| w.session(s).unwrap().stats);
+    assert_eq!(after.upload_bytes - before.upload_bytes, 2 * (8 + 4), "the slab writes count toward uploads, the rejected part not");
+    assert_eq!(after.bad_args - before.bad_args, 1, "the part past the slab's end is rejected alone");
+    assert_eq!((after.buffer_updates - before.buffer_updates, after.buffer_parts - before.buffer_parts), (3, 4),
+        "two updates and one of two parts reach the backend");
+    assert_eq!(after.commands - before.commands, 4, "the create, two updates and the parts command");
+    assert_eq!((after.arenas_taken, after.copy_cmds, after.copy_regions, after.upload_barriers, after.submissions, after.driver_uploads),
+        (0, 0, 0, 0, 0, 0), "headless slab updates do no GPU upload or submission work");
+    w.clear();
+    w.read_buffers(7, &[BufferReadRange { id: slab, offset: 0, len: 64 }]);
+    hal.submit(&w.buf());
+    let mut store = EventStore::new(s, 64, 4096);
+    let mut buf = store.buf();
+    let n = hal.pump(0, &mut buf);
+    let record = store.reader(n, buf.arena_len).find_map(|(_, e)| match e {
+        HalEvent::BufferLeases { req: 7, status: readback::OK, records } => Some(makepad_hal::lease::Record::read(records)),
+        _ => None,
+    }).expect("the slab's bytes come back");
+    // SAFETY: the lease holds the bytes until it is released
+    let got = unsafe { std::slice::from_raw_parts(record.ptr as *const u8, record.len as usize) }.to_vec();
+    hal_lease_release(record.token);
+    let written: Vec<u8> = [&[1u8; 8][..], &[0; 8], &[2; 4]].concat();
+    assert_eq!(got[..20], written[..], "the single updates wrote their bytes");
+    assert_eq!(got[32..52], written[..], "the parts wrote the same, each at its own offset");
     let r = hal.report(s, 30).unwrap();
     let mip_chain = 10 * 10 * 4 + 5 * 5 * 4 + 2 * 2 * 4;
     assert_eq!(r.total_bytes, 100 * 100 * 4 + mip_chain + 100 * 100 * 4 + 5000);
@@ -534,23 +606,177 @@ fn ledger_totals_and_idle() {
 }
 
 #[test]
+fn hal_uniform_stream_shared_blocks_and_validation() {
+    let info = HalInfo { volume_formats: 17, max_volume_dimension: 1024, uniform_align: 64,
+        max_uniform_block: 32_768, ..Default::default() };
+    let wire = info.to_bytes();
+    assert_eq!(HalInfo::from_bytes(&wire), Some(info));
+    let legacy = HalInfo { uniform_align: 256, max_uniform_block: 65_536, ..info };
+    assert_eq!(HalInfo::from_bytes(&wire[..wire.len() - 8]), Some(legacy));
+    assert_eq!(HalInfo::from_bytes(&wire[..wire.len() - 20]),
+        Some(HalInfo { volume_formats: 0, max_volume_dimension: 0, ..legacy }));
+
+    let hal = Hal::new();
+    let sid = open(&hal, 0);
+    let mut w = CmdWriter::new(sid);
+    let pipeline = Id::new(0, 1);
+    let target = Id::new(0, 1);
+    w.texture_create(target, usage::RENDER_TARGET, format::RGBA8, 1, 1, [1, 1], Attr::default());
+    let blob = CmdWriter::pipeline_blob(PipelineDesc::default(), b"code", &[], &[]);
+    w.pipeline_create(pipeline, dialect::MSL, Attr::default(), &blob);
+    hal.submit(&w.buf());
+    let stats = || hal.with_world(|world| world.session(sid).unwrap().stats);
+    let mut warm = None;
+    for frame in 1..=3 {
+        w.clear();
+        w.frame_begin(frame, FrameMeta::default());
+        let uniforms = w.put_uniform(&[1u32; 4]);
+        w.pass(Pass { color: [target, Id::NONE, Id::NONE, Id::NONE], uniforms, ..Default::default() });
+        let list = w.put_uniform(&[2u32; 4]);
+        for i in 0u32..4 {
+            let call = w.put_uniform(&[i; 4]);
+            let call = match (frame, i) {
+                (3, 0) => Range { off: 4, ..call },
+                (3, 1) => Range { off: 6 * w.uniform_align(), ..call },
+                _ => call,
+            };
+            w.draw(Draw { pipeline, index: [0, 3], inst: Inst::none(1), uniforms: [call, list, Range::default(), Range::default()], ..Default::default() });
+        }
+        w.frame_end(target, target::TEXTURE);
+        let before = stats();
+        let buf = w.buf();
+        // SAFETY: the writer owns the batch through submission.
+        let packet_bytes = unsafe { buf.view() }.unwrap().frames[0].uniforms.len;
+        assert_eq!(packet_bytes, 6 * w.uniform_align());
+        hal.submit(&buf);
+        let after = stats();
+        assert_eq!(after.uniform_bytes - before.uniform_bytes, u64::from(packet_bytes));
+        let rejected = if frame == 3 { 2 } else { 0 };
+        assert_eq!(after.bad_args - before.bad_args, rejected);
+        assert_eq!(after.skipped_draws - before.skipped_draws, rejected);
+        assert_eq!(after.draws - before.draws, 4 - rejected);
+        assert_eq!(*warm.get_or_insert(w.capacities()), w.capacities());
+    }
+}
+
+#[test]
+fn cmd_writer_take_uniform_stream_swaps_and_appends() {
+    let mut w = CmdWriter::new(1);
+    w.set_uniform_align(16);
+    let window = Id::new(0, 1);
+    let first = [0x11; 16];
+    let second = [0x22; 32];
+    let mut source = first.to_vec();
+    let ptr = source.as_ptr();
+    w.frame_begin(1, FrameMeta::default());
+    assert_eq!(w.take_uniform_stream(&mut source), 0);
+    w.frame_end(window, target::WINDOW);
+    assert!(source.is_empty());
+    let buf = w.buf();
+    // SAFETY: the writer owns the buffer and the view is read before the next append.
+    assert_eq!(unsafe { buf.view() }.unwrap().uniforms.as_ptr(), ptr);
+
+    source.extend_from_slice(&second);
+    let capacity = source.capacity();
+    w.frame_begin(2, FrameMeta::default());
+    assert_eq!(w.take_uniform_stream(&mut source), 0, "the offset is packet-relative");
+    w.frame_end(window, target::WINDOW);
+    assert!(source.is_empty());
+    assert_eq!(source.capacity(), capacity);
+    let buf = w.buf();
+    // SAFETY: the writer owns both packets while their bytes are inspected.
+    let view = unsafe { buf.view() }.unwrap();
+    assert_eq!(view.uniforms.len(), first.len() + second.len());
+    for (packet, offset, expected) in [(0, 0, first.as_slice()), (1, first.len(), second.as_slice())] {
+        let range = view.frames[packet].uniforms;
+        assert_eq!(range.off as usize, offset);
+        assert_eq!(&view.uniforms[range.off as usize..(range.off + range.len) as usize], expected);
+    }
+
+    let mut w = CmdWriter::new(1);
+    w.set_uniform_align(16);
+    let mut source = Vec::new();
+    let mut warm = None;
+    for frame in 1..=4 {
+        w.clear();
+        source.extend_from_slice(&first);
+        w.frame_begin(frame, FrameMeta::default());
+        assert_eq!(w.take_uniform_stream(&mut source), 0);
+        w.frame_end(window, target::WINDOW);
+        if frame >= 2 {
+            let current = w.capacities();
+            assert_eq!(current, *warm.get_or_insert(current), "writer capacity changed on frame {frame}");
+        }
+    }
+}
+
+#[test]
+fn kept_frame_preserves_uniform_stream() {
+    use makepad_hal::session::HOST;
+    let hal = Hal::new();
+    let info = hal.open_host(&OpenReq { backend: backend_id::HEADLESS, ..Default::default() });
+    let window = Id::new(0, 1);
+    let pipeline = Id::new(0, 1);
+    let mut w = CmdWriter::new(info.session);
+    w.window_create(window, window_kind::NORMAL, Id::NONE, [0.0, 0.0, 16.0, 16.0], false);
+    let blob = CmdWriter::pipeline_blob(PipelineDesc::default(), b"code", &[], &[]);
+    w.pipeline_create(pipeline, dialect::MSL, Attr::default(), &blob);
+    w.frame_begin(1, FrameMeta::default());
+    let uniforms = w.put_uniform(&[11u32; 4]);
+    w.pass(Pass { uniforms, ..Default::default() });
+    w.frame_end(window, target::WINDOW);
+    w.frame_begin(2, FrameMeta::default());
+    let uniforms = w.put_uniform(&[22u32; 4]);
+    w.pass(Pass { uniforms, ..Default::default() });
+    let call = w.put_uniform(&[33u32; 4]);
+    w.draw(Draw { pipeline, index: [0, 3], inst: Inst::none(1), uniforms: [call, Range::default(), Range::default(), Range::default()], ..Default::default() });
+    w.frame_end(window, target::WINDOW | target::BADGES);
+    let buf = w.buf();
+    // SAFETY: the writer lives through the copy and submit.
+    let original = unsafe { buf.view() }.unwrap();
+    let packet = original.frames[1].uniforms;
+    assert_ne!(packet.off, 0);
+    let expected = original.uniforms[packet.off as usize..(packet.off + packet.len) as usize].to_vec();
+    hal.submit(&buf);
+    drop(w);
+    let kept = hal.with_world(|world| world.session(HOST).unwrap().windows.get(HOST, window).unwrap().val.badges.clone()).unwrap();
+    let view = kept.view();
+    assert_eq!(view.uniforms, expected);
+    assert_eq!(view.frames[0].uniforms, Range { off: 0, len: packet.len });
+    assert_eq!((view.passes[0].uniforms, view.draws[0].uniforms[0]), (uniforms, call));
+    // Present an empty base pass. Its retained badge supplies the only draw.
+    let mut base = CmdWriter::new(HOST);
+    base.frame_begin(3, FrameMeta::default());
+    base.pass(Pass::default());
+    base.frame_end(window, target::WINDOW);
+    let before = hal.with_world(|world| world.session(HOST).unwrap().stats);
+    hal.submit(&base.buf());
+    let stats = hal.with_world(|world| world.session(HOST).unwrap().stats);
+    assert_eq!(stats.draws - before.draws, 1);
+    assert_eq!(stats.uniform_bytes - before.uniform_bytes, u64::from(packet.len));
+    assert_eq!((stats.bad_args, stats.skipped_draws), (0, 0));
+}
+
+#[test]
 fn frame_packet_with_two_passes_three_draws_yields_frame_done() {
     let hal = Hal::new();
     let s = open(&hal, 0);
     let mut w = CmdWriter::new(s);
     let win = Id::new(0, 1);
     w.window_create(win, window_kind::NORMAL, Id::NONE, [0.0, 0.0, 640.0, 480.0], false);
-    let blob = CmdWriter::pipeline_blob(PipelineDesc { name: 1, ..Default::default() }, b"code", &[], &[]);
+    let blob = CmdWriter::pipeline_blob(PipelineDesc { name: 1, instance_stride: 4, ..Default::default() }, b"code", &[], &[]);
     w.pipeline_create(Id::new(0, 1), dialect::MSL, Attr::default(), &blob);
     w.texture_create(Id::new(0, 1), usage::RENDER_TARGET | usage::SAMPLED, format::RGBA8, 64, 64, [1, 1], Attr::default());
     w.buffer_create(Id::new(0, 1), buffer_kind::VERTEX, 256, Attr::default());
-    let ranges = w.put_items(&[[0u32, 3]]);
-    w.frame_begin(7, FrameMeta { input_ns: 1, ..Default::default() });
+    let rows = Id::new(1, 1);
+    w.buffer_create(rows, buffer_kind::INSTANCE, 48, Attr::default());
+    w.buffer_update(rows, 0, &[0; 32]);
+    let ranges = w.put_pairs(&[[0, 2]]);
+    let mut meta = FrameMeta { input_ns: 1, build_start_ns: 30, build_end_ns: 34, ..Default::default() };
+    meta.phases[2] = [10, 23];
+    w.frame_begin(7, meta);
     w.pass(Pass { color: [Id::new(0, 1), Id::NONE, Id::NONE, Id::NONE], depth: Id::NONE, viewport: [0.0, 0.0, 64.0, 64.0], ..Default::default() });
-    // the frames below reuse this draw after `clear`: its instances live in a static
-    static INSTANCES: [f32; 8] = [0.0; 8];
-    // SAFETY: a static outlives every submit
-    let draw = Draw { pipeline: Id::new(0, 1), vb: Id::new(0, 1), ib: Id::NONE, inst: Inst::inline(unsafe { Slice::of(&INSTANCES) }, 2), inst_ranges: ranges, ubufs: [Id::NONE; 4], ..Default::default() };
+    let draw = Draw { pipeline: Id::new(0, 1), vb: Id::new(0, 1), ib: Id::NONE, inst: Inst::buffer(rows, 0, 2), inst_ranges: ranges, ubufs: [Id::NONE; 4], ..Default::default() };
     w.draw(draw);
     w.draw(draw);
     w.pass(Pass { color: [Id::NONE; 4], depth: Id::NONE, ..Default::default() });
@@ -567,24 +793,41 @@ fn frame_packet_with_two_passes_three_draws_yields_frame_done() {
     assert!(evs.iter().any(|(_, e)| e.starts_with("Startup")));
     let st = hal.with_world(|w| w.session(s).unwrap().stats);
     assert_eq!((st.frames, st.passes, st.draws, st.skipped_draws, st.stale_ids), (1, 2, 3, 0, 0));
+    assert_eq!(st.walk_ns, 13, "walk_ns for the beat");
     assert!(hal.await_frame_done(s, 7, Duration::from_millis(10)));
     assert!(!hal.await_frame_done(s, 8, Duration::from_millis(10)));
     // a draw with a dead pipeline is skipped, counted, and the frame still completes
     w.clear();
-    w.frame_begin(8, FrameMeta::default());
-    w.pass(Pass { color: [Id::NONE; 4], depth: Id::NONE, ..Default::default() });
-    w.draw(Draw { pipeline: Id::new(5, 1), ..draw });
+    w.buffer_update(draw.vb, 0, &[0; 12]);
+    w.buffer_update(rows, 0, &[0; 32]);
+    w.buffer_update(rows, 32, &[0; 16]);
+    w.frame_begin(8, FrameMeta { build_start_ns: 35, build_end_ns: 46, ..meta });
+    let pass_uniforms = w.put_uniform(&[0f32; 5]);
+    w.pass(Pass { color: [Id::NONE; 4], depth: Id::NONE, uniforms: pass_uniforms, ..Default::default() });
+    let uniforms = [w.put_uniform(&[0f32; 1]), w.put_uniform(&[0f32; 2]), w.put_uniform(&[0f32; 3]), w.put_uniform(&[0f32; 4])];
+    let live = Draw { uniforms, inst_ranges: Range::default(), ..draw };
+    w.draw(live);
+    w.draw(Draw { pipeline: Id::new(5, 1), inst: Inst::buffer(rows, 2, 1), ..live });
     w.frame_end(win, target::WINDOW);
     hal.submit(&w.buf());
     assert!(hal.await_frame_done(s, 8, Duration::from_millis(10)));
-    assert_eq!(hal.with_world(|w| w.session(s).unwrap().stats.skipped_draws), 1);
+    let after = hal.with_world(|w| w.session(s).unwrap().stats);
+    assert_eq!(after.skipped_draws, 1, "skipped_draws");
+    assert_eq!(after.upload_bytes - st.upload_bytes, 12 + 32 + 16, "vertex and instance upload bytes");
+    assert!(after.upload_ns >= st.upload_ns, "upload time is monotonic across a buffer update");
+    assert_eq!(after.uniform_bytes - st.uniform_bytes, 5 * u64::from(w.uniform_align()), "uniform_bytes");
+    assert_eq!(after.draws - st.draws, 2, "draws");
+    assert_eq!(after.build_ns - st.build_ns, 11, "build_ns");
+    assert_eq!(after.walk_ns - st.walk_ns, 0, "walk_ns for a second packet of the same beat");
+    assert_eq!(after.binds, 0, "binds");
+    assert_eq!(after.set_writes, 0, "set_writes");
     // steady state: the writer does not grow
     let cap = w.capacities();
     for f in 9..20 {
         w.clear();
         w.frame_begin(f, FrameMeta::default());
         w.pass(Pass { color: [Id::NONE; 4], depth: Id::NONE, ..Default::default() });
-        w.draw(Draw { pipeline: Id::new(0, 1), ..draw });
+        w.draw(Draw { inst_ranges: Range::default(), ..draw });
         w.frame_end(win, target::WINDOW);
         hal.submit(&w.buf());
     }

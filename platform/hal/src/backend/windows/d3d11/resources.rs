@@ -264,12 +264,31 @@ pub struct Buffer {
     pub size: u64,
     pub bytes: u64,
     pub kind: u16,
+    dynamic_append: bool,
+}
+
+pub(super) fn supports_dynamic_append(dev: &Device) -> bool {
+    // d3d11.h: D3D11_FEATURE_DATA_D3D11_OPTIONS is 14 BOOLs, and
+    // MapNoOverwriteOnDynamicBufferSRV is the tenth. Our bindings omit this struct.
+    const D3D11_FEATURE_D3D11_OPTIONS: D3D11_FEATURE = D3D11_FEATURE(5);
+    let mut options = [0i32; 14];
+    let queried = unsafe {
+        dev.device.CheckFeatureSupport(D3D11_FEATURE_D3D11_OPTIONS, options.as_mut_ptr().cast(), std::mem::size_of_val(&options) as u32)
+    };
+    let supported = queried.is_ok() && options[9] != 0;
+    let path = if supported { "Map(WRITE_DISCARD / WRITE_NO_OVERWRITE)" } else { "UpdateSubresource" };
+    eprintln!("[hal-d3d11] APPEND instance buffers use {path}");
+    supported
 }
 
 impl Buffer {
     /// A retained buffer of `kind` (`buffer_kind`). Uniform buffers are constant buffers (sized up
     /// to 16 bytes); instance buffers are read by the vertex shader as words.
     pub fn new(dev: Arc<Device>, kind: u16, size: u64) -> Result<Arc<Buffer>, String> {
+        Self::retained(dev, kind, size, false)
+    }
+
+    pub fn retained(dev: Arc<Device>, kind: u16, size: u64, no_overwrite_srv: bool) -> Result<Arc<Buffer>, String> {
         let bytes = match kind & buffer_kind::KIND_MASK {
             buffer_kind::UNIFORM => size.max(16).div_ceil(16) * 16,
             _ => size.max(4).div_ceil(4) * 4,
@@ -287,7 +306,16 @@ impl Buffer {
         let storage = kind & buffer_kind::KIND_MASK == buffer_kind::STORAGE;
         // D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS, DRAWINDIRECT_ARGS.
         let misc = if storage { 0x20 } else { 0 } | if kind & buffer_kind::INDIRECT != 0 { 0x10 } else { 0 };
-        let desc = D3D11_BUFFER_DESC { ByteWidth: bytes as u32, Usage: D3D11_USAGE_DEFAULT, BindFlags: bind, CPUAccessFlags: 0, MiscFlags: misc, StructureByteStride: 0 };
+        let instance = kind & buffer_kind::KIND_MASK == buffer_kind::INSTANCE;
+        let dynamic_append = no_overwrite_srv && instance && kind & buffer_kind::APPEND != 0 && misc == 0;
+        let desc = D3D11_BUFFER_DESC {
+            ByteWidth: bytes as u32,
+            Usage: if dynamic_append { D3D11_USAGE_DYNAMIC } else { D3D11_USAGE_DEFAULT },
+            BindFlags: bind,
+            CPUAccessFlags: if dynamic_append { D3D11_CPU_ACCESS_WRITE.0 as u32 } else { 0 },
+            MiscFlags: misc,
+            StructureByteStride: 0,
+        };
         let mut buf = None;
         unsafe { dev.device.CreateBuffer(&desc, None, Some(&mut buf)) }.map_err(|e| hr(&format!("CreateBuffer {bytes} bytes kind {kind}"), e))?;
         let buf: ID3D11Buffer = buf.ok_or("CreateBuffer returned nothing")?;
@@ -301,24 +329,33 @@ impl Buffer {
             view.Anonymous.Buffer = D3D11_BUFFER_UAV { FirstElement: 0, NumElements: (bytes / 4) as u32, Flags: 1 };
             unsafe { dev.device.CreateUnorderedAccessView(buf.as_ID3D11Resource(), Some(&view), Some(&mut uav)) }.map_err(|e| hr("raw UAV", e))?;
             srv
-        } else if kind == buffer_kind::INSTANCE { Some(word_view(&dev, &buf, (bytes / 4) as u32)?) } else { None };
-        Ok(Arc::new(Buffer { dev, buf, words, uav, size, bytes, kind }))
+        } else if instance { Some(word_view(&dev, &buf, (bytes / 4) as u32)?) } else { None };
+        Ok(Arc::new(Buffer { dev, buf, words, uav, size, bytes, kind, dynamic_append }))
     }
 
-    pub fn write(&self, off: u64, data: &[u8]) {
+    pub fn update_parts<'a>(&self, parts: impl Iterator<Item = (u64, &'a [u8])>, driver_uploads: &mut u64) -> Result<(), String> {
+        if self.dynamic_append {
+            return write_mapped(&self.dev, &self.buf, self.size, parts, driver_uploads);
+        }
+        for (off, data) in parts { *driver_uploads += self.write(off, data); }
+        Ok(())
+    }
+
+    pub fn write(&self, off: u64, data: &[u8]) -> u64 {
         if data.is_empty() {
-            return;
+            return 0;
         }
         // constant buffers are updated whole (D3D11 updates no part of one)
-        if self.kind == buffer_kind::UNIFORM {
+        if self.kind & buffer_kind::KIND_MASK == buffer_kind::UNIFORM {
             let mut whole = vec![0u8; self.bytes as usize];
             let end = (off as usize + data.len()).min(whole.len());
             whole[off as usize..end].copy_from_slice(&data[..end - off as usize]);
             unsafe { self.dev.ctx.UpdateSubresource(self.buf.as_ID3D11Resource(), 0, None, whole.as_ptr() as _, 0, 0) };
-            return;
+            return 1;
         }
         let bx = D3D11_BOX { left: off as u32, top: 0, front: 0, right: (off + data.len() as u64) as u32, bottom: 1, back: 1 };
         unsafe { self.dev.ctx.UpdateSubresource(self.buf.as_ID3D11Resource(), 0, Some(&bx), data.as_ptr() as _, 0, 0) };
+        1
     }
 }
 
@@ -345,28 +382,23 @@ pub fn word_view(dev: &Device, buf: &ID3D11Buffer, count: u32) -> Result<ID3D11S
     v.ok_or_else(|| "CreateShaderResourceView(words) returned nothing".into())
 }
 
-/// One frame's transient bytes: inline instances (a word buffer) and uniform blocks (a
-/// constant buffer bound by 256-byte windows, D3D11.1). Grown when a frame needs more; written
-/// with one map per frame.
+/// Uniform blocks bound through D3D11.1 constant-buffer windows, filled in one discard map.
 pub struct Arena {
     pub buf: ID3D11Buffer,
-    pub words: Option<ID3D11ShaderResourceView>,
     pub size: u64,
-    constant: bool,
     _charge: Charge,
 }
 
 impl Arena {
-    pub fn new(dev: &Device, size: u64, constant: bool) -> Result<Arena, String> {
+    pub fn new(dev: &Device, size: u64) -> Result<Arena, String> {
         let size = size.max(64 * 1024).div_ceil(256) * 256;
         if size > u32::MAX as u64 {
             return Err(format!("a {size}-byte frame arena exceeds D3D11's resource limit"));
         }
-        let bind = if constant { D3D11_BIND_CONSTANT_BUFFER.0 as u32 } else { D3D11_BIND_SHADER_RESOURCE.0 as u32 };
         let desc = D3D11_BUFFER_DESC {
             ByteWidth: size as u32,
             Usage: D3D11_USAGE_DYNAMIC,
-            BindFlags: bind,
+            BindFlags: D3D11_BIND_CONSTANT_BUFFER.0 as u32,
             CPUAccessFlags: D3D11_CPU_ACCESS_WRITE.0 as u32,
             MiscFlags: 0,
             StructureByteStride: 0,
@@ -374,24 +406,42 @@ impl Arena {
         let mut buf = None;
         unsafe { dev.device.CreateBuffer(&desc, None, Some(&mut buf)) }.map_err(|e| hr("CreateBuffer(frame arena)", e))?;
         let buf: ID3D11Buffer = buf.ok_or("CreateBuffer(frame arena) returned nothing")?;
-        let words = if constant { None } else { Some(word_view(dev, &buf, (size / 4) as u32)?) };
-        Ok(Arena { buf, words, size, constant, _charge: dev.pools.charge(Pool::UploadArena, size) })
+        Ok(Arena { buf, size, _charge: dev.pools.charge(Pool::UploadArena, size) })
     }
 
     /// Replaces the arena's contents with `bytes` (a discard map: frames in flight keep theirs).
     pub fn fill(&mut self, dev: &Device, bytes: &[u8]) -> Result<(), String> {
-        if bytes.len() as u64 > self.size {
-            *self = Arena::new(dev, (bytes.len() as u64).next_power_of_two(), self.constant)?;
+        if bytes.is_empty() { return Ok(()); }
+        let padded = bytes.len().checked_next_multiple_of(256).ok_or("frame arena length overflow")?;
+        if padded as u64 > self.size {
+            *self = Arena::new(dev, (padded as u64).next_power_of_two())?;
         }
-        if bytes.is_empty() {
-            return Ok(());
-        }
-        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-        unsafe {
-            dev.ctx.Map(self.buf.as_ID3D11Resource(), 0, D3D11_MAP_WRITE_DISCARD, 0, Some(&mut mapped)).map_err(|e| hr("Map(frame arena)", e))?;
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.pData as *mut u8, bytes.len());
-            dev.ctx.Unmap(self.buf.as_ID3D11Resource(), 0);
-        }
-        Ok(())
+        let parts = std::iter::once((0, bytes));
+        if padded == bytes.len() { return write_mapped(dev, &self.buf, self.size, parts, &mut 0); }
+        let padding = &([0u8; 256])[..padded - bytes.len()];
+        write_mapped(dev, &self.buf, self.size, parts.chain([(bytes.len() as u64, padding)]), &mut 0)
     }
+}
+
+/// Keep the mapping through gaps. A nonempty write at zero discards the previous contents.
+fn write_mapped<'a>(dev: &Device, buf: &ID3D11Buffer, size: u64, parts: impl Iterator<Item = (u64, &'a [u8])>, driver_uploads: &mut u64) -> Result<(), String> {
+    let mut parts = parts.filter(|(_, data)| !data.is_empty()).peekable();
+    while let Some((mut off, mut data)) = parts.next() {
+        let mode = if off == 0 { D3D11_MAP_WRITE_DISCARD } else { D3D11_MAP_WRITE_NO_OVERWRITE };
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+        unsafe { dev.ctx.Map(buf.as_ID3D11Resource(), 0, mode, 0, Some(&mut mapped)) }.map_err(|e| hr("Map(dynamic buffer)", e))?;
+        *driver_uploads += 1;
+        let result = loop {
+            if off.checked_add(data.len() as u64).is_none_or(|end| end > size) {
+                break Err(format!("upload offset={off} bytes={} exceeds mapped buffer size={size}", data.len()));
+            }
+            // SAFETY: the checked range is inside the live write mapping.
+            unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), mapped.pData.cast::<u8>().add(off as usize), data.len()); }
+            let Some(next) = parts.next_if(|(off, _)| *off != 0) else { break Ok(()); };
+            (off, data) = next;
+        };
+        unsafe { dev.ctx.Unmap(buf.as_ID3D11Resource(), 0); }
+        result?;
+    }
+    Ok(())
 }

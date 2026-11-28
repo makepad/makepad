@@ -83,7 +83,12 @@ use std::time::{Duration, Instant};
 type Key = (u32, Id);
 
 /// A frame asked for and not built within this is asked again (its batch was dropped).
+#[cfg(not(test))]
 const REASK: Duration = Duration::from_millis(250);
+/// Under test the wall clock must not decide: a test stalled by a loaded machine would see a
+/// re-ask the code under test never made.
+#[cfg(test)]
+const REASK: Duration = Duration::from_secs(3600);
 /// The eye size until the headset says its own.
 const DEFAULT_EYE: [u32; 2] = [1680, 1760];
 

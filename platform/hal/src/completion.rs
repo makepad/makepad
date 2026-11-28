@@ -69,6 +69,7 @@ impl CompletionReply {
     }
 }
 
+#[relax_api::relax_api(loader = "the loader's HAL: JIT code reaches it through the `hal_*` ops")]
 impl Hal {
     /// The completion of everything `session` submitted so far; `notify` (any thread) when it
     /// answers.

@@ -12,6 +12,7 @@ const WIN: Id = Id::new(1, 1);
 const TEX: Id = Id::new(1, 1);
 const QUAD: Id = Id::new(1, 1);
 const INDEX: Id = Id::new(2, 1);
+const ROWS: Id = Id::new(3, 1);
 const SOLID: Id = Id::new(1, 1);
 const SAMPLED: Id = Id::new(2, 1);
 const W: u32 = 64;
@@ -82,7 +83,7 @@ fn frame(w: &mut CmdWriter, n: u64) {
     let base = Draw { vb: QUAD, ib: INDEX, index: [0, 6], scissor: [f32::NAN; 4], bounds: [f32::NAN; 4], ..Default::default() };
     let ids = w.put_ids(&[TEX]);
     for (i, (pipe, tex)) in [(SOLID, Range::default()), (SAMPLED, ids), (SOLID, Range::default())].into_iter().enumerate() {
-        let inst = Inst::inline(w.keep(&INSTANCES[i][..]), 1);
+        let inst = Inst::buffer(ROWS, i as u32, 1);
         w.draw(Draw { pipeline: pipe, inst, tex, ..base });
     }
     w.frame_end(WIN, target::WINDOW);
@@ -106,6 +107,9 @@ fn a_captured_frame_replays_to_the_same_pixels() {
     let idx: Vec<u8> = [0u16, 1, 2, 0, 2, 3].iter().flat_map(|i| i.to_le_bytes()).collect();
     w.buffer_create(INDEX, buffer_kind::INDEX, idx.len() as u64, Attr::default());
     w.buffer_update(INDEX, 0, &idx);
+    let rows: Vec<u8> = INSTANCES.iter().flatten().flat_map(|f| f.to_le_bytes()).collect();
+    w.buffer_create(ROWS, buffer_kind::INSTANCE | buffer_kind::APPEND, rows.len() as u64, Attr::default());
+    w.buffer_update(ROWS, 0, &rows);
     let none = pipeline_binding::NONE;
     for (id, code, ntex) in [(SOLID, MSL_SOLID, 0u32), (SAMPLED, MSL_SAMPLED, 1)] {
         let blob = CmdWriter::pipeline_blob(PipelineDesc { outputs: 1, instance_stride: 8, color_formats: [format::BGRA8, 0, 0, 0], ..Default::default() }, code.as_bytes(), &[none, none, none, none, none, ntex], &[8]);
@@ -158,7 +162,8 @@ fn a_captured_frame_replays_to_the_same_pixels() {
     let mut cap = (*cap).clone();
     cap.backend = info.backend;
     cap.dialect = info.dialect;
-    assert_eq!((cap.passes.len(), cap.draws.len(), cap.pipelines.len(), cap.textures.len(), cap.buffers.len()), (1, 3, 2, 1, 2));
+    assert_eq!((cap.passes.len(), cap.draws.len(), cap.pipelines.len(), cap.textures.len(), cap.buffers.len()), (1, 3, 2, 1, 3));
+    assert_eq!(cap.buffer(ROWS).unwrap().contents.as_deref(), Some(rows.as_slice()));
     assert_eq!(cap.textures[0].contents.as_deref(), Some(&texels[..]), "texture contents as uploaded");
     assert_eq!(cap.size, [W, H]);
 
@@ -197,6 +202,8 @@ fn a_captured_frame_replays_to_the_same_pixels() {
         let a = ask(&format!("cap draw D{draw}"));
         assert!(a.contains(&format!("changed {px} px")), "{a}");
     }
+    let mesh = ask("cap mesh D2");
+    assert!(mesh.contains("| 2 | 0.250 0.250 0.500 0.500 0 1.00 0 1.00 |"), "{mesh}");
     let pixel = ask("cap pixel 20,20");
     assert!(pixel.contains("2 draws changed it; the last is D2"), "{pixel}");
     let od = ask("cap overdraw");
@@ -211,16 +218,22 @@ fn a_captured_frame_replays_to_the_same_pixels() {
     hal.submit(&w.buf());
     let two = |w: &mut CmdWriter, n: u64| {
         w.clear();
+        // The second packet appends a row after the first packet has read this slab.
+        let slab = Id::new(4, n as u32);
+        let stride = std::mem::size_of_val(&INSTANCES[0]);
+        w.buffer_create(slab, buffer_kind::INSTANCE | buffer_kind::APPEND, (2 * stride) as u64, Attr::default());
+        w.buffer_update(slab, 0, &rows[..stride]);
         w.frame_begin(n, FrameMeta::default());
         w.pass(Pass { color: [RT, Id::NONE, Id::NONE, Id::NONE], depth: Id::NONE, load: [pass_load::CLEAR; 5], clear: [[0.0, 0.0, 1.0, 1.0]; 4], viewport: [0.0, 0.0, 32.0, 32.0], dpi: 1.0, ..Default::default() });
         let base = Draw { vb: QUAD, ib: INDEX, index: [0, 6], scissor: [f32::NAN; 4], bounds: [f32::NAN; 4], ..Default::default() };
-        let inst = Inst::inline(w.keep(&INSTANCES[0][..]), 1);
+        let inst = Inst::buffer(slab, 0, 1);
         w.draw(Draw { pipeline: SOLID, inst, ..base });
         w.frame_end(RT, target::TEXTURE);
+        w.buffer_update(slab, stride as u64, &rows[stride..2 * stride]);
         w.frame_begin(n + 1, FrameMeta::default());
         w.pass(Pass { color: [Id::NONE; 4], depth: Id::NONE, load: [pass_load::CLEAR; 5], clear: [[0.0, 0.0, 0.0, 1.0]; 4], viewport: [0.0, 0.0, W as f32, H as f32], dpi: 1.0, ..Default::default() });
         let ids = w.put_ids(&[RT]);
-        let inst = Inst::inline(w.keep(&INSTANCES[1][..]), 1);
+        let inst = Inst::buffer(slab, 1, 1);
         w.draw(Draw { pipeline: SAMPLED, inst, tex: ids, ..base });
         w.frame_end(WIN, target::WINDOW);
     };

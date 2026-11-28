@@ -5,15 +5,15 @@ use crate::backend::apple::media::{external_texture, Sink};
 use super::device::Device;
 use crate::ledger::{Kind, LedgerEntry};
 use crate::session::Session;
+use crate::table::SessionTable;
 use crate::types::*;
 use makepad_apple_sys::*;
 use std::any::Any;
-use crate::FastMap;
 
 /// The texture storage of the Metal backend, as the media module sees it.
 pub struct MetalSink<'a> {
     pub dev: &'a Device,
-    pub tex: &'a mut FastMap<(u32, u32), Tex>,
+    pub tex: &'a mut SessionTable<Tex>,
     pub now: u64,
 }
 
@@ -79,6 +79,7 @@ impl Sink for MetalSink<'_> {
         entry.val.bytes = bytes;
         let tex = Tex {
             gen: id.gen,
+            painted: 0,
             obj: RcObjcId::from_unowned(NonNull::new(mtl).expect("checked")),
             surface: None,
             surface_id: 0,
@@ -86,7 +87,7 @@ impl Sink for MetalSink<'_> {
             _keep: keep,
             msaa: None,
         };
-        if let Some(old) = self.tex.insert((s.id, id.index), tex) {
+        if let Some(old) = self.tex.insert(s.id, id.index, tex) {
             self.dev.retire(Box::new(old));
         }
         self.set_row(s, id, fmt, w, h, bytes);
@@ -116,8 +117,8 @@ impl Sink for MetalSink<'_> {
     }
 
     fn drop_texture(&mut self, s: &mut Session, id: Id) {
-        if self.tex.get(&(s.id, id.index)).is_some_and(|t| t.gen == id.gen) {
-            if let Some(old) = self.tex.remove(&(s.id, id.index)) {
+        if self.tex.get(s.id, id.index).is_some_and(|t| t.gen == id.gen) {
+            if let Some(old) = self.tex.remove(s.id, id.index) {
                 self.dev.retire(Box::new(old));
             }
             if let Some(l) = s.ledger.get_mut(Kind::Texture, id.index).filter(|l| l.gen == id.gen) {

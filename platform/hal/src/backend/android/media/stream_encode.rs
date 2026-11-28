@@ -40,14 +40,10 @@ pub enum Codec {
     H265,
 }
 
-/// How a stream trades bits and latency (the fields Linux's encoder takes; MediaCodec uses the
-/// rate mode).
+/// The bitrate mode requested from MediaCodec.
 #[derive(Clone, Copy, Debug)]
 pub struct Tuning {
-    pub quality: u32,
     pub constant: bool,
-    pub buffer_pictures: u32,
-    pub sharp: bool,
 }
 
 pub struct StreamEncoder {

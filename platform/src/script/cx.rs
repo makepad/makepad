@@ -4,14 +4,20 @@ use crate::*;
 use makepad_script::*;
 
 pub fn script_mod(vm: &mut ScriptVm) {
+    register(vm, true);
+}
+
+pub(super) fn register(vm: &mut ScriptVm, host: bool) {
     let cx = vm.new_module(id_lut!(cx));
 
     set_script_value_to_api!(vm, cx.OsType);
 
-    vm.add_method(cx, id_lut!(quit), script_args_def!(), |vm, _args| {
-        vm.cx_mut().request_quit(QuitReason::App);
-        NIL
-    });
+    if host {
+        vm.add_method(cx, id_lut!(quit), script_args_def!(), |vm, _args| {
+            vm.cx_mut().request_quit(QuitReason::App);
+            NIL
+        });
+    }
 
     vm.add_method(cx, id_lut!(os_type), script_args_def!(), |vm, _args| {
         let os_type = vm.cx().os_type().clone();

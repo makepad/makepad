@@ -82,6 +82,7 @@ impl<I> FrameResults<I> {
     }
 
     /// Lets go of the waiting image (before its reader goes).
+    #[cfg(target_os = "android")]
     pub fn clear(&mut self) { self.pending = None; }
 }
 

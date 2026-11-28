@@ -185,7 +185,7 @@ impl Sealer {
 pub enum OpenError {
     /// Too few bytes to contain both a sequence and a tag.
     Short,
-    /// Already opened, or too old for this opener's window.
+    /// Authenticated under this opener's keys, but already opened or too old for its window.
     Replayed,
     /// Invalid tag, ciphertext beyond the block limit, or a local decryption failure.
     BadTag,
@@ -202,20 +202,21 @@ impl Opener {
         Self { keys, window: ReplayWindow::new(window) }
     }
 
-    /// Checks freshness and the tag without decrypting or recording the sequence.
+    /// Checks the tag and freshness without decrypting or recording the sequence.
+    /// Only an authenticated packet can return `OpenError::Replayed`.
     pub fn verify(&self, aad: &[u8], sealed: &[u8]) -> Result<u64, OpenError> {
         if sealed.len() < SEQ_LEN + TAG_LEN {
             return Err(OpenError::Short);
         }
         let (body, tag) = sealed.split_at(sealed.len() - TAG_LEN);
+        if body.len() - SEQ_LEN > MAX_PLAINTEXT || !crate::tls::constant_time_eq(&self.keys.tag(aad, body), tag) {
+            return Err(OpenError::BadTag);
+        }
         let mut sequence = [0u8; 8];
         sequence[2..].copy_from_slice(&body[..SEQ_LEN]);
         let seq = u64::from_be_bytes(sequence);
         if !self.window.check(seq) {
             return Err(OpenError::Replayed);
-        }
-        if body.len() - SEQ_LEN > MAX_PLAINTEXT || !crate::tls::constant_time_eq(&self.keys.tag(aad, body), tag) {
-            return Err(OpenError::BadTag);
         }
         Ok(seq)
     }
@@ -460,6 +461,26 @@ mod tests {
 
         fn keys(stream: &[u8]) -> SealKeys {
             SealKeys::derive(b"secret", b"call", &[b"sender/", stream]).unwrap()
+        }
+
+        #[test]
+        fn forged_packet_at_seen_sequence_returns_bad_tag_not_replayed() {
+            let mut receiver = Opener::new(keys(b"a"), 128);
+            let mut packet = Vec::new();
+            Sealer::new(keys(b"a")).seal(b"aad", b"sample", &mut packet).unwrap();
+            let mut plain = Vec::new();
+            assert_eq!(receiver.open(b"aad", &packet, &mut plain), Ok(0), "the first packet opens at sequence zero");
+
+            let mut tampered = packet.clone();
+            *tampered.last_mut().unwrap() ^= 1;
+            let mut foreign = Vec::new();
+            Sealer::new(keys(b"b")).seal(b"aad", b"sample", &mut foreign).unwrap();
+            for (kind, bytes) in [("tampered", tampered), ("foreign", foreign)] {
+                assert_eq!(receiver.verify(b"aad", &bytes), Err(OpenError::BadTag), "verify must reject the {kind} tag at zero");
+                assert_eq!(receiver.open(b"aad", &bytes, &mut plain), Err(OpenError::BadTag), "open must reject the {kind} tag at zero");
+            }
+            assert_eq!(receiver.verify(b"aad", &packet), Err(OpenError::Replayed), "verify recognizes the authentic duplicate");
+            assert_eq!(receiver.open(b"aad", &packet, &mut plain), Err(OpenError::Replayed), "open recognizes the authentic duplicate");
         }
 
         #[test]

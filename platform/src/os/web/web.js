@@ -95,7 +95,7 @@ export function makepad_compute_webgl_size(
     };
 }
 
-// GPU safety (local/agent_state/edits/reports/GPU-SAFETY.md). A page may at
+// GPU safety. A page may at
 // worst lose its own context; it must never queue unbounded GPU work, hold a
 // GPU busy for longer than an operating system tolerates, or leak GPU memory
 // unnoticed. Nothing here refuses work or stops drawing, and nothing is a
@@ -199,7 +199,7 @@ export function makepad_gpu_ledger_set(ledger, kind, object, part, bytes) {
     }
     let entry = ledger.objects.get(object);
     if (!entry) {
-        entry = { kind, parts: new Map(), bytes: 0 };
+        entry = { kind, instance_role: object._instance_ledger_role, parts: new Map(), bytes: 0 };
         ledger.objects.set(object, entry);
     }
     const old = entry.parts.get(part) || 0;
@@ -268,13 +268,18 @@ export function makepad_gpu_ledger_forget_all(ledger) {
 
 export function makepad_gpu_ledger_stats(ledger) {
     let textures = 0;
+    let instance_slab_bytes = 0, instance_mirror_bytes = 0;
     for (const entry of ledger.objects.values()) {
         if (entry.kind === "texture") textures += 1;
+        if (entry.instance_role === "slab") instance_slab_bytes += entry.bytes;
+        if (entry.instance_role === "mirror") instance_mirror_bytes += entry.bytes;
     }
     return {
         live_bytes: makepad_gpu_ledger_total(ledger),
         texture_bytes: ledger.bytes.texture,
         buffer_bytes: ledger.bytes.buffer,
+        instance_slab_bytes,
+        instance_mirror_bytes,
         renderbuffer_bytes: ledger.bytes.renderbuffer,
         live_textures: textures,
         peak_bytes: ledger.peak_bytes,

@@ -174,6 +174,8 @@ pub struct SttOptions {
     /// offers the choice (Android). Never forces: an engine without an
     /// offline model still recognizes.
     pub prefer_offline: bool,
+    /// Require recognition on this device. An engine that cannot guarantee it refuses.
+    pub on_device_only: bool,
     /// `transcribe` only: ask for per-segment timing when the engine has it.
     pub timestamps: bool,
 }
@@ -184,6 +186,7 @@ impl Default for SttOptions {
             language: "en".to_string(),
             partial_results: true,
             prefer_offline: true,
+            on_device_only: false,
             timestamps: true,
         }
     }
@@ -259,6 +262,12 @@ pub mod stt {
         platform::stt_available()
     }
 
+    /// Whether the installed OS recognizer supports on-device recognition for this language.
+    /// Probing starts no recognition session and requests no permission.
+    pub fn on_device(language: &str) -> bool {
+        platform::stt_on_device(language)
+    }
+
     pub fn capabilities() -> SttCapabilities {
         platform::stt_capabilities()
     }
@@ -283,6 +292,9 @@ pub mod stt {
     /// `sink` until the utterance ends or the handle is stopped/dropped. The
     /// caller must already hold microphone permission.
     pub fn listen(options: &SttOptions, sink: Sender<SttEvent>) -> Result<ListenHandle, SpeechError> {
+        if options.on_device_only && !on_device(&options.language) {
+            return Err(SpeechError::Unsupported("on-device listening is unavailable for this language"));
+        }
         platform::stt_listen(options, sink)
     }
 }
@@ -429,6 +441,13 @@ mod tests {
         // Availability probes must be safe to call anywhere, any platform.
         let _ = stt::available();
         let _ = tts::available();
+        #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+        {
+            assert!(!stt::on_device("en"), "this backend guarantees no offline recognizer");
+            let options = SttOptions { on_device_only: true, ..Default::default() };
+            assert!(matches!(stt::listen(&options, std::sync::mpsc::channel().0), Err(SpeechError::Unsupported(_))),
+                "strict listening must refuse before opening a microphone");
+        }
         let _ = stt::capabilities();
         let _ = stt::engine_name();
         let _ = tts::engine_name();

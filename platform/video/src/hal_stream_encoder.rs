@@ -12,6 +12,8 @@ use crate::surface::{GpuCompletion, SurfaceHandle};
 use crate::surface::{SurfaceFormat, SurfaceKind};
 use crate::VideoFileError;
 use makepad_hal::stream_encode as hal;
+#[cfg(any(target_os = "android", test))]
+use std::collections::VecDeque;
 #[cfg(target_os = "linux")]
 use std::os::fd::IntoRawFd;
 
@@ -25,6 +27,8 @@ fn last_error() -> VideoFileError {
 pub(crate) struct HalStreamEncoder {
     id: u64,
     hevc: bool,
+    #[cfg(target_os = "android")]
+    pending_pts: VecDeque<i64>,
     key_wanted: bool,
     /// The next texture picture is a refinement (Linux's).
     #[cfg(target_os = "linux")]
@@ -37,15 +41,23 @@ pub(crate) struct HalStreamEncoder {
 impl HalStreamEncoder {
     /// On encode engine `engine` (`EncoderCaps::engines`).
     fn new(options: &VideoStreamEncoderOptions, engine: u32, tuning: StreamTuning) -> Result<Self, VideoFileError> {
-        if cfg!(target_os = "linux") && options.width % 4 != 0 {
-            return Err(VideoFileError::new(format!("stream width {} must be a multiple of 4", options.width)));
-        }
         let flags = if options.full_chroma { hal::FULL_CHROMA } else { 0 } | if options.codec == StreamVideoCodec::Hevc { hal::HEVC } else { 0 } | if tuning.constant_rate { hal::CBR } else { 0 } | if tuning.sharp { hal::SHARP } else { 0 };
         let id = hal::hal_stream_encoder_open(options.width, options.height, options.fps, options.bitrate_kbps, engine, flags, tuning.quality, tuning.buffer_pictures);
         if id == 0 {
             return Err(last_error());
         }
-        Ok(Self { id, hevc: options.codec == StreamVideoCodec::Hevc, key_wanted: true, #[cfg(target_os = "linux")] refine_wanted: false, keyint: options.keyint, since_key: 0, out: Vec::new() })
+        Ok(Self {
+            id,
+            hevc: options.codec == StreamVideoCodec::Hevc,
+            #[cfg(target_os = "android")]
+            pending_pts: VecDeque::new(),
+            key_wanted: true,
+            #[cfg(target_os = "linux")]
+            refine_wanted: false,
+            keyint: options.keyint,
+            since_key: 0,
+            out: Vec::new(),
+        })
     }
 
     fn info(&self) -> String {
@@ -76,14 +88,8 @@ impl HalStreamEncoder {
         let data = std::mem::take(&mut self.out);
         #[cfg(target_os = "android")]
         {
-            // MediaCodec may hand the picture over a call late: none now, and a packet's key-ness
-            // is what it begins with (the HAL puts the parameter sets in front of each key frame)
             let _ = key;
-            if data.is_empty() {
-                return Ok(Vec::new());
-            }
-            let is_key = makepad_hal::stream_pack::starts_with_parameter_set(&data, self.hevc);
-            return Ok(vec![EncodedPacket { data, pts_100ns, is_key }]);
+            return Ok(take_lagged_packet(&mut self.pending_pts, data, pts_100ns, self.hevc));
         }
         #[cfg(not(target_os = "android"))]
         {
@@ -91,6 +97,20 @@ impl HalStreamEncoder {
             Ok(vec![EncodedPacket { data, pts_100ns, is_key: key }])
         }
     }
+}
+
+#[cfg(any(target_os = "android", test))]
+fn take_lagged_packet(pending_pts: &mut VecDeque<i64>, data: Vec<u8>, pts_100ns: i64, hevc: bool) -> Vec<EncodedPacket> {
+    if data.is_empty() {
+        // MediaCodec keeps at most one picture back, so only this push is still buffered.
+        pending_pts.clear();
+        pending_pts.push_back(pts_100ns);
+        return Vec::new();
+    }
+    pending_pts.push_back(pts_100ns);
+    let pts_100ns = pending_pts.pop_front().unwrap_or(pts_100ns);
+    let is_key = makepad_hal::stream_pack::starts_with_parameter_set(&data, hevc);
+    vec![EncodedPacket { data, pts_100ns, is_key }]
 }
 
 impl StreamEncoderOs for HalStreamEncoder {
@@ -188,5 +208,41 @@ impl StreamEncoderOs for HalStreamEncoder {
 impl Drop for HalStreamEncoder {
     fn drop(&mut self) {
         hal::hal_stream_encoder_close(self.id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lagged_android_packets_keep_queued_pts_and_key_flag() {
+        let key_au = &[0, 0, 0, 1, 0x67, 1, 0, 0, 0, 1, 0x65, 2];
+        let p_au = &[0, 0, 0, 1, 0x41, 3];
+        let hevc_vps_au = &[0, 0, 0, 1, 0x40, 1];
+
+        let mut pending_pts = VecDeque::new();
+        let mut check = |data: &[u8], pts, hevc, expected: &[(i64, bool)], queued: &[i64]| {
+            let packets = take_lagged_packet(&mut pending_pts, data.to_vec(), pts, hevc);
+            let emitted: Vec<_> = packets.iter().map(|p| (p.pts_100ns, p.is_key)).collect();
+            assert_eq!(emitted, expected, "packet timestamp and key flag on push {pts}");
+            assert!(pending_pts.iter().copied().eq(queued.iter().copied()), "queued timestamps on push {pts}: {pending_pts:?}");
+        };
+
+        check(key_au, 100, false, &[(100, true)], &[]);
+        check(p_au, 200, false, &[(200, false)], &[]);
+
+        check(&[], 100, false, &[], &[100]);
+        check(key_au, 200, false, &[(100, true)], &[200]);
+        check(p_au, 300, false, &[(200, false)], &[300]);
+        // Push 400 failed before take_lagged_packet, leaving 300 buffered.
+        check(p_au, 500, false, &[(300, false)], &[500]);
+        check(key_au, 600, false, &[(500, true)], &[600]);
+        // An empty success after a failed input drained 600 replaces the stale timestamp.
+        check(&[], 700, false, &[], &[700]);
+        check(key_au, 800, false, &[(700, true)], &[800]);
+
+        check(&[], 1000, true, &[], &[1000]);
+        check(hevc_vps_au, 2000, true, &[(1000, true)], &[2000]);
     }
 }

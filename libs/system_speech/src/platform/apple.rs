@@ -183,6 +183,28 @@ unsafe fn release(obj: ObjcId) {
     }
 }
 
+// initWithLocale: may fall back to a different locale. Check the recognizer we actually got.
+unsafe fn supports_language_on_device(recognizer: ObjcId, language: &str) -> bool {
+    if recognizer.is_null() || !responds(recognizer, sel!(supportsOnDeviceRecognition)) {
+        return false;
+    }
+    let supported: BOOL = msg_send![recognizer, supportsOnDeviceRecognition];
+    let locale: ObjcId = msg_send![recognizer, locale];
+    let identifier: ObjcId = msg_send![locale, localeIdentifier];
+    supported != NO && rust_string(identifier).replace('_', "-").eq_ignore_ascii_case(language)
+}
+
+pub(crate) fn stt_on_device(language: &str) -> bool {
+    let _pool = Pool::new();
+    let language = bcp47(language);
+    unsafe {
+        let recognizer = make_recognizer(&language);
+        let supported = supports_language_on_device(recognizer, &language);
+        release(recognizer);
+        supported
+    }
+}
+
 pub(crate) fn stt_prepare(language: &str) -> Result<(), SpeechError> {
     let _pool = Pool::new();
     unsafe {
@@ -211,6 +233,10 @@ pub(crate) fn stt_transcribe(samples_16k: &[f32], options: &SttOptions) -> Resul
     let want_timestamps = options.timestamps;
     unsafe {
         let recognizer = make_recognizer(&language);
+        if options.on_device_only && !supports_language_on_device(recognizer, &language) {
+            release(recognizer);
+            return Err(SpeechError::Unsupported("on-device recognition is unavailable for this language"));
+        }
         if recognizer.is_null() {
             return Err(SpeechError::Backend("apple stt transcribe failed (-2)".to_string()));
         }
@@ -233,7 +259,7 @@ pub(crate) fn stt_transcribe(samples_16k: &[f32], options: &SttOptions) -> Resul
         let request: ObjcId = msg_send![class!(SFSpeechAudioBufferRecognitionRequest), alloc];
         let request: ObjcId = msg_send![request, init];
         let on_device: BOOL = msg_send![recognizer, supportsOnDeviceRecognition];
-        if on_device != NO {
+        if options.on_device_only || on_device != NO {
             let _: () = msg_send![request, setRequiresOnDeviceRecognition: YES];
         }
         let _: () = msg_send![request, setShouldReportPartialResults: NO];

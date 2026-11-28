@@ -296,7 +296,8 @@ fn set_gl_payloads(mapping: &mut CxDrawShaderMapping, output: &crate::makepad_sc
 
 fn gl_payload(mapping: &CxDrawShaderMapping, sources: &crate::makepad_script::shader_ir_glsl::GlslDrawSources, pick: bool) -> Result<Vec<u8>, String> {
     use crate::makepad_script::shader::{SamplerAddress, SamplerCoord, SamplerFilter, TextureType};
-    use makepad_hal::glsl::{Attribute, GlslPipeline, Texture};
+    use crate::makepad_script::makepad_shader::shader_output::{pick_twin_name, glsl_texture_uniform_name, GLSL_STAGE_FRAGMENT};
+    use makepad_hal::glsl::{Attribute, GlslPipeline, PickTwin, Texture};
     let info = sources.info();
     let mut attributes = Vec::new();
     for (instance, inputs, prefix) in [(false, &mapping.geometries, "geom"), (true, &mapping.instances, "inst")] {
@@ -324,22 +325,33 @@ fn gl_payload(mapping: &CxDrawShaderMapping, sources: &crate::makepad_script::sh
     let mut blocks: Vec<String> = ["draw_callUniforms", "passUniforms", "draw_listUniforms", "userUniforms", "liveUniforms"]
         .into_iter().map(str::to_owned).collect();
     blocks.extend(mapping.uniform_buffers.iter().map(|b| b.block_name.clone()));
-    let textures = mapping.textures.iter().enumerate().map(|(i, t)| {
+    let mut textures = Vec::with_capacity(mapping.glsl_texture_bindings.len());
+    let mut pick_twins = Vec::new();
+    let mut twin_mask = 0u32;
+    for b in &mapping.glsl_texture_bindings {
+        let t = mapping.textures.get(b.texture_slot as usize).ok_or("invalid GLES texture slot")?;
         let shape = match t.tex_type {
             TextureType::Texture2d | TextureType::TextureVideo => 0, TextureType::TextureCube => 1,
             TextureType::Texture3d => makepad_hal::TEXTURE_SHAPE_3D, TextureType::Texture2dArray => 2, TextureType::TextureDepth => 3, TextureType::TextureDepthArray => 4,
             _ => return Err("unsupported GLES texture shape".to_owned()),
         };
-        let sampler = mapping.texture_sampler_indices.get(i).and_then(|i| mapping.samplers.get(*i)).map_or(
-            makepad_hal::spirv::SpirvSampler { filter: 1, address: 1, compare: matches!(shape, 3 | 4), pixel: false, anisotropy: 1 },
-            |s| makepad_hal::spirv::SpirvSampler {
-                filter: if s.filter == SamplerFilter::Nearest { 0 } else { 1 },
-                address: match s.address { SamplerAddress::Repeat => 0, SamplerAddress::ClampToEdge => 1, SamplerAddress::ClampToZero => 2, SamplerAddress::MirroredRepeat => 3 },
-                compare: s.compare, pixel: s.coord == SamplerCoord::Pixel, anisotropy: s.anisotropy as u32,
-            });
-        Ok(Texture { name: format!("tex_{}", t.id), shape, sampler })
-    }).collect::<Result<Vec<_>, String>>()?;
-    Ok(GlslPipeline { vertex: sources.vertex().to_owned(), fragment: sources.fragment().to_owned(), blocks, attributes, textures,
+        let s = mapping.samplers.get(b.sampler_index as usize).ok_or("invalid GLES sampler index")?;
+        let sampler = makepad_hal::spirv::SpirvSampler {
+            filter: if s.filter == SamplerFilter::Nearest { 0 } else { 1 },
+            address: match s.address { SamplerAddress::Repeat => 0, SamplerAddress::ClampToEdge => 1, SamplerAddress::ClampToZero => 2, SamplerAddress::MirroredRepeat => 3 },
+            compare: s.compare, pixel: s.coord == SamplerCoord::Pixel, anisotropy: s.anisotropy as u32,
+        };
+        textures.push(Texture { name: b.uniform_name.clone(), slot: b.texture_slot, shape, stages: b.stages, sampler });
+        // A size/load-only fragment binding can have no twin at link time.
+        if pick && t.tex_type == TextureType::Texture2d && b.stages & GLSL_STAGE_FRAGMENT != 0 && b.texture_slot < 32 {
+            let bit = 1u32 << b.texture_slot;
+            if twin_mask & bit == 0 {
+                pick_twins.push(PickTwin { name: pick_twin_name(&glsl_texture_uniform_name(t.id, 0)), slot: b.texture_slot });
+                twin_mask |= bit;
+            }
+        }
+    }
+    Ok(GlslPipeline { vertex: sources.vertex().to_owned(), fragment: sources.fragment().to_owned(), blocks, attributes, textures, pick_twins,
         vertex_stride: mapping.geometry_stride_bytes() as u32,
         instance_stride: mapping.instances.total_slots as u32 * 4,
         instance_texture: info.instance_fetch_from.is_some(), pick }.encode())

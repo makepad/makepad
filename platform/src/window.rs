@@ -9,7 +9,7 @@ use crate::{
     //makepad_live_id::*,
     makepad_script::*,
     screen::{sanitize_window_geom, DEFAULT_WINDOW_SIZE},
-    script::vm::*,
+    script::{vm::*, HostGrants},
 };
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -461,8 +461,9 @@ impl WindowHandle {
         cxwindow.uses_client_side_decorations = false;
         cxwindow.wayland_is_fullscreen = false;
         cxwindow.draws_chrome_buttons = false;
-        cx.platform_ops
-            .push_back(CxOsOp::CreateWindow(window.window_id()));
+        if cx.script_data.std.has_grant(HostGrants::DESKTOP_SHELL) {
+            cx.platform_ops.push_back(CxOsOp::CreateWindow(window.window_id()));
+        }
         window
     }
 
@@ -472,6 +473,9 @@ impl WindowHandle {
     /// This only affects a surface that has not been created yet and never
     /// closes an existing native window.
     pub fn cancel_initial_create(&self, cx: &mut Cx) -> bool {
+        if !cx.script_data.std.has_grant(HostGrants::DESKTOP_SHELL) {
+            return false;
+        }
         let window_id = self.window_id();
         if cx.windows[window_id].is_created {
             return false;
@@ -509,13 +513,15 @@ impl WindowHandle {
             cxwindow.draws_chrome_buttons = false;
             cxwindow.popup_grab_keyboard
         };
-        cx.platform_ops.push_back(CxOsOp::CreatePopupWindow {
-            window_id,
-            parent_window_id: parent,
-            position,
-            size,
-            grab_keyboard,
-        });
+        if cx.script_data.std.has_grant(HostGrants::DESKTOP_SHELL) {
+            cx.platform_ops.push_back(CxOsOp::CreatePopupWindow {
+                window_id,
+                parent_window_id: parent,
+                position,
+                size,
+                grab_keyboard,
+            });
+        }
         window
     }
 }
@@ -627,7 +633,7 @@ impl ScriptHook for ScriptWindowHandle {
             cx.windows[window_id].transparent = visuals.transparent;
             cx.windows[window_id].backdrop = visuals.backdrop;
             cx.windows[window_id].backdrop_intensity = visuals.backdrop_intensity;
-            if cx.windows[window_id].is_created {
+            if cx.windows[window_id].is_created && cx.script_data.std.has_grant(HostGrants::DESKTOP_SHELL) {
                 cx.push_unique_platform_op(CxOsOp::SetWindowVisuals(window_id, visuals));
             }
         }
@@ -642,6 +648,9 @@ impl ScriptHook for ScriptWindowHandle {
 
 impl WindowHandle {
     pub fn set_title(&self, cx: &mut Cx, title: String) {
+        if !cx.script_data.std.has_grant(HostGrants::DESKTOP_SHELL) {
+            return;
+        }
         let title = crate::window::badge_window_title(title);
         let window_id = self.window_id();
         if cx.windows[window_id].create_title == title {
@@ -694,6 +703,9 @@ impl WindowHandle {
     /// re-places it. Creates the window the first time. Where the desktop has no tray
     /// (`Cx::has_tray` false) it shows the window where the window system puts it.
     pub fn show_at_tray(&mut self, cx: &mut Cx, tray: LiveId, size: Vec2d) {
+        if !cx.script_data.std.has_grant(HostGrants::DESKTOP_SHELL) {
+            return;
+        }
         let id = self.window_id();
         if !cx.windows[id].is_created && !cx.platform_ops.iter().any(|op| matches!(op, CxOsOp::CreateWindow(w) if *w == id)) {
             cx.windows[id].create_inner_size = Some(size);
@@ -738,18 +750,30 @@ impl WindowHandle {
     }
 
     pub fn minimize(&mut self, cx: &mut Cx) {
+        if !cx.script_data.std.has_grant(HostGrants::DESKTOP_SHELL) {
+            return;
+        }
         cx.push_unique_platform_op(CxOsOp::MinimizeWindow(self.window_id()));
     }
 
     pub fn maximize(&mut self, cx: &mut Cx) {
+        if !cx.script_data.std.has_grant(HostGrants::DESKTOP_SHELL) {
+            return;
+        }
         cx.push_unique_platform_op(CxOsOp::MaximizeWindow(self.window_id()));
     }
 
     pub fn fullscreen(&mut self, cx: &mut Cx) {
+        if !cx.script_data.std.has_grant(HostGrants::DESKTOP_SHELL) {
+            return;
+        }
         cx.push_unique_platform_op(CxOsOp::FullscreenWindow(self.window_id()));
     }
 
     pub fn normal(&mut self, cx: &mut Cx) {
+        if !cx.script_data.std.has_grant(HostGrants::DESKTOP_SHELL) {
+            return;
+        }
         cx.push_unique_platform_op(CxOsOp::NormalizeWindow(self.window_id()));
     }
 
@@ -793,6 +817,9 @@ impl WindowHandle {
     }
 
     pub fn set_topmost(&mut self, cx: &mut Cx, set_topmost: bool) {
+        if !cx.script_data.std.has_grant(HostGrants::DESKTOP_SHELL) {
+            return;
+        }
         cx.push_unique_platform_op(CxOsOp::SetTopmost(self.window_id(), set_topmost));
     }
 
@@ -802,6 +829,9 @@ impl WindowHandle {
     /// clean fullscreen picture (a projector output, say) rather than a
     /// decorated window pinned to the screen. Other backends ignore it.
     pub fn set_chromeless_when_maximized(&mut self, cx: &mut Cx, chromeless: bool) {
+        if !cx.script_data.std.has_grant(HostGrants::DESKTOP_SHELL) {
+            return;
+        }
         cx.push_unique_platform_op(CxOsOp::SetChromelessWhenMaximized(
             self.window_id(),
             chromeless,
@@ -809,6 +839,9 @@ impl WindowHandle {
     }
 
     pub fn set_window_visuals(&mut self, cx: &mut Cx, visuals: WindowVisuals) {
+        if !cx.script_data.std.has_grant(HostGrants::DESKTOP_SHELL) {
+            return;
+        }
         let visuals = visuals.normalized();
         let window_id = self.window_id();
         if cx.windows[window_id].window_visuals() != visuals {
@@ -840,6 +873,9 @@ impl WindowHandle {
     }
 
     pub fn resize(&self, cx: &mut Cx, size: Vec2d) {
+        if !cx.script_data.std.has_grant(HostGrants::DESKTOP_SHELL) {
+            return;
+        }
         cx.push_unique_platform_op(CxOsOp::ResizeWindow(self.window_id(), size));
     }
 
@@ -850,10 +886,16 @@ impl WindowHandle {
     /// has no single factor to be logical in. Backends fit the request to the displays that
     /// are actually attached, so a window cannot be placed where it could not be reached.
     pub fn reposition(&self, cx: &mut Cx, position: Vec2d) {
+        if !cx.script_data.std.has_grant(HostGrants::DESKTOP_SHELL) {
+            return;
+        }
         cx.push_unique_platform_op(CxOsOp::RepositionWindow(self.window_id(), position));
     }
 
     pub fn restore(&mut self, cx: &mut Cx) {
+        if !cx.script_data.std.has_grant(HostGrants::DESKTOP_SHELL) {
+            return;
+        }
         cx.push_unique_platform_op(CxOsOp::RestoreWindow(self.window_id()));
     }
 
@@ -862,6 +904,9 @@ impl WindowHandle {
     /// it without asking.
     #[track_caller]
     pub fn request_close(&mut self, cx: &mut Cx) {
+        if !cx.script_data.std.has_grant(HostGrants::DESKTOP_SHELL) {
+            return;
+        }
         crate::log!("window {}: the app asks to close it at {}{}", self.window_id().id(), std::panic::Location::caller(), injected_note(cx));
         cx.push_unique_platform_op(CxOsOp::RequestCloseWindow(self.window_id()));
     }
@@ -870,6 +915,9 @@ impl WindowHandle {
     /// ask for is then the app's, 11-06).
     #[track_caller]
     pub fn close(&mut self, cx: &mut Cx) {
+        if !cx.script_data.std.has_grant(HostGrants::DESKTOP_SHELL) {
+            return;
+        }
         if !cx.windows[self.window_id()].is_popup {
             crate::log!("window {}: the app closes it at {}{}", self.window_id().id(), std::panic::Location::caller(), injected_note(cx));
         }
@@ -880,6 +928,9 @@ impl WindowHandle {
     /// again in front like `set_visible(cx, true)`. A tray app makes its regular window this way
     /// when the person asks for it.
     pub fn show(&mut self, cx: &mut Cx) {
+        if !cx.script_data.std.has_grant(HostGrants::DESKTOP_SHELL) {
+            return;
+        }
         let id = self.window_id();
         if !cx.windows[id].is_created {
             if !cx.platform_ops.iter().any(|op| matches!(op, CxOsOp::CreateWindow(w) if *w == id)) {
@@ -894,6 +945,9 @@ impl WindowHandle {
     /// shows it again in front of the others with the app activated. A tray app hides its
     /// window on `WindowCloseRequested` (`accept_close.set(false)`) and shows it from its menu.
     pub fn set_visible(&mut self, cx: &mut Cx, visible: bool) {
+        if !cx.script_data.std.has_grant(HostGrants::DESKTOP_SHELL) {
+            return;
+        }
         let id = self.window_id();
         cx.platform_ops.retain(|op| !matches!(op, CxOsOp::HideWindow(w) | CxOsOp::ShowWindow(w) | CxOsOp::ShowWindowAtTray(w, ..) if *w == id));
         cx.platform_ops.push_back(if visible { CxOsOp::ShowWindow(id) } else { CxOsOp::HideWindow(id) });
@@ -1776,6 +1830,7 @@ mod tests {
 
     /// Input a command injects says who sent it to what it reaches (a window's close or caption
     /// button), the inner scope's sender while it lasts; the window system's input says nothing.
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn injected_input_names_its_sender() {
         let cx = test_cx();

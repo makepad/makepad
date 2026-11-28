@@ -438,6 +438,7 @@ impl State {
 /// The process's Vulkan device was replaced after a loss: the copier and every import made on
 /// the old one are dropped; the next copy makes them again on the new device (the registered
 /// descriptors are kept).
+#[relax_api::relax_api(loader = "the HAL's Vulkan backend replaced its device: JIT code has no use for it")]
 pub fn device_replaced() {
     let mut state = lock(&STATE);
     if let Some(state) = state.as_mut() {
@@ -448,6 +449,7 @@ pub fn device_replaced() {
 }
 
 /// Name an image for the copies below (the descriptor is kept until `release`).
+#[relax_api::relax_api(loader = "the HAL's DMA-BUF registry: JIT code registers, reads and releases images with the `hal_dmabuf_*` ops")]
 pub fn register(fd: OwnedFd, layout: Layout) -> u64 {
     let mut state = lock(&STATE);
     let state = state.get_or_insert_with(State::default);
@@ -457,12 +459,14 @@ pub fn register(fd: OwnedFd, layout: Layout) -> u64 {
     handle
 }
 
+#[relax_api::relax_api(loader = "the HAL's DMA-BUF registry: JIT code registers, reads and releases images with the `hal_dmabuf_*` ops")]
 pub fn release(handle: u64) {
     if let Some(state) = lock(&STATE).as_mut() {
         state.registered.remove(&handle);
     }
 }
 
+#[relax_api::relax_api(loader = "the HAL's DMA-BUF registry: JIT code registers, reads and releases images with the `hal_dmabuf_*` ops")]
 pub fn layout(handle: u64) -> Option<Layout> {
     lock(&STATE).as_ref()?.registered.get(&handle).map(|r| r.layout)
 }
@@ -470,7 +474,7 @@ pub fn layout(handle: u64) -> Option<Layout> {
 /// Copy the foreign image `src` into the registered image `dst` (its top-left; the smaller
 /// size of the two) and read back the probes' pixels of `src`. Waits for the GPU: `src` may be
 /// reused by its owner as soon as this returns.
-pub fn copy(src: BorrowedFd<'_>, src_layout: Layout, dst: u64, probes: &[[u32; 2]]) -> Result<Vec<[u8; 4]>, String> {
+pub(crate) fn copy(src: BorrowedFd<'_>, src_layout: Layout, dst: u64, probes: &[[u32; 2]]) -> Result<Vec<[u8; 4]>, String> {
     with_state(|state| {
         state.registered(dst)?;
         let at = state.foreign(src, src_layout)?;
@@ -482,7 +486,7 @@ pub fn copy(src: BorrowedFd<'_>, src_layout: Layout, dst: u64, probes: &[[u32; 2
 
 /// Write BGRA rows (`stride` bytes apart) of a `width` x `height` picture into the registered
 /// image `dst` (its top-left).
-pub fn upload(dst: u64, pixels: &[u8], width: u32, height: u32, stride: usize) -> Result<(), String> {
+pub(crate) fn upload(dst: u64, pixels: &[u8], width: u32, height: u32, stride: usize) -> Result<(), String> {
     with_state(|state| {
         state.registered(dst)?;
         let State { copier, registered, .. } = state;
@@ -506,6 +510,7 @@ pub(crate) fn registered_image(handle: u64) -> Result<(Arc<Imported>, [u32; 2]),
 }
 
 /// The registered image's pixels in `region` (x, y, width, height), BGRA, tightly packed.
+#[relax_api::relax_api(loader = "the HAL's DMA-BUF registry: JIT code registers, reads and releases images with the `hal_dmabuf_*` ops")]
 pub fn read(handle: u64, region: [u32; 4]) -> Result<Vec<u8>, String> {
     with_state(|state| {
         state.registered(handle)?;

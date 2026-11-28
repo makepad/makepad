@@ -44,6 +44,7 @@ pub(super) fn key_changed(on: bool) {
 
 /// Right before a restart as a new process (any thread): the environment that puts the restarted run's
 /// window where this process's first window is in the stacking, with its focus.
+#[relax_api::relax_api(loader = "the loader hands its window stack to the next image at its exec: JIT code has no use for it")]
 pub fn handover() -> Vec<(String, String)> {
     let number = WINDOW.load(Ordering::Acquire);
     if number <= 0 {

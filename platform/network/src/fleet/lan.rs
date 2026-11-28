@@ -14,7 +14,7 @@ pub fn is_private_lan(ip: IpAddr) -> bool {
 
 /// Whether a datagram from `ip` is from this network: a private LAN address,
 /// link-local, or this machine (loopback). The rule for whom a fleet
-/// listener ANSWERS (a Sandbox room's probe responder); binding stays
+/// listener ANSWERS (a game room's probe responder); binding stays
 /// [`check_lan_bind`].
 pub fn is_lan_peer(ip: IpAddr) -> bool {
     match ip {

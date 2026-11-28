@@ -8,7 +8,7 @@
 //! carries. A `submit` completion raises the UI signal, so the handle can be
 //! polled on `Event::Signal`; makepad's own jobs use `submit_internal`, whose
 //! completion only wakes the runtime. Three FIFO classes share the process CPU
-//! budget with compiler work; cooperative checkpoints give higher classes room.
+//! budget. Cooperative checkpoints give higher classes room.
 //!
 //! [`ThreadSpawner::spawn_worker`] creates a dedicated long-lived thread — an
 //! audio, decode or network loop fed over a channel — once at start-up. It is
@@ -32,15 +32,18 @@ use {
         any::Any,
         collections::{HashMap, VecDeque},
         fmt,
+        future::Future,
         num::NonZeroUsize,
         ops::Range,
         panic::{catch_unwind, AssertUnwindSafe},
+        pin::Pin,
         sync::{
             atomic::{
                 AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering,
             },
             Arc, Condvar, Mutex, OnceLock, Weak,
         },
+        task::{Context, Poll, Waker},
         thread::ThreadId,
         time::Duration,
     },
@@ -404,43 +407,55 @@ impl<T> TaskHandle<T> {
     pub fn priority_status(&self) -> PriorityStatus {
         PriorityStatus::load(&self.priority_status)
     }
+}
 
-    #[allow(dead_code)]
-    fn completed(ui_thread: ThreadId, result: Result<T, TaskError>) -> Self {
-        let state = Arc::new(TaskState::default());
-        state.complete(result);
-        Self {
-            state,
-            token: CancellationToken::new(),
-            ui_thread,
-            priority_status: priority_state(PriorityStatus::BestEffortUnsupported),
-            #[cfg(not(target_arch = "wasm32"))]
-            native_join: None,
+const FRAME_JOBS_INLINE: bool = cfg!(all(target_arch = "wasm32", not(target_feature = "atomics")));
+
+struct FrameTurns {
+    frame: u64,
+    ran: bool,
+    previous_wait: u64,
+    longest_wait: u64,
+}
+
+impl FrameTurns {
+    fn take(&mut self, last_turn: &mut Option<u64>) -> bool {
+        let last = last_turn.get_or_insert(self.frame.wrapping_sub(1));
+        let waited = self.frame.wrapping_sub(*last);
+        // Last frame's oldest refused job has now waited one more frame.
+        // A repeat poll of this frame's winner has waited zero.
+        if !self.ran && waited > self.previous_wait {
+            self.ran = true;
+            *last = self.frame;
+            true
+        } else {
+            self.longest_wait = self.longest_wait.max(waited);
+            false
         }
     }
 }
 
-// The page profile without threads (wasm32 without atomics): no worker
-// exists, so a [`FrameJob`] runs on the UI thread, one per display frame.
-#[cfg(all(target_arch = "wasm32", not(target_feature = "atomics")))]
 std::thread_local! {
-    static FRAME_JOB_RAN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FRAME_TURNS: std::cell::RefCell<FrameTurns> = const {
+        std::cell::RefCell::new(FrameTurns { frame: 0, ran: false, previous_wait: 0, longest_wait: 0 })
+    };
 }
 
-/// A display frame starts: the next deferred [`FrameJob`] may run. The web
-/// platform calls this at every animation frame; with threads it does nothing.
+/// Begin a display frame for inline frame jobs on this thread. The web
+/// platform calls this at every animation frame.
 pub fn frame_jobs_new_frame() {
-    #[cfg(all(target_arch = "wasm32", not(target_feature = "atomics")))]
-    FRAME_JOB_RAN.with(|ran| ran.set(false));
+    FRAME_TURNS.with_borrow_mut(|turns| {
+        turns.frame = turns.frame.wrapping_add(1);
+        turns.ran = false;
+        turns.previous_wait = std::mem::take(&mut turns.longest_wait);
+    });
 }
 
-/// A job on the pool ([`TaskPool::submit_frame_job`]), with
-/// [`TaskHandle`]'s polling. Natively and in a threaded web build it is a
-/// pool task. Without workers (a single-threaded web build) it runs on the
-/// UI thread when its result is first asked for (`try_take`,
-/// `is_finished`), one job per display frame ([`frame_jobs_new_frame`]):
-/// a page that loads many keeps drawing between them. Poll it from a
-/// frame-driven path, since a deferred job only runs when polled.
+/// A one-shot or stepped job with [`TaskHandle`]'s polling. On a page without
+/// workers or a pool configured for inline frame jobs, poll it from a
+/// frame-driven path. Across all inline jobs on that thread, the first eligible
+/// `try_take` or `is_finished` poll runs one step per display frame
+/// ([`frame_jobs_new_frame`]).
 #[must_use = "dropping a frame job cancels or detaches it"]
 pub struct FrameJob<T> {
     inner: FrameJobInner<T>,
@@ -448,12 +463,11 @@ pub struct FrameJob<T> {
 
 enum FrameJobInner<T> {
     /// A pool task (natively and in a threaded web build).
-    #[cfg_attr(all(target_arch = "wasm32", not(target_feature = "atomics")), allow(dead_code))]
-    Task(TaskHandle<T>),
-    /// Not run yet, or run and not taken (the page without threads).
-    #[cfg_attr(not(all(target_arch = "wasm32", not(target_feature = "atomics"))), allow(dead_code))]
+    Task { task: TaskHandle<T>, cancel_on_drop: bool },
+    /// Created and polled on the thread driving the inline frames.
     Later {
-        job: Option<Box<dyn FnOnce() -> T + Send>>,
+        future: Option<Pin<Box<dyn Future<Output = T>>>>,
+        last_turn: Option<u64>,
         result: Option<Result<T, TaskError>>,
         token: CancellationToken,
     },
@@ -462,38 +476,57 @@ enum FrameJobInner<T> {
 impl<T> fmt::Debug for FrameJob<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.inner {
-            FrameJobInner::Task(task) => task.fmt(f),
-            FrameJobInner::Later { job, .. } => f.debug_struct("FrameJob").field("ran", &job.is_none()).finish(),
+            FrameJobInner::Task { task, .. } => task.fmt(f),
+            FrameJobInner::Later { future, .. } => f.debug_struct("FrameJob").field("finished", &future.is_none()).finish(),
         }
     }
 }
 
 impl<T> FrameJob<T> {
-    /// Run a deferred job here when this frame's turn is free.
+    fn later<Fut>(start: impl FnOnce() -> Fut + Send + 'static) -> Self
+    where
+        Fut: Future<Output = T> + 'static,
+    {
+        Self {
+            inner: FrameJobInner::Later {
+                future: Some(Box::pin(async move { start().await })),
+                last_turn: None,
+                result: None,
+                token: CancellationToken::new(),
+            },
+        }
+    }
+
+    fn later_once(f: impl FnOnce() -> T + Send + 'static) -> Self where T: 'static {
+        Self::later(move || async move { f() })
+    }
+
+    /// Run one deferred step here when this frame's turn is free.
     fn run_due(&mut self) {
-        let FrameJobInner::Later { job, result, token } = &mut self.inner else { return };
-        if job.is_none() {
-            return;
-        }
-        if token.is_cancelled() {
-            *job = None;
-            *result = Some(Err(TaskError::Cancelled));
-            return;
-        }
-        #[cfg(all(target_arch = "wasm32", not(target_feature = "atomics")))]
-        if FRAME_JOB_RAN.with(|ran| ran.replace(true)) {
-            return;
-        }
-        let f = job.take().unwrap();
-        *result = Some(catch_unwind(AssertUnwindSafe(f)).map_err(|payload| TaskError::Panicked(panic_report(payload))));
+        let FrameJobInner::Later { future, last_turn, result, token } = &mut self.inner else { return };
+        let Some(next) = future.as_mut() else { return };
+        let answer = if token.is_cancelled() {
+            Err(TaskError::Cancelled)
+        } else {
+            if !FRAME_TURNS.with_borrow_mut(|turns| turns.take(last_turn)) {
+                return;
+            }
+            match catch_unwind(AssertUnwindSafe(|| next.as_mut().poll(&mut Context::from_waker(Waker::noop())))) {
+                Ok(Poll::Pending) => return,
+                Ok(Poll::Ready(value)) => Ok(value),
+                Err(payload) => Err(TaskError::Panicked(panic_report(payload))),
+            }
+        };
+        *future = None;
+        *result = Some(answer);
     }
 
     /// Whether the result is there (a deferred job runs here if it may).
     pub fn is_finished(&mut self) -> bool {
         self.run_due();
         match &self.inner {
-            FrameJobInner::Task(task) => task.is_finished(),
-            FrameJobInner::Later { job, .. } => job.is_none(),
+            FrameJobInner::Task { task, .. } => task.is_finished(),
+            FrameJobInner::Later { future, .. } => future.is_none(),
         }
     }
 
@@ -501,22 +534,30 @@ impl<T> FrameJob<T> {
     pub fn try_take(&mut self) -> Option<Result<T, TaskError>> {
         self.run_due();
         match &mut self.inner {
-            FrameJobInner::Task(task) => task.try_take(),
+            FrameJobInner::Task { task, .. } => task.try_take(),
             FrameJobInner::Later { result, .. } => result.take(),
         }
     }
 
     pub fn cancel(&self) {
         match &self.inner {
-            FrameJobInner::Task(task) => task.cancel(),
+            FrameJobInner::Task { task, .. } => task.cancel(),
             FrameJobInner::Later { token, .. } => token.cancel(),
         }
     }
 
     pub fn token(&self) -> CancellationToken {
         match &self.inner {
-            FrameJobInner::Task(task) => task.token(),
+            FrameJobInner::Task { task, .. } => task.token(),
             FrameJobInner::Later { token, .. } => token.clone(),
+        }
+    }
+}
+
+impl<T> Drop for FrameJob<T> {
+    fn drop(&mut self) {
+        if let FrameJobInner::Task { task, cancel_on_drop: true } = &self.inner {
+            if !task.is_finished() { task.cancel(); }
         }
     }
 }
@@ -723,10 +764,13 @@ fn map_spawn_io_error(error: std::io::Error) -> SpawnError {
     }
 }
 
+/// The machine's cores ([`makepad_cpu_budget::machine_cores`]: what the OS shows the process, or
+/// the machine its run was told, `MAKEPAD_MACHINE_CORES`, where a CPU quota at its start would
+/// size it for its whole life).
 pub fn available_parallelism() -> NonZeroUsize {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        std::thread::available_parallelism().unwrap_or(NonZeroUsize::new(1).unwrap())
+        NonZeroUsize::new(makepad_cpu_budget::machine_cores()).unwrap_or(NonZeroUsize::new(1).unwrap())
     }
     #[cfg(target_arch = "wasm32")]
     {
@@ -1031,6 +1075,12 @@ impl Cx {
         self.task_pool = std::cell::OnceCell::from(TaskPool::closed());
     }
 
+    /// Configure this Cx before taking pool handles to drive their frame jobs inline. Call
+    /// [`frame_jobs_new_frame`] at the start of each display frame.
+    pub fn use_inline_frame_jobs(&mut self) {
+        self.task_pool = std::cell::OnceCell::from(self.task_pool().with_inline_frame_jobs());
+    }
+
     /// From now on this Cx's pool is one of its own: one worker on a CPU budget of its own, so
     /// what it reads of its pool (`/settled`) is its own jobs alone. The process's app pool is
     /// every Cx's, and so every test's in one process.
@@ -1256,10 +1306,9 @@ pub fn current_class() -> Option<Class> {
 }
 
 /// A job that takes task after task (a crew's helper) gives its worker back at its next task
-/// boundary: a job of a higher class waits for a place in this worker's pool, or for this job's
-/// CPU permit (of a higher class, or the JIT's below its floor while the machine is full:
-/// that one wait ends with the floor met), or, for a scope's
-/// job, another job of its class waits while its scope holds more than its part of the workers.
+/// boundary when a higher class waits in its pool or for a CPU permit, or the budget is over its
+/// cores. A scope's job also gives way if another job of its class waits while its scope holds
+/// more than its share of the workers.
 /// Fan-out helpers leave at an item boundary so the next job can use this thread.
 pub fn worker_wanted() -> bool {
     let Some((class, should_yield)) = JOB.with(|j| j.borrow().as_ref().map(|j| (j.class, j.should_yield()))) else {
@@ -1269,8 +1318,7 @@ pub fn worker_wanted() -> bool {
 }
 
 /// The pool's half of [`worker_wanted`]: a job of a higher class than `class` waits in the calling
-/// worker's pool. The permit's half answers for the job's budget, which the app pool shares
-/// with the JIT's compiles.
+/// worker's pool. The permit's half answers for the job's budget.
 fn higher_queued_in_pool(class: Class) -> bool {
     WORKER_POOL.with(|p| p.borrow().as_ref().is_some_and(|(pool, _)| pool.higher_queued(class)))
 }
@@ -1366,6 +1414,8 @@ fn on_pool_worker() -> bool {
 
 // On the same budget a nested job borrows the caller's row, which a checkpoint can replace.
 // Across budgets the caller keeps its row and lends its token until the nested guard drops.
+// A thread `set_ui_thread` marked (the UI's, the JIT owner's) takes no row: it is outside
+// admission, and its wait for a token would stall the UI, or every thread waiting on the JIT.
 struct JobGuard {
     previous: Option<JobContext>,
     borrowed: bool,
@@ -1389,6 +1439,7 @@ impl JobGuard {
             let row = job.permit?;
             if job.budget.id() == budget.id() {
                 debug_assert!(permit.is_none());
+                budget.reclass(row, class.budget());
                 job.permit.take()
             } else {
                 job.budget.lend_permit(row);
@@ -1396,12 +1447,11 @@ impl JobGuard {
             }
         });
         let borrowed = borrowed_permit.is_some();
-        let permit = borrowed_permit.or(permit).unwrap_or_else(|| {
-            budget.admit(class.budget(), makepad_cpu_budget::APP, label)
-        });
-        if borrowed {
-            budget.reclass(permit, class.budget());
-        }
+        let permit = match borrowed_permit.or(permit) {
+            Some(row) => Some(row),
+            None if makepad_cpu_budget::on_ui_thread() => None,
+            None => Some(budget.admit(class.budget(), makepad_cpu_budget::APP, label)),
+        };
         makepad_cpu_budget::set_thread_class(class.budget());
         let parents = previous
             .as_ref()
@@ -1414,7 +1464,7 @@ impl JobGuard {
         JOB.with(|j| {
             *j.borrow_mut() = Some(JobContext {
                 budget: budget.clone(),
-                permit: Some(permit),
+                permit,
                 checkpoint_at: Instant::now(),
                 class,
                 label,
@@ -1498,6 +1548,16 @@ pub fn without_permit<R>(f: impl FnOnce() -> R) -> R {
     let result = f();
     drop(restore);
     result
+}
+
+/// Gives the calling job's CPU permit back and asks for it again behind every job that waits for
+/// one: a fresh FIFO ticket, where a [`checkpoint`] keeps the job's first. A long job of short
+/// steps calls it between them so that a job of its class queued meanwhile runs first. Otherwise
+/// the oldest job keeps its class's last permit to its end, which on a small budget (one Background
+/// permit at four cores) holds every other job of that class. With nothing waiting, it goes on at
+/// once. Outside a pool job it does nothing.
+pub fn yield_to_waiting() {
+    without_permit(|| ());
 }
 
 /// Waits the UI thread made through [`makepad_core_util::blocking`], for every pool: the platform
@@ -1600,8 +1660,25 @@ where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
 {
+    task_job_with_token(
+        ui_thread, class, label, ticket, CancellationToken::new(), move || Ok(f()), internal,
+    )
+}
+
+fn task_job_with_token<F, T>(
+    ui_thread: ThreadId,
+    class: Class,
+    label: &'static str,
+    ticket: Ticket,
+    token: CancellationToken,
+    f: F,
+    internal: bool,
+) -> (PoolJob, TaskHandle<T>)
+where
+    F: FnOnce() -> Result<T, TaskError> + Send + 'static,
+    T: Send + 'static,
+{
     let state = Arc::new(TaskState::default());
-    let token = CancellationToken::new();
     let run_state = state.clone();
     let cancel_state = state.clone();
     let priority_status = priority_state(PriorityStatus::Pending);
@@ -1623,8 +1700,8 @@ where
                 } as u8,
                 Ordering::Release,
             );
-            let result =
-                catch_unwind(AssertUnwindSafe(f)).map_err(|p| TaskError::Panicked(panic_report(p)));
+            let result = catch_unwind(AssertUnwindSafe(f))
+                .unwrap_or_else(|p| Err(TaskError::Panicked(panic_report(p))));
             completed.fetch_add(1, Ordering::Relaxed);
             run_state.complete(result);
             signal_completion(internal);
@@ -2448,7 +2525,7 @@ fn pool_worker(inner: Arc<PoolInner>, index: usize) {
             Next::Admit(class, label) => (class, label),
         };
         // Only one worker per class waits for a permit. Others remain available to
-        // submit a higher-class request, including while the JIT owns all cores.
+        // submit a higher-class request.
         let Some(permit) = inner.admit(index, &mut waiting, &mut label) else {
             continue;
         };
@@ -2514,6 +2591,7 @@ pub(crate) struct PoolBacklog {
 pub struct TaskPool {
     inner: Arc<PoolInner>,
     set: Arc<JobSet>,
+    inline_frame_jobs: bool,
 }
 impl Clone for TaskPool {
     fn clone(&self) -> Self {
@@ -2521,6 +2599,7 @@ impl Clone for TaskPool {
         Self {
             inner: self.inner.clone(),
             set: self.set.clone(),
+            inline_frame_jobs: self.inline_frame_jobs,
         }
     }
 }
@@ -2585,10 +2664,23 @@ pub(crate) fn cpu_summary() -> String {
     )
 }
 impl TaskPool {
+    /// The pool whose worker runs the caller, when one does: work deep inside a job (a library's
+    /// bake, a loader's decode) spreads over the job's own pool ([`TaskPool::fan_out`]) without a
+    /// handle carried down to it. `None` on any other thread (the UI's, a tool's, a test's, a
+    /// thread outside the pool that runs a claimed job) and once the pool is closing: such a
+    /// caller runs its work itself.
+    pub fn of_current_worker() -> Option<TaskPool> {
+        WORKER_POOL.with(|p| {
+            let p = p.borrow();
+            let (inner, _) = p.as_ref()?;
+            inner.add_live_handle().then(|| TaskPool { inner: inner.clone(), set: Arc::default(), inline_frame_jobs: FRAME_JOBS_INLINE })
+        })
+    }
+
     fn shared(spawner: ThreadSpawner) -> Result<Self, SpawnError> {
         let mut global = app_pool().lock().unwrap();
         if let Some(inner) = global.upgrade().filter(|inner| inner.add_live_handle()) {
-            return Ok(Self { inner, set: Arc::default() });
+            return Ok(Self { inner, set: Arc::default(), inline_frame_jobs: FRAME_JOBS_INLINE });
         }
         let budget = BudgetHandle::process();
         // (the budget's limit at its long-lived pools' cores, [`makepad_cpu_budget::pool_cores`]:
@@ -2660,6 +2752,7 @@ impl PoolInner {
         let pool = TaskPool {
             inner: inner.clone(),
             set: Arc::default(),
+            inline_frame_jobs: FRAME_JOBS_INLINE,
         };
         makepad_core_util::blocking::install(blocking_wait);
         spawner.register_pool(&inner)?;
@@ -2703,6 +2796,13 @@ impl PoolInner {
     }
 }
 impl TaskPool {
+    /// Drive frame jobs submitted through this handle and its future clones
+    /// inline, sharing one turn per [`frame_jobs_new_frame`] on the polling thread.
+    pub fn with_inline_frame_jobs(mut self) -> Self {
+        self.inline_frame_jobs = true;
+        self
+    }
+
     /// A pool of its own with no workers that refuses every job, as a target
     /// without threads has (wasm without atomics): callers take their
     /// synchronous path. The shared pool other users hold is not touched.
@@ -2788,10 +2888,13 @@ impl TaskPool {
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static,
     {
-        let (mut job, handle) = task_job(self.inner.ui_thread, class, label, ticket, f, internal);
-        job.member = Some(self.set.join(&job.token).ok_or(SubmitError::Closed)?);
-        self.inner.enqueue(job)?;
+        let (job, handle) = task_job(self.inner.ui_thread, class, label, ticket, f, internal);
+        self.enqueue_task(job)?;
         Ok(handle)
+    }
+    fn enqueue_task(&self, mut job: PoolJob) -> Result<(), SubmitError> {
+        job.member = Some(self.set.join(&job.token).ok_or(SubmitError::Closed)?);
+        self.inner.enqueue(job)
     }
     pub fn submit_internal<F, T>(&self, class: Class, f: F) -> Result<TaskHandle<T>, SubmitError>
     where
@@ -2820,21 +2923,71 @@ impl TaskPool {
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static,
     {
-        #[cfg(all(target_arch = "wasm32", not(target_feature = "atomics")))]
-        {
-            let _ = class;
-            Ok(FrameJob {
-                inner: FrameJobInner::Later {
-                    job: Some(Box::new(f)),
-                    result: None,
-                    token: CancellationToken::new(),
-                },
-            })
+        if self.inline_frame_jobs {
+            return Ok(FrameJob::later_once(f));
         }
-        #[cfg(not(all(target_arch = "wasm32", not(target_feature = "atomics"))))]
-        self.submit(class, f).map(|task| FrameJob {
-            inner: FrameJobInner::Task(task),
-        })
+        self.submit_worker_frame_future(class, std::any::type_name::<F>(), move || async move { f() }, false)
+    }
+
+    /// Submit long, resumable work. Each poll does a bounded slice of the
+    /// caller's choosing. The driver polls again after [`Poll::Pending`],
+    /// without waiting for a wake or limiting the number of polls.
+    ///
+    /// A worker calls `start` once and polls the future on that thread until
+    /// ready or cancelled, so the future may hold thread-local state. Inline,
+    /// the first due frame calls `start` and polls once. Dropping the handle
+    /// stops further polls after any poll already in flight.
+    pub fn submit_stepped_frame_job<Fut, T>(
+        &self,
+        class: Class,
+        start: impl FnOnce() -> Fut + Send + 'static,
+    ) -> Result<FrameJob<T>, SubmitError>
+    where
+        Fut: Future<Output = T> + 'static,
+        T: Send + 'static,
+    {
+        if self.inline_frame_jobs {
+            return Ok(FrameJob::later(start));
+        }
+        self.submit_worker_frame_future(class, std::any::type_name::<Fut>(), start, true)
+    }
+
+    fn submit_worker_frame_future<Fut, T>(
+        &self,
+        class: Class,
+        label: &'static str,
+        start: impl FnOnce() -> Fut + Send + 'static,
+        stepped: bool,
+    ) -> Result<FrameJob<T>, SubmitError>
+    where
+        Fut: Future<Output = T> + 'static,
+        T: Send + 'static,
+    {
+        let token = CancellationToken::new();
+        let worker_token = token.clone();
+        let run = move || {
+            let mut future = std::pin::pin!(start());
+            let mut cx = Context::from_waker(Waker::noop());
+            while !worker_token.is_cancelled() {
+                if let Poll::Ready(value) = future.as_mut().poll(&mut cx) {
+                    // A one-shot that has started publishes its result even if cancelled in flight.
+                    if stepped && worker_token.is_cancelled() { break; }
+                    return Ok(value);
+                }
+            }
+            Err(TaskError::Cancelled)
+        };
+        let (job, task) = task_job_with_token(
+            self.inner.ui_thread,
+            class,
+            label,
+            Ticket::none(),
+            token,
+            run,
+            false,
+        );
+        self.enqueue_task(job)?;
+        Ok(FrameJob { inner: FrameJobInner::Task { task, cancel_on_drop: stepped } })
     }
     /// Refuses this handle's (and its clones') new jobs; `CancelPending` also cancels the
     /// ones it submitted that have not finished. The pool and its other handles go on.
@@ -4344,7 +4497,7 @@ mod tests {
             let holder = std::thread::spawn(move || {
                 let (keep, held) = &*theirs;
                 let mut permits = Vec::new();
-                // Warm this loop before taking tokens: a JIT build can lend process-budget tokens.
+                // Warm this loop before taking tokens: waiting for a build can lend this thread's tokens.
                 hold(&budget, &mut permits, keep);
                 permits.extend((0..count).map(|_| {
                     budget.admit(makepad_cpu_budget::INTERACTIVE, makepad_cpu_budget::APP, label)
@@ -4434,6 +4587,43 @@ mod tests {
         }).unwrap();
         entered.recv_timeout(NOTHING_MOVES).expect("the Background job must reach its gate inside without_permit");
         (open, job)
+    }
+
+    /// A job that yields between its steps lets a job of its class queued behind it run first,
+    /// though their class has one permit (a four-core budget): the budget's FIFO alone keeps that
+    /// permit with the older job until it ends.
+    #[test]
+    fn a_job_yielding_between_steps_lets_a_queued_class_mate_run_first() {
+        let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
+        let pool = PoolInner::create_with(ThreadSpawner::for_current_thread(3), 2, 0, 0, 0, BudgetHandle::of_cores(4)).unwrap();
+        assert_eq!(pool.budget().background_limit(), 1, "the budget has one Background permit");
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let (started, running) = mpsc::channel();
+        let (go_on, queued) = mpsc::channel::<()>();
+        let long = pool.submit(Class::Background, {
+            let order = order.clone();
+            move || {
+                order.lock().unwrap().push("long job, first step");
+                started.send(()).unwrap();
+                queued.recv_timeout(NOTHING_MOVES).expect("the class mate queues");
+                yield_to_waiting();
+                order.lock().unwrap().push("long job, second step");
+            }
+        }).unwrap();
+        running.recv_timeout(NOTHING_MOVES).expect("the long job starts");
+        let mate = pool.submit(Class::Background, {
+            let order = order.clone();
+            move || order.lock().unwrap().push("class mate")
+        }).unwrap();
+        wait_for("the class mate to wait for the Background permit", || {
+            pool.budget().tokens().waiting.iter().any(|w| w.class == makepad_cpu_budget::BACKGROUND)
+        });
+        go_on.send(()).unwrap();
+        worker_join(long).unwrap();
+        worker_join(mate).unwrap();
+        assert_eq!(*order.lock().unwrap(), ["long job, first step", "class mate", "long job, second step"],
+            "the queued class mate runs between the long job's steps");
+        worker_join(pool.shutdown_pool(ShutdownMode::Drain)).unwrap();
     }
 
     #[test]
@@ -4830,6 +5020,7 @@ mod tests {
         assert_eq!(handle.join(), Err(TaskError::WouldBlockUi));
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn task_poll_retries_instead_of_waiting_for_the_result_mutex() {
         let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
@@ -4954,6 +5145,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn task_poll_does_not_join_a_published_but_live_thread() {
         let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
@@ -4975,6 +5167,193 @@ mod tests {
         // This must return before the thread is allowed to exit.
         assert_eq!(handle.try_take(), Some(Ok(42)));
         release_tx.send(()).unwrap();
+    }
+
+    #[test]
+    fn deferred_frame_jobs_share_one_step_per_frame() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.use_closed_task_pool();
+        cx.use_inline_frame_jobs();
+        let pool = cx.task_pool();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = calls.clone();
+        let frame_thread = std::thread::current().id();
+        let mut stepped = pool.submit_stepped_frame_job(Class::Visible, move || {
+            let started_on = std::thread::current().id();
+            assert_eq!(started_on, frame_thread, "the frame thread creates the step");
+            std::future::poll_fn(move |_| {
+                assert_eq!(std::thread::current().id(), started_on, "every inline step runs where it started");
+                let n = counted.fetch_add(1, Ordering::Relaxed) + 1;
+                if n == 3 { Poll::Ready(n) } else { Poll::Pending }
+            })
+        }).unwrap();
+        let value = String::from("one shot");
+        let mut once = pool.submit_frame_job(Class::Visible, move || value).unwrap();
+
+        frame_jobs_new_frame();
+        assert_eq!(stepped.try_take(), None, "the first step yields");
+        assert!(!stepped.is_finished(), "polling again in this frame must leave the job pending");
+        assert_eq!(calls.load(Ordering::Relaxed), 1, "two polls in one frame run exactly one step");
+        assert_eq!(once.try_take(), None, "the stepped job took the one-shot job's turn");
+
+        frame_jobs_new_frame();
+        assert_eq!(once.try_take(), Some(Ok(String::from("one shot"))), "the one-shot job gets the next turn");
+        assert!(!stepped.is_finished(), "the one-shot job took this frame's turn");
+        assert_eq!(calls.load(Ordering::Relaxed), 1, "the stepped job waits for a free turn");
+
+        frame_jobs_new_frame();
+        assert!(!stepped.is_finished(), "the second step yields");
+        assert_eq!(calls.load(Ordering::Relaxed), 2, "is_finished runs exactly one step on a free turn");
+        frame_jobs_new_frame();
+        assert!(stepped.is_finished(), "the third step completes");
+        assert_eq!(stepped.try_take(), Some(Ok(3)), "a ready value can be taken in the same frame");
+        assert_eq!(stepped.try_take(), None, "a ready value is delivered only once");
+
+        let total = Arc::new(AtomicUsize::new(0));
+        let job = |finish_at: Option<usize>| {
+            let polls = total.clone();
+            pool.submit_stepped_frame_job(Class::Visible, move || {
+                let mut steps = 0;
+                std::future::poll_fn(move |_| {
+                    polls.fetch_add(1, Ordering::Relaxed);
+                    steps += 1;
+                    if Some(steps) == finish_at { Poll::Ready(steps) } else { Poll::Pending }
+                })
+            }).unwrap()
+        };
+        let mut endless = job(None);
+        let mut five = job(Some(5));
+        let mut result = None;
+        for frame in 1..=10 {
+            frame_jobs_new_frame();
+            assert!(!endless.is_finished(), "the first job stays pending");
+            assert_eq!(endless.try_take(), None, "repeat polls of the winner cannot reserve its next turn");
+            result = five.try_take();
+            assert_eq!(total.load(Ordering::Relaxed), frame, "exactly one poll runs in frame {frame}");
+            if result.is_some() { break; }
+        }
+        assert_eq!(result, Some(Ok(5)), "the second job gets five turns within ten frames");
+    }
+
+    #[test]
+    fn deferred_frame_jobs_release_the_step_on_cancel_drop_or_panic() {
+        // The counter's captured Arc also probes when the driver drops the closure.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let starts = Arc::new(AtomicUsize::new(0));
+        let pending = || {
+            let counted = calls.clone();
+            let started = starts.clone();
+            FrameJob::later(move || {
+                started.fetch_add(1, Ordering::Relaxed);
+                std::future::poll_fn(move |_| {
+                    counted.fetch_add(1, Ordering::Relaxed);
+                    Poll::<()>::Pending
+                })
+            })
+        };
+        drop(pending());
+        assert_eq!(starts.load(Ordering::Relaxed), 0, "dropping before the first frame never starts the job");
+        assert_eq!(Arc::strong_count(&calls), 1, "dropping the unstarted job releases the start closure");
+        frame_jobs_new_frame();
+        let mut cancelled = pending();
+        assert_eq!(starts.load(Ordering::Relaxed), 0, "submitting a deferred job leaves start for its frame");
+        assert_eq!(cancelled.try_take(), None, "the job yields before cancellation");
+        assert_eq!(starts.load(Ordering::Relaxed), 1, "the first due frame creates and runs the step");
+        cancelled.token().cancel();
+        assert_eq!(cancelled.try_take(), Some(Err(TaskError::Cancelled)), "cancellation needs no frame turn");
+        assert_eq!(calls.load(Ordering::Relaxed), 1, "a cancelled job never takes another step");
+        assert_eq!(Arc::strong_count(&calls), 1, "cancellation releases the closure while the handle lives");
+
+        frame_jobs_new_frame();
+        let mut discarded = pending();
+        assert!(!discarded.is_finished(), "the job yields before drop");
+        drop(discarded);
+        assert_eq!(calls.load(Ordering::Relaxed), 2, "dropping a pending job calls no further step");
+        assert_eq!(Arc::strong_count(&calls), 1, "dropping the job releases its closure");
+
+        frame_jobs_new_frame();
+        let counted = calls.clone();
+        let mut panicked = FrameJob::later(move || std::future::poll_fn(move |_| -> Poll<()> {
+            counted.fetch_add(1, Ordering::Relaxed);
+            panic!("frame step panicked");
+        }));
+        let report = PanicReport { message: "frame step panicked".into() };
+        assert_eq!(panicked.try_take(), Some(Err(TaskError::Panicked(report))), "a step panic preserves its message");
+        assert_eq!(Arc::strong_count(&calls), 1, "a panicked job releases its closure");
+        assert_eq!(panicked.try_take(), None, "a panic is delivered only once");
+        assert_eq!(calls.load(Ordering::Relaxed), 3, "later frames never poll the dropped future again");
+    }
+
+    #[cfg(not(all(target_arch = "wasm32", not(target_feature = "atomics"))))]
+    #[test]
+    fn worker_frame_jobs_step_until_ready_or_cancelled() {
+        async fn add_after_yield(sum: &std::cell::Cell<u32>, amount: u32, owner: ThreadId) {
+            let mut first = true;
+            std::future::poll_fn(|_| {
+                assert_eq!(std::thread::current().id(), owner, "the future is always polled on its start thread");
+                if std::mem::take(&mut first) { Poll::Pending } else { Poll::Ready(()) }
+            }).await;
+            sum.set(sum.get() + amount);
+        }
+
+        let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
+        let pool = test_pool(1);
+        let submitter = std::thread::current().id();
+        let starts = Arc::new(AtomicUsize::new(0));
+        let submit = |pool: &TaskPool, inline| {
+            let starts = starts.clone();
+            pool.submit_stepped_frame_job(Class::Visible, move || {
+                starts.fetch_add(1, Ordering::Relaxed);
+                let owner = std::thread::current().id();
+                assert_eq!(owner == submitter, inline, "only the inline pool starts on the submitting frame thread");
+                let sum = std::rc::Rc::new(std::cell::Cell::new(0));
+                async move {
+                    add_after_yield(&sum, 2, owner).await;
+                    add_after_yield(&sum, 3, owner).await;
+                    sum.get()
+                }
+            }).unwrap()
+        };
+        let mut ready = submit(&pool, false);
+        let mut inline = submit(&pool.clone().with_inline_frame_jobs(), true);
+        for _ in 0..2 {
+            frame_jobs_new_frame();
+            assert_eq!(inline.try_take(), None, "each await yields to a new frame");
+        }
+        frame_jobs_new_frame();
+        let inline_result = inline.try_take();
+        assert_eq!(inline_result, Some(Ok(5)), "the inline future retains its Rc across both awaits");
+
+        let hold_poll = || {
+            let polls = Arc::new(AtomicUsize::new(0));
+            let counted = polls.clone();
+            let (entered, started) = mpsc::channel();
+            let (release, wait) = mpsc::channel();
+            let job = pool.submit_stepped_frame_job(Class::Visible, move || std::future::poll_fn(move |_| {
+                if counted.fetch_add(1, Ordering::Relaxed) != 0 { return Poll::Ready(()); }
+                entered.send(()).unwrap();
+                wait.recv().unwrap();
+                Poll::Pending
+            })).unwrap();
+            started.recv_timeout(NOTHING_MOVES).expect("the worker enters the poll before the owner stops it");
+            (job, release, polls)
+        };
+        let (mut cancelled, release, cancel_polls) = hold_poll();
+        cancelled.cancel();
+        release.send(()).unwrap();
+        let (discarded, release, drop_polls) = hold_poll();
+        let (finished, detached) = mpsc::channel();
+        drop(pool.submit_frame_job(Class::Visible, move || finished.send(()).unwrap()).unwrap());
+        drop(discarded);
+        release.send(()).unwrap();
+        worker_join(pool.shutdown_pool(ShutdownMode::Drain)).expect("all worker jobs must finish");
+
+        assert_eq!(ready.try_take(), inline_result, "the worker and inline futures give the same result");
+        assert_eq!(starts.load(Ordering::Relaxed), 2, "each driver calls start exactly once");
+        assert_eq!(cancelled.try_take(), Some(Err(TaskError::Cancelled)), "the worker reports cancellation after Pending");
+        assert_eq!(cancel_polls.load(Ordering::Relaxed), 1, "no poll followed the one in flight at cancellation");
+        assert_eq!(drop_polls.load(Ordering::Relaxed), 1, "no poll followed the one in flight at drop");
+        assert_eq!(detached.try_recv(), Ok(()), "dropping a queued worker one-shot still detaches it");
     }
 
     #[test]
@@ -5338,7 +5717,55 @@ mod tests {
             worker_join(pool.submit(Class::Visible, || 8).unwrap()).unwrap(),
             8
         );
+        // A job finds its own pool without a handle (`of_current_worker`) and spreads over it; a
+        // thread outside the pool (this test's, the spawner's) finds none.
+        assert!(TaskPool::of_current_worker().is_none(), "the test thread is no pool worker");
+        let outside = spawner.spawn_worker(ThreadOptions::default(), || TaskPool::of_current_worker().is_none()).unwrap();
+        assert!(worker_join(outside).unwrap(), "a thread the pool does not own is no pool worker");
+        let pool_at = Arc::as_ptr(&pool.inner) as usize;
+        let found = pool
+            .submit(Class::Background, move || {
+                let own = TaskPool::of_current_worker().expect("a job's worker knows its pool");
+                let count = AtomicUsize::new(0);
+                own.fan_out(64, |_| {
+                    count.fetch_add(1, Ordering::Relaxed);
+                });
+                (Arc::as_ptr(&own.inner) as usize == pool_at, count.into_inner())
+            })
+            .unwrap();
+        assert_eq!(worker_join(found).unwrap(), (true, 64), "the job's own pool, every index run");
         worker_join(pool.shutdown_pool(ShutdownMode::Drain)).unwrap();
+    }
+
+    #[test]
+    fn a_job_on_a_ui_thread_takes_no_token() {
+        let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
+        let budget = BudgetHandle::of_cores(2);
+        let pool = test_pool_on(1, budget.clone());
+        let count = budget.cores() as usize;
+        let held = HeldTokens::new(&budget, count, "token holder");
+        let caller_pool = pool.clone();
+        let caller = std::thread::spawn(move || {
+            makepad_cpu_budget::set_ui_thread();
+            let items = AtomicUsize::new(0);
+            caller_pool.fan_out(3, |_| {
+                assert_eq!(current_class(), Some(Class::Background), "each item runs in the caller's job");
+                items.fetch_add(1, Ordering::Relaxed);
+            });
+            items.into_inner()
+        });
+        // With one worker the fan-out queues no helpers, so only the caller could be waiting.
+        wait_for("the marked caller to finish or request a token", || {
+            caller.is_finished() || !budget.tokens().waiting.is_empty()
+        });
+        let tokens = budget.tokens();
+        drop(held);
+        let items = caller.join().unwrap();
+        worker_join(pool.shutdown_pool(ShutdownMode::Drain)).unwrap();
+        assert!(tokens.waiting.is_empty(), "the marked caller waited for admission");
+        assert_eq!(items, 3, "the fan-out must complete every item");
+        assert_eq!(tokens.holders.len(), count, "all of the holder's rows must remain");
+        assert!(tokens.holders.iter().all(|row| row.label == "token holder" && !row.lent), "only the holder's running rows may remain");
     }
 
     /// The class every item of a 64-item spread from the calling thread ran at: `fan_out`'s, or

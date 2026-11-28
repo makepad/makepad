@@ -6,7 +6,6 @@
 use super::timing::*;
 use makepad_apple_sys::*;
 use crate::ledger::{Charge, Pool, Pools};
-use crate::FastMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
@@ -14,6 +13,8 @@ use std::time::Instant;
 
 relax_api::option_layouts! {
     Loc,
+    // `Metal::encode_pass`: a pick pass's draws issued, sampled pictures absent, unpainted
+    (usize, usize, usize),
 }
 
 /// What a finished piece of GPU work tells the backend thread. Completion handlers run on
@@ -100,8 +101,10 @@ pub struct Submission {
 /// holds barely two frames of per-pass buffers for a compositor with a 30-pass frame.
 const QUEUE_MAX_COMMAND_BUFFERS: u64 = 256;
 
-/// The arena's chunk size: the uniforms, inline instances and upload staging of a batch.
+/// The arena's chunk size: the uniforms and upload staging of a batch.
 const CHUNK_BYTES: usize = 4 * 1024 * 1024;
+/// The largest uniform block (`HalInfo::max_uniform_block`).
+const ZERO_UNIFORM_BYTES: usize = 65_536;
 /// Free arena bytes kept for the next batches; beyond it the largest free chunks are released.
 const ARENA_KEEP_BYTES: usize = 64 << 20;
 /// A free chunk no batch wrote for this long is released (`arena_trim`), down to the first two.
@@ -181,8 +184,9 @@ pub struct Device {
     chunks: Vec<Chunk>,
     /// Leased through GPU completion and retained across idle turns for later volume edits.
     volume_chunks: Vec<Chunk>,
-    /// batch-local: where a (pointer, length) of the caller's memory already sits in the arena
-    pub dedup: FastMap<(usize, usize), Loc>,
+    /// Zeros that an empty uniform range binds: a block the program declares reads 0, never
+    /// unbound memory.
+    pub zero_uniforms: Option<PoolBuffer>,
     pub recommended_working_set: u64,
 }
 
@@ -295,9 +299,17 @@ impl Device {
             clock: None,
             chunks: Vec::new(),
             volume_chunks: Vec::new(),
-            dedup: FastMap::default(),
+            zero_uniforms: None,
             recommended_working_set: crate::gpu_limits::gpu_working_set_bytes(),
         };
+        let zeros = dev.pool_buffer(Pool::Fallback, ZERO_UNIFORM_BYTES as u64)?;
+        let contents: *mut u8 = unsafe { msg_send![zeros.as_id(), contents] };
+        if contents.is_null() {
+            return None;
+        }
+        // SAFETY: the shared buffer has `ZERO_UNIFORM_BYTES` bytes at `contents`
+        unsafe { std::ptr::write_bytes(contents, 0, ZERO_UNIFORM_BYTES) };
+        dev.zero_uniforms = Some(zeros);
         // the first batches' uniforms: two chunks, touched now so no draw waits for a page fault
         for _ in 0..2 {
             dev.add_chunk(CHUNK_BYTES, false);
@@ -418,22 +430,13 @@ impl Device {
         Some(&mut chunks[i])
     }
 
-    /// Copies `data` into the arena for command buffer `seq` (256-byte aligned: the constant
-    /// address space needs it). The same (pointer, length) of one batch is copied once.
-    pub fn arena_put(&mut self, data: &[u8], seq: u64) -> Option<Loc> {
-        let key = (data.as_ptr() as usize, data.len());
-        if let Some(loc) = self.dedup.get(&key).copied() {
-            self.touch_lease(loc.buffer, seq);
-            return Some(loc);
-        }
-        let loc = self.arena_copy(data, seq, false)?;
-        self.dedup.insert(key, loc);
-        Some(loc)
+    /// Copies one packet's stream into a 256-byte-aligned window leased through `seq`.
+    pub fn arena_put_stream(&mut self, bytes: &[u8], align: usize, seq: u64) -> Option<Loc> {
+        let padded = bytes.len().checked_next_multiple_of(align.max(16))?;
+        self.arena_copy_padded(bytes, padded, seq, false)
     }
 
-    /// Like `arena_put` for data that does not live to the end of the batch (a buffer the caller
-    /// frees right after): its address says nothing about its content, as the next such buffer
-    /// of the same length is allocated at the same address, so it is never deduplicated.
+    /// Stages a transient buffer upload into storage leased through `seq`.
     pub fn arena_put_transient(&mut self, data: &[u8], seq: u64) -> Option<Loc> {
         self.arena_copy(data, seq, false)
     }
@@ -444,6 +447,10 @@ impl Device {
     }
 
     fn arena_copy(&mut self, data: &[u8], seq: u64, volume: bool) -> Option<Loc> {
+        self.arena_copy_padded(data, data.len(), seq, volume)
+    }
+
+    fn arena_copy_padded(&mut self, data: &[u8], padded: usize, seq: u64, volume: bool) -> Option<Loc> {
         let completed = self.completed.load(Ordering::Acquire);
         let chunks = if volume { &mut self.volume_chunks } else { &mut self.chunks };
         let mut found = None;
@@ -455,7 +462,7 @@ impl Device {
                 chunk.used = 0;
             }
             let offset = (chunk.used + 255) & !255;
-            if offset + data.len() <= chunk.capacity {
+            if offset.checked_add(padded).is_some_and(|end| end <= chunk.capacity) {
                 found = Some((chunk, offset));
                 break;
             }
@@ -463,27 +470,25 @@ impl Device {
         let (chunk, offset) = match found {
             Some(f) => f,
             None => {
-                let capacity = data.len().next_power_of_two().max(CHUNK_BYTES);
+                let capacity = padded.checked_next_power_of_two()?.max(CHUNK_BYTES);
                 (self.add_chunk(capacity, volume)?, 0)
             }
         };
-        // SAFETY: offset + len <= capacity of a live shared buffer; the source is the caller's data
-        unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), chunk.contents.add(offset), data.len()) };
-        chunk.used = offset + data.len();
+        // SAFETY: the reserved window fits both the source bytes and the padding.
+        unsafe {
+            let dst = chunk.contents.add(offset);
+            std::ptr::copy_nonoverlapping(data.as_ptr(), dst, data.len());
+            if padded > data.len() {
+                std::ptr::write_bytes(dst.add(data.len()), 0, padded - data.len());
+            }
+        }
+        chunk.used = offset + padded;
         chunk.lease = chunk.lease.max(seq);
         Some(Loc { buffer: chunk.buffer.as_id(), offset: offset as u64 })
     }
 
-    fn touch_lease(&mut self, buffer: ObjcId, seq: u64) {
-        if let Some(c) = self.chunks.iter_mut().find(|c| c.buffer.as_id() == buffer) {
-            c.lease = c.lease.max(seq);
-        }
-    }
-
-    /// The batch is over: the dedup memory is the caller's again, and free chunks beyond the
-    /// keep size are released (largest first).
+    /// Releases free chunks beyond the keep size, largest first.
     pub fn arena_end_batch(&mut self) {
-        self.dedup.clear();
         let completed = self.completed.load(Ordering::Acquire);
         let now = crate::clock_ns();
         for chunk in self.chunks.iter_mut().filter(|c| c.lease > completed) {
@@ -731,7 +736,9 @@ mod tests {
     #[test]
     fn transient_buffers_of_one_address_are_not_deduplicated() {
         let mut dev = Device::new(Mailbox::new(Arc::new(|_, _| {}))).expect("Metal device");
-        let (_, seq) = dev.new_command_buffer(Default::default());
+        // An enqueued command buffer must be committed before it is released: Metal's validation
+        // layer stops the process on one destroyed uncommitted.
+        let (buffer, seq) = dev.new_command_buffer(Default::default());
         let mut seen = Vec::new();
         for i in 0..8u8 {
             let data = vec![i + 1; 400];
@@ -743,10 +750,6 @@ mod tests {
         let mut offsets: Vec<u64> = seen.iter().map(|s| s.0).collect();
         offsets.dedup();
         assert_eq!(offsets.len(), 8, "each upload has its own place");
-        // the keyed path still shares one copy of one live slice
-        let live = vec![9u8; 400];
-        let a = dev.arena_put(&live, seq).unwrap();
-        let b = dev.arena_put(&live, seq).unwrap();
-        assert_eq!((a.offset, a.buffer), (b.offset, b.buffer));
+        let () = unsafe { msg_send![buffer.as_id(), commit] };
     }
 }

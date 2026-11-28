@@ -250,7 +250,9 @@ impl Area {
                     error!("get_rect called on instance_count ==0 area pointer, use mark/sweep correctly!");
                     return Rect::default();
                 }
-                let draw_list = &cx.draw_lists[inst.draw_list_id];
+                let Some(draw_list) = cx.draw_lists.checked_index(inst.draw_list_id) else {
+                    return Rect::default();
+                };
                 if draw_list.redraw_id != inst.redraw_id {
                     return Rect::default();
                 }
@@ -363,7 +365,9 @@ impl Area {
             // on screen", not a mark/sweep mistake worth logging.
             return Rect::default();
         }
-        let draw_list = &cx.draw_lists[inst.draw_list_id];
+        let Some(draw_list) = cx.draw_lists.checked_index(inst.draw_list_id) else {
+            return Rect::default();
+        };
         if !ignore_redraw && draw_list.redraw_id != inst.redraw_id {
             return Rect::default();
         }
@@ -441,7 +445,9 @@ impl Area {
                     error!("get_rect called on instance_count ==0 area pointer, use mark/sweep correctly!");
                     return Rect::default();
                 }
-                let draw_list = &cx.draw_lists[inst.draw_list_id];
+                let Some(draw_list) = cx.draw_lists.checked_index(inst.draw_list_id) else {
+                    return Rect::default();
+                };
                 if draw_list.redraw_id != inst.redraw_id {
                     return Rect::default();
                 }
@@ -481,7 +487,7 @@ impl Area {
                     error!("set_rect called on instance_count ==0 area pointer, use mark/sweep correctly!");
                     return;
                 }
-                let cxview = &mut cx.draw_lists[inst.draw_list_id];
+                let Some(cxview) = cx.draw_lists.checked_index_mut(inst.draw_list_id) else { return };
                 if cxview.redraw_id != inst.redraw_id {
                     //println!("set_rect called on invalid area pointer, use mark/sweep correctly!");
                     return;
@@ -531,7 +537,7 @@ impl Area {
                 }
             }
             Area::Rect(ra) => {
-                let draw_list = &mut cx.draw_lists[ra.draw_list_id];
+                let Some(draw_list) = cx.draw_lists.checked_index_mut(ra.draw_list_id) else { return };
                 if draw_list.redraw_id != ra.redraw_id {
                     return;
                 }
@@ -678,5 +684,46 @@ mod tests {
             assert_eq!(area.rect(&cx), Rect::default());
             area.set_rect(&mut cx, &Rect { pos: dvec2(1.0, 1.0), size: dvec2(1.0, 1.0) });
         }
+
+        let old_id = list.id();
+        drop(list);
+        let reused = DrawList::new(&mut cx);
+        assert_eq!(reused.id().index(), old_id.index(), "the new owner occupies the old slot");
+        assert_ne!(reused.id().generation(), old_id.generation(), "the slot has a new generation");
+        let bounds = Rect { pos: dvec2(3.0, 5.0), size: dvec2(20.0, 30.0) };
+        let new_list = &mut cx.draw_lists[reused.id()];
+        new_list.redraw_id = 1;
+        new_list.rect_areas.push(crate::draw_list::CxRectArea {
+            rect: bounds,
+            draw_clip: (bounds.pos, bounds.pos + bounds.size),
+        });
+
+        thread_local! { static ERRORS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+        struct ClearTap;
+        impl Drop for ClearTap {
+            fn drop(&mut self) { set_log_tap(None); }
+        }
+        ERRORS.set(0);
+        set_log_tap(Some(|message, _| {
+            if message.contains("Drawlist id generation wrong") {
+                ERRORS.set(ERRORS.get() + 1);
+            }
+        }));
+        let _tap = ClearTap;
+        for area in [
+            Area::Instance(InstanceArea { draw_list_id: old_id, draw_item_id: 0, instance_offset: 0, instance_count: 1, redraw_id: 1 }),
+            Area::Rect(RectArea { draw_list_id: old_id, rect_id: 0, redraw_id: 1 }),
+        ] {
+            assert!(!area.is_valid(&cx));
+            assert!(area.valid_instance(&cx).is_none());
+            assert_eq!(area.clipped_rect(&cx), Rect::default());
+            assert_eq!(area.clipped_rect_union(&cx), Rect::default());
+            assert_eq!(area.clipped_rect_union_attached(&cx), Rect::default());
+            assert_eq!(area.rect_union(&cx), Rect::default());
+            assert_eq!(area.rect(&cx), Rect::default());
+            area.set_rect(&mut cx, &Rect::default());
+            assert_eq!(cx.draw_lists[reused.id()].rect_areas[0].rect, bounds, "stale writes leave the new owner's rect intact");
+        }
+        assert_eq!(ERRORS.get(), 0, "accessing a stale area is silent");
     }
 }

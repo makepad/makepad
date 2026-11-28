@@ -13,8 +13,6 @@ use crate::ledger::Kind;
 use crate::session::*;
 use crate::types::*;
 
-pub use super::exec::texture_bytes;
-
 #[derive(Default)]
 pub struct Headless { buffers: crate::FastMap<(u32, Id), Vec<u8>> }
 
@@ -42,6 +40,8 @@ impl Backend for Headless {
             dpi: 1.0,
             max_texture: MAX_TEXTURE,
             max_window: [MAX_TEXTURE, MAX_TEXTURE],
+            uniform_align: 256,
+            max_uniform_block: 65_536,
             max_buffer: 0,
             working_set: 0,
             ..Default::default()
@@ -93,8 +93,11 @@ impl Gpu for Headless {
         self.buffers.insert((s.id, id), bytes);
         Ok(())
     }
-    fn buffer_update(&mut self, s: &mut Session, id: Id, _b: &mut BufferObj, off: u64, data: &[u8]) {
-        if let Some(bytes) = self.buffers.get_mut(&(s.id, id)) { bytes[off as usize..off as usize + data.len()].copy_from_slice(data); }
+    fn buffer_update_parts(&mut self, s: &mut Session, id: Id, _b: &mut BufferObj, parts: BufferParts<'_>) {
+        // SAFETY: called inside the hal_submit call that lent the parts
+        for (off, data) in unsafe { parts.iter() } {
+            if let Some(bytes) = self.buffers.get_mut(&(s.id, id)) { bytes[off as usize..off as usize + data.len()].copy_from_slice(data); }
+        }
     }
     fn buffer_destroy(&mut self, sid: u32, id: Id) { self.buffers.remove(&(sid, id)); }
     fn buffer_readbacks(&mut self, s: &mut Session, req: u32, ranges: &[BufferReadRange]) {
@@ -153,6 +156,8 @@ fn frame(s: &mut Session, sid: u32, _target: Id, _kind: u32, packet: u32, view: 
         s.stats.bad_args += 1;
         return None;
     };
+    let Some(stream) = exec::packet_uniforms(view, p) else { s.bad(); return None };
+    let mut views = Vec::new();
     s.last_frame_layers.clear();
     s.last_frame_occluders.clear();
     for layer in &view.layers[lr] {
@@ -170,6 +175,7 @@ fn frame(s: &mut Session, sid: u32, _target: Id, _kind: u32, packet: u32, view: 
     s.stats.max_frame_ns = s.stats.max_frame_ns.max(p.meta.build_end_ns.saturating_sub(p.meta.build_start_ns));
     for pass in &view.passes[pr] {
         if pass.kind == pass_kind::COMPUTE { crate::compute::unsupported(); continue; }
+        if exec::pass_views_into(pass, view.arena, stream, 256, &mut views).is_err() { s.bad(); continue; }
         s.stats.passes += 1;
         for id in pass.color.iter().chain(std::iter::once(&pass.depth)).filter(|i| !i.is_none()) {
             touch(s, sid, Kind::Texture, *id, frame, now);
@@ -179,6 +185,13 @@ fn frame(s: &mut Session, sid: u32, _target: Id, _kind: u32, packet: u32, view: 
             continue;
         };
         for d in &view.draws[dr] {
+            if Draw::cull_mode(d.flags).is_none()
+                || d.uniforms.iter().any(|r| exec::uniform_slice(stream, *r, 256).is_none())
+            {
+                s.bad();
+                s.stats.skipped_draws += 1;
+                continue;
+            }
             if d.storage_buffers.len != 0 { crate::compute::unsupported(); continue; }
             s.stats.draws += 1;
             // a surface lent by a session that is gone (or relaunched) is never sampled

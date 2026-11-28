@@ -14,6 +14,7 @@ fn print_usage() {
     eprintln!("  App:    makepad-remote app <pid|socket|endpoint-file> <command> [k=v ...]   (a running makepad app's endpoint; `help` lists its commands; an app name only at a terminal, or for an app of your own lease)");
     eprintln!("          makepad-remote app <pid> grab [w=ID] [scale=F] out=<file>   (images are written by this client)");
     eprintln!("          makepad-remote app <pid> tools | call <service>.<tool> [instance] [json]   (its AI tools: the `app` service)");
+    eprintln!("          makepad-remote app <endpoint-file> --reconnect call <service>.<tool> [json]   (replay a held call across endpoint restarts)");
     eprintln!("  MCP:    makepad-remote mcp <pid|app-name|host:pid|endpoint-file> [--no-builtins] [--caller-env NAME] [--launch <program> [args...]]   (stdio MCP server)");
     eprintln!("  Server: makepad-remote --server [--port 8384] [--bind lan|<ip>] [--all]");
     eprintln!("                         [--keys <file>] [--identity <dir>] [--audit-log <file>] [--max-run <secs>]");
@@ -40,43 +41,6 @@ fn exit_with(result: std::io::Result<i32>) -> ExitCode {
         Err(e) => {
             eprintln!("error: {e}");
             ExitCode::from(1)
-        }
-    }
-}
-
-/// `makepad-remote app <pid|app|socket> <command> [k=v ...]`: prints the answer's lines; exit
-/// status 1 when the answer had an error, 2 when the app cannot be reached.
-fn run_app(spec: &str, argv: &[String]) -> ExitCode {
-    // `<host>:<app|pid>` goes through the hub to an app on another machine (a phone that dials in)
-    #[cfg(unix)]
-    let routed = (spec.contains(':') && !spec.contains('/')).then(|| {
-        let bin = std::env::var_os("RELAX_BIN").map(PathBuf::from);
-        makepad_remote::hub::connect(bin.as_deref()).map(|hub| makepad_remote::Client::routed(&hub, spec))
-    });
-    #[cfg(not(unix))]
-    let routed: Option<Result<makepad_remote::Client, String>> = None;
-    let connected = match routed {
-        Some(Ok(c)) => Ok(c),
-        Some(Err(e)) => { eprintln!("makepad-remote app: {e}"); return ExitCode::from(2); }
-        None => makepad_remote::Client::connect_as(spec, &makepad_remote::discovery::Caller::command_line()),
-    };
-    let client = match connected {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("makepad-remote app: {e}");
-            return ExitCode::from(2);
-        }
-    };
-    let argv = if argv.is_empty() { vec!["help".to_string()] } else { argv.to_vec() };
-    match makepad_remote::app::run_printed(&client, &argv, &mut |l| {
-        println!("{l}");
-        true
-    }) {
-        Ok(false) => ExitCode::SUCCESS,
-        Ok(true) => ExitCode::from(1),
-        Err(e) => {
-            eprintln!("makepad-remote app: {e}");
-            ExitCode::from(2)
         }
     }
 }
@@ -147,7 +111,7 @@ fn main() -> ExitCode {
             };
             exit_with(client::probe(addr, &PathBuf::from(keys), &PathBuf::from(identity)).map(|_| 0))
         }
-        "app" if args.len() >= 2 => run_app(&args[1], &args[2..]),
+        "app" if args.len() >= 2 => ExitCode::from(makepad_remote::app::run_command_line(&args[1], &args[2..]) as u8),
         "mcp" if args.len() >= 2 => {
             let mut opts = makepad_remote::mcp::Options { target: args[1].clone(), builtins: true, launch: Vec::new(), caller: None };
             let mut rest = args[2..].iter();

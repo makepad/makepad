@@ -19,6 +19,7 @@ pub trait Api {
     fn copy_frame(&mut self, session: &mut Session, source: Id, destination: Id, sequence: u64) -> Result<(), String>;
 }
 
+#[relax_api::relax_api(loader = "the loader's HAL: JIT code reaches it through the `hal_*` ops")]
 impl Hal {
     fn with_dmabuf<R>(&self, session: u32, f: impl FnOnce(&mut dyn Api, &mut Session) -> Result<R, String>) -> Result<R, String> {
         let mut state = crate::lock(&self.state);
@@ -88,6 +89,52 @@ pub fn hal_dmabuf_register(fd: i32, layout: &[u64]) -> u64 {
     match copy::Layout::from_words(layout) {
         Some(layout) => copy::register(fd, layout),
         None => 0,
+    }
+}
+
+/// Copies the single-plane DMA-BUF `fd` (borrowed: the caller keeps it), laid out as `layout`
+/// (6 words), into the registered image `handle` (its top-left), and reads the copy at `probes`
+/// (x, y pairs) into `out`, 4 bytes (BGRA) each: the number of probes read, or -1 with the reason
+/// in [`hal_dmabuf_error`] (an unknown handle, a layout the GPU cannot import, `out` too short, a
+/// GPU error). A browser's accelerated paint reaches its frame ring's slot this way.
+#[relax_api::relax_api]
+pub fn hal_dmabuf_copy(fd: i32, layout: &[u64], handle: u64, probes: &[u32], out: &mut [u8]) -> i64 {
+    let Some(layout) = copy::Layout::from_words(layout) else {
+        failed("a DMA-BUF layout is 6 words".into());
+        return -1;
+    };
+    let points: Vec<[u32; 2]> = probes.chunks_exact(2).map(|p| [p[0], p[1]]).collect();
+    if fd < 0 || out.len() < points.len() * 4 {
+        failed(format!("descriptor {fd}, {} probe bytes for {} probes", out.len(), points.len()));
+        return -1;
+    }
+    // SAFETY: the caller keeps `fd` open for the call
+    let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
+    match copy::copy(fd, layout, handle, &points) {
+        Ok(read) => {
+            for (o, p) in out.chunks_exact_mut(4).zip(&read) {
+                o.copy_from_slice(p);
+            }
+            read.len() as i64
+        }
+        Err(error) => {
+            failed(error);
+            -1
+        }
+    }
+}
+
+/// Writes BGRA rows (`stride` bytes apart) of a `width` x `height` picture into the registered
+/// image `handle` (its top-left): 0, or -1 with the reason in [`hal_dmabuf_error`]. A browser's
+/// software paint reaches its frame ring's slot this way.
+#[relax_api::relax_api]
+pub fn hal_dmabuf_upload(handle: u64, pixels: &[u8], width: u32, height: u32, stride: u64) -> i32 {
+    match copy::upload(handle, pixels, width, height, stride as usize) {
+        Ok(()) => 0,
+        Err(error) => {
+            failed(error);
+            -1
+        }
     }
 }
 

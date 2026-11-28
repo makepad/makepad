@@ -8,6 +8,7 @@ use crate::{
     id_pool::{IdPool, PoolId},
     makepad_live_id::LiveId,
     makepad_math::Rect,
+    script::HostGrants,
     texture::Texture,
     video::{VideoFormatId, VideoInputId},
 };
@@ -146,7 +147,7 @@ impl Cx {
         self.native_layer_retire();
         let handle = NativeLayer(self.native_layers.0.alloc());
         self.native_layers.0.pool[handle.0.id].item = CxNativeLayer::default();
-        if self.script_data.std.host_io_only() {
+        if !self.script_data.std.has_grant(HostGrants::NATIVE_LAYERS) {
             self.native_layers.0.pool[handle.0.id].mode = NativeLayerMode::Unsupported;
             self.native_layers.0.pool[handle.0.id].closed = true;
         } else {
@@ -205,27 +206,27 @@ pub struct NativeLayerHandle<'a> {
 }
 
 impl NativeLayerHandle<'_> {
-    fn op(&mut self, op: NativeLayerOperation) {
-        if self.cx.script_data.std.host_io_only() { return; }
+    fn op(&mut self, op: impl FnOnce() -> NativeLayerOperation) {
+        if !self.cx.script_data.std.has_grant(HostGrants::NATIVE_LAYERS) { return; }
         if self.cx.native_layers.get(self.id).is_some_and(|l| !l.closed) {
-            self.cx.platform_ops.push_back(CxOsOp::NativeLayerOp { id: self.id, op });
+            self.cx.platform_ops.push_back(CxOsOp::NativeLayerOp { id: self.id, op: op() });
         }
     }
     pub fn navigate(&mut self, url: &str, replace: bool) {
-        self.op(NativeLayerOperation::Navigate { url: url.to_owned(), replace });
+        self.op(|| NativeLayerOperation::Navigate { url: url.to_owned(), replace });
     }
-    pub fn history(&mut self, delta: i32) { self.op(NativeLayerOperation::History(delta)); }
-    pub fn reload(&mut self) { self.op(NativeLayerOperation::Reload); }
-    pub fn stop(&mut self) { self.op(NativeLayerOperation::Stop); }
+    pub fn history(&mut self, delta: i32) { self.op(|| NativeLayerOperation::History(delta)); }
+    pub fn reload(&mut self) { self.op(|| NativeLayerOperation::Reload); }
+    pub fn stop(&mut self) { self.op(|| NativeLayerOperation::Stop); }
     pub fn appearance(&mut self, dark: bool, background: [f32; 4]) {
-        self.op(NativeLayerOperation::Appearance { dark, background });
+        self.op(|| NativeLayerOperation::Appearance { dark, background });
     }
-    pub fn focus(&mut self) { self.op(NativeLayerOperation::Focus); }
-    pub fn blur(&mut self) { self.op(NativeLayerOperation::Blur); }
-    pub fn input(&mut self, packed: &[u8]) { self.op(NativeLayerOperation::Input(packed.to_vec())); }
-    pub fn size(&mut self, width: u32, height: u32) { self.op(NativeLayerOperation::Size { width, height }); }
+    pub fn focus(&mut self) { self.op(|| NativeLayerOperation::Focus); }
+    pub fn blur(&mut self) { self.op(|| NativeLayerOperation::Blur); }
+    pub fn input(&mut self, packed: &[u8]) { self.op(|| NativeLayerOperation::Input(packed.to_vec())); }
+    pub fn size(&mut self, width: u32, height: u32) { self.op(|| NativeLayerOperation::Size { width, height }); }
     pub fn camera_source(&mut self, input: VideoInputId, format: VideoFormatId) {
-        self.op(NativeLayerOperation::CameraSource { input, format });
+        self.op(|| NativeLayerOperation::CameraSource { input, format });
     }
     pub fn close(&mut self) {
         if self.cx.native_layers.get(self.id).is_some_and(|l| !l.closed) {

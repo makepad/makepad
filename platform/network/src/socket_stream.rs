@@ -20,6 +20,22 @@ impl SocketStream {
                 port,
                 use_tls,
                 ignore_ssl_cert,
+                None,
+            )?,
+        })
+    }
+
+    /// Each resolved address gets `timeout` to connect. TLS uses the time left since the call began.
+    pub fn connect_timeout(
+        host: &str,
+        port: &str,
+        use_tls: bool,
+        ignore_ssl_cert: bool,
+        timeout: Duration,
+    ) -> io::Result<Self> {
+        Ok(Self {
+            inner: crate::backend::linux::socket_stream::SocketStream::connect(
+                host, port, use_tls, ignore_ssl_cert, Some(timeout),
             )?,
         })
     }
@@ -48,7 +64,19 @@ impl SocketStream {
 
     pub fn into_tls(self, host: &str, ignore_ssl_cert: bool) -> io::Result<Self> {
         Ok(Self {
-            inner: self.inner.into_tls(host, ignore_ssl_cert)?,
+            inner: self.inner.into_tls(host, ignore_ssl_cert, None)?,
+        })
+    }
+
+    /// Bound the wait for TLS handshake input, preserving the read timeout on success.
+    pub fn into_tls_timeout(
+        self,
+        host: &str,
+        ignore_ssl_cert: bool,
+        timeout: Duration,
+    ) -> io::Result<Self> {
+        Ok(Self {
+            inner: self.inner.into_tls(host, ignore_ssl_cert, Some(timeout))?,
         })
     }
 
@@ -113,7 +141,22 @@ impl SocketStream {
         ignore_ssl_cert: bool,
     ) -> io::Result<Self> {
         Ok(Self {
-            inner: apple_impl::SocketStream::connect(host, port, use_tls, ignore_ssl_cert)?,
+            inner: apple_impl::SocketStream::connect(host, port, use_tls, ignore_ssl_cert, None)?,
+        })
+    }
+
+    /// Each resolved address gets `timeout` to connect. TLS uses the time left since the call began.
+    pub fn connect_timeout(
+        host: &str,
+        port: &str,
+        use_tls: bool,
+        ignore_ssl_cert: bool,
+        timeout: Duration,
+    ) -> io::Result<Self> {
+        Ok(Self {
+            inner: apple_impl::SocketStream::connect(
+                host, port, use_tls, ignore_ssl_cert, Some(timeout),
+            )?,
         })
     }
 
@@ -141,7 +184,19 @@ impl SocketStream {
 
     pub fn into_tls(self, host: &str, ignore_ssl_cert: bool) -> io::Result<Self> {
         Ok(Self {
-            inner: self.inner.into_tls(host, ignore_ssl_cert)?,
+            inner: self.inner.into_tls(host, ignore_ssl_cert, None)?,
+        })
+    }
+
+    /// Bound the wait for TLS handshake input, preserving the read timeout on success.
+    pub fn into_tls_timeout(
+        self,
+        host: &str,
+        ignore_ssl_cert: bool,
+        timeout: Duration,
+    ) -> io::Result<Self> {
+        Ok(Self {
+            inner: self.inner.into_tls(host, ignore_ssl_cert, Some(timeout))?,
         })
     }
 
@@ -206,7 +261,22 @@ impl SocketStream {
         ignore_ssl_cert: bool,
     ) -> io::Result<Self> {
         Ok(Self {
-            inner: windows_impl::SocketStream::connect(host, port, use_tls, ignore_ssl_cert)?,
+            inner: windows_impl::SocketStream::connect(host, port, use_tls, ignore_ssl_cert, None)?,
+        })
+    }
+
+    /// Wait up to `timeout` for the platform's connect operation, including TLS.
+    pub fn connect_timeout(
+        host: &str,
+        port: &str,
+        use_tls: bool,
+        ignore_ssl_cert: bool,
+        timeout: Duration,
+    ) -> io::Result<Self> {
+        Ok(Self {
+            inner: windows_impl::SocketStream::connect(
+                host, port, use_tls, ignore_ssl_cert, Some(timeout),
+            )?,
         })
     }
 
@@ -236,6 +306,16 @@ impl SocketStream {
         Ok(Self {
             inner: self.inner.into_tls(host, ignore_ssl_cert)?,
         })
+    }
+
+    /// TLS upgrade on an existing socket is unsupported on this target.
+    pub fn into_tls_timeout(
+        self,
+        host: &str,
+        ignore_ssl_cert: bool,
+        _timeout: Duration,
+    ) -> io::Result<Self> {
+        self.into_tls(host, ignore_ssl_cert)
     }
 
     pub fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
@@ -305,6 +385,17 @@ impl SocketStream {
         })
     }
 
+    /// Android delegates to the platform connector, which ignores the supplied timeout.
+    pub fn connect_timeout(
+        host: &str,
+        port: &str,
+        use_tls: bool,
+        ignore_ssl_cert: bool,
+        _timeout: Duration,
+    ) -> io::Result<Self> {
+        Self::connect(host, port, use_tls, ignore_ssl_cert)
+    }
+
     /// TLS without CA validation (self-signed servers); returns the server
     /// leaf certificate DER. Hash it with [`crate::tls::fingerprint`] for a known-hosts check.
     pub fn connect_capture(host: &str, port: &str) -> io::Result<(Self, Vec<u8>)> {
@@ -331,6 +422,16 @@ impl SocketStream {
             io::ErrorKind::Unsupported,
             "socket stream TLS upgrade is not available on this target",
         ))
+    }
+
+    /// TLS upgrade on an existing socket is unsupported on this target.
+    pub fn into_tls_timeout(
+        self,
+        host: &str,
+        ignore_ssl_cert: bool,
+        _timeout: Duration,
+    ) -> io::Result<Self> {
+        self.into_tls(host, ignore_ssl_cert)
     }
 
     pub fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
@@ -393,6 +494,17 @@ impl SocketStream {
         ))
     }
 
+    /// Raw sockets are unavailable on WebAssembly.
+    pub fn connect_timeout(
+        host: &str,
+        port: &str,
+        use_tls: bool,
+        ignore_ssl_cert: bool,
+        _timeout: Duration,
+    ) -> io::Result<Self> {
+        Self::connect(host, port, use_tls, ignore_ssl_cert)
+    }
+
     pub fn connect_capture(_host: &str, _port: &str) -> io::Result<(Self, Vec<u8>)> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -416,6 +528,16 @@ impl SocketStream {
             io::ErrorKind::Unsupported,
             "socket stream TLS upgrade is not available on this target",
         ))
+    }
+
+    /// TLS upgrade on an existing socket is unsupported on this target.
+    pub fn into_tls_timeout(
+        self,
+        host: &str,
+        ignore_ssl_cert: bool,
+        _timeout: Duration,
+    ) -> io::Result<Self> {
+        self.into_tls(host, ignore_ssl_cert)
     }
 
     pub fn set_read_timeout(&self, _timeout: Option<Duration>) -> io::Result<()> {
@@ -461,6 +583,85 @@ impl Write for SocketStream {
     }
 
     fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+    use std::net::{TcpListener, TcpStream};
+    use std::time::Instant;
+
+    #[test]
+    fn socket_stream_connect_timeout_fails_fast_on_refused_loopback() -> io::Result<()> {
+        let listener = TcpListener::bind(("127.0.0.1", 0))?;
+        // The client's source port stays allocated and has no listener.
+        let client = TcpStream::connect(listener.local_addr()?)?;
+        let port = client.local_addr()?.port().to_string();
+        let started = Instant::now();
+        let err = SocketStream::connect_timeout("127.0.0.1", &port, false, true, Duration::from_secs(3))
+            .err().expect("a port without a listener accepted a connection");
+        assert_ne!(err.kind(), io::ErrorKind::TimedOut, "connect missed the refusal");
+        #[cfg(any(target_os = "linux", target_vendor = "apple"))]
+        assert_eq!(err.kind(), io::ErrorKind::ConnectionRefused);
+        assert!(started.elapsed() < Duration::from_millis(750), "loopback refusal took {:?}", started.elapsed());
+        Ok(())
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn socket_stream_into_tls_timeout_upgrades_after_plaintext_greeting() -> io::Result<()> {
+        use crate::tls::{generate_p256, TlsIdentity, TlsServer};
+        use std::thread;
+
+        const GREETING: &[u8; 15] = b"MDCSTART<<TLS>>";
+        let limit = Duration::from_millis(750);
+        let server = TlsServer::new(TlsIdentity::in_memory(generate_p256()?, "localhost", None)?)?;
+        let listener = TcpListener::bind(("127.0.0.1", 0))?;
+        let port = listener.local_addr()?.port().to_string();
+        let mut client = SocketStream::connect_timeout("127.0.0.1", &port, false, true, limit)?;
+        let (mut peer, _) = listener.accept()?;
+        peer.set_read_timeout(Some(limit))?;
+        peer.set_write_timeout(Some(limit))?;
+        let echo = thread::spawn(move || -> io::Result<()> {
+            peer.write_all(GREETING)?;
+            let mut tls = server.accept(peer)?;
+            let mut request = [0; 2];
+            tls.read_exact(&mut request)?;
+            tls.write_all(&request)?;
+            tls.flush()
+        });
+
+        let previous = Some(Duration::from_millis(250));
+        client.set_read_timeout(previous)?;
+        let mut greeting = [0; GREETING.len()];
+        client.read_exact(&mut greeting)?;
+        assert_eq!(&greeting, GREETING);
+        let mut tls = client.into_tls_timeout("localhost", true, limit)?;
+        assert_eq!(tls.try_clone_tcp()?.read_timeout()?, previous, "upgrade changed the read timeout");
+        tls.write_all(b"ok")?;
+        tls.flush()?;
+        let mut reply = [0; 2];
+        tls.read_exact(&mut reply)?;
+        assert_eq!(&reply, b"ok");
+        echo.join().unwrap()?;
+
+        let client = SocketStream::connect_timeout("127.0.0.1", &port, false, true, limit)?;
+        assert_eq!(client.try_clone_tcp()?.read_timeout()?, None);
+        let (mut peer, _) = listener.accept()?;
+        // Drain the ClientHello without replying. Also release the socket if the client hangs.
+        peer.set_read_timeout(Some(limit))?;
+        let silent = thread::spawn(move || io::copy(&mut peer, &mut io::sink()));
+        let started = Instant::now();
+        let timeout = Duration::from_millis(150);
+        let result = client.into_tls_timeout("localhost", true, timeout);
+        let elapsed = started.elapsed();
+        let err = result.err().expect("TLS handshake succeeded against a silent peer");
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut, "silent peer: {err}");
+        assert!(elapsed >= timeout, "handshake timed out early after {elapsed:?}");
+        assert!(elapsed < limit, "silent peer held the handshake for {elapsed:?}");
+        silent.join().unwrap()?;
         Ok(())
     }
 }

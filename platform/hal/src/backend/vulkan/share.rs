@@ -99,10 +99,7 @@ impl NativeImages {
         let id = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
         lock(&self.entries).insert(id, Entry { session, handle: Arc::new(handle), image: Weak::new() }); id
     }
-    /// Export tickets become externally readable only after TextureShared is delivered (the
-    /// release-to-foreign barrier has completed). The shell must finish its external use before
-    /// allowing further HAL access, or register the finished producer handle for import.
-    pub fn handle(&self, ticket: u64) -> Option<Arc<NativeHandle>> { lock(&self.entries).get(&ticket).map(|e| e.handle.clone()) }
+    #[cfg(target_os = "android")]
     pub fn release(&self, ticket: u64) { lock(&self.entries).remove(&ticket); }
     pub(super) fn retire(&self, session: u32, image: &Arc<Image>) {
         let image = Arc::downgrade(image);
@@ -170,18 +167,18 @@ impl crate::dmabuf::Api for super::Vulkan {
         }
     }
     fn acquire(&mut self, session: u32, id: crate::Id) -> Result<(), String> {
-        let image = self.tex.get(&(session, id.index)).filter(|t| t.gen == id.gen).ok_or("missing DMA-BUF texture")?;
+        let image = self.tex.get(session, id.index).filter(|t| t.gen == id.gen).ok_or("missing DMA-BUF texture")?;
         if image.image.external.is_none() { return Err("texture is not external".into()); }
         // Every submitted use releases to FOREIGN/GENERAL. The next use's transition
         // acquires it again, after the compositor has observed the producer's fence.
         Ok(())
     }
     fn available(&self, session: u32, id: crate::Id) -> Result<bool, String> {
-        let image = self.tex.get(&(session, id.index)).filter(|t| t.gen == id.gen).ok_or("missing hosted texture")?;
+        let image = self.tex.get(session, id.index).filter(|t| t.gen == id.gen).ok_or("missing hosted texture")?;
         match &image.image.timeline { Some(t) if t.producer => t.available(), _ => Err("hosted image has no writer timeline".into()) }
     }
     fn sequence(&self, session: u32, id: crate::Id) -> Result<u64, String> {
-        let image = self.tex.get(&(session, id.index)).filter(|t| t.gen == id.gen).ok_or("missing hosted texture")?;
+        let image = self.tex.get(session, id.index).filter(|t| t.gen == id.gen).ok_or("missing hosted texture")?;
         image.image.timeline.as_ref().filter(|t| t.producer).map(|t| t.sequence()).ok_or("hosted image has no writer timeline".into())
     }
     fn copy_frame(&mut self, session: &mut crate::session::Session, source: crate::Id, destination: crate::Id, sequence: u64) -> Result<(), String> {

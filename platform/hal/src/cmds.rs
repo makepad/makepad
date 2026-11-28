@@ -171,6 +171,9 @@ hal_commands! {
     /// The GPU profiler for an app's own readout: starts a recording kept `keep_s` seconds when
     /// none runs, else answers `GpuProfRecording` with the busiest session's recording so far.
     GpuProfQuery = 35, gpu_prof_query { keep_s: u32 };
+    /// Stops the recording this session's `GpuProfQuery` started (one another tool started, the
+    /// remote's `gpuprof`, runs on).
+    GpuProfStop = 37, gpu_prof_stop {};
     /// Centers the native window buttons `y_center` points below the window's top edge.
     /// AppKit retains the center across geometry changes; other backends ignore it.
     WindowButtonsCenter = 24, window_buttons_center { id: obj, y_center: f32 };
@@ -244,6 +247,10 @@ hal_commands! {
     /// `kind` (flags) is `buffer_kind::*`.
     BufferCreate = 56, buffer_create { id: obj, kind: flags, size: u64, attr: attr };
     BufferUpdate = 57, buffer_update { id: obj, off: u64, bytes: slice };
+    /// Writes at several offsets of one buffer: the same as a `BufferUpdate` per part, in order,
+    /// each part checked on its own, as one command (the frame builder sends one per instance
+    /// slab a frame writes).
+    BufferUpdateParts = 65, buffer_update_parts { id: obj, parts: parts };
     BufferDestroy = 58, buffer_destroy { id: obj };
     /// `desc`: a `PipelineDesc` followed by the parts it names (see `buffers::PipelineSpec`).
     PipelineCreate = 59, pipeline_create { id: obj, dialect: u32, attr: attr, desc: rng };

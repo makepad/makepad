@@ -74,7 +74,7 @@ fn main() {
 
     // The main thread's wakes under the full load, and between them the tokens the Background
     // jobs hold: printed, not gated.
-    let background_tokens = || makepad_cpu_budget::tokens().holders.iter().filter(|h| h.class == BACKGROUND && h.client == APP && !h.lent && !h.above).count();
+    let background_tokens = || makepad_cpu_budget::tokens().holders.iter().filter(|h| h.class == BACKGROUND && h.client == APP && !h.lent).count();
     let mut most_tokens = 0;
     let mut wakes = Vec::with_capacity(500);
     for _ in 0..500 {

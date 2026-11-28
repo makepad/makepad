@@ -33,6 +33,7 @@ use crate::cmds::HalCmd;
 use crate::ledger::{Kind, LedgerEntry};
 use crate::media::{audio_dir, game_op, location_kind, location_op, midi_op, permission_kind, permission_op, permission_status, read_u64s, video_mode, video_op, video_status};
 use crate::session::{Session, TextureObj, World};
+use crate::table::SessionTable;
 use crate::types::{format, usage, Attr, Id};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -89,7 +90,7 @@ fn external_texture(fmt: u32, w: u32, h: u32) -> TextureObj {
 /// session's table entry (size, format) and the ledger row in step with it.
 pub(crate) struct Sink<'a> {
     pub(crate) dev: &'a Arc<Device>,
-    pub(crate) tex: &'a mut HashMap<(u32, u32), Tex>,
+    pub(crate) tex: &'a mut SessionTable<Tex>,
     pub(crate) now: u64,
 }
 
@@ -138,7 +139,7 @@ impl Sink<'_> {
         match Texture::new(self.dev.clone(), obj) {
             Ok(t) => {
                 let bytes = t.bytes;
-                self.tex.insert((s.id, id.index), Tex { gen: id.gen, tex: t });
+                self.tex.insert(s.id, id.index, Tex { gen: id.gen, tex: t });
                 self.set_row(s, id, fmt, 1, 1, bytes);
             }
             Err(e) => eprintln!("[hal-media] video: placeholder texture: {e}"),
@@ -155,15 +156,15 @@ impl Sink<'_> {
         let (fmt, w, h, bytes) = (t.desc.format, t.desc.w, t.desc.h, t.bytes);
         entry.val = external_texture(fmt, w, h);
         entry.val.bytes = bytes;
-        self.tex.insert((s.id, id.index), Tex { gen: id.gen, tex: t });
+        self.tex.insert(s.id, id.index, Tex { gen: id.gen, tex: t });
         self.set_row(s, id, fmt, w, h, bytes);
         true
     }
 
     /// Gives the storage of `id` back; its table entry stays until the app destroys the texture.
     fn drop_texture(&mut self, s: &mut Session, id: Id) {
-        if self.tex.get(&(s.id, id.index)).is_some_and(|t| t.gen == id.gen) {
-            self.tex.remove(&(s.id, id.index));
+        if self.tex.get(s.id, id.index).is_some_and(|t| t.gen == id.gen) {
+            self.tex.remove(s.id, id.index);
             if let Some(l) = s.ledger.get_mut(Kind::Texture, id.index).filter(|l| l.gen == id.gen) {
                 l.bytes = 0;
             }
@@ -242,8 +243,10 @@ impl Media {
                 true
             }
             HalCmd::AudioUse { dir, options: _, devices } => {
-                // echo cancellation (`audio_option::ECHO_CANCELLATION`) has no WASAPI stream
-                // equivalent here: the capture is the device's own
+                // echo cancellation (`audio_option::ECHO_CANCELLATION`) is a no-op here: the
+                // caller cancels echo in software. The communications stream category would make
+                // Windows turn other sounds down (this app's own playback included) and can engage
+                // the driver's own echo processing underneath the software canceller.
                 let sm = self.sessions.entry(s.id).or_insert_with(|| SessionMedia::new(s.id));
                 let ids = read_u64s(devices);
                 if dir == audio_dir::INPUT {

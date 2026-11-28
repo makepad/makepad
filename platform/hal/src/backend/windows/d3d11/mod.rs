@@ -24,6 +24,7 @@ use crate::buffers::{CmdView, PipelineBlob};
 use crate::hlsl::HlslPipeline;
 use crate::ledger::{Kind, LedgerEntry};
 use crate::session::*;
+use crate::table::SessionTable;
 use crate::types::*;
 use complete::{Completion, Event, Mailbox, Token};
 use device::{CompilePool, Device};
@@ -67,16 +68,17 @@ pub struct D3d11 {
     a11y_update: Option<win32::a11y::Update>,
     leases: Arc<leases::Pool>,
     dev: Arc<Device>,
+    no_overwrite_srv: bool,
     info: HalInfo,
-    tex: HashMap<(u32, u32), Tex>,
-    buf: HashMap<(u32, u32), Buf>,
-    pipe: HashMap<(u32, u32), Pipe>,
-    compute: HashMap<(u32, u32), compute::Pipe>,
+    tex: SessionTable<Tex>,
+    buf: SessionTable<Buf>,
+    pipe: SessionTable<Pipe>,
+    compute: SessionTable<compute::Pipe>,
     /// compiled pipelines shared by identical sources and layouts (by `PipeSrc::hash_key`)
     programs: HashMap<u64, Vec<Weak<PipeState>>>,
     starved: Vec<Starved>,
     /// windows' retained images, by (owner, index)
-    win: HashMap<(u32, u32), Tex>,
+    win: SessionTable<Tex>,
     /// session 0's windows with a badge layer (by index), and the image each last presented: its
     /// retained image with the layer drawn over (what a snapshot of the window reads)
     badged: HashMap<u32, Option<Tex>>,
@@ -105,7 +107,7 @@ pub struct D3d11 {
     dcomp_reset: bool,
     batch: complete::Batch,
     cb_arena: Arena,
-    word_arena: Arena,
+    tail_cb: Arena,
     /// the device's count of this process's video memory (`Device::usage`), read every
     /// `COUNT_NS` (when idle staging is trimmed too)
     device_bytes: Option<u64>,
@@ -143,6 +145,8 @@ impl D3d11 {
         };
         let budget = dev.budget().map_or(0, |b| b.0);
         let mut info = HalInfo {
+            uniform_align: 256,
+            max_uniform_block: 65_536,
             backend: backend_id::D3D11,
             dialect: dialect::HLSL,
             formats: dev.formats,
@@ -183,21 +187,22 @@ impl D3d11 {
             leases: leases::Pool::new(dev.clone(), wake.clone()),
             shell,
             a11y_update: None,
-            cb_arena: Arena::new(&dev, 256 * 1024, true)?,
-            word_arena: Arena::new(&dev, 256 * 1024, false)?,
+            cb_arena: Arena::new(&dev, 256 * 1024)?,
+            tail_cb: Arena::new(&dev, 64 * 1024)?,
             device_bytes: None,
             counted_at: 0,
             scratch: Default::default(),
             prof: None,
+            no_overwrite_srv: resources::supports_dynamic_append(&dev),
             dev,
             info,
-            tex: HashMap::new(),
-            buf: HashMap::new(),
-            pipe: HashMap::new(),
-            compute: HashMap::new(),
+            tex: SessionTable::default(),
+            buf: SessionTable::default(),
+            pipe: SessionTable::default(),
+            compute: SessionTable::default(),
             programs: HashMap::new(),
             starved: Vec::new(),
-            win: HashMap::new(),
+            win: SessionTable::default(),
             badged: HashMap::new(),
             compose: None,
             aliases: HashMap::new(),
@@ -331,14 +336,14 @@ impl D3d11 {
                 Event::Readback { req, status, rect, lease } => world.to_session(sid, |q| q.readback(req, status, rect, lease)),
             }
         }
-        for ((sid, index), pipe) in &mut self.pipe {
+        for ((sid, index), pipe) in self.pipe.iter_mut() {
             let epoch = pipe.state.epoch.load(Ordering::Acquire);
             if epoch == pipe.epoch {
                 continue;
             }
             pipe.epoch = epoch;
-            let id = Id::new(*index, pipe.gen);
-            let Some(s) = world.session_mut(*sid) else { continue };
+            let id = Id::new(index, pipe.gen);
+            let Some(s) = world.session_mut(sid) else { continue };
             if !pipe.announced {
                 pipe.announced = true;
                 s.pipelines_pending = s.pipelines_pending.saturating_sub(1);
@@ -351,9 +356,9 @@ impl D3d11 {
                     self.starved.push(Starved { failed: pipe.state.clone(), next: None, retry_ns: crate::clock_ns() + STARVED_RETRY_NS });
                 }
                 let log = e.to_owned();
-                world.to_session(*sid, |q| q.pipeline_failed(id, log.as_bytes()));
+                world.to_session(sid, |q| q.pipeline_failed(id, log.as_bytes()));
             } else if pipe.state.ready().is_some() {
-                world.to_session(*sid, |q| q.pipeline_ready(id));
+                world.to_session(sid, |q| q.pipeline_ready(id));
             }
         }
         self.announce_compute(world);
@@ -369,14 +374,14 @@ impl D3d11 {
             host.ledger.set_pools(&self.dev.pools, frame, now);
         }
         // a window's row: its retained image and its swapchain's back buffers
-        for ((sid, index), t) in &self.win {
-            let id = Id::new(*index, t.gen);
-            let back = self.chains.back_buffers((*sid, id));
-            if *sid != HOST && back.is_none() { continue; }
-            let Some(owner) = world.session_mut(*sid) else { continue };
+        for ((sid, index), t) in self.win.iter() {
+            let id = Id::new(index, t.gen);
+            let back = self.chains.back_buffers((sid, id));
+            if sid != HOST && back.is_none() { continue; }
+            let Some(owner) = world.session_mut(sid) else { continue };
             let (back_bytes, back_count) = back.unwrap_or_default();
             let (bytes, objects) = (t.tex.bytes + back_bytes, 1 + back_count as u64);
-            if owner.ledger.get(Kind::Window, *index).is_none_or(|r| r.gen != t.gen || r.bytes != bytes || r.objects != objects
+            if owner.ledger.get(Kind::Window, index).is_none_or(|r| r.gen != t.gen || r.bytes != bytes || r.objects != objects
                 || r.width != t.tex.desc.w || r.height != t.tex.desc.h) {
                 let mut row = window_row(id, &t.tex, now, owner.frame);
                 row.bytes = bytes;
@@ -442,7 +447,7 @@ impl Backend for D3d11 {
                         None => st.next = Some(next),
                         Some(_) if next.out_of_memory() => st.retry_ns = now + STARVED_RETRY_NS,
                         Some(_) => {
-                            for pipe in self.pipe.values_mut().filter(|p| Arc::ptr_eq(&p.state, &st.failed)) {
+                            for pipe in self.pipe.iter_mut().map(|(_, p)| p).filter(|p| Arc::ptr_eq(&p.state, &st.failed)) {
                                 pipe.state = next.clone();
                                 pipe.epoch = 0;
                             }
@@ -483,10 +488,11 @@ impl Backend for D3d11 {
             self.chains.close_session(shell, sid);
         }
         self.media.session_closed(sid);
-        self.tex.retain(|k, _| k.0 != sid);
-        self.buf.retain(|k, _| k.0 != sid);
-        self.pipe.retain(|k, _| k.0 != sid); self.compute.retain(|k, _| k.0 != sid);
-        self.win.retain(|k, _| k.0 != sid);
+        self.tex.take_session(sid);
+        self.buf.take_session(sid);
+        self.pipe.take_session(sid);
+        self.compute.take_session(sid);
+        self.win.take_session(sid);
         self.segments.retain(|k, _| k.0 != sid);
         self.segment_depths.retain(|k, _| k.0 != sid);
         self.over_budget.retain(|k| k.0 != sid);
@@ -514,8 +520,8 @@ impl Backend for D3d11 {
 impl exec::DeviceReset for D3d11 {
     fn replace_device(&mut self, world: &mut World) -> Result<(), String> {
         let dev = Device::new()?;
-        let cb_arena = Arena::new(&dev, 256 * 1024, true)?;
-        let word_arena = Arena::new(&dev, 256 * 1024, false)?;
+        let cb_arena = Arena::new(&dev, 256 * 1024)?;
+        let tail_cb = Arena::new(&dev, 64 * 1024)?;
         let complete = Completion::new(dev.clone(), self.mailbox.clone())?;
         // the old device's work: its completion thread answers what was submitted (readbacks and
         // picks as failed, frames as finished) and ends; then those answers are delivered
@@ -544,8 +550,9 @@ impl exec::DeviceReset for D3d11 {
         self.fallback.clear();
         self.media.device_reset(world);
         self.cb_arena = cb_arena;
-        self.word_arena = word_arena;
+        self.tail_cb = tail_cb;
         self.leases = leases::Pool::new(dev.clone(), self.mailbox.wake.clone());
+        self.no_overwrite_srv = resources::supports_dynamic_append(&dev);
         self.dev = dev;
         self.info.working_set = self.dev.budget().map_or(0, |b| b.0);
         crate::gpu_limits::set_gpu_working_set_bytes(self.info.working_set);
@@ -553,7 +560,7 @@ impl exec::DeviceReset for D3d11 {
     }
 
     fn rebuild_pipelines(&mut self, world: &mut World) {
-        let kernels: Vec<_> = self.compute.iter().map(|(key, pipe)| (*key, pipe.gen, pipe.announced)).collect();
+        let kernels: Vec<_> = self.compute.iter().map(|(key, pipe)| (key, pipe.gen, pipe.announced)).collect();
         self.compute.clear();
         for ((sid, index), gen, announced) in kernels {
             let Some(s) = world.session_mut(sid) else { continue; };
@@ -571,9 +578,9 @@ impl exec::DeviceReset for D3d11 {
         // every program is built again below, the ones that ran out of memory too
         self.starved.clear();
         let mut rebuilt: HashMap<*const PipeState, Arc<PipeState>> = HashMap::new();
-        let keys: Vec<(u32, u32)> = self.pipe.keys().copied().collect();
+        let keys: Vec<(u32, u32)> = self.pipe.iter().map(|(key, _)| key).collect();
         for key in keys {
-            let old = self.pipe[&key].state.clone();
+            let old = self.pipe.get(key.0, key.1).expect("listed above").state.clone();
             let state = match rebuilt.get(&Arc::as_ptr(&old)) {
                 Some(st) => st.clone(),
                 None => {
@@ -584,7 +591,7 @@ impl exec::DeviceReset for D3d11 {
                     st
                 }
             };
-            let pipe = self.pipe.get_mut(&key).expect("listed above");
+            let pipe = self.pipe.get_mut(key.0, key.1).expect("listed above");
             pipe.state = state;
             pipe.epoch = 0;
             // pending again until the new program answers
@@ -664,7 +671,7 @@ impl Gpu for D3d11 {
             e
         })?;
         t.bytes = tex.bytes;
-        self.tex.insert((s.id, id.index), Tex { gen: id.gen, tex });
+        self.tex.insert(s.id, id.index, Tex { gen: id.gen, tex });
         Ok(())
     }
     fn texture_update(&mut self, s: &mut Session, id: Id, _t: &TextureObj, mip: u16, rect: [u32; 4], layer: u32, data: &[u8]) {
@@ -674,8 +681,8 @@ impl Gpu for D3d11 {
         }
     }
     fn texture_destroy(&mut self, sid: u32, id: Id) {
-        if self.tex.get(&(sid, id.index)).is_some_and(|t| t.gen <= id.gen) {
-            self.tex.remove(&(sid, id.index));
+        if self.tex.get(sid, id.index).is_some_and(|t| t.gen <= id.gen) {
+            self.tex.remove(sid, id.index);
         }
         self.pick_pending.remove(&(sid, id));
     }
@@ -688,7 +695,7 @@ impl Gpu for D3d11 {
         self.read(s, t, req, rect);
     }
     fn texture_share(&mut self, s: &mut Session, id: Id) {
-        let key = self.tex.get(&(s.id, id.index)).filter(|t| t.gen == id.gen).and_then(|t| t.tex.shared.as_ref()).map_or(0, |sh| sh.key);
+        let key = self.tex.get(s.id, id.index).filter(|t| t.gen == id.gen).and_then(|t| t.tex.shared.as_ref()).map_or(0, |sh| sh.key);
         s.events.texture_shared(id, key);
     }
     fn texture_import(&mut self, s: &mut Session, id: Id, handle: u64, kind: u32) -> Option<TextureObj> {
@@ -697,40 +704,41 @@ impl Gpu for D3d11 {
         }
         let tex = Texture::import(self.dev.clone(), handle).map_err(|e| eprintln!("[hal-d3d11] import: {e}")).ok()?;
         let desc = tex.desc.clone();
-        self.tex.insert((s.id, id.index), Tex { gen: id.gen, tex });
+        self.tex.insert(s.id, id.index, Tex { gen: id.gen, tex });
         Some(desc)
     }
     fn buffer_create(&mut self, s: &mut Session, id: Id, b: &mut BufferObj) -> Result<(), String> {
-        let buf = Buffer::new(self.dev.clone(), b.kind, b.size)?;
+        let buf = Buffer::retained(self.dev.clone(), b.kind, b.size, self.no_overwrite_srv)?;
         // A retained buffer reads as zero where nothing wrote it, as on Vulkan and Metal. D3D11
         // leaves a new buffer's bytes undefined (the driver hands out memory the process freed),
         // so a storage buffer is cleared on the GPU here; the other kinds are read only where
         // uploaded (a uniform buffer is written whole).
         if let Some(uav) = &buf.uav { unsafe { self.dev.ctx.ClearUnorderedAccessViewUint(uav, &[0; 4]) } }
         b.bytes = buf.bytes;
-        self.buf.insert((s.id, id.index), Buf { gen: id.gen, buf, evictable: b.evictable });
+        self.buf.insert(s.id, id.index, Buf { gen: id.gen, buf, evictable: b.evictable });
         Ok(())
     }
-    fn buffer_update(&mut self, s: &mut Session, id: Id, b: &mut BufferObj, off: u64, data: &[u8]) {
-        match self.buf.get(&(s.id, id.index)).filter(|r| r.gen == id.gen) {
-            Some(r) => {
-                r.buf.write(off, data);
-                b.bytes = r.buf.bytes;
-            }
-            None => {
-                eprintln!("[hal-d3d11] buffer update: missing buffer {id:?}");
-                s.bad();
-            }
+    fn buffer_update_parts(&mut self, s: &mut Session, id: Id, b: &mut BufferObj, parts: BufferParts<'_>) {
+        let Some(r) = self.buf.get(s.id, id.index).filter(|r| r.gen == id.gen) else {
+            eprintln!("[hal-d3d11] buffer update: missing buffer {id:?}");
+            s.bad();
+            return;
+        };
+        b.bytes = r.buf.bytes;
+        // SAFETY: called inside the hal_submit call that lent the parts
+        if let Err(e) = r.buf.update_parts(unsafe { parts.iter() }, &mut s.stats.driver_uploads) {
+            eprintln!("[hal-d3d11] buffer {id:?} update: {e}");
+            s.bad();
         }
     }
     fn buffer_readbacks(&mut self, s: &mut Session, req: u32, ranges: &[BufferReadRange]) { self.read_compute_buffers(s, req, ranges); }
     fn buffer_destroy(&mut self, sid: u32, id: Id) {
-        if self.buf.get(&(sid, id.index)).is_some_and(|b| b.gen <= id.gen) {
-            self.buf.remove(&(sid, id.index));
+        if self.buf.get(sid, id.index).is_some_and(|b| b.gen <= id.gen) {
+            self.buf.remove(sid, id.index);
         }
     }
     fn buffer_evictable(&mut self, sid: u32, id: Id) {
-        if let Some(b) = self.buf.get_mut(&(sid, id.index)).filter(|b| b.gen == id.gen) {
+        if let Some(b) = self.buf.get_mut(sid, id.index).filter(|b| b.gen == id.gen) {
             b.evictable = true;
         }
     }
@@ -764,20 +772,20 @@ impl Gpu for D3d11 {
             list.push(Arc::downgrade(&state));
             state
         });
-        self.pipe.insert((s.id, id.index), Pipe { gen: id.gen, state, epoch: 0, announced: false });
+        self.pipe.insert(s.id, id.index, Pipe { gen: id.gen, state, epoch: 0, announced: false });
         PipeStatus::Pending
     }
     fn pipeline_wanted(&mut self, sid: u32, id: Id) {
-        if let Some(p) = self.pipe.get(&(sid, id.index)).filter(|p| p.gen == id.gen) {
+        if let Some(p) = self.pipe.get(sid, id.index).filter(|p| p.gen == id.gen) {
             self.compilers.hurry(Arc::as_ptr(&p.state) as usize);
-        } else if let Some(p) = self.compute.get(&(sid, id.index)).filter(|p| p.gen == id.gen) {
+        } else if let Some(p) = self.compute.get(sid, id.index).filter(|p| p.gen == id.gen) {
             self.compilers.hurry(p.compile_key());
         }
     }
     fn pipeline_destroy(&mut self, sid: u32, id: Id) -> bool {
-        if self.compute.get(&(sid, id.index)).is_some_and(|p| p.gen <= id.gen) { return self.compute.remove(&(sid, id.index)).is_some_and(|p| !p.announced); }
-        if self.pipe.get(&(sid, id.index)).is_some_and(|p| p.gen <= id.gen) {
-            return self.pipe.remove(&(sid, id.index)).is_some_and(|p| !p.announced);
+        if self.compute.get(sid, id.index).is_some_and(|p| p.gen <= id.gen) { return self.compute.remove(sid, id.index).is_some_and(|p| !p.announced); }
+        if self.pipe.get(sid, id.index).is_some_and(|p| p.gen <= id.gen) {
+            return self.pipe.remove(sid, id.index).is_some_and(|p| !p.announced);
         }
         false
     }
@@ -793,7 +801,7 @@ impl Gpu for D3d11 {
         self.copy_window(s, window, texture, req);
     }
     fn window_closed(&mut self, sid: u32, id: Id) {
-        self.win.remove(&(sid, id.index));
+        self.win.remove(sid, id.index);
         self.segments.retain(|k, _| (k.0, k.1) != (sid, id.index));
         self.segment_depths.retain(|k, _| (k.0, k.1) != (sid, id.index));
         self.native_fallback.remove(&(sid, id));

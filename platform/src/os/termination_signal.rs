@@ -93,7 +93,6 @@ mod native {
         sync::{atomic::AtomicI32, OnceLock},
     };
 
-    #[cfg(target_os = "linux")]
     use std::sync::atomic::AtomicU64;
 
     // Both endpoints live for the process lifetime, including on partial setup
@@ -104,11 +103,13 @@ mod native {
     /// unless it comes within SAME_REQUEST_NS: that is one request delivered twice -- GNU
     /// timeout (and so every x64run/CI wrapper) sends SIGTERM to its child and then to its
     /// process group, and the child's _exit then cut off Relax's quit write of the cache.
-    #[cfg(target_os = "linux")]
     static FIRST_SIGNAL_NS: AtomicU64 = AtomicU64::new(0);
-    #[cfg(target_os = "linux")]
     const SAME_REQUEST_NS: u64 = 250_000_000;
+    /// The clock id differs: 1 on Linux, 6 on Darwin (where 1 is CLOCK_REALTIME-like and not monotonic).
     #[cfg(target_os = "linux")]
+    const CLOCK_MONOTONIC: c_int = 1;
+    #[cfg(target_os = "macos")]
+    const CLOCK_MONOTONIC: c_int = 6;
     #[repr(C)]
     struct Timespec {
         sec: i64,
@@ -125,19 +126,16 @@ mod native {
         #[cfg_attr(target_os = "macos", link_name = "__error")]
         #[cfg_attr(target_os = "linux", link_name = "__errno_location")]
         fn errno_location() -> *mut c_int;
-        #[cfg(target_os = "linux")]
         fn _exit(status: c_int) -> !;
-        #[cfg(target_os = "linux")]
         fn clock_gettime(clock: c_int, ts: *mut Timespec) -> c_int;
     }
 
     extern "C" fn handle(_: c_int) {
         // Only lock-free atomics and async-signal-safe C calls here. In
         // particular, the UI waker may lock or enter AppKit, so a worker runs it.
-        #[cfg(target_os = "linux")]
         {
             let mut ts = Timespec { sec: 0, nsec: 0 };
-            unsafe { clock_gettime(1, &mut ts) }; // CLOCK_MONOTONIC; async-signal-safe
+            unsafe { clock_gettime(CLOCK_MONOTONIC, &mut ts) }; // async-signal-safe
             let now = (ts.sec as u64).wrapping_mul(1_000_000_000).wrapping_add(ts.nsec as u64).max(1);
             if let Err(first) = FIRST_SIGNAL_NS.compare_exchange(0, now, Ordering::AcqRel, Ordering::Acquire) {
                 if now.saturating_sub(first) >= SAME_REQUEST_NS {

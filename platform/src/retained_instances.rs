@@ -1,7 +1,7 @@
 //! Immutable instance publications. Recording pins CPU storage; renderer-owned
 //! buffers remain subject to each backend's real submission/completion law.
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::BTreeMap,
     ops::Range,
     sync::{
         atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -121,7 +121,7 @@ pub struct RetainedAllocationBudget {
     limit: usize,
     device_limit: Option<usize>,
     evicted_bytes: usize,
-    bytes: usize,
+    bytes: u64,
     records: Vec<Arc<RetainedAllocationRecord>>,
     released: Arc<std::sync::atomic::AtomicUsize>,
     metadata_disposals: Vec<Arc<RetainedAllocationRecord>>,
@@ -138,7 +138,7 @@ pub struct RetainedAllocationBudget {
 }
 #[derive(Debug)]
 pub(crate) struct RetainedAllocationRecord {
-    bytes: usize,
+    bytes: u64,
     submitted: AtomicU64,
     owners: std::sync::atomic::AtomicUsize,
     released: Arc<std::sync::atomic::AtomicUsize>,
@@ -324,6 +324,9 @@ impl RetainedAllocationBudget {
         self.records.len()
     }
     pub fn bytes(&self) -> usize {
+        usize::try_from(self.bytes).unwrap_or(usize::MAX)
+    }
+    pub(crate) fn physical_bytes(&self) -> u64 {
         self.bytes
     }
     pub fn refusals(&self) -> usize {
@@ -333,15 +336,15 @@ impl RetainedAllocationBudget {
     /// resident bytes are above three quarters of the limit, with a Schmitt
     /// band down to five eighths. Nothing in the platform evicts on it.
     pub fn reclaim_needed(&self) -> bool {
-        if self.bytes > self.pressure_high() {
+        if self.bytes > self.pressure_high() as u64 {
             self.cache_pressure.set(true);
-        } else if self.bytes <= self.pressure_low() {
+        } else if self.bytes <= self.pressure_low() as u64 {
             self.cache_pressure.set(false);
         }
         self.cache_pressure.get()
     }
     pub fn reserve(&mut self, bytes: usize) -> Option<RetainedAllocation> {
-        if bytes > self.limit().saturating_sub(self.bytes) {
+        if bytes as u64 > (self.limit() as u64).saturating_sub(self.bytes) {
             self.refusals = self.refusals.saturating_add(1);
             return None;
         }
@@ -351,6 +354,9 @@ impl RetainedAllocationBudget {
     /// refused allocation was a hole (residency by construction). The
     /// producer's policy brings the total back under its limit.
     pub fn reserve_visible(&mut self, bytes: usize) -> RetainedAllocation {
+        self.reserve_physical(bytes as u64)
+    }
+    pub(crate) fn reserve_physical(&mut self, bytes: u64) -> RetainedAllocation {
         let record = Arc::new(RetainedAllocationRecord {
             bytes,
             submitted: AtomicU64::new(0),
@@ -587,96 +593,6 @@ impl InstanceSegment {
     }
 }
 
-/// A copy from the previous complete GPU publication to the next one.
-/// Offsets and lengths are in float slots, not bytes or instance records.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct InstanceCopy {
-    pub source: Range<usize>,
-    pub destination: usize,
-}
-
-/// Complete coverage of a new publication, in two disjoint classes: reusable
-/// previous GPU ranges and changed CPU ranges. Copy ranges always refer to the
-/// previous immutable snapshot. A backend must not overwrite that snapshot
-/// while it is submitted, nor apply overlapping relocation copies in-place.
-/// Use a separate target allocation for relocation, retaining the source until
-/// its copies and earlier readers have completed. Publication becomes drawable
-/// only once every range is ready; this contract never drops missing segments.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct InstanceUploadPlan {
-    pub copies: Vec<InstanceCopy>,
-    pub writes: Vec<Range<usize>>,
-}
-impl InstanceUploadPlan {
-    /// No old bytes need to move. The backend must additionally establish
-    /// capacity and its own submission/completion rules before patching.
-    pub fn can_update_in_place(&self) -> bool {
-        self.copies
-            .iter()
-            .all(|copy| copy.source.start == copy.destination)
-    }
-    pub fn copy_float_len(&self) -> usize {
-        self.copies.iter().map(|copy| copy.source.len()).sum()
-    }
-    pub fn write_float_len(&self) -> usize {
-        self.writes.iter().map(|range| range.len()).sum()
-    }
-    fn copy(&mut self, source: Range<usize>, destination: usize) {
-        if source.is_empty() {
-            return;
-        }
-        if let Some(last) = self.copies.last_mut() {
-            if last.source.end == source.start
-                && last.destination + last.source.len() == destination
-            {
-                last.source.end = source.end;
-                return;
-            }
-        }
-        self.copies.push(InstanceCopy {
-            source,
-            destination,
-        });
-    }
-    fn write(&mut self, range: Range<usize>) {
-        if range.is_empty() {
-            return;
-        }
-        if let Some(last) = self.writes.last_mut() {
-            if last.end == range.start {
-                last.end = range.end;
-                return;
-            }
-        }
-        self.writes.push(range);
-    }
-}
-
-/// Segment identity for `upload_plan`: the storage allocation's address.
-fn storage_key(segment: &InstanceSegment) -> usize {
-    Arc::as_ptr(&segment.storage) as usize
-}
-
-/// Addresses are already unique; one multiply spreads them over the table's
-/// control bits. `upload_plan` fills a map of thousands of these per call.
-#[derive(Default)]
-struct StorageKeyHasher(u64);
-impl std::hash::Hasher for StorageKeyHasher {
-    fn finish(&self) -> u64 {
-        self.0
-    }
-    fn write(&mut self, bytes: &[u8]) {
-        for &byte in bytes {
-            self.0 = (self.0 ^ byte as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-        }
-    }
-    fn write_usize(&mut self, value: usize) {
-        self.0 = (value as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    }
-}
-type StorageMap =
-    HashMap<usize, (usize, usize), std::hash::BuildHasherDefault<StorageKeyHasher>>;
-
 #[derive(Clone, Debug)]
 pub struct RetainedInstances(Arc<InstancePublication>);
 /// Observes storage held by independently retained draw recordings without
@@ -801,8 +717,7 @@ impl RetainedInstances {
             bytes: self.byte_len(),
         }
     }
-    /// Compatibility for id-only append uploads. New backends retain the last
-    /// publication and use upload_plan, which also handles replacement/reorder.
+    /// Whether an id-only append upload can continue from `previous`.
     pub fn can_continue_upload(&self, previous: u64, copied_bytes: usize) -> bool {
         copied_bytes <= self.byte_len()
             && (self.id() == previous
@@ -862,107 +777,6 @@ impl RetainedInstances {
             range,
             index,
         }
-    }
-    /// Diff immutable identities and lengths, never the float payloads. A
-    /// repeated segment may reuse any valid previous occurrence; an occurrence
-    /// at the same offset is preferred when it covers the reusable range.
-    ///
-    /// Identity is the storage allocation: an id is minted once per
-    /// `InstanceSegmentStorage`, so two segments share an id exactly when they
-    /// share the `Arc`. Comparing the pointers keeps this off the heap, which
-    /// matters because renderers call it for every changed buffer every frame.
-    /// A large map republishes thousands of segments of which a handful moved;
-    /// reading each id through its `Arc` and SipHashing it into a map cost
-    /// about 0.1 to 1.5 ms per plan. Segments that kept their slot and offset
-    /// now settle with three compares. The few that did not are looked up by
-    /// scanning pointers, and only a publication that moved many builds the
-    /// by-identity map, keyed by pointer with a multiplicative hash.
-    pub fn upload_plan(&self, previous: &Self) -> InstanceUploadPlan {
-        let mut result = InstanceUploadPlan::default();
-        if self.slots() != previous.slots() {
-            result.write(0..self.float_len());
-            return result;
-        }
-        if self.id() == previous.id() {
-            result.copy(0..self.float_len(), 0);
-            return result;
-        }
-        let previous_segments_list = &previous.0.segments;
-        let previous_offsets = &previous.0.offsets;
-        let mut previous_segments: Option<StorageMap> = None;
-        const SCANNED_LOOKUPS: usize = 8;
-        let mut unplaced = 0usize;
-        for (index, (segment, &destination)) in
-            self.0.segments.iter().zip(self.0.offsets.iter()).enumerate()
-        {
-            // Same storage, same offset, and at least as long as before: the
-            // bytes are already in place, whichever other occurrences exist.
-            if let (Some(before), Some(&before_offset)) =
-                (previous_segments_list.get(index), previous_offsets.get(index))
-            {
-                if before_offset == destination
-                    && before.len >= segment.len
-                    && Arc::ptr_eq(&before.storage, &segment.storage)
-                {
-                    result.copy(destination..destination + segment.len, destination);
-                    continue;
-                }
-            }
-            // The longest previous occurrence of this storage, the first one
-            // winning a tie. The first few lookups scan the list by pointer,
-            // which is cheaper than hashing thousands of entries to answer a
-            // handful of questions; a publication that moved more than that
-            // pays for the map once.
-            unplaced += 1;
-            let longest = if unplaced <= SCANNED_LOOKUPS {
-                let mut longest: Option<(usize, usize)> = None;
-                for (before, &offset) in previous_segments_list.iter().zip(previous_offsets.iter())
-                {
-                    if Arc::ptr_eq(&before.storage, &segment.storage)
-                        && longest.is_none_or(|(_, len)| before.len > len)
-                    {
-                        longest = Some((offset, before.len));
-                    }
-                }
-                longest
-            } else {
-                previous_segments
-                    .get_or_insert_with(|| {
-                        let mut map = StorageMap::with_capacity_and_hasher(
-                            previous_segments_list.len(),
-                            Default::default(),
-                        );
-                        for (before, &offset) in
-                            previous_segments_list.iter().zip(previous_offsets.iter())
-                        {
-                            let longest: &mut (usize, usize) =
-                                map.entry(storage_key(before)).or_insert((offset, before.len));
-                            if before.len > longest.1 {
-                                *longest = (offset, before.len);
-                            }
-                        }
-                        map
-                    })
-                    .get(&storage_key(segment))
-                    .copied()
-            };
-            let Some((mut source, previous_len)) = longest else {
-                result.write(destination..destination + segment.len);
-                continue;
-            };
-            let reusable = previous_len.min(segment.len);
-            if let Ok(index) = previous_offsets.binary_search(&destination) {
-                let at_destination = &previous_segments_list[index];
-                if Arc::ptr_eq(&at_destination.storage, &segment.storage)
-                    && at_destination.len >= reusable
-                {
-                    source = destination;
-                }
-            }
-            result.copy(source..source + reusable, destination);
-            result.write(destination + reusable..destination + segment.len);
-        }
-        result
     }
     /// Legacy contiguous access. Single-segment publications return their
     /// original Arc. Multiple segments are explicitly materialized on first
@@ -1306,6 +1120,12 @@ mod upload_tests {
         drop(replacement);
         allocations.collect(7);
         assert_eq!(allocations.bytes(), 0);
+        let capacity = u64::from(u32::MAX) + 1;
+        let charge = allocations.reserve_physical(capacity);
+        let charged = allocations.physical_bytes();
+        drop(charge);
+        allocations.collect(7);
+        assert_eq!((charged, allocations.physical_bytes()), (capacity, 0), "a 4 GiB backing is charged and released exactly");
         allocations.set_limit(1024);
         for _ in 0..1024 {
             drop(allocations.reserve(1).unwrap());

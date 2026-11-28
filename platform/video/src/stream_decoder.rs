@@ -58,6 +58,31 @@ impl DecodedFrame {
     }
 }
 
+/// A stream decoder's spare NV12 picture buffers, given back by its caller with `recycle`. A CPU
+/// picture takes a spare when there is one, and a new buffer (counted in `allocated`) when not.
+#[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "android", target_os = "linux"))]
+#[derive(Default)]
+pub(crate) struct PictureBuffers {
+    spares: Vec<Vec<u8>>,
+    pub(crate) allocated: u64,
+}
+
+#[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "android", target_os = "linux"))]
+impl PictureBuffers {
+    pub(crate) fn take(&mut self) -> Vec<u8> {
+        self.spares.pop().unwrap_or_else(|| {
+            self.allocated += 1;
+            Vec::new()
+        })
+    }
+
+    pub(crate) fn recycle(&mut self, nv12: Vec<u8>) {
+        if nv12.capacity() != 0 {
+            self.spares.push(nv12);
+        }
+    }
+}
+
 #[cfg(target_vendor = "apple")]
 use crate::apple_stream_decoder::AppleStreamDecoder as OsStreamDecoder;
 #[cfg(target_os = "windows")]
@@ -80,11 +105,10 @@ impl VideoStreamDecoder {
         Self::with_output(codec, false)
     }
 
-    /// A decoder for a live stream where every picture of delay shows (a call): each picture
-    /// comes out of the push that brought it, as soon as it is decoded. On Linux that is a
-    /// software decoder where installed, since GStreamer's hardware H.264 and HEVC decoders
-    /// hold a picture until the next one arrives, and a push waits up to 20 ms for its picture;
-    /// elsewhere the same as [`Self::new`].
+    /// A live decoder for streams that need each picture as soon as it is decoded.
+    /// Linux requires `avdec_h264` or `avdec_h265` (gstreamer1.0-libav) and returns
+    /// an error if absent. A push waits up to 20 ms and later pictures can be polled.
+    /// Other platforms use the same decoder as [`Self::new`].
     pub fn new_low_latency(codec: StreamVideoCodec) -> Result<Self, VideoFileError> {
         #[cfg(target_os = "linux")]
         return Ok(Self { os: OsStreamDecoder::new_low_latency(codec)? });
@@ -167,13 +191,47 @@ impl VideoStreamDecoder {
     /// only packets or a mid-GOP decoder (re)initialization boundary
     /// legitimately produce 0.
     pub fn push_packet(&mut self, annex_b: &[u8], pts_100ns: i64) -> Result<Vec<DecodedFrame>, VideoFileError> {
+        let mut out = Vec::new();
+        self.push_packet_into(annex_b, pts_100ns, &mut out)?;
+        Ok(out)
+    }
+
+    /// Push one access unit and append its decoded pictures to the caller's output.
+    pub fn push_packet_into(&mut self, annex_b: &[u8], pts_100ns: i64, out: &mut Vec<DecodedFrame>) -> Result<(), VideoFileError> {
         #[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "android", target_os = "linux"))]
-        return self.os.push_packet(annex_b, pts_100ns);
+        return self.os.push_packet_into(annex_b, pts_100ns, out);
         #[cfg(not(any(target_vendor = "apple", target_os = "windows", target_os = "android", target_os = "linux")))]
         {
-            let _ = (annex_b, pts_100ns);
+            let _ = (annex_b, pts_100ns, out);
             return Err(VideoFileError::new(UNSUPPORTED));
         }
+    }
+
+    /// Append any decoded pictures already ready in the decoder, without waiting.
+    pub fn ready_into(&mut self, out: &mut Vec<DecodedFrame>) -> Result<(), VideoFileError> {
+        #[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "android", target_os = "linux"))]
+        return self.os.ready_into(out);
+        #[cfg(not(any(target_vendor = "apple", target_os = "windows", target_os = "android", target_os = "linux")))]
+        {
+            let _ = out;
+            Ok(())
+        }
+    }
+
+    /// Return storage for a later CPU picture. Every buffer with nonzero capacity is kept.
+    pub fn recycle(&mut self, nv12: Vec<u8>) {
+        #[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "android", target_os = "linux"))]
+        self.os.recycle(nv12);
+        #[cfg(not(any(target_vendor = "apple", target_os = "windows", target_os = "android", target_os = "linux")))]
+        let _ = nv12;
+    }
+
+    /// Number of CPU picture buffers obtained when there was no recycled buffer available.
+    pub fn allocated_buffers(&self) -> u64 {
+        #[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "android", target_os = "linux"))]
+        return self.os.allocated_buffers();
+        #[cfg(not(any(target_vendor = "apple", target_os = "windows", target_os = "android", target_os = "linux")))]
+        return 0;
     }
 
     /// Whether pictures decode on a hardware decoder (None: not known yet, or not reported on
@@ -190,9 +248,19 @@ impl VideoStreamDecoder {
     /// this is normally empty, but it is not a promise every backend keeps
     /// zero-latency).
     pub fn flush(&mut self) -> Result<Vec<DecodedFrame>, VideoFileError> {
+        let mut out = Vec::new();
+        self.flush_into(&mut out)?;
+        Ok(out)
+    }
+
+    /// Append any pictures still buffered by the decoder to the caller's output.
+    pub fn flush_into(&mut self, out: &mut Vec<DecodedFrame>) -> Result<(), VideoFileError> {
         #[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "android", target_os = "linux"))]
-        return self.os.flush();
+        return self.os.flush_into(out);
         #[cfg(not(any(target_vendor = "apple", target_os = "windows", target_os = "android", target_os = "linux")))]
-        return Ok(Vec::new());
+        {
+            let _ = out;
+            Ok(())
+        }
     }
 }

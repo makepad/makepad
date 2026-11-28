@@ -74,9 +74,10 @@ pub struct Opts {
 pub struct Replayer {
     hal: Arc<Hal>,
     sid: u32,
+    uniform_align: u32,
     store: EventStore,
     tex: HashMap<Id, Id>,
-    buf: HashMap<Id, Id>,
+    buf: HashMap<Id, Vec<(u32, Id)>>,
     pipe: HashMap<Id, Id>,
     /// the texture the window's passes draw into
     rt: Id,
@@ -127,8 +128,10 @@ fn restore_contents(w: &mut CmdWriter, id: Id, t: &CapTexture, bytes: &[u8]) -> 
     Ok(())
 }
 
+#[relax_api::relax_api(loader = "the loader replays a capture on a private HAL: JIT code has no use for it")]
 impl Replayer {
     /// A private HAL with every resource of the capture created and every pipeline compiled.
+    #[relax_api::relax_api(loader = "the loader replays a capture on a private HAL: JIT code has no use for it")]
     pub fn new(c: &Capture) -> Result<Replayer, String> {
         let hal = Hal::new();
         let info = hal.open(&OpenReq { backend: c.backend, flags: open_flags::OFFSCREEN_WINDOWS, dpi_hint: c.dpi.max(1.0), ..Default::default() });
@@ -143,7 +146,7 @@ impl Replayer {
         let biggest = c.textures.iter().map(|t| format::level_bytes(t.format, t.w, t.h) as usize).max().unwrap_or(0);
         let window = format::level_bytes(format::BGRA8, c.size[0], c.size[1]) as usize;
         let store = EventStore::new(sid, 256, biggest.max(window) + (1 << 20));
-        let mut r = Replayer { hal, sid, store, tex: HashMap::new(), buf: HashMap::new(), pipe: HashMap::new(), rt: Id::NONE, frame: 1, req: 1, backend: info.backend, failed: Vec::new(), last_gpu_ns: 0 };
+        let mut r = Replayer { hal, sid, uniform_align: info.effective_uniform_align(), store, tex: HashMap::new(), buf: HashMap::new(), pipe: HashMap::new(), rt: Id::NONE, frame: 1, req: 1, backend: info.backend, failed: Vec::new(), last_gpu_ns: 0 };
         let mut w = CmdWriter::new(sid);
         let mut next = 1u32;
         let mut fresh = || {
@@ -162,11 +165,9 @@ impl Replayer {
             r.rt = fresh();
             w.texture_create(r.rt, usage::RENDER_TARGET | usage::SAMPLED, format::BGRA8, c.size[0].max(1), c.size[1].max(1), [1, 1], Attr::default());
         }
-        let mut next_buf = 1u32;
-        for b in &c.buffers {
-            let id = Id::new(next_buf, 1);
-            next_buf += 1;
-            r.buf.insert(b.id, id);
+        for (index, b) in c.buffers.iter().enumerate() {
+            let id = Id::new(index as u32 + 1, 1);
+            r.buf.entry(b.id).or_default().push((b.first_pass, id));
             w.buffer_create(id, b.kind, b.size, Attr::default());
             if let Some(bytes) = &b.contents {
                 w.buffer_update(id, 0, &bytes[..bytes.len().min(b.size as usize)]);
@@ -237,11 +238,9 @@ impl Replayer {
         self.tex.get(&id).copied().unwrap_or(Id::NONE)
     }
 
-    fn map_buf(&self, id: Id) -> Id {
-        if id.is_none() {
-            return id;
-        }
-        self.buf.get(&id).copied().unwrap_or(Id::NONE)
+    fn map_buf(&self, id: Id, pass: u32) -> Id {
+        self.buf.get(&id).and_then(|versions| versions.iter().rev().find(|(first, _)| *first <= pass))
+            .map_or(Id::NONE, |&(_, id)| id)
     }
 
     /// The replay id of the colour target draw pass `pass` renders (attachment 0).
@@ -263,9 +262,18 @@ impl Replayer {
             let frame = self.frame;
             self.frame += 1;
             let mut w = CmdWriter::new(self.sid);
+            w.set_uniform_align(self.uniform_align);
             w.frame_begin(frame, FrameMeta::default());
             let mut expected = 0u64;
             for (pi, p) in c.passes.iter().enumerate().take(cut.pass + 1) {
+                let views = p.view_rects.len().max(1);
+                if p.uniforms.len() % views != 0 { return Err("captured pass uniforms do not split evenly across views".into()); }
+                let (uniforms, uniform_stride) = if views == 1 || p.uniforms.is_empty() {
+                    (w.put_uniform_bytes(&p.uniforms), 0)
+                } else {
+                    let blocks: Vec<_> = p.uniforms.chunks_exact(p.uniforms.len() / views).collect();
+                    w.put_pass_views_uniforms(&blocks)
+                };
                 let pass = Pass {
                     kind: pass_kind::DRAW, dispatches: Range::default(),
                     color: if p.is_window() { [self.rt, Id::NONE, Id::NONE, Id::NONE] } else { p.color.map(|i| self.map_tex(i)) },
@@ -280,7 +288,7 @@ impl Replayer {
                     views: 1,
                     // (and single sampled: the replay's target has no multisampled images)
                     samples: 1,
-                    uniforms: w.keep(&p.uniforms),
+                    uniforms, uniform_stride,
                     draws: Range::default(),
                     name: 0,
                     owner: 0,
@@ -304,22 +312,26 @@ impl Replayer {
                     let inst_ranges = w.put_pairs(&d.inst_ranges);
                     let tex_ids: Vec<Id> = d.tex.iter().map(|t| self.map_tex(*t)).collect();
                     let tex = w.put_ids(&tex_ids);
+                    let map_buf = |id| self.map_buf(id, d.pass);
+                    let inst = if d.inst_id.is_none() {
+                        Inst::none(d.inst_count)
+                    } else {
+                        let id = map_buf(d.inst_id);
+                        if id.is_none() {
+                            return Err(format!("D{di} reads instance buffer {}:{} missing from the capture", d.inst_id.index, d.inst_id.gen));
+                        }
+                        Inst::buffer(id, d.inst_off, d.inst_count)
+                    };
                     let draw = Draw {
                         storage_buffers: Range::default(),
                         pipeline,
-                        vb: self.map_buf(d.vb),
-                        ib: self.map_buf(d.ib),
+                        vb: map_buf(d.vb),
+                        ib: map_buf(d.ib),
                         index: d.index,
-                        inst: Inst {
-                            kind: d.inst_kind,
-                            id: if d.inst_kind == Inst::BUFFER { self.map_buf(d.inst_id) } else { Id::NONE },
-                            off: d.inst_off,
-                            count: d.inst_count,
-                            data: if d.inst_kind == Inst::INLINE { w.keep(&d.inst_data) } else { Slice::EMPTY },
-                        },
+                        inst,
                         inst_ranges,
-                        uniforms: [w.keep(&d.uniforms[0]), w.keep(&d.uniforms[1]), w.keep(&d.uniforms[2]), w.keep(&d.uniforms[3])],
-                        ubufs: d.ubufs.map(|b| self.map_buf(b)),
+                        uniforms: d.uniforms.each_ref().map(|block| w.put_uniform_bytes(block)),
+                        ubufs: d.ubufs.map(map_buf),
                         tex,
                         pick_tex: Range::default(),
                         scissor: d.scissor,
@@ -338,7 +350,7 @@ impl Replayer {
                         expected += 1;
                     }
                     if opts.wire == Some(di) {
-                        w.draw(Draw { flags: (draw.flags | Draw::WIREFRAME) & !Draw::CULL, ..draw });
+                        w.draw(Draw { flags: (draw.flags | Draw::WIREFRAME) & !Draw::CULL_MASK, ..draw });
                         expected += 1;
                     }
                 }

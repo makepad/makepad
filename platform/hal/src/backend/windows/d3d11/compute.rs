@@ -15,7 +15,7 @@ impl D3d11 {
         for pass in passes.iter().filter(|p| p.kind == pass_kind::COMPUTE) {
             let Some(dispatches) = compute::records::<Dispatch>(view.arena, pass.dispatches) else { return false; };
             for d in dispatches {
-                let Some(p) = self.compute.get(&(sid, d.pipeline.index)).filter(|p| p.gen == d.pipeline.gen) else { return false; };
+                let Some(p) = self.compute.get(sid, d.pipeline.index).filter(|p| p.gen == d.pipeline.gen) else { return false; };
                 if !matches!(p.state.get(), Some(Ok(_))) { return false; }
             }
         }
@@ -33,7 +33,7 @@ impl D3d11 {
         if let Err(e) = layout.validate_device(&self.info) { return PipeStatus::Failed(e); }
         let source = match std::str::from_utf8(blob.code) { Ok(s) => s.to_owned(), Err(e) => return PipeStatus::Failed(e.to_string()) };
         let state = Arc::new(OnceLock::new());
-        self.compute.insert((s.id, id.index), Pipe { gen: id.gen, state: state.clone(), announced: false });
+        self.compute.insert(s.id, id.index, Pipe { gen: id.gen, state: state.clone(), announced: false });
         let name = s.string(blob.desc.name).unwrap_or("").to_owned();
         let dev = self.dev.clone(); let wake = self.mailbox.wake.clone();
         self.compilers.push(Arc::as_ptr(&state) as usize, move || {
@@ -52,12 +52,12 @@ impl D3d11 {
         PipeStatus::Pending
     }
     pub(super) fn announce_compute(&mut self, world: &mut World) {
-        for ((sid, index), pipe) in &mut self.compute {
+        for ((sid, index), pipe) in self.compute.iter_mut() {
             if pipe.announced { continue; }
             let Some(result) = pipe.state.get() else { continue; };
-            let Some(s) = world.session_mut(*sid) else { continue; };
+            let Some(s) = world.session_mut(sid) else { continue; };
             pipe.announced = true; s.pipelines_pending = s.pipelines_pending.saturating_sub(1);
-            let id = Id::new(*index, pipe.gen);
+            let id = Id::new(index, pipe.gen);
             match result { Ok(_) => s.events.pipeline_ready(id), Err(e) => s.events.pipeline_failed(id, e.as_bytes()) }
         }
     }
@@ -81,7 +81,7 @@ impl D3d11 {
                 self.unbind_compute();
                 let sampled = compute::ids(view.arena, d.sampled).ok_or("invalid sampled textures")?.into_iter()
                     .map(|id| self.resolve(s, id).ok_or("missing sampled texture")).collect::<Result<Vec<_>, _>>()?;
-                let pipe = self.compute.get(&(s.id, d.pipeline.index)).filter(|p| p.gen == d.pipeline.gen).ok_or("stale compute pipeline")?;
+                let pipe = self.compute.get(s.id, d.pipeline.index).filter(|p| p.gen == d.pipeline.gen).ok_or("stale compute pipeline")?;
                 let p = pipe.state.get().ok_or("compute pipeline pending")?.as_ref().map_err(|e| e.clone())?;
                 p.layout.validate_dispatch(s, &d, view.arena)?;
                 let ids = compute::ids(view.arena, d.buffers).ok_or("invalid buffers")?;
@@ -90,12 +90,12 @@ impl D3d11 {
                 if ids.len() != p.layout.buffers.len() || textures.len() != p.layout.textures.len() || params.len() != p.layout.desc.push_size as usize { return Err("compute resource count mismatch".into()); }
                 let mut uavs: [Option<ID3D11UnorderedAccessView>; 8] = Default::default();
                 for (id, binding) in ids.iter().zip(&p.layout.buffers) {
-                    let buffer = &self.buf.get(&(s.id, id.index)).filter(|b| b.gen == id.gen).ok_or("stale compute buffer")?.buf;
+                    let buffer = &self.buf.get(s.id, id.index).filter(|b| b.gen == id.gen).ok_or("stale compute buffer")?.buf;
                     if binding.writable != 0 { uavs[binding.index as usize] = Some(buffer.uav.clone().ok_or("buffer lacks UAV")?); }
                     else { unsafe { self.dev.ctx.CSSetShaderResources(binding.index, Some(&[buffer.words.clone()])); } }
                 }
                 for (id, binding) in textures.iter().zip(&p.layout.textures) {
-                    let texture = &self.tex.get(&(s.id, id.index)).filter(|t| t.gen == id.gen).ok_or("stale storage texture")?.tex;
+                    let texture = &self.tex.get(s.id, id.index).filter(|t| t.gen == id.gen).ok_or("stale storage texture")?.tex;
                     if texture.desc.format != binding.format { return Err("storage image format mismatch".into()); }
                     uavs[binding.index as usize] = Some(texture.uav.clone().ok_or("image lacks UAV")?);
                 }
@@ -109,7 +109,7 @@ impl D3d11 {
                     unsafe { self.dev.ctx.CSSetSamplers(0, Some(&p.samplers)); }
                 }
                 let indirect = if d.indirect_buffer.is_none() { None } else {
-                    let buffer = self.buf.get(&(s.id, d.indirect_buffer.index)).filter(|b| b.gen == d.indirect_buffer.gen).ok_or("stale indirect buffer")?.buf.clone();
+                    let buffer = self.buf.get(s.id, d.indirect_buffer.index).filter(|b| b.gen == d.indirect_buffer.gen).ok_or("stale indirect buffer")?.buf.clone();
                     if d.indirect_offset % 4 != 0 || d.indirect_offset.checked_add(12).is_none_or(|end| end > buffer.size) { return Err("invalid indirect offset".into()); }
                     Some(buffer)
                 };
@@ -166,7 +166,7 @@ impl D3d11 {
             let mut layout = Vec::with_capacity(ranges.len());
             let mut bytes = 0u64;
             for range in ranges {
-                let source = self.buf.get(&(s.id, range.id.index)).filter(|b| b.gen == range.id.gen).ok_or("stale buffer")?.buf.clone();
+                let source = self.buf.get(s.id, range.id.index).filter(|b| b.gen == range.id.gen).ok_or("stale buffer")?.buf.clone();
                 layout.push((bytes, range.len));
                 bytes = bytes.checked_add(range.len.max(1)).ok_or("lease size overflow")?;
                 sources.push(source);

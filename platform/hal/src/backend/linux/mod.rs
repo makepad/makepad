@@ -393,7 +393,7 @@ impl super::gl::surface::EglSurfaceSource for EglSurfaceSource {
         let native = lock(&self.0.surfaces).get(&(sid, id)).filter(|n| n.available.load(Ordering::Acquire)).cloned();
         let Some(n) = native else { return SurfaceState::Lost };
         let size = n.pixels.load(Ordering::Acquire);
-        SurfaceState::Native(NativeSurface { generation: n.token, window: n.window, size: [(size >> 32) as u32, size as u32], keep: n })
+        SurfaceState::Native(NativeSurface { generation: n.token, window: n.window, size: [(size >> 32) as u32, size as u32], _keep: n })
     }
 }
 impl VkSurfaceSource for SurfaceSource {
@@ -470,7 +470,7 @@ impl VkSurfaceSource for SurfaceSource {
         }
         Ok(NativeSurface {
             handle,
-            keep: native,
+            _keep: native,
         })
     }
 }

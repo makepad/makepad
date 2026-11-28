@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 /// The pixels a surface holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SurfaceFormat {
-    /// NV12 packed into BGRA8 texels (`width/4` texels a row, the luma rows then the chroma
-    /// rows): what the `draw_nv12_pack` shaders write.
+    /// NV12 packed into BGRA8 texels by the `draw_nv12_pack` shaders, luma rows then chroma
+    /// rows. Widths between multiples of four are padded to whole texels in each row.
     PackedNv12,
     /// A BGRA8 picture (a window, a screen capture).
     Bgra8,

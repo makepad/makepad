@@ -85,6 +85,10 @@ impl Sender {
         (self.sent - self.base) as usize
     }
 
+    pub fn unsent_bytes(&self) -> usize {
+        self.queue.iter().skip(self.flight()).map(|segment| segment.bytes.len()).sum()
+    }
+
     fn can_send(&self) -> bool {
         self.flight() < self.queue.len() && self.flight() < self.cwnd && self.sent < self.peer_edge
     }

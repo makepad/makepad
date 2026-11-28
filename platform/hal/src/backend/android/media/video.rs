@@ -1,7 +1,7 @@
 //! Java MediaPlayer control plus worker-owned OES -> RGBA readback -> staging into the GPU core's textures.
 //! The EGL context is private to this worker, never shared with the renderer.
 use super::{exception, field, java, lock, method, string, void, Engine, Global, Message, Output, Ticket};
-use crate::{backend::exec::Gpu, ledger::{Kind, LedgerEntry}, media::*, session::{Session, TextureObj}, types::{format, usage, Attr, Id}};
+use crate::{backend::exec::{self, Gpu}, ledger::{Kind, LedgerEntry}, media::*, session::{Session, TextureObj}, types::{format, usage, Attr, Id}};
 use makepad_jni_sys::{registration as reg, *};
 use std::{collections::{HashMap, VecDeque}, ffi::{c_char, c_void, CStr}, sync::{Arc, Mutex, OnceLock}, thread::Thread};
 
@@ -110,7 +110,7 @@ pub(super) fn present(gpu: &mut dyn Gpu, s: &mut Session, ids: [Id; 4], frame: &
         s.textures.get_mut(s.id, *id).map_err(|_| "stale video texture")?.val = desc.clone();
         row(s, *id, &desc);
         let bad = s.stats.bad_args;
-        gpu.texture_update(s, *id, &desc, 0, [0, 0, desc.w, desc.h], 0, &plane.bytes);
+        exec::upload_texture(gpu, s, *id, &desc, 0, [0, 0, desc.w, desc.h], 0, &plane.bytes);
         if s.stats.bad_args != bad { return Err("video staging failed".into()); }
         desc.uploaded = plane.bytes.len() as u64;
         s.textures.get_mut(s.id, *id).map_err(|_| "stale video texture")?.val = desc.clone();

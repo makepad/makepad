@@ -3,6 +3,7 @@ pub mod gl_render_bridge;
 pub mod home;
 /// Allocator swaps (before/after loading something that replaces the process allocator).
 pub use makepad_alloc_epoch as alloc_epoch;
+pub use makepad_alloc_guard as alloc_guard;
 pub mod archive_cache;
 pub mod folder_access;
 pub mod os;
@@ -18,8 +19,8 @@ mod web_alloc;
 
 #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
 #[global_allocator]
-static WEB_GLOBAL_ALLOCATOR: web_alloc::ThreadCachingAllocator =
-    web_alloc::ThreadCachingAllocator::new();
+static WEB_GLOBAL_ALLOCATOR: alloc_guard::Guarded<web_alloc::ThreadCachingAllocator> =
+    alloc_guard::Guarded(web_alloc::ThreadCachingAllocator::new());
 
 #[macro_use]
 pub mod log;
@@ -46,6 +47,7 @@ pub mod midi;
 pub mod midi_inject;
 pub mod script;
 pub mod thread;
+pub mod ui_progress;
 pub mod storage;
 pub mod video;
 pub mod native_layer;
@@ -75,6 +77,7 @@ pub mod draw_shader_layout;
 mod draw_vars;
 #[cfg(not(target_arch = "wasm32"))]
 mod frame_build;
+pub(crate) mod instance_store;
 #[cfg(not(target_arch = "wasm32"))]
 mod draw_damage;
 pub mod shader_pack;
@@ -108,6 +111,7 @@ mod gpu_info;
 mod id_pool;
 pub mod ime;
 pub mod live_reload;
+pub mod script_mod_doc;
 mod macos_menu;
 pub mod tray;
 pub mod notification;
@@ -126,6 +130,7 @@ pub mod permission;
 mod screen;
 mod texture;
 mod uniform_buffer;
+pub mod uniform_stream;
 mod window;
 /// The XR room field (surfaces as a signed distance field): `makepad_tsdf`, its process-wide store.
 pub mod xr_tsdf;
@@ -483,6 +488,7 @@ pub use {
     smallvec::SmallVec,
 };
 
+pub use crate::draw_shader::CullMode;
 /// The compiled-shader handle the const-table API is keyed by
 /// (`Cx::shader_const_table`, `shader_const_patch`, `shader_const_reset`).
 pub use crate::draw_shader::DrawShaderId;

@@ -83,7 +83,7 @@ impl Vulkan {
         for pass in passes.iter().filter(|p| p.kind == pass_kind::COMPUTE) {
             let Some(dispatches) = compute::records::<Dispatch>(view.arena, pass.dispatches) else { return false; };
             for d in dispatches {
-                let Some(p) = self.compute.get(&(sid, d.pipeline.index)).filter(|p| p.gen == d.pipeline.gen) else { return false; };
+                let Some(p) = self.compute.get(sid, d.pipeline.index).filter(|p| p.gen == d.pipeline.gen) else { return false; };
                 if !matches!(p.state.get(), Some(Ok(_))) { super::Compilers::waited(&p.rank); return false; }
             }
         }
@@ -98,26 +98,26 @@ impl Vulkan {
         let code: Vec<u32> = blob.code.chunks_exact(4).map(|w| u32::from_le_bytes(w.try_into().unwrap())).collect();
         let state = Arc::new(OnceLock::new());
         let rank = super::Compilers::rank(super::compile_rank::KERNEL);
-        self.compute.insert((s.id, id.index), Pipe { gen: id.gen, state: state.clone(), announced: false, rank: rank.clone() });
+        self.compute.insert(s.id, id.index, Pipe { gen: id.gen, state: state.clone(), announced: false, rank: rank.clone() });
         let dev = self.dev.clone(); let notify = self.mailbox.notify.clone(); let sid = s.id;
         self.compiler.push(rank, move || { let _ = state.set(Program::new(dev, layout, &code)); notify(sid, false); });
         PipeStatus::Pending
     }
     pub(super) fn announce_compute(&mut self, world: &mut World) {
-        for ((sid, index), pipe) in &mut self.compute {
+        for ((sid, index), pipe) in self.compute.iter_mut() {
             if pipe.announced { continue; }
             let Some(result) = pipe.state.get() else { continue; };
-            let Some(s) = world.session_mut(*sid) else { continue; };
+            let Some(s) = world.session_mut(sid) else { continue; };
             pipe.announced = true;
             s.pipelines_pending = s.pipelines_pending.saturating_sub(1);
-            let id = Id::new(*index, pipe.gen);
+            let id = Id::new(index, pipe.gen);
             match result { Ok(_) => s.events.pipeline_ready(id), Err(e) => s.events.pipeline_failed(id, e.as_bytes()) }
         }
     }
     pub(super) fn encode_compute(&mut self, s: &mut Session, pass: &Pass, view: &CmdView, batch: &mut Batch) -> Result<(), String> {
         let dispatches = compute::records::<Dispatch>(view.arena, pass.dispatches).ok_or("invalid dispatch records")?;
         for d in &dispatches {
-            let pipe = self.compute.get(&(s.id, d.pipeline.index)).filter(|p| p.gen == d.pipeline.gen).ok_or("stale compute pipeline")?;
+            let pipe = self.compute.get(s.id, d.pipeline.index).filter(|p| p.gen == d.pipeline.gen).ok_or("stale compute pipeline")?;
             let p = pipe.state.get().ok_or("compute pipeline pending")?.as_ref().map_err(|e| e.clone())?.clone();
             p.layout.validate_dispatch(s, d, view.arena)?;
             let params = compute::bytes(view.arena, d.params).ok_or("invalid params")?;
@@ -128,7 +128,7 @@ impl Vulkan {
                 || sampled.len() != p.layout.sampled.len() { return Err("compute resource count mismatch".into()); }
             let mut params = params.to_vec();
             for (id, binding) in ids.iter().zip(&p.layout.buffers) {
-                let buffer = self.buf.get(&(s.id, id.index)).filter(|b| b.gen == id.gen).ok_or("stale compute buffer")?.buffer.clone();
+                let buffer = self.buf.get(s.id, id.index).filter(|b| b.gen == id.gen).ok_or("stale compute buffer")?.buffer.clone();
                 if !s.buffers.get(s.id, *id).is_ok_and(|b| b.val.kind & buffer_kind::KIND_MASK == buffer_kind::STORAGE) { return Err("compute buffer lacks STORAGE".into()); }
                 let address = unsafe { self.dev.raw.get_buffer_device_address(&vk::BufferDeviceAddressInfo::default().buffer(buffer.buffer)) };
                 let off = binding.offset as usize;
@@ -190,7 +190,7 @@ impl Vulkan {
                 if !params.is_empty() && !block { self.dev.raw.cmd_push_constants(batch.cb, p.pipeline_layout, vk::ShaderStageFlags::COMPUTE, 0, &params); }
                 if d.indirect_buffer.is_none() { self.dev.raw.cmd_dispatch(batch.cb, d.groups[0], d.groups[1], d.groups[2]); }
                 else {
-                    let buffer = self.buf.get(&(s.id, d.indirect_buffer.index)).filter(|b| b.gen == d.indirect_buffer.gen).ok_or("stale indirect buffer")?.buffer.clone();
+                    let buffer = self.buf.get(s.id, d.indirect_buffer.index).filter(|b| b.gen == d.indirect_buffer.gen).ok_or("stale indirect buffer")?.buffer.clone();
                     if d.indirect_offset % 4 != 0 || d.indirect_offset.checked_add(12).is_none_or(|end| end > buffer.size) { return Err("invalid indirect offset".into()); }
                     self.dev.raw.cmd_dispatch_indirect(batch.cb, buffer.buffer, d.indirect_offset); batch.buffers.push(buffer);
                 }
@@ -208,7 +208,7 @@ impl Vulkan {
             let align = dev.properties.limits.non_coherent_atom_size.max(256);
             // Reserve the entire request before encoding any copy.
             for (order, range) in ranges.iter().enumerate() {
-                let source = self.buf.get(&(s.id, range.id.index)).filter(|b| b.gen == range.id.gen).ok_or("stale buffer")?.buffer.clone();
+                let source = self.buf.get(s.id, range.id.index).filter(|b| b.gen == range.id.gen).ok_or("stale buffer")?.buffer.clone();
                 let (block, offset) = self.leases.alloc(range.len, align, |size| Buffer::scratch(dev.clone(), crate::ledger::Pool::Leases, size, vk::BufferUsageFlags::TRANSFER_DST))?;
                 let len = usize::try_from(range.len).map_err(|_| "lease exceeds address space")?;
                 // SAFETY: the guard retains the mapped block; the range is disjoint from all

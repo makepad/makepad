@@ -13,7 +13,11 @@
 //! GPU-sampled hardware buffers; a picture is that image (no CPU copy), held until the caller
 //! drops it (the reader then reuses its buffer).
 use super::mediacodec::{checked, ndk, BufferInfo, Codec as MediaCodec, Format, Image, Reader, FLAG_CODEC_CONFIG, OUTPUT_FORMAT_CHANGED};
+use crate::backend::android::native_layer::{poll, PollFd};
+use crate::stream_decode::{drain_reader_with_budget, FenceWait, PendingGpu, ReaderStop};
 use std::ffi::{c_void, CStr, CString};
+use std::mem::ManuallyDrop;
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::time::{Duration, Instant};
 
 relax_api::option_layouts! {
@@ -61,10 +65,118 @@ const USAGE_GPU_SAMPLED_IMAGE: u64 = 1 << 8;
 /// Images of a GPU-output reader: the shown picture, the two before it (frames on the GPU), up to
 /// six decoded and waiting for their display frame, and two for the decoder itself.
 const READER_IMAGES: i32 = 11;
-/// How long a picture the decoder released takes at most to reach its reader.
+const INFO_TRY_AGAIN_LATER: isize = -1;
+const OUTPUT_BUFFERS_CHANGED: isize = -3;
+const AMEDIA_IMGREADER_NO_BUFFER_AVAILABLE: i32 = -30001;
+const AMEDIA_IMGREADER_MAX_IMAGES_ACQUIRED: i32 = -30002;
+/// A push shares this wait across all reader handoffs and acquire fences.
 const READER_WAIT: Duration = Duration::from_millis(20);
+const READER_POLL_STEP: Duration = Duration::from_micros(300);
+const POLLIN: i16 = 0x0001;
+const POLLERR: i16 = 0x0008;
+const POLLHUP: i16 = 0x0010;
+const POLLNVAL: i16 = 0x0020;
+
+/// Owns the image and the producer's fence until it is safe to sample or return the image.
+struct FencedImage {
+    image: ManuallyDrop<Image>,
+    fence: Option<OwnedFd>,
+}
+
+// The decoder serializes access to the image and its fence.
+unsafe impl Send for FencedImage {}
+
+impl FencedImage {
+    fn new(image: Image, fence: Option<OwnedFd>) -> Self {
+        Self { image: ManuallyDrop::new(image), fence }
+    }
+
+    fn raw_image(&self) -> *mut c_void {
+        self.image.0
+    }
+
+    fn has_fence(&self) -> bool {
+        self.fence.is_some()
+    }
+
+    fn fence_fd(&self) -> i32 {
+        self.fence.as_ref().map_or(-1, AsRawFd::as_raw_fd)
+    }
+
+    fn drop_invalid_fence(&mut self) {
+        if let Some(fd) = self.fence.take() {
+            // POLLNVAL: the descriptor is already closed.
+            let _ = fd.into_raw_fd();
+        }
+    }
+
+    fn into_signaled(mut self) -> Image {
+        self.fence = None;
+        // Suppress our Drop before moving the image to its picture.
+        let mut this = ManuallyDrop::new(self);
+        unsafe { ManuallyDrop::take(&mut this.image) }
+    }
+}
+
+impl Drop for FencedImage {
+    fn drop(&mut self) {
+        let image = unsafe { ManuallyDrop::take(&mut self.image) };
+        if let Some(fd) = self.fence.take() {
+            image.delete_async(fd);
+        }
+    }
+}
+
+enum FenceState { Signaled, Pending }
+
+fn poll_fence(fd: i32, timeout_ms: i32) -> Result<FenceState, (bool, String)> {
+    if fd < 0 {
+        return Ok(FenceState::Signaled);
+    }
+    let mut pfd = PollFd { fd, events: POLLIN, revents: 0 };
+    let result = unsafe { poll(&mut pfd, 1, timeout_ms) };
+    if result < 0 {
+        let error = std::io::Error::last_os_error();
+        return match error.kind() {
+            std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock => Ok(FenceState::Pending),
+            _ => Err((false, format!("poll image acquire fence: {error}"))),
+        };
+    }
+    if pfd.revents & (POLLNVAL | POLLERR | POLLHUP) != 0 {
+        return Err((pfd.revents & POLLNVAL != 0, format!("poll image acquire fence: revents {:#x}", pfd.revents)));
+    }
+    if pfd.revents & POLLIN != 0 { Ok(FenceState::Signaled) } else { Ok(FenceState::Pending) }
+}
+
+fn poll_fence_once(fd: i32) -> Result<FenceState, (bool, String)> {
+    poll_fence(fd, 0)
+}
+
+fn wait_fence_fd(fd: i32, limit: Duration) -> Result<FenceWait, (bool, String)> {
+    let start = Instant::now();
+    loop {
+        let remaining = limit.saturating_sub(start.elapsed());
+        let timeout_ms = remaining.as_millis() as i32; // limit is at most READER_WAIT
+        if timeout_ms > 0 {
+            if let FenceState::Signaled = poll_fence(fd, timeout_ms)? {
+                return Ok(FenceWait::Signaled(start.elapsed()));
+            }
+        } else {
+            if let FenceState::Signaled = poll_fence_once(fd)? {
+                return Ok(FenceWait::Signaled(start.elapsed()));
+            }
+            if remaining.is_zero() {
+                return Ok(FenceWait::TimedOut);
+            }
+            // poll's timeout is in whole milliseconds. Use only the remaining fraction.
+            std::thread::sleep(READER_POLL_STEP.min(limit.saturating_sub(start.elapsed())));
+        }
+    }
+}
 
 pub struct StreamDecoder {
+    // Return the acquired image (and any unsignaled fence) before destroying either owner.
+    pending_gpu: PendingGpu<FencedImage>,
     codec: MediaCodec,
     /// The output layout (from the latest format change).
     width: u32,
@@ -145,7 +257,7 @@ impl StreamDecoder {
             checked(ndk::AMediaCodec_start(codec.0), "start the stream decoder")?;
         }
         let info = codec_name(&codec) + if gpu { " → GPU images" } else { "" };
-        Ok(StreamDecoder { codec, width, height, stride: width, slice_height: height, crop: [0, 0, width, height], color: COLOR_NV12, info, reader, logged: Default::default() })
+        Ok(StreamDecoder { pending_gpu: PendingGpu::default(), codec, width, height, stride: width, slice_height: height, crop: [0, 0, width, height], color: COLOR_NV12, info, reader, logged: Default::default() })
     }
 
     fn output_format(&mut self) {
@@ -188,29 +300,41 @@ impl StreamDecoder {
     pub fn pictures(&mut self, wait: Duration) -> Result<Vec<Picture>, String> {
         let start = Instant::now();
         let mut out = Vec::new();
+        let max_reader_wait = READER_WAIT.min(wait);
+        let mut reader_budget = max_reader_wait;
+        if self.reader.is_some() && !self.pending_gpu.is_empty() {
+            let fresh = self.pending_gpu.fresh_wait(start, max_reader_wait);
+            let stop = self.drain_reader_wait(&mut out, &mut reader_budget, fresh, true)?;
+            if matches!(stop, ReaderStop::MaxAcquired | ReaderStop::FencePending) {
+                return Ok(out);
+            }
+        }
         loop {
             let left = if out.is_empty() { wait.saturating_sub(start.elapsed()) } else { Duration::ZERO };
             let mut info = BufferInfo::default();
             let index = unsafe { ndk::AMediaCodec_dequeueOutputBuffer(self.codec.0, &mut info, left.as_micros() as i64) };
-            if index == OUTPUT_FORMAT_CHANGED {
-                self.output_format();
-                continue;
-            }
-            if index < 0 {
-                if out.is_empty() && !left.is_zero() {
+            match index {
+                OUTPUT_FORMAT_CHANGED => {
+                    self.output_format();
                     continue;
                 }
-                return Ok(out);
+                OUTPUT_BUFFERS_CHANGED => continue,
+                INFO_TRY_AGAIN_LATER if out.is_empty() && !left.is_zero() => continue,
+                INFO_TRY_AGAIN_LATER => break,
+                index if index < 0 => return Err(format!("MediaCodec: dequeue output buffer: {index}")),
+                _ => {}
             }
             let index = index as usize;
-            if let Some(reader) = &self.reader {
+            if self.reader.is_some() {
                 // rendered into the reader: its image is the picture
                 let shown = info.flags & FLAG_CODEC_CONFIG == 0;
-                unsafe { ndk::AMediaCodec_releaseOutputBuffer(self.codec.0, index, shown) };
+                checked(unsafe { ndk::AMediaCodec_releaseOutputBuffer(self.codec.0, index, shown) }, "release output buffer")?;
                 if shown {
-                    match self.reader_image(reader, info.presentation_time_us) {
-                        Ok(p) => out.push(p),
-                        Err(e) => eprintln!("[hal-android-stream-decode] {e}"),
+                    self.pending_gpu.push(info.presentation_time_us, Instant::now());
+                    let no_buffer = reader_budget;
+                    let stop = self.drain_reader_wait(&mut out, &mut reader_budget, no_buffer, false)?;
+                    if matches!(stop, ReaderStop::MaxAcquired | ReaderStop::FencePending) {
+                        return Ok(out);
                     }
                 }
                 continue;
@@ -218,49 +342,105 @@ impl StreamDecoder {
             if info.size > 0 && info.flags & FLAG_CODEC_CONFIG == 0 {
                 let mut capacity = 0usize;
                 let buffer = unsafe { ndk::AMediaCodec_getOutputBuffer(self.codec.0, index, &mut capacity) };
-                if !buffer.is_null() && (info.offset + info.size) as usize <= capacity {
+                if !buffer.is_null() && info.offset >= 0 && info.offset as usize + info.size as usize <= capacity {
                     let bytes = unsafe { std::slice::from_raw_parts(buffer.add(info.offset as usize), info.size as usize) };
                     out.push(self.nv12(bytes, info.presentation_time_us));
                 }
             }
-            unsafe { ndk::AMediaCodec_releaseOutputBuffer(self.codec.0, index, false) };
+            checked(unsafe { ndk::AMediaCodec_releaseOutputBuffer(self.codec.0, index, false) }, "release output buffer")?;
+        }
+        if self.reader.is_some() && !self.pending_gpu.is_empty() {
+            self.drain_reader_now(&mut out)?;
+        }
+        Ok(out)
+    }
+
+    fn gpu_picture(&self, image: Image, pts_us: i64) -> Result<Picture, String> {
+        let mut buffer = std::ptr::null_mut();
+        checked(unsafe { ndk::AImage_getHardwareBuffer(image.0, &mut buffer) }, "the picture's hardware buffer")?;
+        // The texture spans the coded buffer. The cropped picture is at its top left.
+        let mut desc = BufferDesc::default();
+        unsafe { AHardwareBuffer_describe(buffer, &mut desc) };
+        let (w, h) = (desc.width, desc.height);
+        if !self.logged.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            super::super::xr::log(&format!("stream decode {}: GPU pictures {w}x{h} (crop {:?}), buffer format {:#x} usage {:#x} stride {}", self.info, self.crop, desc.format, desc.usage, desc.stride));
+        }
+        Ok(Picture { width: w, height: h, nv12: Vec::new(), pts_us, gpu: Some(GpuPicture { _image: image, buffer }) })
+    }
+
+    fn discard_failed_fence(&mut self, (invalid_fd, error): (bool, String)) -> String {
+        let (mut image, _, _) = self.pending_gpu.take_acquired().unwrap();
+        if invalid_fd {
+            image.drop_invalid_fence();
+        }
+        error
+    }
+
+    fn drain_reader_now(&mut self, out: &mut Vec<Picture>) -> Result<ReaderStop, String> {
+        loop {
+            if let Some(image) = self.pending_gpu.front_acquired() {
+                let state = poll_fence_once(image.fence_fd()).map_err(|e| self.discard_failed_fence(e))?;
+                if let FenceState::Pending = state {
+                    return Ok(ReaderStop::FencePending);
+                }
+                let (image, pts_us, _) = self.pending_gpu.take_acquired().unwrap();
+                out.push(self.gpu_picture(image.into_signaled(), pts_us)?);
+            }
+            if !self.pending_gpu.has_released() {
+                return Ok(ReaderStop::Done);
+            }
+            let reader = self.reader.as_ref().unwrap();
+            let mut image = std::ptr::null_mut();
+            let mut fence_fd = -1;
+            let status = unsafe { ndk::AImageReader_acquireNextImageAsync(reader.0, &mut image, &mut fence_fd) };
+            match status {
+                AMEDIA_IMGREADER_NO_BUFFER_AVAILABLE => return Ok(ReaderStop::NoBuffer),
+                AMEDIA_IMGREADER_MAX_IMAGES_ACQUIRED => return Ok(ReaderStop::MaxAcquired),
+                _ => checked(status, "acquire reader image")?,
+            }
+            let fence = (fence_fd >= 0).then(|| unsafe { OwnedFd::from_raw_fd(fence_fd) });
+            if image.is_null() {
+                return Ok(ReaderStop::NoBuffer);
+            }
+            let image = FencedImage::new(Image(image), fence);
+            // The timestamp is BufferItem metadata. Only access the pixels after the fence.
+            let mut time = 0;
+            checked(unsafe { ndk::AImage_getTimestamp(image.raw_image(), &mut time) }, "the picture's timestamp")?;
+            let Some((pts_us, released_at)) = self.pending_gpu.match_image(time / 1000) else { continue };
+            if image.has_fence() {
+                self.pending_gpu.hold_acquired(image, pts_us, released_at);
+            } else {
+                out.push(self.gpu_picture(image.into_signaled(), pts_us)?);
+            }
         }
     }
 
-    /// The reader's image of the picture of `pts_us` (the one just released to it), waiting
-    /// up to READER_WAIT for it; older images still in the reader are dropped.
-    fn reader_image(&self, reader: &Reader, pts_us: i64) -> Result<Picture, String> {
-        let start = Instant::now();
-        loop {
-            let mut image = std::ptr::null_mut();
-            let status = unsafe { ndk::AImageReader_acquireNextImage(reader.0, &mut image) };
-            if status == 0 && !image.is_null() {
-                let image = Image(image);
-                let mut time = 0i64;
-                unsafe { ndk::AImage_getTimestamp(image.0, &mut time) };
-                // (the decoder stamps its surface frames with the presentation time, in ns)
-                if time / 1000 < pts_us {
-                    continue;
-                }
-                let mut buffer = std::ptr::null_mut();
-                checked(unsafe { ndk::AImage_getHardwareBuffer(image.0, &mut buffer) }, "the picture's hardware buffer")?;
-                // the size of the image's buffer (what a texture of it spans: the decoder's coded
-                // size, not the image's cropped one); the picture is its top-left part
-                let mut desc = BufferDesc::default();
-                unsafe { AHardwareBuffer_describe(buffer, &mut desc) };
-                let (w, h) = (desc.width, desc.height);
-                if self.logged.swap(true, std::sync::atomic::Ordering::Relaxed) == false {
-                    // (the buffer's format and usage: a vendor format with the private UBWC bit,
-                    // 1 << 28, is the compressed layout the GPU reads at a fraction of the bytes)
-                    super::super::xr::log(&format!("stream decode {}: GPU pictures {w}x{h} (crop {:?}), buffer format {:#x} usage {:#x} stride {}", self.info, self.crop, desc.format, desc.usage, desc.stride));
-                }
-                return Ok(Picture { width: w, height: h, nv12: Vec::new(), pts_us, gpu: Some(GpuPicture { _image: image, buffer }) });
-            }
-            if start.elapsed() > READER_WAIT {
-                return Err(format!("the decoded picture never reached the image reader ({status})"));
-            }
-            std::thread::sleep(Duration::from_micros(300));
-        }
+    fn wait_acquired_fence(&mut self, limit: Duration) -> Result<FenceWait, String> {
+        let fd = self.pending_gpu.front_acquired().unwrap().fence_fd();
+        wait_fence_fd(fd, limit).map_err(|e| self.discard_failed_fence(e))
+    }
+
+    fn drain_reader_wait(
+        &mut self,
+        out: &mut Vec<Picture>,
+        budget: &mut Duration,
+        no_buffer_budget: Duration,
+        stop_on_picture: bool,
+    ) -> Result<ReaderStop, String> {
+        drain_reader_with_budget(
+            &mut (self, out), budget, no_buffer_budget, READER_POLL_STEP, stop_on_picture,
+            |(decoder, out)| {
+                let before = out.len();
+                let stop = decoder.drain_reader_now(out)?;
+                Ok((stop, out.len() - before))
+            },
+            |step| {
+                let start = Instant::now();
+                std::thread::sleep(step);
+                start.elapsed()
+            },
+            |(decoder, _), limit| decoder.wait_acquired_fence(limit),
+        )
     }
 
     /// The cropped picture of a ByteBuffer as tightly packed NV12.

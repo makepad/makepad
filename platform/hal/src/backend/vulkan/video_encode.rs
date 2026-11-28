@@ -188,6 +188,8 @@ struct Encoder {
     /// The picture (w, h) and the coded size (aligned).
     size: [u32; 2],
     coded: [u32; 2],
+    /// Bytes per staged luma row, padded to whole BGRA8 texels. The bitstream crops to the picture width.
+    pitch: u32,
     /// SPS + PPS, Annex-B.
     parameter_sets: Vec<u8>,
     quality_level: u32,
@@ -415,8 +417,8 @@ impl Encoder {
         if codec == Codec::H265 && !video.h265 {
             return Err("this GPU's encoder has no H.265 (VK_KHR_video_encode_h265)".into());
         }
-        if size[0] == 0 || size[1] == 0 || size[0] % 4 != 0 || size[1] % 2 != 0 {
-            return Err(format!("stream size {}x{}: the width must be a multiple of 4 and the height even", size[0], size[1]));
+        if size[0] == 0 || size[1] == 0 || size[0] % 2 != 0 || size[1] % 2 != 0 {
+            return Err(format!("stream size {}x{}: width and height must both be nonzero and even", size[0], size[1]));
         }
         let profile = Profile::new(codec, full_chroma, tuning.sharp);
         let picture_format = if full_chroma { vk::Format::G8_B8R8_2PLANE_444_UNORM } else { vk::Format::G8_B8R8_2PLANE_420_UNORM };
@@ -534,6 +536,7 @@ impl Encoder {
                 last_encode_ns: std::cell::Cell::new(None),
                 size,
                 coded,
+                pitch: size[0].next_multiple_of(4),
                 parameter_sets: Vec::new(),
                 quality_level: tuning.quality.min(quality_levels - 1),
                 quality_levels,
@@ -608,7 +611,7 @@ impl Encoder {
             }
             let families = [dev.family, video.family];
             // luma, then the interleaved chroma (4:2:0: a quarter of the samples; 4:4:4: all)
-            let luma = size[0] as u64 * size[1] as u64;
+            let luma = enc.pitch as u64 * size[1] as u64;
             let plane_bytes = if full_chroma { luma * 3 } else { luma * 3 / 2 };
             let align = caps.min_bitstream_buffer_size_alignment.max(1);
             let bitstream_size = BITSTREAM_BYTES.div_ceil(align) * align;
@@ -1519,7 +1522,7 @@ impl StreamEncoder {
 
     /// The staged planes (in `buffer`) into the encode source image, which then goes to the
     /// encode layout.
-    unsafe fn record_planes(&self, buffer: vk::Buffer) {
+    unsafe fn record_planes(&self, buffer: vk::Buffer, pitch: u32) {
         let d = &self.enc.dev.raw;
         let [w, h] = self.enc.size;
         let slot = &self.enc.slots[0];
@@ -1547,9 +1550,13 @@ impl StreamEncoder {
             slot.src.image,
             vk::ImageLayout::TRANSFER_DST_OPTIMAL,
             &[
-                vk::BufferImageCopy::default().image_subresource(plane(vk::ImageAspectFlags::PLANE_0)).image_extent(vk::Extent3D { width: w, height: h, depth: 1 }),
                 vk::BufferImageCopy::default()
-                    .buffer_offset(w as u64 * h as u64)
+                    .buffer_row_length(pitch)
+                    .image_subresource(plane(vk::ImageAspectFlags::PLANE_0))
+                    .image_extent(vk::Extent3D { width: w, height: h, depth: 1 }),
+                vk::BufferImageCopy::default()
+                    .buffer_offset(pitch as u64 * h as u64)
+                    .buffer_row_length(if self.enc.full_chroma { pitch } else { pitch / 2 })
                     .image_subresource(plane(vk::ImageAspectFlags::PLANE_1))
                     .image_extent(if self.enc.full_chroma { vk::Extent3D { width: w, height: h, depth: 1 } } else { vk::Extent3D { width: w / 2, height: h / 2, depth: 1 } }),
             ],
@@ -1619,11 +1626,12 @@ impl StreamEncoder {
     /// `refine`: the same picture as the last one again at a near-lossless QP (a still desktop).
     pub fn encode_rows(&mut self, image: vk::Image, image_size: [u32; 2], source_height: u32, x0: u32, y0: u32, sync: Option<OwnedFd>, key: bool, refine: bool) -> Result<Vec<u8>, String> {
         let [w, h] = self.enc.size;
+        let pitch = self.enc.pitch;
         let full = self.enc.full_chroma;
-        // the packed picture: luma rows, then chroma rows (4:2:0: half as many, each w bytes; 4:4:4:
-        // one per luma row, each 2w bytes = two texture rows)
+        // the packed picture: luma rows, then chroma rows (4:2:0: one per two luma rows; 4:4:4: two
+        // per luma row, its 2w bytes as two texture rows), each row `pitch` bytes
         let chroma_rows = if full { source_height * 2 } else { source_height / 2 };
-        if image_size[0] * 4 < x0 + w || image_size[1] < source_height + chroma_rows || y0 + h > source_height || y0 % 2 != 0 || x0 % 4 != 0 {
+        if image_size[0] * 4 < x0 + pitch || image_size[1] < source_height + chroma_rows || y0 + h > source_height || y0 % 2 != 0 || x0 % 4 != 0 {
             return Err(format!("{w}x{h} at {x0},{y0} of a {source_height} tall NV12 picture in a {}x{} texture: out of it", image_size[0], image_size[1]));
         }
         let pic = self.next_picture(key, refine);
@@ -1685,12 +1693,12 @@ impl StreamEncoder {
                 vk::ImageLayout::GENERAL,
                 slot.staging,
                 &[
-                    vk::BufferImageCopy::default().image_subresource(layer).image_offset(vk::Offset3D { x: (x0 / 4) as i32, y: y0 as i32, z: 0 }).image_extent(vk::Extent3D { width: w / 4, height: h, depth: 1 }),
+                    vk::BufferImageCopy::default().image_subresource(layer).image_offset(vk::Offset3D { x: (x0 / 4) as i32, y: y0 as i32, z: 0 }).image_extent(vk::Extent3D { width: pitch / 4, height: h, depth: 1 }),
                     vk::BufferImageCopy::default()
-                        .buffer_offset(w as u64 * h as u64)
+                        .buffer_offset(pitch as u64 * h as u64)
                         .image_subresource(layer)
                         .image_offset(vk::Offset3D { x: (x0 / 4) as i32, y: (source_height + if full { y0 * 2 } else { y0 / 2 }) as i32, z: 0 })
-                        .image_extent(vk::Extent3D { width: w / 4, height: if full { h * 2 } else { h / 2 }, depth: 1 }),
+                        .image_extent(vk::Extent3D { width: pitch / 4, height: if full { h * 2 } else { h / 2 }, depth: 1 }),
                 ],
             );
             let release = vk::ImageMemoryBarrier::default()
@@ -1702,7 +1710,7 @@ impl StreamEncoder {
                 .src_access_mask(vk::AccessFlags::TRANSFER_READ)
                 .subresource_range(range);
             d.cmd_pipeline_barrier(self.copy_cb, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::BOTTOM_OF_PIPE, vk::DependencyFlags::empty(), &[], &[], &[release]);
-            self.record_planes(slot.staging);
+            self.record_planes(slot.staging, pitch);
             let out = self.finish(pic, wait_ready)?;
             let mut stamps = [0u64; 2];
             let results = d.table.get_query_pool_results.ok_or("vkGetQueryPoolResults is unavailable")?;
@@ -1743,7 +1751,7 @@ impl StreamEncoder {
                 self.failed();
                 return Err(e);
             }
-            self.record_planes(buf);
+            self.record_planes(buf, w);
             self.finish(pic, false)
         }
     }

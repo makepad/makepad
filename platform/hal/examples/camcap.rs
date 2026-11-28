@@ -4,7 +4,7 @@
 //! being left and entered again), releases it and checks the device is no longer held by this process.
 #[cfg(target_os = "linux")]
 fn main() {
-    use makepad_hal::backend::linux::media::v4l2_camera::Camera;
+    use makepad_hal::linux::v4l2_camera::Camera;
     use makepad_hal::media::VideoPixel;
     let args: Vec<String> = std::env::args().collect();
     let wanted = args.get(1).cloned().unwrap_or_default().to_lowercase();
