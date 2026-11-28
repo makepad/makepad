@@ -754,6 +754,7 @@ let au_button = fn(pos: vec2, size: vec2, o: vec2, dpi: float, hover: float, dow
 mod.widgets.ButtonFlat.draw_bg.pixel = fn() {
     return self.host_over(au_button(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.hover, self.down, self.disabled, self.focus, self.loading, self.anim_time, 0.0, 0.0), 14.0)
 }
+mod.widgets.ButtonFlat.draw_bg.face = {mode: @host_over, rest: #00000000, hover: #3a3c40bf, down: #17181b}
 mod.widgets.Button.draw_bg.pixel = fn() {
     return self.host_over(au_button(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.hover, self.down, self.disabled, self.focus, self.loading, self.anim_time, 1.0, 0.0), 14.0)
 }
@@ -788,6 +789,7 @@ mod.widgets.ButtonXl.draw_bg.pixel = fn() {
 mod.widgets.ButtonFlatter.draw_bg.pixel = fn() {
     return self.host_over(au_button(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.hover, self.down, self.disabled, self.focus, self.loading, self.anim_time, 7.0, 0.0), 14.0)
 }
+mod.widgets.ButtonFlatter.draw_bg.face = {mode: @host_over, rest: #00000000, hover: #00000000, down: #00000000}
 
 // Label ink per state: caps #dcdde0, the primary's lit legend blue-white,
 // the cover's legend white on its red, every variant #63666b disabled.
@@ -1045,6 +1047,7 @@ mod.widgets.RadioButtonTabFlat.draw_bg.pixel = fn() {
     let hi = vec2(au_snap(self.rect_size.x, o.x, px), au_snap(self.rect_size.y, o.y, px))
     return au_gold_tab(p, lo, hi, px, self.hover, self.down, self.active, self.disabled, self.focus)
 }
+mod.widgets.RadioButtonTabFlat.draw_bg.face = {mode: @own_face, rest: #242528, hover: #303135, down: #18191b, active: #18191b}
 mod.widgets.RadioButtonTabFlat.draw_text.color = #cfae6c
 mod.widgets.RadioButtonTabFlat.draw_text.color_hover = #e6c684
 mod.widgets.RadioButtonTabFlat.draw_text.color_active = #ffe2a8

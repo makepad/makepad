@@ -470,6 +470,26 @@ fn steady_caret_never_rearms_blink_and_read_only_cancels_pending_timeout() {
 }
 
 #[test]
+fn key_focus_without_pointer_input_starts_the_blink_and_focus_loss_stops_it() {
+    for read_only in [false, true] {
+        let (mut cx, mut editor) = editor();
+        let mut session = CodeSession::new(doc("text"));
+        record_editor(&mut cx, &mut editor, &mut session);
+        editor.set_read_only(&mut cx, read_only);
+        let area = editor.scroll_bars.area();
+        let focus = |prev, focus| Event::KeyFocus(KeyFocusEvent { prev, focus });
+        editor.handle_event(&mut cx, &focus(Area::Empty, area), &mut Scope::empty(), &mut session);
+        if read_only {
+            assert_eq!(editor.blink_timer.0, 0, "a read-only editor must not blink after key focus");
+        } else {
+            assert_ne!(editor.blink_timer.0, 0, "key focus must start the blink timer without a click");
+            editor.handle_event(&mut cx, &focus(area, Area::Empty), &mut Scope::empty(), &mut session);
+            assert_eq!(editor.blink_timer.0, 0, "losing key focus must stop the blink timer");
+        }
+    }
+}
+
+#[test]
 fn content_opacity_is_clamped_without_changing_background_or_theme() {
     let (_cx, mut editor) = editor();
     let bg = editor.draw_bg.color;

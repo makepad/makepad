@@ -350,6 +350,7 @@ mod.widgets.ButtonFlat.draw_bg.pixel = fn() {
     let f = fr_button(p, self.rect_pos, self.rect_size, px, self.corners(), self.hover, self.down, self.focus, self.disabled, 0.75, 0.0, 0.9, fr_rimc(), 0.0)
     return self.host_over(fr_wait(f, p, self.rect_size, px, self.loading, self.anim_time), m)
 }
+mod.widgets.ButtonFlat.draw_bg.face = {mode: @host_over, rest: #ffffff1a, hover: #ffffff2b, down: #ffffff0d}
 // The standard button: the whole stack.
 mod.widgets.Button.draw_bg.pixel = fn() {
     let m = self.glow_room
@@ -414,6 +415,7 @@ mod.widgets.ButtonFlatter.draw_bg.pixel = fn() {
     let f = fr_button(p, self.rect_pos, self.rect_size, px, self.corners(), self.hover, self.down, self.focus, self.disabled, face, 0.0, rim, fr_rimc(), 0.0)
     return self.host_over(fr_wait(f, p, self.rect_size, px, self.loading, self.anim_time), m)
 }
+mod.widgets.ButtonFlatter.draw_bg.face = {mode: @host_over, rest: #00000000, hover: #ffffff29, down: #ffffff0a}
 
 // Button inks: white on the hero, the near-white #eef4fb on the second
 // voice and the tonal button (one accent at rest), a rose white on danger.
@@ -1718,6 +1720,7 @@ mod.widgets.RadioButtonTabFlat.draw_bg.pixel = fn() {
     let live = 1.0 - self.disabled
     return fr_chip(p, self.rect_pos, self.rect_size, px, 2.0, 3.0, self.hover, self.down, self.focus, self.active, live)
 }
+mod.widgets.RadioButtonTabFlat.draw_bg.face = {mode: @own_face, rest: #00000000, hover: #ffffff1f, down: #ffffff10, active: #ffffff3d}
 mod.widgets.RadioButtonTabFlat.draw_text.color = #b9c0ca
 mod.widgets.RadioButtonTabFlat.draw_text.color_hover = #eef4fb
 mod.widgets.RadioButtonTabFlat.draw_text.color_active = #ffffff

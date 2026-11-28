@@ -379,6 +379,15 @@
     "features": []
   },
   {
+    "id": "town",
+    "title": "Town",
+    "package": "makepad-town",
+    "binary": "makepad-town",
+    "workspace": "makepad/apps/apps/create/app",
+    "features": [],
+    "menu": "other"
+  },
+  {
     "id": "translator",
     "title": "Translator",
     "package": "makepad-app-translator",

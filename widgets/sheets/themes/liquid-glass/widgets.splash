@@ -511,6 +511,7 @@ mod.widgets.ButtonFlat.draw_bg.pixel = fn() {
     let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
     return self.host_over(lq_pill(pq, self.rect_size, self.rect_pos, px, self.hover, self.down, self.cap_time, 0.0, self.focus, self.disabled, self.loading, self.anim_time, self.loading_color, vec4(0.0, 0.0, 0.0, 0.0), vec4(1.0, 0.0, 0.0, 0.0)), m)
 }
+mod.widgets.ButtonFlat.draw_bg.face = {mode: @host_over, rest: #ffffff26, hover: #ffffff38, down: #ffffff1a}
 // The standard, sized and compound buttons are clear pills standing off the
 // ground (THE GLASS PILL).
 mod.widgets.Button.draw_bg.pixel = fn() {
@@ -592,6 +593,7 @@ mod.widgets.ButtonFlatter.draw_bg.pixel = fn() {
     let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
     return self.host_over(lq_pill(pq, self.rect_size, self.rect_pos, px, self.hover, self.down, self.cap_time, 0.0, self.focus, self.disabled, self.loading, self.anim_time, self.loading_color, vec4(0.0, 0.0, 0.0, 0.0), vec4(1.0, 0.0, 1.0, 0.0)), m)
 }
+mod.widgets.ButtonFlatter.draw_bg.face = {mode: @host_over, rest: #00000000, hover: #ffffff33, down: #ffffff1a}
 
 // Rows of 26: a 14 point line with 6 above and below, 10 either side
 // (the label then clears the capsule end by a point at its cap height).
@@ -2653,6 +2655,7 @@ mod.widgets.RadioButtonTabFlat.draw_bg.pixel = fn() {
     let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
     return lq_button(pq, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, 0.0, 0.0, vec4(0.0, 0.0, 0.0, 0.0), vec4(lq_blue(), self.active), self.active, 0.0, 0.0)
 }
+mod.widgets.RadioButtonTabFlat.draw_bg.face = {mode: @own_face, rest: #ffffff26, hover: #ffffff38, down: #ffffff1a, active: #abb9ca}
 mod.widgets.RadioButtonTabFlat.padding = mod.turtle.Inset{left: 12.0 right: 12.0 top: 6.0 bottom: 6.0}
 mod.widgets.RadioButtonTabFlat.draw_text.color = #1c1e22
 mod.widgets.RadioButtonTabFlat.draw_text.color_active = #0d0f14

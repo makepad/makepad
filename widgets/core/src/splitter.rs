@@ -295,6 +295,13 @@ pub enum SplitterAxis {
     Vertical,
 }
 
+/// A child of a standalone splitter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SplitterSide {
+    A,
+    B,
+}
+
 #[derive(Clone, Copy, Debug, Script, ScriptHook, SerRon, DeRon)]
 pub enum SplitterAlign {
     #[live(50.0)]
@@ -522,6 +529,7 @@ enum DrawState {
     DrawA,
     DrawSplit,
     DrawB,
+    Solo(SplitterSide),
 }
 
 #[derive(Script, ScriptHook, Widget, Animator)]
@@ -549,6 +557,8 @@ pub struct Splitter {
     /// unfolding restores the bar the user left, with nobody remembering it.
     #[live(SplitterCollapse::None)]
     pub collapse: SplitterCollapse,
+    #[rust]
+    solo: Option<SplitterSide>,
 
     /// Hold the align to the floors as a law, not as the rule of thumb the
     /// dock was built on.
@@ -675,8 +685,31 @@ pub enum SplitterAction {
 }
 
 impl Widget for Splitter {
+    fn set_key_focus(&self, cx: &mut Cx) {
+        if self.solo.is_none() {
+            cx.set_key_focus(self.area());
+        }
+    }
+
+    fn key_focus(&self, cx: &Cx) -> bool {
+        self.solo.is_none() && cx.has_key_focus(self.area())
+    }
+
+    fn visit_cancel(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) -> bool {
+        match self.solo {
+            Some(SplitterSide::A) => visit(id!(a), self.a.clone()),
+            Some(SplitterSide::B) => visit(id!(b), self.b.clone()),
+            None => return self.cancel_children_impl(visit),
+        }
+        true
+    }
+
     fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
         let _ = cx;
+        if self.solo.is_some() {
+            node.role = a11y_tree::Role::Generic;
+            return;
+        }
         node.role = a11y_tree::Role::Splitter;
         makepad_platform::a11y::set_string(&mut node.name, &self.text());
         node.range = Some(a11y_tree::RangeValue {
@@ -693,6 +726,10 @@ impl Widget for Splitter {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if let Some(side) = self.solo {
+            self.pane(side).handle_event(cx, event, scope);
+            return;
+        }
         let uid = self.widget_uid();
 
         if self.animator_handle_event(cx, event).must_redraw() {
@@ -888,7 +925,22 @@ impl Widget for Splitter {
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         if self.draw_state.begin(cx, DrawState::DrawA) {
-            self.begin(cx, walk);
+            if let Some(side) = self.solo {
+                cx.begin_turtle(walk, Layout::flow_down());
+                self.rect = cx.turtle().inner_rect();
+                self.draw_state.set(DrawState::Solo(side));
+            } else {
+                self.begin(cx, walk);
+            }
+        }
+        if let Some(DrawState::Solo(side)) = self.draw_state.get() {
+            self.pane(side).draw(cx, scope)?;
+            cx.end_turtle_with_area(match side {
+                SplitterSide::A => &mut self.area_a,
+                SplitterSide::B => &mut self.area_b,
+            });
+            self.draw_state.end();
+            return DrawStep::done();
         }
         if let Some(DrawState::DrawA) = self.draw_state.get() {
             self.a.draw(cx, scope)?;
@@ -908,6 +960,48 @@ impl Widget for Splitter {
 }
 
 impl Splitter {
+    fn pane(&mut self, side: SplitterSide) -> &mut WidgetRef {
+        match side {
+            SplitterSide::A => &mut self.a,
+            SplitterSide::B => &mut self.b,
+        }
+    }
+
+    fn set_solo(&mut self, cx: &mut Cx, side: Option<SplitterSide>) {
+        if self.solo == side {
+            return;
+        }
+        self.redraw(cx);
+        cx.redraw_area_and_children(self.area_a);
+        cx.redraw_area_and_children(self.area_b);
+        self.solo = side;
+        if side.is_some() {
+            let bar = self.draw_bg.area();
+            if !bar.is_empty() {
+                if cx.fingers.is_area_hovered(bar) || self.drag_start_align.is_some() {
+                    cx.set_cursor(MouseCursor::Default);
+                }
+                if let Some(digit) = cx.fingers.find_digit_for_captured_area(bar) {
+                    cx.fingers.cancel_digit_except(digit, Area::Empty);
+                    if cx.has_key_focus(bar) || self.key_step > 0.0 && self.drag_start_align.is_some() {
+                        cx.set_key_focus(Area::Empty);
+                    }
+                } else {
+                    cx.update_area_refs(bar, Area::Empty);
+                }
+                self.draw_bg.draw_vars.area = Area::Empty;
+            }
+            cx.stop_timer(std::mem::replace(&mut self.dwell, Timer::empty()));
+            self.animator_cut(cx, ids!(hover.off));
+            self.animator_cut(cx, ids!(focus.off));
+            self.drag_start_align = None;
+            self.drag_moved = false;
+            self.folded_by_drag = false;
+        }
+        self.area_a = Area::Empty;
+        self.area_b = Area::Empty;
+    }
+
     pub fn begin(&mut self, cx: &mut Cx2d, walk: Walk) {
         // we should start a fill turtle in the layout direction of choice
         match self.axis {
@@ -1243,6 +1337,14 @@ impl Splitter {
 }
 
 impl SplitterRef {
+    /// Give one child the whole splitter, omitting the bar. Passing `None`
+    /// restores the split with its existing align and collapse state.
+    pub fn set_solo(&self, cx: &mut Cx, side: Option<SplitterSide>) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_solo(cx, side);
+        }
+    }
+
     pub fn changed(&self, actions: &Actions) -> Option<(SplitterAxis, SplitterAlign)> {
         self.borrow().and_then(|inner| inner.changed(actions))
     }
@@ -1642,7 +1744,7 @@ mod preset_tests {
     #[test]
     fn split_pane_is_the_splitter_with_the_law_switched_on() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.with_vm(|vm| {
+        let mut pane = cx.with_vm(|vm| {
             crate::script_mod(vm);
             let mut pane = built(vm, "SplitPane");
             assert!(pane.exact_floors);
@@ -1655,7 +1757,17 @@ mod preset_tests {
             // pairs, because which pair is read follows the axis.
             pane.set_axis(SplitterAxis::Vertical);
             assert_eq!(pane.axis_min_max(), (80.0, 80.0));
+            pane
         });
+        pane.set_collapse(&mut cx, SplitterCollapse::A);
+        for side in [Some(SplitterSide::A), Some(SplitterSide::B), None] {
+            pane.set_solo(&mut cx, side);
+            if side.is_some() {
+                assert!(!pane.key_focus(&cx), "a hidden bar cannot own keyboard focus");
+            }
+            assert_eq!(pane.collapse(), SplitterCollapse::A, "showing a single pane preserves a fold");
+            assert!(matches!(pane.align(), SplitterAlign::FromA(240.0)), "showing a single pane preserves its align");
+        }
     }
 
     /// The same ask on the two of them, in the same room. The plain one

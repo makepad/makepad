@@ -5,6 +5,9 @@ use {
     crate::window::Window,
     std::cell::RefCell,
     std::collections::{HashMap, HashSet},
+    std::fs::OpenOptions,
+    std::io::Write,
+    std::path::PathBuf,
 };
 use crate::widget_hooks::WidgetHooks;
 
@@ -124,6 +127,7 @@ struct WidgetTreeInner {
     /// discoveries could persist a stale "not found" forever.
     path_cache_epoch: u64,
     stats: WidgetTreeStats,
+    lookup_clashes: Option<Box<LookupClashCheck>>,
     dirty: FastHashSet<WidgetUid>,
     discovery_buffers: Vec<Vec<(LiveId, WidgetRef)>>,
     refresh_pending: Vec<WidgetUid>,
@@ -162,6 +166,13 @@ struct WidgetTreeInner {
     /// They get removed once nothing in them is alive, or along with their parent. Most apps never
     /// have any, so these live apart from the graph's nodes and only get looked at if there are some.
     detached: FastHashMap<WidgetUid, Vec<WidgetUid>>,
+}
+
+#[derive(Default)]
+struct LookupClashCheck {
+    file: Option<PathBuf>,
+    seen: HashSet<(Vec<LiveId>, Vec<WidgetUid>)>,
+    lines: Vec<String>,
 }
 
 struct WidgetTreeNode {
@@ -2430,6 +2441,69 @@ impl WidgetTree {
         self.find_all_flood(origin_uid, path)
     }
 
+    /// Record ambiguous single-widget lookups in memory and optionally append them to a file.
+    pub fn check_lookup_clashes(&self, file: Option<PathBuf>) {
+        let mut inner = self.inner.borrow_mut();
+        inner.lookup_clashes.get_or_insert_with(Default::default).file = file;
+    }
+
+    /// Return the clash reports in the order the lookups first encountered them.
+    pub fn lookup_clashes(&self) -> Vec<String> {
+        self.inner.borrow().lookup_clashes.as_ref()
+            .map(|check| check.lines.clone())
+            .unwrap_or_default()
+    }
+
+    fn report_lookup_clash(inner: &mut WidgetTreeInner, root_uid: WidgetUid, path: &[LiveId]) {
+        let stats = inner.stats;
+        let matches = Self::find_all_within_cached_graph(inner, root_uid, path);
+        inner.stats = stats;
+        if matches.len() < 2 {
+            return;
+        }
+        let mut uids = Vec::with_capacity(matches.len());
+        for widget in matches {
+            let Some(uid) = widget.try_widget_uid().filter(|uid| *uid != WidgetUid(0)) else {
+                return;
+            };
+            uids.push(uid);
+        }
+        let check = inner.lookup_clashes.as_mut().unwrap();
+        if !check.seen.insert((path.to_vec(), uids.clone())) {
+            return;
+        }
+        let widget_path = |uid| {
+            let mut names = Vec::new();
+            let mut current = Some(uid);
+            for _ in 0..inner.graph.len() {
+                let Some(node) = current.and_then(|id| inner.graph.get(&id)) else { break };
+                if node.name != LiveId(0) {
+                    names.push(live_id_token(node.name));
+                }
+                current = node.parent;
+            }
+            names.reverse();
+            names.join(".")
+        };
+        let query = path.iter().copied().map(live_id_token).collect::<Vec<_>>().join(".");
+        let paths = uids.iter()
+            .map(|&uid| format!("{} (uid {})", widget_path(uid), uid.0))
+            .collect::<Vec<_>>().join(", ");
+        let line = format!(
+            "lookup clash: ids!({query}) from {} matches {}: {paths}",
+            widget_path(root_uid), uids.len()
+        );
+        if let Some(file) = &check.file {
+            if let Err(err) = OpenOptions::new().create(true).append(true).open(file)
+                .and_then(|mut out| writeln!(out, "{line}"))
+            {
+                log!("could not append lookup clash to {}: {err}", file.display());
+            }
+        }
+        log!("{line}");
+        check.lines.push(line);
+    }
+
     /// Find a widget within the subtree of `root_uid` by matching a path of LiveIds.
     /// Returns the shallowest (first) match in the tree.
     pub fn find_within(&self, root_uid: WidgetUid, path: &[LiveId]) -> WidgetRef {
@@ -2440,12 +2514,17 @@ impl WidgetTree {
         if !inner.dirty.is_empty() {
             Self::flush_dirty(&mut inner, false);
         }
-        if let Some((widget, lookups)) = Self::cached_first_widget(&inner, root_uid, path) {
+        let widget = if let Some((widget, lookups)) = Self::cached_first_widget(&inner, root_uid, path) {
             inner.stats.lookups += lookups;
-            return widget.unwrap_or_else(WidgetRef::empty);
+            widget.unwrap_or_else(WidgetRef::empty)
+        } else {
+            let results = Self::find_all_within_cached_graph(&mut inner, root_uid, path);
+            results.into_iter().next().unwrap_or_else(WidgetRef::empty)
+        };
+        if inner.lookup_clashes.is_some() {
+            Self::report_lookup_clash(&mut inner, root_uid, path);
         }
-        let results = Self::find_all_within_cached_graph(&mut inner, root_uid, path);
-        results.into_iter().next().unwrap_or_else(WidgetRef::empty)
+        widget
     }
 
     /// Find all widgets matching path within the subtree of `root_uid`.
@@ -2838,6 +2917,9 @@ impl WidgetTreeState {
     fn get_or_init(cx: &mut Cx) -> &mut WidgetTreeState {
         if cx.widget_tree_ptr.is_null() {
             let boxed = Box::new(WidgetTreeState::default());
+            if let Some(path) = std::env::var_os("MAKEPAD_LOOKUP_CLASHES").filter(|path| !path.is_empty()) {
+                boxed.tree.check_lookup_clashes(Some(PathBuf::from(path)));
+            }
             cx.widget_tree_ptr = Box::into_raw(boxed) as *mut ();
             makepad_platform::a11y::set_path_resolver(|cx, uid, window| cx.widget_tree().semantic_path_synced(WidgetUid(uid), WidgetUid(window)));
         }
@@ -2916,9 +2998,7 @@ pub fn set_ui_root(cx: &mut Cx, ui: &WidgetRef) {
     cx.cancel_scope_resolver = Some(cancel_scope_resolver);
     cx.widget_uid_paths_callback = Some(widget_uid_paths_callback);
     crate::draw_times::register();
-    if let Some(tweaker) = WidgetHooks::tweaker(cx) {
-        cx.tweak_callback = Some(tweaker.tweak_callback);
-    }
+    cx.tweak_callback = Some(crate::design_data::callback);
     let root_uid = ui.widget_uid();
     update_global_ui_handle(cx, root_uid);
 }
@@ -3792,6 +3872,52 @@ mod tests {
     // ------------------------------------------------------------------
     // scope
     // ------------------------------------------------------------------
+
+    #[test]
+    fn test_lookup_clashes_are_reported_once() {
+        let tree = WidgetTree::default();
+        let mut keep_alive = Vec::new();
+        let mut observe = |label: &str, parent, scope| {
+            let uid = WidgetUid::new();
+            let widget = if scope { make_widget_skip(uid, vec![]) } else { make_widget(uid, vec![]) };
+            tree.observe_node(uid, LiveId::from_str_with_lut(label).unwrap(), widget.clone(), parent);
+            keep_alive.push(widget);
+            uid
+        };
+        let outer = observe("outer", None, false);
+        let root = observe("root", Some(outer), false);
+        let a = observe("a", Some(root), false);
+        let first = observe("caption", Some(a), false);
+        let b = observe("b", Some(root), false);
+        let second = observe("caption", Some(b), false);
+        let scope = observe("scope", Some(root), true);
+        observe("caption", Some(scope), false);
+        stabilize_graph_cache(&tree);
+
+        let path = [name("caption")];
+        let warm_lookup = || {
+            let before = tree.stats();
+            let uid = tree.find_within(root, &path).widget_uid();
+            let after = tree.stats();
+            (uid, after.lookups - before.lookups, after.walk_nodes - before.walk_nodes)
+        };
+        tree.find_within(root, &path);
+        let unchecked = warm_lookup();
+        assert_eq!(unchecked.0, first, "the first caption in walk order must win");
+        tree.check_lookup_clashes(None);
+        assert_eq!(warm_lookup(), unchecked, "checking must preserve the warm result and lookup counters");
+        let lines = tree.lookup_clashes();
+        assert_eq!(lines, [format!(
+            "lookup clash: ids!(caption) from outer.root matches 2: outer.root.a.caption (uid {}), outer.root.b.caption (uid {})",
+            first.0, second.0
+        )], "the report must name both visible captions in order and exclude the scoped caption");
+
+        tree.find_within(root, &path);
+        tree.find_within(outer, &path);
+        assert_eq!(tree.find_within(root, &[name("a"), name("caption")]).widget_uid(), first,
+            "the longer path must select just the first caption");
+        assert_eq!(tree.lookup_clashes(), lines, "repeated, overlapping, and unique lookups must add no reports");
+    }
 
     #[test]
     fn test_scope_skips_subtree() {

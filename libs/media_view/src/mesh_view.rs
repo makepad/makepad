@@ -73,7 +73,7 @@ script_mod! {
         }
         draw_sprite +: {
             alpha_blend: true
-            backface_culling: false
+            cull_mode: @None
             pixel: fn() {
                 let color = self.tex.sample_nearest(self.v_uv)
                 if color.w < 0.08 {

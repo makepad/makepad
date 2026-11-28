@@ -267,6 +267,10 @@ impl Widget for FoldHeader {
 }
 
 impl FoldHeader {
+    pub(crate) fn header(&self) -> &WidgetRef {
+        &self.header
+    }
+
     fn body_is_active(&self) -> bool {
         if self.animator.groups.contains_key(&id!(active)) {
             self.animator.in_state_id(ids!(active.on))

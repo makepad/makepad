@@ -11,6 +11,7 @@ pub(crate) struct WebFrame {
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
     use super::*;
+    use crate::HostGrants;
     use makepad_browser_view::{BrowserViews, ViewId, ViewOp};
     use std::{cell::RefCell, rc::{Rc, Weak}};
 
@@ -36,7 +37,7 @@ mod native {
 
     impl TexturedWebView {
         pub fn open(&mut self, cx: &mut Cx, url: &str) {
-            if self.attempted || cx.script_data.std.host_io_only() {
+            if self.attempted || !cx.script_data.std.has_grant(HostGrants::NATIVE_LAYERS) {
                 return;
             }
             self.attempted = true;
@@ -58,6 +59,9 @@ mod native {
         }
 
         pub fn is_open(&self) -> bool { self.view.is_some() }
+
+        #[cfg(test)]
+        pub(crate) fn was_attempted(&self) -> bool { self.attempted }
 
         pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) -> bool {
             let Some(host) = &self.host else { return false };
@@ -200,6 +204,8 @@ pub(crate) struct TexturedWebView;
 impl TexturedWebView {
     pub fn open(&mut self, _cx: &mut Cx, _url: &str) {}
     pub fn is_open(&self) -> bool { false }
+    #[cfg(test)]
+    pub(crate) fn was_attempted(&self) -> bool { false }
     pub fn handle_event(&mut self, _cx: &mut Cx, _event: &Event) -> bool { false }
     pub fn events(&mut self, _previous: &crate::web_view::WebViewState) -> Vec<NativeLayerEventKind> { Vec::new() }
     pub fn frame(&mut self, _cx: &mut Cx, _size: Vec2d, _dpi: f64) -> Option<WebFrame> { None }

@@ -37,6 +37,7 @@ pub mod splash_host;
 pub mod splash_storage;
 pub mod widget_match_event;
 pub mod widget_tree;
+pub mod design_data;
 mod draw_times;
 pub mod ui_checks;
 pub mod scan;
@@ -277,8 +278,8 @@ pub use crate::{
     },
     widget_async::{
         enter_isolate, leave_isolate, set_splash_theme, set_splash_theme_script,
-        set_widget_async_trace, CxSplashVmExt, CxWidgetToScriptCallExt, IsolateEntry,
-        ScriptAsyncCalls, ScriptAsyncId, ScriptAsyncResult, SplashTheme, SplashThemeScript,
+        set_widget_async_trace, with_splash_resources, HostGrants, CxSplashVmExt, CxWidgetToScriptCallExt, IsolateEntry,
+        ScriptAsyncCalls, ScriptAsyncId, ScriptAsyncResult, SplashTheme, SplashThemeScript, SplashVmConfig,
         SplashVmId, MAIN_SPLASH_VM_ID,
     },
     widget_match_event::WidgetMatchEvent,
@@ -410,6 +411,18 @@ pub fn set_theme_mix(cx: &mut Cx, code: Option<String>) {
     cx.global::<ThemeMixChoice>().0 = code;
 }
 
+/// Literal overrides installed with a sheet, underneath subsequent edits.
+#[derive(Default)]
+struct ThemePins(Option<Vec<(String, String)>>);
+
+pub fn theme_pins(cx: &mut Cx) -> Option<Vec<(String, String)>> {
+    cx.global::<ThemePins>().0.clone()
+}
+
+pub fn set_theme_pins(cx: &mut Cx, pins: Option<Vec<(String, String)>>) {
+    cx.global::<ThemePins>().0 = pins;
+}
+
 /// A person's own edits to the theme in force, token by token, as the text
 /// each was set to. Re-emitted on every module run, after the base theme,
 /// the sheet and the mix, so an edit outlives the rebuild that used to
@@ -464,6 +477,7 @@ pub fn clear_theme_edits(cx: &mut Cx) {
 pub fn set_base_theme(cx: &mut Cx, theme: BaseTheme) {
     cx.global::<BaseThemeChoice>().0 = theme;
     set_theme_mix(cx, None);
+    set_theme_pins(cx, None);
     clear_theme_edits(cx);
 }
 
@@ -557,7 +571,7 @@ fn build_base_themes_units(units: &mut Vec<UiUnit>) {
 pub fn theme_mod(vm: &mut ScriptVm) {
     let mut units = Vec::new();
     theme_mod_units(&mut units);
-    run_units(vm, units);
+    with_splash_resources(vm, |vm| run_units(vm, units));
 }
 
 pub(crate) fn theme_mod_units(units: &mut Vec<UiUnit>) {
@@ -691,17 +705,17 @@ pub fn widgets_mod_with(
     families: &[fn(&mut ScriptVm)],
 ) {
     *vm.cx_mut().global::<Registration>() = Registration { window, families: families.to_vec() };
-    let host_io_only = vm.cx().script_data.std.host_io_only();
-    widgets_mod_with_io(vm, window, families, host_io_only, true, IsolateWidgets::Library);
+    let grants = vm.cx().script_data.std.grants();
+    widgets_mod_with_grants(vm, window, families, grants, true, IsolateWidgets::Library);
 }
 
 /// The library for a Splash isolate whose host registers it itself
-/// (`alloc_splash_vm_with_ui`): the core and `families`, ONCE, under the sheet
+/// (`SplashVmConfig::ui`): the core and `families`, ONCE, under the sheet
 /// installed on the isolate (no stock copy registered apart, as an isolate
 /// carries none of the host's chrome). Leaves the app's `Registration` alone.
 pub fn isolate_widgets_mod_with(vm: &mut ScriptVm, families: &[fn(&mut ScriptVm)]) {
-    let host_io_only = vm.cx().script_data.std.host_io_only();
-    widgets_mod_with_io(vm, WindowFamilies::default(), families, host_io_only, false, IsolateWidgets::Library);
+    let grants = vm.cx().script_data.std.grants();
+    widgets_mod_with_grants(vm, WindowFamilies::default(), families, grants, false, IsolateWidgets::Library);
 }
 
 /// The families the last `widgets_mod_with` registered. A module rebuild the
@@ -722,44 +736,40 @@ pub(crate) fn script_mod_as_registered(vm: &mut ScriptVm) {
     script_mod_with(vm, window, &families);
 }
 
-/// The core's widgets for a Splash isolate being built: `host_io_only` is
-/// the restriction it will run under (its std is restricted only after this).
-pub(crate) fn widgets_mod_with_host_io_units(
+/// Build the isolate's widget units for its effective persistent grants.
+pub(crate) fn isolate_widgets_mod_with_grants_units(
     vm: &mut ScriptVm,
     units: &mut Vec<UiUnit>,
-    host_io_only: bool,
+    grants: HostGrants,
     set: IsolateWidgets,
 ) {
     let families = vm.cx_mut().global::<widget_hooks::IsolateFamilies>().0.clone();
-    widgets_mod_with_io_units(vm, units, WindowFamilies::default(), &families, host_io_only, false, set);
+    widgets_mod_with_grants_units(vm, units, WindowFamilies::default(), &families, grants, false, set);
 }
 
-/// With `host_io_only` (a guest held to the host service bridge) the modules
-/// that reach past it stay out: the window and its menu bar (a guest must not
-/// replace the app's), screen capture, and cached widgets (their singletons
-/// would reach widgets the host or other isolates cached).
+/// Window management, screen capture and cached widgets require the desktop shell grant.
 ///
 /// `stock_apart` keeps the stock library apart from the sheet's; an isolate
 /// passes false, see below.
-fn widgets_mod_with_io(
+fn widgets_mod_with_grants(
     vm: &mut ScriptVm,
     window: WindowFamilies,
     families: &[fn(&mut ScriptVm)],
-    host_io_only: bool,
+    grants: HostGrants,
     stock_apart: bool,
     set: IsolateWidgets,
 ) {
     let mut units = Vec::new();
-    widgets_mod_with_io_units(vm, &mut units, window, families, host_io_only, stock_apart, set);
-    run_units(vm, units);
+    widgets_mod_with_grants_units(vm, &mut units, window, families, grants, stock_apart, set);
+    with_splash_resources(vm, |vm| run_units(vm, units));
 }
 
-fn widgets_mod_with_io_units(
+fn widgets_mod_with_grants_units(
     vm: &mut ScriptVm,
     units: &mut Vec<UiUnit>,
     window: WindowFamilies,
     families: &[fn(&mut ScriptVm)],
-    host_io_only: bool,
+    grants: HostGrants,
     stock_apart: bool,
     set: IsolateWidgets,
 ) {
@@ -774,13 +784,13 @@ fn widgets_mod_with_io_units(
     // and a second pass would be wasted work. Its stock names are the sheet's library.
     if stock_apart {
         let sheet = crate::desktop_style::current_name(vm).is_some();
-        register_widgets_units(units, window, families, host_io_only, WithSheet::No, true, set);
+        register_widgets_units(units, window, families, grants, WithSheet::No, true, set);
         if sheet {
             build_base_themes_units(units);
-            register_widgets_units(units, window, families, host_io_only, WithSheet::Yes, false, set);
+            register_widgets_units(units, window, families, grants, WithSheet::Yes, false, set);
         }
     } else {
-        register_widgets_units(units, window, families, host_io_only, WithSheet::Current, true, set);
+        register_widgets_units(units, window, families, grants, WithSheet::Current, true, set);
     }
 }
 
@@ -793,6 +803,21 @@ pub(crate) enum WithSheet {
     Current,
 }
 
+fn apply_theme_literals(vm: &mut ScriptVm, layer: &str, module: &str, values: &[(String, String)]) {
+    if values.is_empty() {
+        return;
+    }
+    let mut code = format!("mod.themes.{layer} = mod.theme{{");
+    for (name, literal) in values {
+        code.push(' ');
+        code.push_str(name);
+        code.push_str(": ");
+        code.push_str(literal);
+    }
+    code.push_str(&format!(" }}\nmod.theme = mod.themes.{layer}\ntrue\n"));
+    vm.eval(makepad_platform::ScriptMod::new(widgets_dir(), module, &format!("{module}.splash"), 0, 0, &code, &[]));
+}
+
 /// One registration of every widget template, `window`'s families and then
 /// `families`, with the installed sheet's token half first when
 /// `with_sheet`, and kept as the stock library the chrome is built from when
@@ -801,7 +826,7 @@ fn register_widgets_units(
     units: &mut Vec<UiUnit>,
     window: WindowFamilies,
     families: &[fn(&mut ScriptVm)],
-    host_io_only: bool,
+    grants: HostGrants,
     with_sheet: WithSheet,
     keep: bool,
     set: IsolateWidgets,
@@ -816,6 +841,12 @@ fn register_widgets_units(
         if with_sheet {
             crate::desktop_style::apply_theme(vm);
         }
+        // The first pass under a sheet captures stock widgets and their unpinned base.
+        if with_sheet || crate::desktop_style::current_name(vm).is_none() {
+            if let Some(pins) = theme_pins(vm.cx_mut()) {
+                apply_theme_literals(vm, "pinned", "theme_pins", &pins);
+            }
+        }
         // ...and the person's own edits over everything -- base, sheet or mix.
         // (A global has already rebuilt the base in `theme_mod`; its pin here
         // is the same value again, and the belt for a base that never named it.)
@@ -824,21 +855,7 @@ fn register_widgets_units(
         // now; and before the prelude captures `theme: mod.theme` for every
         // template, which is the last moment a token is still a token.
         let edits = theme_edits(vm.cx_mut());
-        if !edits.is_empty() {
-            let mut code = String::from("mod.themes.edited = mod.theme{");
-            for (name, text) in &edits {
-                code.push(' ');
-                code.push_str(name);
-                code.push_str(": ");
-                code.push_str(text);
-            }
-            // The last statement of a script is swallowed; `true` takes the fall.
-            code.push_str(" }
-mod.theme = mod.themes.edited
-true
-");
-            vm.eval(makepad_platform::ScriptMod::new(widgets_dir(), "theme_edits", &"theme_edits.splash".to_string(), 0, 0, &code, &[]));
-        }
+        apply_theme_literals(vm, "edited", "theme_edits", &edits);
         // make the prelude for our own widgets
         script_eval!(vm, {
             mod.prelude.widgets_internal = {
@@ -857,7 +874,7 @@ true
     }));
     register_base_widgets_units(units);
     if set == IsolateWidgets::Library {
-        register_library_widgets_units(units, window, families, host_io_only);
+        register_library_widgets_units(units, window, families, grants);
     }
 
     units.push(UiUnit::new("widgets: insets and prelude", |vm| {
@@ -889,9 +906,31 @@ true
             );
         }
 
+        let grants = vm.cx().script_data.std.grants();
+        let prelude = vm.module(id!(prelude));
+        let header = vm.value(prelude, id!(widgets_header)).as_object().expect("widget header");
+        let header = if grants.contains(HostGrants::NETWORK.union(HostGrants::LOCAL_RESOURCES)) {
+            header
+        } else {
+            // Copy the non-resource header fields and the permanently granted
+            // loader names. A host registration scope never expands the guest API.
+            let loader = vm.module(id!(res));
+            let filtered = vm.new_object();
+            for entry in vm.heap().map_entries(header) {
+                let required = if entry.key == id!(http_resource).into() {
+                    HostGrants::NETWORK
+                } else {
+                    HostGrants::LOCAL_RESOURCES
+                };
+                if grants.contains(required) || vm.heap().object_own_value(loader, &entry.key).is_none() {
+                    vm.set_value_def(filtered, entry.key, entry.value);
+                }
+            }
+            filtered
+        };
         script_eval!(vm, {
             mod.prelude.widgets = {
-                ..mod.prelude.widgets_header,
+                ..#(header),
                 theme:mod.theme,
                 ..mod.widgets,
             }
@@ -924,7 +963,7 @@ fn register_library_widgets_units(
     units: &mut Vec<UiUnit>,
     window: WindowFamilies,
     families: &[fn(&mut ScriptVm)],
-    host_io_only: bool,
+    grants: HostGrants,
 ) {
     units.push(UiUnit::new("widgets: adaptive_view", crate::adaptive_view::script_mod));
     units.push(UiUnit::new("widgets: desktop_button", crate::desktop_button::script_mod));
@@ -945,7 +984,7 @@ fn register_library_widgets_units(
             }
         }
     }));
-    if !host_io_only { units.push(UiUnit::new("widgets: window_menu", crate::window_menu::script_mod)); }
+    if grants.contains(HostGrants::DESKTOP_SHELL) { units.push(UiUnit::new("widgets: window_menu", crate::window_menu::script_mod)); }
     units.push(UiUnit::new("widgets: nav_control", crate::nav_control::script_mod));
     units.push(UiUnit::new("widgets: tweaker", move |vm| {
         match window.tweaker {
@@ -961,7 +1000,7 @@ fn register_library_widgets_units(
         }
     }));
     units.push(UiUnit::new("widgets: gauss_view", crate::gauss_view::script_mod));
-    if !host_io_only { units.push(UiUnit::new("widgets: screen_cap", crate::screen_cap::script_mod)); }
+    if grants.contains(HostGrants::DESKTOP_SHELL) { units.push(UiUnit::new("widgets: screen_cap", crate::screen_cap::script_mod)); }
     // The AI slot before the window: its DSL names `AiChatSlot`.
     units.push(UiUnit::new("widgets: ai slot", move |vm| {
         match window.ai {
@@ -978,7 +1017,7 @@ fn register_library_widgets_units(
     }));
     units.push(UiUnit::new("widgets: app_icon", crate::app_icon::script_mod));
     units.push(UiUnit::new("widgets: cursor", crate::cursor::script_mod));
-    if !host_io_only { units.push(UiUnit::new("widgets: window", crate::window::script_mod)); }
+    if grants.contains(HostGrants::DESKTOP_SHELL) { units.push(UiUnit::new("widgets: window", crate::window::script_mod)); }
 
     units.push(UiUnit::new("widgets: popup_menu", crate::popup_menu::script_mod));
     units.push(UiUnit::new("widgets: drop_down", crate::drop_down::script_mod));
@@ -1032,7 +1071,7 @@ fn register_library_widgets_units(
     units.push(UiUnit::new("widgets: scroll_fade", crate::scroll_fade::script_mod));
     units.push(UiUnit::new("widgets: reorder_list", crate::reorder_list::script_mod));
 
-    if !host_io_only { units.push(UiUnit::new("widgets: cached_widget", crate::cached_widget::script_mod)); }
+    if grants.contains(HostGrants::DESKTOP_SHELL) { units.push(UiUnit::new("widgets: cached_widget", crate::cached_widget::script_mod)); }
     units.push(UiUnit::new("widgets: root", crate::root::script_mod));
 
     units.push(UiUnit::new("widgets: tab_close_button", crate::tab_close_button::script_mod));

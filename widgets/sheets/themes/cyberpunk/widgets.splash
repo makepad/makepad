@@ -1016,6 +1016,7 @@ let cp_button = fn(pos: vec2, size: vec2, o: vec2, dpi: float, br: float, hover:
 mod.widgets.ButtonFlat.draw_bg.pixel = fn() {
     return self.host_over(cp_button(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.border_radius, self.hover, self.down, self.disabled, self.focus, self.loading, self.anim_time, 0.0), 8.0)
 }
+mod.widgets.ButtonFlat.draw_bg.face = {mode: @host_over, rest: #21242d, hover: #242732, down: #1d1f28}
 mod.widgets.Button.draw_bg.pixel = fn() {
     return self.host_over(cp_button(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.border_radius, self.hover, self.down, self.disabled, self.focus, self.loading, self.anim_time, 1.0), 8.0)
 }
@@ -1037,6 +1038,7 @@ mod.widgets.ButtonOutline.draw_bg.pixel = fn() {
 mod.widgets.ButtonFlatter.draw_bg.pixel = fn() {
     return self.host_over(cp_button(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.border_radius, self.hover, self.down, self.disabled, self.focus, self.loading, self.anim_time, 7.0), 8.0)
 }
+mod.widgets.ButtonFlatter.draw_bg.face = {mode: @host_over, rest: #00000000, hover: #242732cc, down: #1d1f28cc}
 
 // Legends: printed ice-cyan, white under the hand, magenta while held.
 mod.widgets.ButtonFlat.draw_text.color = #c8faff
@@ -1260,6 +1262,7 @@ mod.widgets.RadioButtonTabFlat.draw_bg.pixel = fn() {
     let hi = vec2(cp_snap(self.rect_size.x, o.x, px), cp_snap(self.rect_size.y, o.y, px))
     return cp_key(p, lo, hi, 7.0, 2.5, px, o, self.hover, self.down, self.active, self.focus, self.disabled, vec3(0.08, 0.94, 1.0), vec3(1.0, 0.12, 0.72), 0.0, 1.0, 1.0, 1.0)
 }
+mod.widgets.RadioButtonTabFlat.draw_bg.face = {mode: @own_face, rest: #21242d, hover: #242732, down: #1d1f28, active: #2a1d2f}
 mod.widgets.RadioButtonTabFlat.draw_text.color = #c8faff
 mod.widgets.RadioButtonTabFlat.draw_text.color_hover = #ffffff
 mod.widgets.RadioButtonTabFlat.draw_text.color_active = #ffffff

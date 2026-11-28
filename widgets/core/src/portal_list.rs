@@ -288,9 +288,10 @@ enum ListDrawState {
 
 #[derive(Clone, Debug, Default)]
 pub enum PortalListAction {
-    /// The viewport position changed since the last completed draw. Emitted at
-    /// most once per frame, from the draw, so every kind of scrolling (events,
-    /// animations, draw-side renormalization) reports identically.
+    /// The viewport position or `at_end` state changed since the last settled
+    /// draw. Emitted at most once per frame, from the draw, so every kind of
+    /// scrolling (events, animations, draw-side renormalization, or content
+    /// resizing) reports identically.
     Scroll,
     /// The start of the list is now on screen (within `reached_start_margin`
     /// items). Sent once; not repeated while the start stays on screen. Sent
@@ -302,6 +303,11 @@ pub enum PortalListAction {
     /// items); same behavior as [`Self::ReachedStart`].
     ReachedEnd,
     SmoothScrollReached,
+    /// A primary click or tap on bare content. Empty list space has no item id.
+    /// `taps` is the consecutive tap count at the press (one for a single click).
+    ItemClicked { item_id: Option<usize>, abs: DVec2, taps: u32 },
+    /// A secondary press or touch long-press on an item, in window coordinates.
+    ItemContextMenu { item_id: usize, abs: DVec2 },
     #[default]
     None,
 }
@@ -895,11 +901,14 @@ pub struct PortalList {
     /// flicks build up speed; consumed by the press's release either way.
     #[rust] caught_fling: Option<(f64, f64)>,
     /// Viewport position (`first_id`, `first_scroll`, `bounce_overshoot`) of the most
-    /// recent `Scroll` action, compared at the end of each draw. Scrolling of every kind
-    /// funnels through a draw, so this coalesces notification to at most one action per
-    /// frame in which the viewport actually moved, wherever the motion came from
-    /// (events, animations, or draw-side renormalization).
+    /// recent `Scroll` action, compared at the end of each settled draw. Scrolling of
+    /// every kind funnels through a draw, so this coalesces notification to at most one
+    /// action per frame in which the viewport moved or its `at_end` state changed,
+    /// wherever the change came from (events, animations, draw-side renormalization, or
+    /// content resizing).
     #[rust] last_notified_pos: (usize, f64, f64),
+    /// `at_end` state of the most recent `Scroll` action (see [`Self::last_notified_pos`]).
+    #[rust] last_notified_at_end: bool,
     /// Whether we already told the app the start of the list is on screen
     /// (so `ReachedStart` is sent once, not on every draw).
     #[rust] told_reached_start: bool,
@@ -916,11 +925,11 @@ pub struct PortalList {
     /// Whether content rubber-bands past the end (bottom) edge.
     #[live(true)]
     pub bounce_at_end: bool,
-    /// Whether to emit [`PortalListAction::Scroll`] whenever the viewport moves, at
-    /// most once per frame. Off by default, since each one is another event through
-    /// the whole widget tree, so a list turns it on when something reads its scroll
-    /// actions. The one-shot edge sentinels are controlled separately by
-    /// [`Self::reached_start_margin`] and [`Self::reached_end_margin`].
+    /// Whether to emit [`PortalListAction::Scroll`] whenever the viewport moves or
+    /// its `at_end` state changes, at most once per frame. Off by default, since each
+    /// one is another event through the whole widget tree, so a list turns it on when
+    /// something reads its scroll actions. The one-shot edge sentinels are controlled
+    /// separately by [`Self::reached_start_margin`] and [`Self::reached_end_margin`].
     #[live(false)]
     emit_scroll_actions: bool,
     /// Whether (and how early) to emit [`PortalListAction::ReachedStart`]:
@@ -1120,6 +1129,13 @@ pub struct PortalList {
     #[rust]
     user_scroll_travel: f64,
 
+    /// Report item clicks and context menus. Touch drags scroll and long presses request a menu.
+    #[live] emit_item_actions: bool,
+    #[rust] item_press: Option<(DigitId, Option<usize>, u32)>,
+
+    /// A triple click selects the newline-delimited paragraph under the pointer.
+    #[live] triple_click_paragraph: bool,
+
     // Cross-boundary text selection support
     /// Enable text selection across items (for TextFlow content)
     #[live(false)]
@@ -1141,7 +1157,7 @@ pub struct PortalList {
     /// Auto-scroll state during selection
     #[rust]
     select_scroll_state: Option<SelectScrollState>,
-    /// A double- or triple-click selected this range (a word, a whole
+    /// A double- or triple-click selected this range (a word, a paragraph or a whole
     /// entry): a drag from it keeps it whole and extends past it.
     #[rust]
     select_unit: Option<((usize, usize), (usize, usize))>,
@@ -1245,11 +1261,7 @@ impl PortalList {
     }
 
     fn end(&mut self, cx: &mut Cx2d) {
-        // Note: we intentionally do NOT reset `at_end` here. It is explicitly
-        // set to true or false in every code path below. If the draw cycle
-        // doesn't reach the calculation (e.g., draw_state isn't End, or list
-        // is empty), we preserve the previous value rather than introducing
-        // a spurious `false` that would cause downstream consumers to flicker.
+        // Preserve `at_end` until a draw reaches End and can report its layout.
         self.not_filling_viewport = false;
 
         let vi = self.vec_index;
@@ -1261,9 +1273,12 @@ impl PortalList {
 
         if let Some(ListDrawState::End { viewport }) = self.draw_state.get() {
             let list = &mut self.draw_align_list;
-            if !list.is_empty() {
+            if list.is_empty() {
+                self.at_end = false;
+                self.not_filling_viewport = viewport.size.index(vi) > 0.0;
+            } else {
                 list.sort_by(|a, b| a.index.cmp(&b.index));
-                let first_index = list.iter().position(|v| v.index == self.first_id).unwrap();
+                let first_index = list.partition_point(|v| v.index < self.first_id);
 
                 let mut first_pos = self.first_scroll;
                 for i in (0..first_index).rev() {
@@ -1282,6 +1297,14 @@ impl PortalList {
                         last_drawn_index = Some(item.index);
                     } else {
                         break;
+                    }
+                }
+                // If first_id drew nothing, the last row drawn above it ends at first_scroll.
+                if last_item_pos.is_none() && first_index > 0 {
+                    let prev = &list[first_index - 1];
+                    if prev.index < self.range_end {
+                        last_item_pos = Some(self.first_scroll);
+                        last_drawn_index = Some(prev.index);
                     }
                 }
                 // Whether the very last item in the range was actually drawn.
@@ -1776,12 +1799,17 @@ impl PortalList {
         }
 
         // Scrolling of every kind funnels through a draw, so one comparison here
-        // notifies every viewport move — event-driven, animated, or draw-side
-        // renormalization — at most once per frame.
-        if self.emit_scroll_actions {
+        // notifies every viewport move or `at_end` transition — event-driven,
+        // animated, draw-side renormalization, or content resizing — at most once
+        // per frame. Skip frames that just performed an instant tail jump: their
+        // `first_scroll` already points at the next draw while `at_end` still
+        // describes the overflowing draw, and `redraw_area_in_draw` above has
+        // already queued the settled catch-up frame that will notify once.
+        if self.emit_scroll_actions && !tail_jumped {
             let pos = (self.first_id, self.first_scroll, self.bounce_overshoot);
-            if pos != self.last_notified_pos {
+            if pos != self.last_notified_pos || self.at_end != self.last_notified_at_end {
                 self.last_notified_pos = pos;
+                self.last_notified_at_end = self.at_end;
                 cx.widget_action(self.widget_uid(), PortalListAction::Scroll);
             }
         }
@@ -1927,12 +1955,14 @@ impl PortalList {
                     let did_draw = cx.turtle_has_align_items();
                     let align_range = cx.get_turtle_align_range();
                     let rect = cx.end_turtle();
-                    self.draw_align_list.push(AlignItem {
-                        align_range,
-                        shift: pos,
-                        size: rect.size,
-                        index,
-                    });
+                    if did_draw {
+                        self.draw_align_list.push(AlignItem {
+                            align_range,
+                            shift: pos,
+                            size: rect.size,
+                            index,
+                        });
+                    }
 
                     if !did_draw || pos + rect.size.index(vi) > viewport.size.index(vi) + VIEWPORT_END_TOLERANCE {
                         if self.first_id > self.range_start && !is_down_again {
@@ -2039,12 +2069,14 @@ impl PortalList {
                     let did_draw = cx.turtle_has_align_items();
                     let align_range = cx.get_turtle_align_range();
                     let rect = cx.end_turtle();
-                    self.draw_align_list.push(AlignItem {
-                        align_range,
-                        size: rect.size,
-                        shift: 0.0,
-                        index,
-                    });
+                    if did_draw {
+                        self.draw_align_list.push(AlignItem {
+                            align_range,
+                            size: rect.size,
+                            shift: 0.0,
+                            index,
+                        });
+                    }
                     if index == self.range_start {
                         if pos - rect.size.index(vi) > 0.0 {
                             if let Some(last_index) =
@@ -2358,6 +2390,7 @@ impl PortalList {
             if self.tail_range {
                 self.first_id = self.range_end.max(1) - 1;
                 self.first_scroll = 0.0;
+                self.last_viewport_size = 0.0;
             }
             self.update_scroll_bar(cx);
         }
@@ -2371,8 +2404,9 @@ impl PortalList {
     /// re-keyed; the removed items' widgets are dropped, or parked for reuse where `reuse_items`
     /// says so, the way items leaving the list already are), the viewport anchor (`first_id`
     /// shifts with its item; inside the removed range it becomes `at`, keeping `first_scroll`),
-    /// the skipped ranges and the selection (shifted; a part inside the removed range is clipped
-    /// to `at`), and the range end (`range_end` moves by `added - removed`). Nothing is drawn;
+    /// the skipped ranges and the selection (shifted, clipped at the splice, and cleared if
+    /// nothing remains), and the range end (`range_end` moves by `added - removed`). A pending
+    /// item press follows its item and clears if that item was removed. Nothing is drawn;
     /// the next draw lays the list out from the new state.
     pub fn splice_items(&mut self, cx: &mut Cx, at: usize, removed: usize, added: usize) {
         let at = at.clamp(self.range_start, self.range_end);
@@ -2382,9 +2416,6 @@ impl PortalList {
             return;
         }
         let remap = |id| spliced_id(id, at, removed, added);
-        let remap_position = |(id, character)| {
-            remap(id).map_or((at, 0), |id| (id, character))
-        };
 
         if let Some(tree) = &mut self.height_tree {
             tree.splice(at - self.range_start, removed, added);
@@ -2395,9 +2426,6 @@ impl PortalList {
         self.last_visible_id = self.last_visible_id.and_then(remap);
         self.keep_visible_in_draw = self.keep_visible_in_draw.and_then(remap);
         self.skipped.splice(at, removed, added);
-        self.selection_anchor = self.selection_anchor.map(remap_position);
-        self.selection_cursor = self.selection_cursor.map(remap_position);
-        self.select_unit = self.select_unit.map(|(start, end)| (remap_position(start), remap_position(end)));
         if let ScrollState::ScrollingTo { target_id, .. } = &mut self.scroll_state {
             *target_id = remap(*target_id).unwrap_or(at);
         }
@@ -2434,6 +2462,10 @@ impl PortalList {
                 false
             }
         });
+        self.item_press = self.item_press.and_then(|(digit, item_id, taps)| match item_id {
+            Some(id) => remap(id).map(|new_id| (digit, Some(new_id), taps)),
+            None => Some((digit, None, taps)),
+        });
 
         // Rebuild both the keys and ComponentMap's visible set, without collisions between old and new ids.
         let mut old_items = std::mem::take(&mut self.items);
@@ -2449,6 +2481,32 @@ impl PortalList {
                 }
             } else if self.reuse_items {
                 self.reusable_items.entry(item.template).or_default().push(item);
+            }
+        }
+        let had_selection = self.selection_anchor.is_some()
+            || self.selection_cursor.is_some()
+            || self.select_unit.is_some()
+            || self.is_selecting;
+        if had_selection {
+            let remap_position = |(id, character)| {
+                let (id, character) = remap(id).map_or((at, 0), |id| (id, character));
+                if id >= self.range_end && self.range_end > self.range_start {
+                    let last = self.range_end - 1;
+                    let len = self.items.get(&last).map_or(usize::MAX, |item| item.widget.selection_text_len());
+                    (last, len)
+                } else {
+                    (id, character)
+                }
+            };
+            self.selection_anchor = self.selection_anchor.map(remap_position);
+            self.selection_cursor = self.selection_cursor.map(remap_position);
+            self.select_unit = self.select_unit
+                .map(|(start, end)| (remap_position(start), remap_position(end)))
+                .filter(|(start, end)| start != end);
+            if self.range_end == self.range_start || !self.has_selection() {
+                self.clear_selection(cx);
+            } else {
+                self.update_item_selections(cx);
             }
         }
         cx.widget_tree_mark_dirty(self.uid);
@@ -3350,15 +3408,16 @@ impl PortalList {
 
     // ---- Cross-boundary text selection methods ----
 
-    /// Check if we have an active selection
+    /// Whether the endpoints enclose a range (a single caret selects no text).
     pub fn has_selection(&self) -> bool {
-        self.selection_anchor.is_some() && self.selection_cursor.is_some()
+        self.get_selection_range().is_some_and(|(a, b)| a != b)
     }
 
     /// Clear the selection state
     pub fn clear_selection(&mut self, cx: &mut Cx) {
         self.selection_anchor = None;
         self.selection_cursor = None;
+        self.select_unit = None;
         self.is_selecting = false;
         self.select_scroll_state = None;
 
@@ -3370,7 +3429,6 @@ impl PortalList {
         self.area.redraw(cx);
     }
 
-    /// Get the selection range (start_item, start_char) to (end_item, end_char) in sorted order
     /// Find which item and character index is at the given absolute position
     fn hit_test_selection(&self, cx: &Cx, abs: DVec2) -> Option<(usize, usize)> {
         let vi = self.vec_index;
@@ -3391,8 +3449,7 @@ impl PortalList {
         let mut bottom_edge = list_top;
 
         for (&item_id, item) in self.items.iter() {
-            let rect = item.widget.area().rect(cx);
-            // Only consider items with valid (non-zero) rects
+            let rect = item.widget.area().clipped_rect(cx);
             if !self.is_parked(item_id) && rect.size.index(vi) > 0.0 {
                 if first_visible_id.is_none() || item_id < first_visible_id.unwrap() {
                     first_visible_id = Some(item_id);
@@ -3482,7 +3539,19 @@ impl PortalList {
         Some((first_id, 0))
     }
 
-    fn get_selection_range(&self) -> Option<((usize, usize), (usize, usize))> {
+    fn extend_selection_to(&mut self, cx: &mut Cx, abs: DVec2) {
+        if let Some(at) = self.hit_test_selection(cx, abs) {
+            let (anchor, cursor) = extend_from_unit(self.select_unit, self.selection_anchor, at);
+            if self.selection_cursor == Some(cursor) && self.selection_anchor == anchor { return }
+            self.selection_anchor = anchor;
+            self.selection_cursor = Some(cursor);
+            self.item_press = None;
+            self.update_item_selections(cx);
+        }
+    }
+
+    /// Selected endpoints in reading order, as (item id, byte offset).
+    pub fn get_selection_range(&self) -> Option<((usize, usize), (usize, usize))> {
         selection_range(self.selection_anchor, self.selection_cursor)
     }
 }
@@ -3688,6 +3757,11 @@ impl PortalList {
             item.widget.redraw(cx);
         }
         self.area.redraw(cx);
+    }
+
+    fn item_at(&self, cx: &Cx, abs: DVec2) -> Option<usize> {
+        self.items.iter().find_map(|(id, item)|
+            (!self.is_parked(*id) && item.widget.point_hits_area(cx, abs)).then_some(*id))
     }
 
     /// Check if a point hits any interactive widget (link, button, etc.) in any of the visible items.
@@ -4181,24 +4255,30 @@ impl Widget for PortalList {
                 let bottom_edge = rect.pos.index(vi) + rect.size.index(vi);
                 let mouse_pos = scroll_state.last_abs.index(vi);
 
-                if mouse_pos < top_edge + scroll_margin {
+                if self.item_press.is_none() && mouse_pos < top_edge + scroll_margin {
                     // Mouse above viewport - scroll up (only if not already at top).
                     // Selection auto-scroll clips at the edges instead of stretching
                     // the rubber band: nothing would spring a selection's stretch back.
                     if self.first_id > self.range_start || self.first_scroll < 0.0 {
                         let distance = (top_edge + scroll_margin - mouse_pos).max(1.0);
                         let scroll_speed = (5.0 + distance * 0.5).clamp(5.0, 50.0);
+                        self.tail_range = false;
+                        self.detect_tail_in_draw = true;
                         self.delta_top_scroll(cx, scroll_speed, true, false, 0.0, false, true);
                         self.area.redraw(cx);
                     }
-                } else if mouse_pos > bottom_edge - scroll_margin {
+                } else if self.item_press.is_none() && mouse_pos > bottom_edge - scroll_margin {
                     // Mouse below viewport - scroll down (only if not already at end)
                     if !self.at_end {
                         let distance = (mouse_pos - (bottom_edge - scroll_margin)).max(1.0);
                         let scroll_speed = -(5.0 + distance * 0.5).clamp(5.0, 50.0);
+                        self.detect_tail_in_draw = true;
                         self.delta_top_scroll(cx, scroll_speed, true, false, 0.0, false, true);
                         self.area.redraw(cx);
                     }
+                }
+                if (mouse_pos < top_edge || mouse_pos > bottom_edge) && self.item_press.is_none() {
+                    self.extend_selection_to(cx, scroll_state.last_abs);
                 }
                 // Always request next frame while selecting
                 scroll_state.next_frame = cx.new_next_frame();
@@ -4467,6 +4547,7 @@ impl Widget for PortalList {
                     delta -= e.scroll.y;
                 }
                 if is_owner || is_vertical_owner || (is_over && e.phase == ScrollPhase::Touched) {
+                    self.item_press = None;
                     self.handle_scroll(cx, e, delta);
                 }
             }
@@ -4585,10 +4666,6 @@ impl Widget for PortalList {
                     if self.grab_key_focus && !fe.device.is_touch() && !held_by_another_widget {
                         cx.set_key_focus_from_user(self.area);
                     }
-                    // A press that doesn't end up moving us off the end shouldn't stop
-                    // tailing, so let the next draw re-arm it like the scroll paths do.
-                    self.tail_range = false;
-                    self.detect_tail_in_draw = true;
                     self.was_scrolling = match &self.scroll_state {
                         ScrollState::Drag { samples, .. } => samples.len() > 1,
                         // A press while anything moves the list (a coast, active finger
@@ -4596,6 +4673,13 @@ impl Widget for PortalList {
                         // is a stop, not a click.
                         _ => self.motion_live(fe.time) || self.press_is_catch(fe.time),
                     };
+                    // A resting press can grow a row before the next draw. Keep following
+                    // until a drag or selection scroll moves away. A press that catches
+                    // motion lets the next draw re-arm tailing if it stopped at the end.
+                    if self.was_scrolling {
+                        self.tail_range = false;
+                        self.detect_tail_in_draw = true;
+                    }
                     // Stopping us is part of scrolling, so it keeps the keyboard up like our drags do.
                     if self.was_scrolling && !self.hide_keyboard_on_scroll {
                         cx.fingers.mark_press_as_keeping_key_focus(fe.digit_id);
@@ -4642,7 +4726,18 @@ impl Widget for PortalList {
                     // (`on_interactive`), and not while a control owns the
                     // mouse — a control whose own area the item walk misses
                     // still holds the pointer, and `held_elsewhere` catches it.
-                    if self.selectable && fe.is_primary_hit() && !on_interactive && !held_elsewhere {
+                    self.item_press = None;
+                    if self.emit_item_actions && !on_interactive && !held_elsewhere {
+                        let item_id = self.item_at(cx, fe.abs);
+                        match item_id {
+                            Some(item_id) if fe.mouse_button().is_some_and(|b| b.is_secondary()) =>
+                                cx.widget_action(uid, PortalListAction::ItemContextMenu { item_id, abs: fe.abs }),
+                            _ if fe.is_primary_hit() && !self.was_scrolling => self.item_press = Some((fe.digit_id, item_id, fe.tap_count)),
+                            _ => {}
+                        }
+                    }
+                    if self.selectable && fe.is_primary_hit() && !on_interactive && !held_elsewhere
+                        && !(self.emit_item_actions && fe.is_touch()) {
                         let hit = self.hit_test_selection(cx, fe.abs);
                         if let Some((item_id, char_idx)) = hit {
                             // A mouse drag selects, so no scroller around us takes it over. A touch drag still scrolls.
@@ -4653,14 +4748,19 @@ impl Widget for PortalList {
                             if fe.device.is_touch() {
                                 cx.hide_clipboard_actions();
                             }
-                            // Shift extends what is selected; a double click
-                            // takes the word, a triple click the whole entry
-                            // (a message, a tool line); a press starts afresh.
+                            // Shift extends the range; repeated clicks select a word, then a paragraph or entry.
                             let text = || self.items.get(&item_id).map(|i| i.widget.selection_get_full_text()).unwrap_or_default();
                             let unit = match fe.tap_count {
                                 2 => {
                                     let (a, b) = word_bounds(&text(), char_idx);
                                     Some(((item_id, a), (item_id, b)))
+                                }
+                                n if n >= 3 && self.triple_click_paragraph => {
+                                    let text = text();
+                                    let (before, after) = text.split_at(text.floor_char_boundary(char_idx));
+                                    let start = before.rfind('\n').map_or(0, |i| i + 1);
+                                    let end = after.find('\n').map_or(text.len(), |i| before.len() + i);
+                                    Some(((item_id, start), (item_id, end)))
                                 }
                                 n if n >= 3 => Some(((item_id, 0), (item_id, text().len()))),
                                 _ => None,
@@ -4726,7 +4826,15 @@ impl Widget for PortalList {
                         }
                     }
                 }
+                Hit::FingerLongPress(e) if self.item_press.is_some_and(|(digit, _, _)| digit == e.digit_id) => {
+                    if let Some((_, Some(item_id), _)) = self.item_press.take() {
+                        cx.widget_action(uid, PortalListAction::ItemContextMenu { item_id, abs: e.abs });
+                    }
+                }
                 Hit::FingerMove(e) => {
+                    if self.item_press.is_some() && e.move_distance() >= TAP_COUNT_DISTANCE {
+                        self.item_press = None;
+                    }
                     // The other half of the rule for the selection drag, asked
                     // again on every move for the same reason the scroll drag
                     // below asks again: the press and a control's capture can
@@ -4753,13 +4861,7 @@ impl Widget for PortalList {
                         }
 
                         // Update cursor position
-                        let hit = self.hit_test_selection(cx, e.abs);
-                        if let Some(at) = hit {
-                            let (anchor, cursor) = extend_from_unit(self.select_unit, self.selection_anchor, at);
-                            self.selection_anchor = anchor;
-                            self.selection_cursor = Some(cursor);
-                            self.update_item_selections(cx);
-                        }
+                        self.extend_selection_to(cx, e.abs);
                     } else {
                         // Only update cursor for mouse — skip the expensive
                         // interactive-widget hit test for touch events entirely.
@@ -4917,6 +5019,14 @@ impl Widget for PortalList {
                     }
                 }
                 Hit::FingerUp(fe) if fe.is_primary_hit() => {
+                    if let Some((digit, item_id, taps)) = self.item_press.take() {
+                        if digit == fe.digit_id && fe.is_over && fe.was_tap() && !self.drag_claimed
+                            && !(self.selectable && !fe.is_touch() && fe.modifiers.shift)
+                            && !cx.fingers.is_digit_captured_elsewhere(digit, self.area)
+                            && item_id == self.item_at(cx, fe.abs) && !self.point_hits_interactive_item(cx, fe.abs) {
+                            cx.widget_action(uid, PortalListAction::ItemClicked { item_id, abs: fe.abs, taps });
+                        }
+                    }
                     // A tap that only stopped us is part of scrolling, so it leaves the key focus be.
                     if self.grab_key_focus && fe.device.is_touch() && fe.is_over && fe.was_tap()
                         && !self.was_scrolling
@@ -4948,7 +5058,7 @@ impl Widget for PortalList {
                     }
 
                     // A press taken away offers no clipboard actions.
-                    if self.selectable && fe.device.is_touch() && !fe.cancelled {
+                    if self.selectable && !self.emit_item_actions && fe.device.is_touch() && !fe.cancelled {
                         let has_selection = self.has_selection();
                         if has_selection {
                             let selection_rect = self.selection_clipboard_rect(cx);
@@ -5051,7 +5161,7 @@ impl Widget for PortalList {
                 Hit::KeyFocus(_) => {}
                 Hit::KeyFocusLost(_) => {
                     // Clear selection when losing focus (if selectable)
-                    if self.selectable && self.has_selection() {
+                    if self.selectable && self.selection_anchor.is_some() {
                         self.clear_selection(cx);
                     }
                 }
@@ -5104,13 +5214,15 @@ impl PortalListRef {
         self.borrow().map_or(String::new(), |list| list.selected_text_with(undrawn))
     }
 
+    /// Clicks and context-menu requests from this list, in dispatch order.
+    pub fn item_actions<'a>(&self, actions: &'a Actions) -> impl Iterator<Item = PortalListAction> + 'a {
+        actions.filter_widget_actions_cast(self.widget_uid()).filter(|a| matches!(a,
+            PortalListAction::ItemClicked { .. } | PortalListAction::ItemContextMenu { .. }))
+    }
+
     /// The entry whose drawn row is under `abs`, if any.
     pub fn item_at(&self, cx: &Cx, abs: DVec2) -> Option<usize> {
-        let list = self.borrow()?;
-        list.items
-            .iter()
-            .find(|(id, item)| !list.is_parked(**id) && item.widget.area().clipped_rect(cx).contains(abs))
-            .map(|(id, _)| *id)
+        self.borrow()?.item_at(cx, abs)
     }
 
     /// The selected entry range, first and last (inclusive).
@@ -5468,6 +5580,7 @@ impl PortalListRef {
         if inner.range_end > 0 {
             inner.first_id = inner.range_end - 1;
             inner.first_scroll = 0.0;
+            inner.last_viewport_size = 0.0;
             inner.area.redraw(cx);
         }
     }
@@ -6454,7 +6567,7 @@ mod tests {
         });
     }
 
-    fn finger_of(uid: u64, state: TouchState, at: DVec2, time: f64) -> Event {
+    pub(super) fn finger_of(uid: u64, state: TouchState, at: DVec2, time: f64) -> Event {
         Event::TouchUpdate(crate::event::TouchUpdateEvent {
             time,
             window_id: WindowId(1, 1),
@@ -6682,6 +6795,234 @@ mod tests {
         // Cmd+A: every row; rows the list never drew come from the owner.
         list.borrow_mut().unwrap().select_all(cx);
         assert_eq!(list.borrow().unwrap().get_selected_text(), "first row\nleft right\ntop\nbottom");
+    }
+
+    struct SpliceRows {
+        root: WidgetRef,
+        pass: DrawPass,
+        draw_list: DrawList2d,
+        rows: Vec<String>,
+    }
+
+    impl SpliceRows {
+        fn new(cx: &mut Cx, rows: &[&str]) -> Self {
+            let root = cx.with_vm(|vm| {
+                let value = crate::script_eval!(vm, {
+                    use mod.prelude.widgets.*
+                    use mod.widgets.*
+                    View{
+                        width: Fill height: Fill flow: Down
+                        list := PortalList{
+                            width: Fill height: Fill flow: Down
+                            selectable: true
+                            emit_item_actions: true
+                            Row := Label{width: Fill text: ""}
+                        }
+                    }
+                });
+                WidgetRef::script_from_value(vm, value)
+            });
+            let mut fixture = Self {
+                root,
+                pass: DrawPass::new(cx),
+                draw_list: DrawList2d::new(cx),
+                rows: rows.iter().map(|&text| text.to_owned()).collect(),
+            };
+            for _ in 0..3 {
+                fixture.draw(cx);
+            }
+            fixture
+        }
+
+        fn draw(&mut self, cx: &mut Cx) {
+            self.pass.set_size(cx, PANE);
+            let event = DrawEvent::default();
+            let mut draw = CxDraw::new(cx, &event);
+            let mut cx2d = Cx2d::new(&mut draw);
+            cx2d.begin_pass(&self.pass, None);
+            self.draw_list.begin_always(&mut cx2d);
+            cx2d.begin_root_turtle(PANE, Layout::flow_down());
+            let mut scope = Scope::empty();
+            while let Some(step) = self.root.draw_walk(&mut cx2d, &mut scope, Walk::fill()).step() {
+                let Some(mut list) = step.borrow_mut::<PortalList>() else { continue };
+                list.set_item_range(&mut cx2d, 0, self.rows.len());
+                while let Some(id) = list.next_visible_item(&mut cx2d) {
+                    if let Some(text) = self.rows.get(id) {
+                        let item = list.item(&mut cx2d, id, id!(Row));
+                        item.set_text(&mut cx2d, text);
+                        item.draw_all(&mut cx2d, &mut scope);
+                    }
+                }
+            }
+            cx2d.end_pass_sized_turtle();
+            self.draw_list.end(&mut cx2d);
+            cx2d.end_pass(&self.pass);
+        }
+
+        fn splice(&mut self, cx: &mut Cx, at: usize, removed: usize) {
+            self.rows.drain(at..at + removed);
+            self.list(cx).splice_items(cx, at, removed, 0);
+        }
+
+        fn send(&self, cx: &mut Cx, event: &Event) -> ActionsBuf {
+            let actions = cx.capture_actions(|cx| self.root.handle_event(cx, event, &mut Scope::empty()));
+            if let Event::TouchUpdate(e) = event {
+                cx.fingers.process_touch_update_end(&e.touches);
+            }
+            actions
+        }
+
+        fn list(&self, cx: &Cx) -> PortalListRef {
+            self.root.portal_list(cx, ids!(list))
+        }
+
+        fn row_rect(&self, cx: &Cx, id: usize) -> Rect {
+            self.list(cx).borrow().unwrap().items.get(&id).expect("row drawn").widget.area().rect(cx)
+        }
+
+        fn row_selection(&self, cx: &Cx, id: usize) -> (u32, u32) {
+            let list = self.list(cx);
+            let item = list.borrow().unwrap().items.get(&id).expect("row drawn").widget.clone();
+            let mut node = a11y_tree::Node::default();
+            item.borrow::<crate::label::Label>().unwrap().semantics(cx, &mut node);
+            node.text.unwrap().selection
+        }
+
+        fn select_between(&self, cx: &mut Cx, start_row: usize, end_row: usize, time: f64, release: bool) {
+            let endpoint = |row, offset| {
+                let label = self.list(cx).get_item(row).expect("row drawn").1;
+                let rect = label.area().rect(cx);
+                (0..(rect.size.x * 2.0) as usize)
+                    .map(|x| dvec2(rect.pos.x + x as f64 * 0.5, rect.center().y))
+                    .find(|&point| label.selection_point_to_char_index(cx, point) == Some(offset))
+                    .expect("the endpoint must hit the intended label and byte offset")
+            };
+            let start = endpoint(start_row, 0);
+            let end = endpoint(end_row, self.rows[end_row].len());
+            let window_id = WindowId(1, 1);
+            let button = MouseButton::PRIMARY;
+            cx.fingers.first_mouse_button = Some((button, window_id));
+            self.send(cx, &Event::MouseDown(MouseDownEvent {
+                abs: start, button, window_id, time, modifiers: Default::default(), handled: Cell::new(Area::Empty),
+            }));
+            self.send(cx, &Event::MouseMove(MouseMoveEvent {
+                abs: end, lock_delta: Default::default(), window_id, time: time + 0.1,
+                modifiers: Default::default(), handled: Cell::new(Area::Empty),
+            }));
+            if release {
+                cx.fingers.first_mouse_button = None;
+                self.send(cx, &Event::MouseUp(MouseUpEvent {
+                    abs: end, button, window_id, time: time + 0.2, modifiers: Default::default(),
+                }));
+            }
+        }
+    }
+
+    #[test]
+    fn splice_items_remaps_or_clears_pending_item_press() {
+        crate::on_test_cx(|| {
+            let mut cx = test_cx();
+            let long_press = |uid, abs, time| Event::LongPress(crate::event::LongPressEvent {
+                window_id: WindowId(1, 1), abs, uid, time,
+            });
+            let mut rows = SpliceRows::new(&mut cx, &["row 0", "row 1", "row 2"]);
+            let list = rows.list(&cx);
+            let at = rows.row_rect(&cx, 1).center();
+            rows.send(&mut cx, &finger_of(1, TouchState::Start, at, 1.0));
+            rows.splice(&mut cx, 0, 1);
+            let actions = rows.send(&mut cx, &long_press(1, at, 1.6));
+            assert!(matches!(list.item_actions(&actions).collect::<Vec<_>>().as_slice(),
+                [PortalListAction::ItemContextMenu { item_id: 0, .. }]));
+            rows.send(&mut cx, &finger_of(1, TouchState::Stop, at, 1.7));
+
+            let mut rows = SpliceRows::new(&mut cx, &["row 0", "row 1", "row 2"]);
+            let list = rows.list(&cx);
+            let at = rows.row_rect(&cx, 1).center();
+            rows.send(&mut cx, &finger_of(2, TouchState::Start, at, 2.0));
+            rows.splice(&mut cx, 0, 1);
+            let actions = rows.send(&mut cx, &finger_of(2, TouchState::Stop, at, 2.1));
+            assert!(matches!(list.item_actions(&actions).collect::<Vec<_>>().as_slice(),
+                [PortalListAction::ItemClicked { item_id: Some(0), .. }]));
+
+            // Redraw so the replacement row is under the finger. Test a tap
+            // with its own press: a long press already suppresses a later click.
+            for uid in [3, 4] {
+                let time = uid as f64;
+                let mut rows = SpliceRows::new(&mut cx, &["row 0", "row 1", "row 2"]);
+                let list = rows.list(&cx);
+                let at = rows.row_rect(&cx, 1).center();
+                rows.send(&mut cx, &finger_of(uid, TouchState::Start, at, time));
+                assert!(matches!(list.borrow().unwrap().item_press, Some((_, Some(1), _))));
+                rows.splice(&mut cx, 1, 1);
+                rows.draw(&mut cx);
+                assert_eq!(list.borrow().unwrap().item_at(&cx, at), Some(1));
+                if uid == 3 {
+                    let actions = rows.send(&mut cx, &long_press(uid, at, time + 0.6));
+                    assert!(list.item_actions(&actions).next().is_none());
+                    rows.send(&mut cx, &finger_of(uid, TouchState::Stop, at, time + 0.7));
+                } else {
+                    let actions = rows.send(&mut cx, &finger_of(uid, TouchState::Stop, at, time + 0.1));
+                    assert!(list.item_actions(&actions).next().is_none());
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn splice_items_shifts_or_clears_selection() {
+        crate::on_test_cx(|| {
+            {
+                let mut cx = test_cx();
+                let mut rows = SpliceRows::new(&mut cx, &["zero", "one", "two", "three"]);
+                let list = rows.list(&cx);
+                rows.select_between(&mut cx, 2, 2, 1.0, true);
+                assert_eq!(list.selected_entries(), Some((2, 2)));
+                assert_eq!(list.borrow().unwrap().get_selected_text(), "two");
+                assert_eq!(rows.row_selection(&cx, 2), (0, 3));
+                rows.splice(&mut cx, 1, 1);
+                assert_eq!(list.selected_entries(), Some((1, 1)));
+                assert!(list.has_selection());
+                assert_eq!(list.borrow().unwrap().get_selected_text(), "two");
+                assert_eq!(rows.row_selection(&cx, 1), (0, 3));
+                assert_eq!(rows.row_selection(&cx, 0), (0, 0));
+                assert_eq!(rows.row_selection(&cx, 2), (0, 0));
+            }
+            {
+                let mut cx = test_cx();
+                let mut rows = SpliceRows::new(&mut cx, &["zero", "one", "two", "three"]);
+                let list = rows.list(&cx);
+                rows.select_between(&mut cx, 1, 1, 2.0, false);
+                let mut inner = list.borrow_mut().unwrap();
+                inner.select_unit = inner.get_selection_range();
+                assert!(inner.is_selecting && inner.has_selection());
+                drop(inner);
+                rows.splice(&mut cx, 1, 1);
+                cx.fingers.first_mouse_button = None;
+                let inner = list.borrow().unwrap();
+                assert!(inner.get_selection_range().is_none() && !inner.has_selection());
+                assert!(!inner.is_selecting && inner.select_scroll_state.is_none() && inner.select_unit.is_none());
+                assert_eq!(rows.row_selection(&cx, 0), (0, 0));
+                assert_eq!(rows.row_selection(&cx, 1), (0, 0));
+            }
+            for start_row in [2, 1] {
+                let mut cx = test_cx();
+                let mut rows = SpliceRows::new(&mut cx, &["zero", "one", "two"]);
+                let list = rows.list(&cx);
+                rows.select_between(&mut cx, start_row, 2, 3.0, true);
+                assert_eq!(list.selected_entries(), Some((start_row, 2)));
+                rows.splice(&mut cx, 2, 1);
+                if start_row == 2 {
+                    assert!(list.borrow().unwrap().get_selection_range().is_none() && !list.has_selection());
+                    assert_eq!(list.selected_entries(), None);
+                    assert_eq!(rows.row_selection(&cx, 1), (0, 0));
+                } else {
+                    assert_eq!(list.selected_entries(), Some((1, 1)));
+                    assert_eq!(list.borrow().unwrap().get_selected_text(), "one");
+                    assert_eq!(rows.row_selection(&cx, 1), (0, 3));
+                    assert_eq!(rows.row_selection(&cx, 0), (0, 0));
+                }
+            }
+        });
     }
 
 }
@@ -6942,7 +7283,8 @@ mod skipped_ranges_draw_tests {
         draw_list: DrawList2d,
         len: usize,
         skipped: Vec<Range<usize>>,
-        /// The rows the last draw asked for, in order.
+        undrawn: Option<usize>,
+        /// The rows the host drew on the last pass, in order.
         drawn: Vec<usize>,
     }
 
@@ -6964,7 +7306,10 @@ mod skipped_ranges_draw_tests {
                 });
                 WidgetRef::script_from_value(vm, value)
             });
-            let mut rows = Rows { root, pass: DrawPass::new(cx), draw_list: DrawList2d::new(cx), len, skipped, drawn: Vec::new() };
+            let mut rows = Rows {
+                root, pass: DrawPass::new(cx), draw_list: DrawList2d::new(cx),
+                len, skipped, undrawn: None, drawn: Vec::new(),
+            };
             for _ in 0..3 {
                 rows.draw(cx);
             }
@@ -6986,7 +7331,7 @@ mod skipped_ranges_draw_tests {
                     list.set_item_range(&mut cx2d, 0, self.len);
                     list.set_skipped_ranges(&self.skipped);
                     while let Some(id) = list.next_visible_item(&mut cx2d) {
-                        if id >= self.len {
+                        if id >= self.len || self.undrawn == Some(id) {
                             continue;
                         }
                         let template = if self.skipped.iter().any(|range| range.contains(&id)) { id!(Skipped) } else { id!(Row) };
@@ -7115,6 +7460,367 @@ mod skipped_ranges_draw_tests {
             // A skipped item the list still asks for (here, the last one) takes up no room.
             let rows = Rows::new(&mut cx, 10, vec![4..10]);
             assert_eq!(rows.list(&cx).drawn_slot(9), Some(DrawnSlot { start: 80.0, size: 0.0 }));
+
+            let mut rows = Rows::new(&mut cx, 2, vec![]);
+            let list = rows.list(&cx);
+            assert_eq!(list.drawn_slot(0), Some(DrawnSlot { start: 0.0, size: 20.0 }));
+            assert_eq!(list.drawn_slot(1), Some(DrawnSlot { start: 20.0, size: 20.0 }));
+            assert_eq!(list.drawn_slot(2), None, "the probe past the end drew nothing");
+            rows.len = 3;
+            list.borrow_mut().unwrap().set_item_range(&mut cx, 0, rows.len);
+            assert_eq!(list.drawn_slot(2), None, "an appended row has no slot until drawn");
+            rows.draw(&mut cx);
+            assert_eq!(list.drawn_slot(2), Some(DrawnSlot { start: 40.0, size: 20.0 }));
+
+            rows.undrawn = Some(2);
+            list.set_first_id_and_scroll(2, 0.0);
+            rows.draw(&mut cx);
+            assert_eq!(list.drawn_slot(2), None, "the host skipped the anchor");
+            assert_eq!(list.drawn_slot(0), Some(DrawnSlot { start: 0.0, size: 20.0 }));
+            assert_eq!(list.drawn_slot(1), Some(DrawnSlot { start: 20.0, size: 20.0 }));
+            assert!(!list.is_at_end(), "the last row drew nothing");
+
+            let rows = Rows::new(&mut cx, 0, vec![]);
+            let list = rows.list(&cx);
+            assert_eq!(list.drawn_slot(0), None);
+            assert!(!list.is_at_end());
+            assert!(!list.is_filling_viewport());
+        });
+    }
+}
+
+#[cfg(test)]
+mod tail_scroll_action_tests {
+    use super::*;
+    use crate::makepad_draw::cx_draw::CxDraw;
+    use crate::makepad_platform::studio::{RemoteMouseDown, RemoteMouseUp, StudioToApp};
+
+    const PANE: DVec2 = dvec2(300.0, 120.0);
+
+    struct TailRows {
+        root: WidgetRef,
+        pass: DrawPass,
+        draw_list: DrawList2d,
+        heights: Vec<f64>,
+        pane_h: f64,
+    }
+
+    impl TailRows {
+        fn new(cx: &mut Cx, heights: Vec<f64>, auto_tail: bool, emit_scroll_actions: bool, keep_end_on_resize: bool) -> Self {
+            let root = cx.with_vm(|vm| {
+                let value = crate::script_eval!(vm, {
+                    use mod.prelude.widgets.*
+                    use mod.widgets.*
+                    View{
+                        width: Fill height: Fill flow: Down
+                        list := PortalList{
+                            width: Fill height: Fill flow: Down
+                            selectable: false
+                            auto_tail: #(auto_tail)
+                            emit_scroll_actions: #(emit_scroll_actions)
+                            keep_end_on_resize: #(keep_end_on_resize)
+                            Row := View{width: Fill height: 40. show_bg: true}
+                        }
+                    }
+                });
+                WidgetRef::script_from_value(vm, value)
+            });
+            Self { root, pass: DrawPass::new(cx), draw_list: DrawList2d::new(cx), heights, pane_h: PANE.y }
+        }
+
+        fn draw(&mut self, cx: &mut Cx) -> ActionsBuf {
+            let pane = dvec2(PANE.x, self.pane_h);
+            self.pass.set_size(cx, pane);
+            cx.capture_actions(|cx| {
+                let event = DrawEvent::default();
+                let mut draw = CxDraw::new(cx, &event);
+                let mut cx2d = Cx2d::new(&mut draw);
+                cx2d.begin_pass(&self.pass, None);
+                self.draw_list.begin_always(&mut cx2d);
+                cx2d.begin_root_turtle(pane, Layout::flow_down());
+                let mut scope = Scope::empty();
+                while let Some(step) = self.root.draw_walk(&mut cx2d, &mut scope, Walk::fill()).step() {
+                    let Some(mut list) = step.borrow_mut::<PortalList>() else { continue };
+                    list.set_item_range(&mut cx2d, 0, self.heights.len());
+                    while let Some(id) = list.next_visible_item(&mut cx2d) {
+                        if let Some(&height) = self.heights.get(id) {
+                            let item = list.item(&mut cx2d, id, id!(Row));
+                            let walk = Walk::new(Size::fill(), Size::Fixed(height));
+                            while item.draw_walk(&mut cx2d, &mut scope, walk).is_step() {}
+                        }
+                    }
+                }
+                cx2d.end_pass_sized_turtle();
+                self.draw_list.end(&mut cx2d);
+                cx2d.end_pass(&self.pass);
+            })
+        }
+
+        fn wheel(&self, cx: &mut Cx, dy: f64) {
+            let event = Event::Scroll(ScrollEvent {
+                window_id: WindowId(1, 1),
+                scroll: dvec2(0.0, dy),
+                abs: PANE * 0.5,
+                modifiers: KeyModifiers::default(),
+                handled_x: Default::default(),
+                handled_y: Default::default(),
+                is_mouse: true,
+                time: 0.1,
+                phase: ScrollPhase::None,
+            });
+            self.root.handle_event(cx, &event, &mut Scope::empty());
+        }
+
+        fn click(&self, cx: &mut Cx, abs: DVec2, time: f64) {
+            let window_id = WindowId(1, 1);
+            let button = MouseButton::PRIMARY;
+            cx.dispatch_studio_msg(StudioToApp::MouseDown(RemoteMouseDown {
+                x: abs.x, y: abs.y, time, button_raw_bits: button.bits(), ..Default::default()
+            }), window_id, DVec2::default());
+            self.root.handle_event(cx, &Event::MouseDown(MouseDownEvent {
+                abs, button, window_id, time, modifiers: Default::default(), handled: Default::default(),
+            }), &mut Scope::empty());
+            let time = time + 0.05;
+            self.root.handle_event(cx, &Event::MouseUp(MouseUpEvent {
+                abs, button, window_id, time, modifiers: Default::default(),
+            }), &mut Scope::empty());
+            cx.dispatch_studio_msg(StudioToApp::MouseUp(RemoteMouseUp {
+                x: abs.x, y: abs.y, time, button_raw_bits: button.bits(), ..Default::default()
+            }), window_id, DVec2::default());
+        }
+
+        fn touch(&self, cx: &mut Cx, uid: u64, state: TouchState, abs: DVec2, time: f64) {
+            let event = super::tests::finger_of(uid, state, abs, time);
+            self.root.handle_event(cx, &event, &mut Scope::empty());
+            if let Event::TouchUpdate(e) = event {
+                cx.fingers.process_touch_update_end(&e.touches);
+            }
+        }
+    }
+
+    #[test]
+    fn same_frame_click_keeps_tail_follow_until_drag_moves_off_end() {
+        crate::on_test_cx(|| {
+            let mut cx = crate::checkout_test_cx();
+            let settled_tail = |cx: &mut Cx| {
+                let mut rows = TailRows::new(cx, vec![40.0; 10], true, true, false);
+                for _ in 0..3 {
+                    rows.draw(cx);
+                }
+                let list = rows.root.portal_list(cx, ids!(list));
+                assert!(list.is_at_end() && list.borrow().unwrap().tail_range);
+                (rows, list)
+            };
+            let (mut rows, list) = settled_tail(&mut cx);
+            let at = PANE * 0.5;
+            // Mouse release and touch lift can each expand the row before any draw.
+            let check_growth = |rows: &mut TailRows, cx: &mut Cx, height| {
+                rows.heights[9] = height;
+                let jump = rows.draw(cx);
+                assert!(!list.scrolled(&jump) && !list.reached_end(&jump), "jump after press at {height}");
+                let settled = rows.draw(cx);
+                assert!(list.scrolled(&settled) && list.is_at_end() && !list.reached_end(&settled));
+                let idle = rows.draw(cx);
+                assert!(!list.scrolled(&idle) && !list.reached_end(&idle) && list.is_at_end());
+            };
+            rows.click(&mut cx, at, 1.0);
+            check_growth(&mut rows, &mut cx, 70.0);
+            rows.touch(&mut cx, 1, TouchState::Start, at, 2.0);
+            rows.touch(&mut cx, 1, TouchState::Stop, at, 2.05);
+            check_growth(&mut rows, &mut cx, 100.0);
+
+            let moved = at + dvec2(0.0, 24.0);
+            rows.touch(&mut cx, 2, TouchState::Start, at, 3.0);
+            rows.touch(&mut cx, 2, TouchState::Move, moved, 3.05);
+            rows.touch(&mut cx, 2, TouchState::Stop, moved, 3.5);
+            assert!(!list.borrow().unwrap().tail_range);
+            assert!(matches!(list.borrow().unwrap().scroll_state, ScrollState::Stopped));
+            let away = rows.draw(&mut cx);
+            assert!(list.scrolled(&away) && !list.is_at_end());
+            rows.heights[9] = 130.0;
+            rows.draw(&mut cx);
+            assert!(!list.is_at_end(), "growth after a drag moved the reader back to the end");
+
+            let (mut rows, list) = settled_tail(&mut cx);
+            let next_frame = cx.new_next_frame();
+            list.borrow_mut().unwrap().select_scroll_state = Some(SelectScrollState {
+                next_frame, last_abs: dvec2(150.0, 5.0),
+            });
+            let event = Event::NextFrame(NextFrameEvent {
+                frame: 1, time: 4.0, set: std::collections::HashSet::from([next_frame]),
+            });
+            rows.root.handle_event(&mut cx, &event, &mut Scope::empty());
+            list.borrow_mut().unwrap().select_scroll_state = None;
+            assert!(!list.borrow().unwrap().tail_range, "selection scrolled away");
+            let away = rows.draw(&mut cx);
+            assert!(list.scrolled(&away) && !list.is_at_end());
+
+            let (mut rows, list) = settled_tail(&mut cx);
+            list.set_tail_range(false);
+            rows.click(&mut cx, at, 5.0);
+            rows.heights[9] = 70.0;
+            let detached = rows.draw(&mut cx);
+            assert!(list.scrolled(&detached) && !list.is_at_end() && !list.borrow().unwrap().tail_range);
+            list.set_tail_range(true);
+            rows.draw(&mut cx);
+            rows.draw(&mut cx);
+            list.borrow_mut().unwrap().scroll_state = ScrollState::Tailing {
+                next_frame: cx.new_next_frame(), velocity: 10.0,
+            };
+            rows.touch(&mut cx, 3, TouchState::Start, at, 6.0);
+            assert!(!list.borrow().unwrap().tail_range && list.borrow().unwrap().detect_tail_in_draw);
+            rows.touch(&mut cx, 3, TouchState::Stop, at, 6.05);
+        });
+    }
+
+    #[test]
+    fn tail_row_growth_notifies_settled_at_end_without_spurious_reached_end() {
+        crate::on_test_cx(|| {
+            let mut cx = crate::checkout_test_cx();
+            let mut rows = TailRows::new(&mut cx, vec![40.0; 10], true, true, false);
+            let list = rows.root.portal_list(&cx, ids!(list));
+            rows.draw(&mut cx);
+            rows.draw(&mut cx);
+            let idle = rows.draw(&mut cx);
+            assert_eq!((list.first_id(), list.scroll_position()), (7, 0.0));
+            assert!(list.is_at_end() && !list.scrolled(&idle) && !list.reached_end(&idle));
+
+            // A small change within a row and a change larger than the viewport.
+            for height in [70.0, 200.0] {
+                rows.heights[9] = height;
+                let jump = rows.draw(&mut cx);
+                assert!(!list.scrolled(&jump) && !list.reached_end(&jump), "tail jump at {height}");
+                let settled = rows.draw(&mut cx);
+                assert!(list.scrolled(&settled) && list.is_at_end(), "settled tail at {height}");
+                assert!(!list.reached_end(&settled), "tail stayed in view at {height}");
+                let idle = rows.draw(&mut cx);
+                assert!(list.is_at_end() && !list.scrolled(&idle) && !list.reached_end(&idle));
+            }
+
+            rows.heights.push(200.0);
+            let jump = rows.draw(&mut cx);
+            assert!(!list.scrolled(&jump) && !list.reached_end(&jump), "append jump");
+            let settled = rows.draw(&mut cx);
+            assert!(list.scrolled(&settled) && list.is_at_end() && !list.reached_end(&settled));
+
+            rows.wheel(&mut cx, -60.0);
+            let away = rows.draw(&mut cx);
+            assert!(list.scrolled(&away) && !list.is_at_end() && !list.reached_end(&away));
+            rows.wheel(&mut cx, -300.0);
+            let offscreen = rows.draw(&mut cx);
+            assert!(!list.is_at_end() && !list.reached_end(&offscreen));
+            rows.wheel(&mut cx, 500.0);
+            let back = rows.draw(&mut cx);
+            assert!(list.scrolled(&back) && list.is_at_end() && list.reached_end(&back));
+            let idle = rows.draw(&mut cx);
+            assert!(!list.scrolled(&idle) && !list.reached_end(&idle));
+
+            // Growing the penultimate row pushes a short footer out of view. The
+            // footer re-enters on the second jump, one frame before the settled Scroll.
+            let mut rows = TailRows::new(&mut cx, vec![40.0, 40.0, 40.0, 40.0, 40.0, 20.0], true, true, false);
+            let list = rows.root.portal_list(&cx, ids!(list));
+            for _ in 0..3 {
+                rows.draw(&mut cx);
+            }
+            assert!(list.is_at_end());
+            rows.heights[4] = 90.0;
+            let reply_jump = rows.draw(&mut cx);
+            assert!(!list.scrolled(&reply_jump) && !list.reached_end(&reply_jump));
+            let footer_jump = rows.draw(&mut cx);
+            assert!(!list.scrolled(&footer_jump) && list.reached_end(&footer_jump));
+            let settled = rows.draw(&mut cx);
+            assert!(list.scrolled(&settled) && list.is_at_end() && !list.reached_end(&settled));
+            let idle = rows.draw(&mut cx);
+            assert!(!list.scrolled(&idle) && !list.reached_end(&idle) && list.is_at_end());
+        });
+    }
+
+    #[test]
+    fn keep_end_on_resize_stays_at_end_on_shrink_and_resets_on_scroll_to_end() {
+        crate::on_test_cx(|| {
+            let mut cx = crate::checkout_test_cx();
+            let mut rows = TailRows::new(&mut cx, vec![40.0; 10], true, true, true);
+            let list = rows.root.portal_list(&cx, ids!(list));
+            for _ in 0..3 {
+                rows.draw(&mut cx);
+            }
+            assert_eq!(list.first_id(), 7);
+            assert!(list.is_at_end());
+
+            let assert_tail = |id, pane_h: f64| {
+                let slot = list.drawn_slot(id).expect("the tail row should be drawn");
+                let bottom = slot.start + slot.size;
+                assert!((bottom - pane_h).abs() < 0.01, "row {id} ends at {bottom}, expected {pane_h}");
+                assert!(list.is_at_end(), "row {id} should be at the end on this draw");
+            };
+            rows.pane_h = 85.6;
+            let actions = rows.draw(&mut cx);
+            assert_tail(9, rows.pane_h);
+            assert!(list.scrolled(&actions), "shrinking the viewport moved the anchor");
+            let idle = rows.draw(&mut cx);
+            assert!(!list.scrolled(&idle), "the settled anchor should stay quiet");
+
+            rows.pane_h = 200.0;
+            rows.heights[9] = 150.0;
+            list.scroll_to_end(&mut cx);
+            rows.draw(&mut cx);
+            assert_tail(9, rows.pane_h);
+
+            rows.pane_h = 85.6;
+            rows.draw(&mut cx);
+            assert_tail(9, rows.pane_h);
+            rows.pane_h = 200.0;
+            rows.heights.push(150.0);
+            rows.draw(&mut cx);
+            assert_tail(10, rows.pane_h);
+        });
+    }
+
+    #[test]
+    fn at_end_transition_without_pos_change_still_notifies_scroll() {
+        crate::on_test_cx(|| {
+            let mut cx = crate::checkout_test_cx();
+            let mut rows = TailRows::new(&mut cx, vec![40.0; 10], true, true, false);
+            let list = rows.root.portal_list(&cx, ids!(list));
+            for _ in 0..3 {
+                rows.draw(&mut cx);
+            }
+            assert_eq!((list.first_id(), list.scroll_position()), (7, 0.0));
+            assert!(list.is_at_end());
+            rows.heights[9] = 70.0;
+            let jump = rows.draw(&mut cx);
+            assert!(!list.scrolled(&jump));
+            rows.wheel(&mut cx, -30.0);
+            let interrupted = rows.draw(&mut cx);
+            assert_eq!((list.first_id(), list.scroll_position()), (7, 0.0));
+            assert!(list.scrolled(&interrupted) && !list.is_at_end());
+
+            let mut rows = TailRows::new(&mut cx, vec![35.0; 4], false, true, false);
+            let list = rows.root.portal_list(&cx, ids!(list));
+            rows.draw(&mut cx);
+            rows.draw(&mut cx);
+            assert_eq!((list.first_id(), list.scroll_position()), (0, 0.0));
+            assert!(!list.is_at_end());
+            for (height, at_end) in [(15.0, true), (35.0, false)] {
+                rows.heights[3] = height;
+                let actions = rows.draw(&mut cx);
+                assert_eq!((list.first_id(), list.scroll_position()), (0, 0.0));
+                assert_eq!(list.is_at_end(), at_end);
+                assert!(list.scrolled(&actions) && !list.reached_end(&actions));
+            }
+
+            let mut rows = TailRows::new(&mut cx, vec![40.0; 10], true, false, false);
+            let list = rows.root.portal_list(&cx, ids!(list));
+            for _ in 0..2 {
+                assert!(!list.scrolled(&rows.draw(&mut cx)));
+            }
+            rows.heights[9] = 70.0;
+            for _ in 0..2 {
+                assert!(!list.scrolled(&rows.draw(&mut cx)));
+            }
+            assert!(list.is_at_end());
+            rows.wheel(&mut cx, -60.0);
+            assert!(!list.scrolled(&rows.draw(&mut cx)) && !list.is_at_end());
         });
     }
 }

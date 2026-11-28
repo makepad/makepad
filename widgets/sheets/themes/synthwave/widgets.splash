@@ -432,6 +432,7 @@ mod.widgets.ButtonFlat.draw_bg.pixel = fn() {
     let f = n_pill_flat(p, self.rect_pos, self.rect_size, px, self.corners(), n_g_bloom(), self.hover, self.down, self.focus, self.disabled, 0.45, m)
     return self.host_over(n_wait(f, p, self.rect_pos, self.rect_size, px, self.loading, self.anim_time), m)
 }
+mod.widgets.ButtonFlat.draw_bg.face = {mode: @host_over, rest: #00000000, hover: #140c2b66, down: #x0e223899}
 // The standard button: the reference's pill, quieter. The fill at 0.55, so
 // the hero still stands out, and its bloom at six tenths of the hero's.
 mod.widgets.Button.draw_bg.glow_room = uniform(28.0)
@@ -503,6 +504,7 @@ mod.widgets.ButtonFlatter.draw_bg.pixel = fn() {
     let f = n_pill_flat(p, self.rect_pos, self.rect_size, px, self.corners(), n_g_bloom(), self.hover, self.down, self.focus, self.disabled, 0.45, m)
     return self.host_over(n_wait(f, p, self.rect_pos, self.rect_size, px, self.loading, self.anim_time), m)
 }
+mod.widgets.ButtonFlatter.draw_bg.face = {mode: @host_over, rest: #00000000, hover: #140c2b66, down: #x0e223899}
 
 // Button ink: white on every face, a dim grey violet when switched off.
 mod.widgets.Button.draw_text.color = #ffffff
@@ -1783,6 +1785,7 @@ mod.widgets.RadioButtonTabFlat.draw_bg.pixel = fn() {
     let f = n_tab(p, self.rect_pos, self.rect_size, px, self.hover * live, self.down * live, self.focus * live, self.active * live)
     return f * mix(1.0, 0.35, self.disabled)
 }
+mod.widgets.RadioButtonTabFlat.draw_bg.face = {mode: @own_face, rest: #09061a, hover: #140c2b, down: #x0e2238, active: #x0e2238}
 mod.widgets.RadioButtonTabFlat.draw_text.color = #cfc6f2
 mod.widgets.RadioButtonTabFlat.draw_text.color_hover = #ffffff
 mod.widgets.RadioButtonTabFlat.draw_text.color_active = #ffffff

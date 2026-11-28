@@ -428,6 +428,7 @@ let sy_button = fn(pos: vec2, size: vec2, o: vec2, px: float, hover: float, down
     let bare = step(5.5, kind) * step(kind, 6.5)
     let outl = step(4.5, kind) * step(kind, 5.5)
     let pad = step(6.5, kind)
+    let flat = 1.0 - step(0.5, kind)
     let solid = 1.0 - bare - outl
     let bez = 3.0 * px
     let soft_on = step(0.5, kind) * solid
@@ -446,25 +447,25 @@ let sy_button = fn(pos: vec2, size: vec2, o: vec2, px: float, hover: float, down
     let sink = press * px
     let t = clamp((p.y - lo.y - sink) / max(2.0 * h.y, 1.0), 0.0, 1.0)
     let yi = p.y - lo.y - bez - sink
-    var face = sy_face(t)
+    var face = mix(sy_face(t), vec3(0.26275, 0.26275, 0.25882), flat)
     if pad > 0.5 {
         face = mix(vec3(0.420, 0.420, 0.412), vec3(0.310, 0.310, 0.306), t)
         face = face + g3((Finish.brushed(p + o, vec2(1.0, 0.0), px * 1.2) - 0.5) * 0.05)
     }
-    face = face + g3(sy_knurl(p + o, px) * 0.035 * (1.0 - pad))
+    face = face + g3(sy_knurl(p + o, px) * 0.035 * (1.0 - pad) * (1.0 - flat))
     // a soft sheen over the cap's upper third, the rubber's satin
-    face = face + g3(0.05 * (1.0 - smoothstep(0.05, 0.40, t)) * (1.0 - press))
+    face = face + g3(0.05 * (1.0 - smoothstep(0.05, 0.40, t)) * (1.0 - press) * (1.0 - flat))
     face = face + g3(0.065 * hov)
     // pressed: a darker cap with the base's shadow inside its top
     let sunk = mix(vec3(0.035, 0.033, 0.030), vec3(0.120, 0.120, 0.117), smoothstep(0.0, 3.0 * px + 1.5, yi))
-    face = mix(face, sunk + g3(sy_knurl(p + o, px) * 0.02), press)
+    face = mix(face, sunk + g3(sy_knurl(p + o, px) * 0.02 * (1.0 - flat)), press)
     face = mix(face, vec3(0.290, 0.282, 0.263), disabled)
-    face = face + g3(sy_grain((p + o) / px, 0.014))
+    face = face + g3(sy_grain((p + o) / px, 0.014) * (1.0 - flat))
     // the top highlight: one device pixel, then a short ramp into the face
     let topw = 1.0 - smoothstep(lo.y + bez + r + 0.5, lo.y + bez + r + 1.5, p.y)
     let botw = smoothstep(hi.y - bez - r - 1.5, hi.y - bez - r - 0.5, p.y)
     let hl_row = Finish.band(d, bez, bez + px, px) * topw
-    let ramp = (1.0 - smoothstep(0.0, 2.0, yi - px)) * step(0.0, yi) * 0.30
+    let ramp = (1.0 - smoothstep(0.0, 2.0, yi - px)) * step(0.0, yi) * 0.30 * (1.0 - flat)
     let hl = mix(vec3(0.420, 0.416, 0.400), vec3(0.560, 0.556, 0.540), hov)
     let lit_top = max(hl_row, ramp) * (1.0 - press) * live
     face = mix(face, mix(hl, vec3(0.62, 0.62, 0.60), pad * 0.6), lit_top)
@@ -553,10 +554,14 @@ mod.widgets.ButtonFlat.draw_bg.pixel = fn() {
     let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
     return self.host_over(sy_button(self.pos, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, self.loading, self.anim_time, 2.0, 0.0, 0.0), 0.0)
 }
+mod.widgets.ButtonFlat.draw_bg.face = {mode: @host_over, rest: #434342, hover: #535353, down: #x1e1e1d}
+mod.widgets.ButtonFlat.draw_bg.color = #434342
+mod.widgets.ButtonFlat.draw_bg.color_default = #434342
 mod.widgets.ButtonFlatter.draw_bg.pixel = fn() {
     let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
     return self.host_over(sy_button(self.pos, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, self.loading, self.anim_time, 2.0, 6.0, 0.0), 0.0)
 }
+mod.widgets.ButtonFlatter.draw_bg.face = {mode: @host_over, rest: #00000000, hover: #00000014, down: #00000029}
 mod.widgets.Button.draw_bg.vertex = fn() {
     let g = grow_vertex(self.rect_pos, self.rect_size, 6.0)
     self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
@@ -960,6 +965,7 @@ mod.widgets.RadioButtonTabFlat.draw_bg.pixel = fn() {
     let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
     return sy_segment(p, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, self.active, 1.0)
 }
+mod.widgets.RadioButtonTabFlat.draw_bg.face = {mode: @own_face, rest: #434342, hover: #535353, down: #212120, active: #212120}
 mod.widgets.RadioButtonTabFlat.draw_text.text_style = mod.theme.font_bold{font_size: 8.25}
 mod.widgets.RadioButtonTabFlat.draw_text.color = #e4e2dc
 mod.widgets.RadioButtonTabFlat.draw_text.color_hover = #f4f2ec

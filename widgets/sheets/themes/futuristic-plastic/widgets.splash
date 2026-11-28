@@ -496,6 +496,7 @@ mod.widgets.ButtonFlat.draw_bg.pixel = fn() {
     let f = fp_button(p, self.rect_pos, self.rect_size, px, self.corners(), self.hover, self.down, self.focus, self.disabled, 0.85, 0.3, 0.9, fp_acc_line(), 0.0, wd)
     return self.host_over(fp_wait(f, p, self.rect_size, px, self.loading, self.anim_time), m)
 }
+mod.widgets.ButtonFlat.draw_bg.face = {mode: @host_over, rest: #8faabd, hover: #99b6ca, down: #7f97a8}
 // The standard button: the whole slab.
 mod.widgets.Button.draw_bg.pixel = fn() {
     let m = self.glow_room
@@ -565,6 +566,7 @@ mod.widgets.ButtonFlatter.draw_bg.pixel = fn() {
     let f = fp_plate(p, b, self.corners(), px, self.hover, self.down, self.focus, self.disabled, 0.66 + 0.34 * max(self.hover, self.down), 0.5 * k, 0.5 + 0.5 * k, vec4(0.0, 0.0, 0.0, 0.0), fp_rimc(), fp_acc_line(), 0.3 + 0.7 * k, 0.0, 0.0, wd)
     return self.host_over(fp_wait(f, p, self.rect_size, px, self.loading, self.anim_time), m)
 }
+mod.widgets.ButtonFlatter.draw_bg.face = {mode: @host_over, rest: #8faabd, hover: #99b6ca, down: #7f97a8}
 
 // Button inks. The faces are pale frosted plastic, so their words are a
 // deep blue-grey (#13212d reads 6.6 on the #8faabd middle, 5.4 on the
@@ -1602,6 +1604,7 @@ mod.widgets.RadioButtonTabFlat.draw_bg.pixel = fn() {
     let live = 1.0 - self.disabled
     return fp_key(p, self.rect_pos, self.rect_size, px, vec2(1.0, 0.0), 3.0, self.hover, self.down, self.focus, self.active, live, wd)
 }
+mod.widgets.RadioButtonTabFlat.draw_bg.face = {mode: @own_face, rest: #8faabd, hover: #99b6ca, down: #7f97a8, active: #15202a}
 mod.widgets.RadioButtonTabFlat.draw_text.color = #13212d
 mod.widgets.RadioButtonTabFlat.draw_text.color_hover = #0b1720
 mod.widgets.RadioButtonTabFlat.draw_text.color_focus = #0b1720

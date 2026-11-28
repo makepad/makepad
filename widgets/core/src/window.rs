@@ -1,3 +1,6 @@
+#[path = "confirmation_sheet.rs"]
+mod confirmation_sheet;
+use confirmation_sheet::ConfirmationSheet;
 use crate::gauss_stack::GaussStack;
 use crate::{
     button::ButtonWidgetExt,
@@ -280,6 +283,19 @@ script_mod! {
     mod.widgets.WindowDrag = WindowDrag
     let WindowDoubleClick = set_type_default() do #(WindowDoubleClick::script_api(vm))
     mod.widgets.WindowDoubleClick = WindowDoubleClick
+    mod.widgets.ConfirmationSheet = #(ConfirmationSheet::register_widget(vm)){
+        width: 0 height: 0
+        panel := SolidView{
+            visible: false width: Fill height: Fit flow: Down spacing: 6 padding: 12
+            draw_bg.color: theme.color_bg_app
+            title := Label{width: Fill height: Fit}
+            details := Label{width: Fill height: Fit{max: FitBound.Rel{base: Base.Unused factor: 0.5}}}
+            buttons := View{width: Fill height: Fit flow: Right{wrap: true} spacing: 8
+                allow := ButtonFlat{text: "Allow"}
+                decline := ButtonFlat{text: "Decline"}
+            }
+        }
+    }
     mod.widgets.WindowBase = #(Window::register_widget(vm))
     mod.widgets.Window = set_type_default() do mod.widgets.WindowBase{
         demo: false
@@ -493,6 +509,7 @@ script_mod! {
         // hardcoded like the caption bar, inert unless --remote, zero cost
         // while off. Without the family it is an empty hidden view.
         tweaker := Tweaker {}
+        confirmation := mod.widgets.ConfirmationSheet{}
 
         // Under a window manager in a macOS-like style, the app's own caption carries
         // these (`hosted_mac_controls`); the WM draws no title bar for it.
@@ -1278,6 +1295,18 @@ impl Window {
         self.redraw(cx);
     }
 
+    /// Record this window into a new, caller-named file. Only its picture is captured.
+    pub fn record_to(&mut self, cx: &mut Cx, path: std::path::PathBuf)
+        -> Result<crate::screen_cap::WindowRecording, String> {
+        self.screen_cap.set_window_id(self.window.window_id().id());
+        self.screen_cap.start_managed_once(cx);
+        self.screen_cap.record_to(cx, path)
+    }
+
+    pub fn stop_file_recording(&mut self, cx: &mut Cx) {
+        self.screen_cap.stop_file_recording(cx);
+    }
+
     /// The stock caption bar is wanted: asked for, and no app-drawn caption
     /// (`set_drag_region`) replaces it. Checked on every sync, so a re-apply
     /// of the window's template (a restyle, a live edit) cannot bring the
@@ -1854,7 +1883,9 @@ impl Window {
         // a no-op for the dock's own instance.
         let title = crate::makepad_platform::badge_window_title(source_title.clone());
         if !title.is_empty() {
-            let label = self.label(cx, ids!(caption_label.label));
+            // Direct children: an app may put its own `label`s and icons in the caption.
+            let caption = self.widget(cx, ids!(caption_label));
+            let label = caption.child(id!(label)).as_label();
             if label.borrow().is_none() {
                 // No caption label in the tree yet; retry on a later event.
                 return;
@@ -1864,7 +1895,7 @@ impl Window {
         let name = if self.window.app_id.is_empty() {
             cx.windows[self.window.handle.window_id()].create_app_id.clone()
         } else { self.window.app_id.clone() };
-        if let Some(mut icon) = self.widget(cx, ids!(caption_label.caption_icon)).borrow_mut::<crate::app_icon::AppIcon>() { icon.set_name(cx, &name); }
+        if let Some(mut icon) = self.widget(cx, ids!(caption_label)).child(id!(caption_icon)).borrow_mut::<crate::app_icon::AppIcon>() { icon.set_name(cx, &name); }
         self.last_synced_title = Some(source_title);
     }
 
@@ -1971,7 +2002,7 @@ impl Window {
             bar.draw_bg.draw_vars.set_dyn_instance(cx, id!(window_focus), &[focus]);
             bar.draw_bg.draw_vars.set_dyn_instance(cx, id!(grounded), &[grounded]);
         }
-        if let Some(mut label) = self.label(cx, ids!(caption_bar.caption_label.label)).borrow_mut() {
+        if let Some(mut label) = self.widget(cx, ids!(caption_bar.caption_label)).child(id!(label)).as_label().borrow_mut() {
             label.draw_text.draw_vars.set_dyn_instance(cx, id!(window_focus), &[focus]);
         }
 
@@ -3267,6 +3298,15 @@ impl Widget for Window {
         // works while a text input holds the caret, and is told which window
         // it is recording so its capture sink follows THIS window.
         self.screen_cap.set_window_id(self.window.window_id().id());
+        if let Event::KeyDown(_) = event {
+            let title = if self.window.title.is_empty() {
+                &cx.windows[self.window.handle.window_id()].create_title
+            } else {
+                &self.window.title
+            };
+            let dpi = cx.windows[self.window.handle.window_id()].window_geom.dpi_factor;
+            self.screen_cap.set_window_info(title, dpi);
+        }
         if self.screen_cap.is_managed() && self.screen_cap.is_busy() {
             match event {
                 Event::QuitRequested(request) => {

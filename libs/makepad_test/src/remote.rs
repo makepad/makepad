@@ -30,6 +30,14 @@ pub struct WindowInfo {
     pub pass_dpi: f64,
 }
 
+/// One window readback in row-major RGBA8, top row first.
+#[derive(Debug)]
+pub struct RawFrame {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct LogTail {
     pub last_seq: u64,
@@ -45,6 +53,7 @@ pub enum MouseKind {
     Down,
     Up,
     Click,
+    DoubleClick,
     Scroll,
     /// One finger on a touch screen; `MouseInput::phase` is `start`, `move`, `stop` or `cancel`.
     Touch,
@@ -57,6 +66,7 @@ impl MouseKind {
             Self::Down => "down",
             Self::Up => "up",
             Self::Click => "click",
+            Self::DoubleClick => "dblclick",
             Self::Scroll => "scroll",
             Self::Touch => "touch",
         }
@@ -323,15 +333,38 @@ impl RemoteClient {
         let json = self.get_json("ui", &[("json", "1")])?;
         parse_snapshot(&json)
     }
-    pub fn find(&self, selector: &crate::Selector, extra: &str) -> TestResult<Vec<NodeMatch>> {
+    pub fn find_with_timeout(&self, selector: &crate::Selector, extra: &str, timeout: Duration) -> TestResult<Vec<NodeMatch>> {
         let q = format!("{} {extra}", selector.as_query());
         makepad_a11y::query::Query::parse(&q).map_err(TestError::new)?;
-        let mut params = vec![("q",q.as_str()), ("json","1")];
+        let timeout_ms = timeout.as_millis().min(u64::MAX as u128).to_string();
+        let mut params = vec![("q",q.as_str()), ("json","1"), ("timeout_ms",timeout_ms.as_str())];
         if let Some(w) = selector.window_arg() { params.push(("w",w)); }
         let json = self.get_json("ui find", &params)?;
         parse_nodes(&json)
     }
     pub fn dump(&self) -> TestResult<String> { self.get_text("ui", &[]) }
+
+    /// Fetch one window as unencoded RGBA8 pixels.
+    pub fn grab_rgba(&self, window: usize, scale: f64) -> Result<RawFrame, String> {
+        use makepad_remote::frames::{fetch, Request};
+        let request = Request { window: Some(window), scale: Some(scale), raw: true, n: Some(1), ..Default::default() };
+        let mut frame = None;
+        fetch(&self.client, &request, &mut |record| {
+            let dimension = |key| record.num(key)
+                .filter(|v| v.fract() == 0.0 && *v > 0.0 && *v <= u32::MAX as f64)
+                .map(|v| v as u32).ok_or_else(|| format!("invalid raw frame {key}"));
+            let width = dimension("w")?;
+            let height = dimension("h")?;
+            let bytes = (width as usize).checked_mul(height as usize).and_then(|n| n.checked_mul(4));
+            if record.text("codec").as_deref() != Some("raw") || bytes != Some(record.bytes.len()) {
+                return Err(format!("expected {width}x{height} RGBA8, received {} bytes: {}", record.bytes.len(), record.json));
+            }
+            if frame.is_some() { return Err("received multiple frames for one grab".into()); }
+            frame = Some(RawFrame { width, height, rgba: record.bytes });
+            Ok(())
+        })?;
+        frame.ok_or_else(|| "raw grab returned no frame".into())
+    }
 
     /// Grab one window to a PNG on disk (written by this client) and return
     /// its absolute path.
@@ -895,6 +928,39 @@ mod tests {
         assert!(response_error("{\"ok\":1}").is_none());
         assert!(response_error("{\"s\":[{\"t\":\"{\\\"err\\\":1}\"}]}").is_none());
         assert!(response_error("root View 0 0 640 480").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn find_with_timeout_sends_timeout_ms_and_surfaces_no_tree_yet() {
+        use makepad_hal::a11y::remote::NO_TREE_YET;
+
+        let server = crate::fixture::FixtureServer::start();
+        let client = RemoteClient::connect(server.socket()).unwrap();
+        let selector = crate::Selector::raw("role=button").window("7:0");
+        let find = || client.find_with_timeout(&selector, "state=visible", Duration::from_secs(1));
+        server.route("ui", &format!("{{\"err\":{}}}", makepad_remote::json_str(NO_TREE_YET)));
+        assert!(find().unwrap_err().message().contains(NO_TREE_YET));
+
+        server.route("ui", &semantic_reply());
+        let nodes = find().unwrap();
+        assert_eq!(nodes.len(), 5);
+        assert_eq!(nodes[1].name, "Count: 1");
+        let request = "ui find q=role=button state=visible json=1 timeout_ms=1000 w=7:0";
+        server.route("mouse", r#"{"ok":1}"#);
+        client.mouse(&MouseInput::at(MouseKind::DoubleClick, Some(0), 50.0, 60.0)).unwrap();
+        assert_eq!(server.requests(), [request, request, "mouse k=dblclick x=50 y=60 b=0 w=0 wait=1"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn raw_grab_returns_the_frame_dimensions_and_rgba_bytes() {
+        let server = crate::fixture::FixtureServer::start();
+        let client = RemoteClient::connect(server.socket()).unwrap();
+        let frame = client.grab_rgba(1, 0.5).unwrap();
+        assert_eq!((frame.width, frame.height), (4, 3));
+        assert_eq!(frame.rgba, [1, 0, 2, 255].repeat(12));
+        assert_eq!(server.requests(), ["frames window=1 scale=0.5 codec=raw once=1"]);
     }
 
     #[cfg(unix)]

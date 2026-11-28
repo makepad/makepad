@@ -140,6 +140,11 @@
     "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": [], "mobile": false
   },
   {
+    "id": "town", "label": "Town", "package": "makepad-town",
+    "dir": "apps/apps/create/app", "bin": "makepad-town", "manifest": null, "args": [],
+    "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": [], "mobile": false
+  },
+  {
     "id": "scope", "label": "Scope", "package": "makepad-scope",
     "dir": "apps/commercial/scope", "bin": "scope", "manifest": null, "args": [],
     "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": [], "mobile": false

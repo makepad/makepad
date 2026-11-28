@@ -128,6 +128,33 @@ mod tests {
     }
 
     #[test]
+    fn every_sheet_resolves_in_theme_resolver_without_errors() {
+        use makepad_widgets_core::theme_tokens::{resolve_theme, BlendTheme, Scheme, ThemeResolver};
+
+        register();
+        let themes = BlendTheme::all();
+        assert!(themes.len() >= 3 + 12 + SHEETS.len(), "the resolver must see the bases, core sheets and extra sheets");
+        let mut resolver = ThemeResolver::new(themes.clone());
+        while resolver.step() {}
+        assert!(resolver.errors().is_empty(), "scratch VM reported sheet errors: {:?}", resolver.errors());
+        let cache = resolver.into_cache();
+        assert_eq!(cache.len(), themes.len(), "every advertised theme must have a cache entry");
+        for theme in themes {
+            let values = cache.get(theme).unwrap_or_else(|| panic!("missing cached theme {theme:?}"));
+            let minimum = if theme == BlendTheme::Base(Scheme::Skeleton) { 340 } else { 500 };
+            assert!(values.len() > minimum, "{theme:?} resolved only {} scalar tokens", values.len());
+        }
+
+        let terminal = BlendTheme::Sheet("terminal");
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let reference = cx.with_vm(|vm| {
+            makepad_widgets_core::script_mod(vm);
+            resolve_theme(vm, terminal)
+        });
+        assert_eq!(cache.get(terminal), Some(&reference), "Terminal's scalars must match its full VM reload");
+    }
+
+    #[test]
     fn every_sheet_evaluates_and_names_its_base() {
         for entry in &SHEETS {
             sheet_checks::evaluates(full, entry);
@@ -158,6 +185,20 @@ mod tests {
     fn text_reads_on_its_ground_under_every_sheet() {
         for entry in &SHEETS {
             sheet_checks::contrast(full, entry);
+        }
+    }
+
+    #[test]
+    fn every_sheet_button_face_takes_the_host_colour() {
+        for entry in &SHEETS {
+            sheet_checks::button_faces_take_the_host_colour(entry);
+        }
+    }
+
+    #[test]
+    fn button_and_tab_ink_reads_on_its_face_under_every_sheet() {
+        for entry in &SHEETS {
+            sheet_checks::button_and_tab_contrast(full, entry);
         }
     }
 }

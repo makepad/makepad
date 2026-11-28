@@ -14,6 +14,7 @@ impl Selector {
     pub fn widget_type(value: impl Into<String>) -> Self { Self::all().term("class", value.into()) }
     pub fn raw(value: impl Into<String>) -> Self { Self { terms: vec![value.into()], ..Self::all() } }
     pub fn name(self, value: impl Into<String>) -> Self { self.term("name", value.into()) }
+    pub fn value(self, value: impl Into<String>) -> Self { self.term("value", value.into()) }
     pub fn text_exact(self, value: impl Into<String>) -> Self { self.name(value) }
     pub fn text_contains(self, value: impl Into<String>) -> Self { self.term("text~=", value.into()) }
     pub fn state(self, value: impl Into<String>) -> Self { self.term("state", value.into()) }

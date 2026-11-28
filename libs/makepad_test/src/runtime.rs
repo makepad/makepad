@@ -2,7 +2,7 @@ use crate::app_process::{self, LaunchSpec, OwnedApp, ShutdownOutcome};
 use crate::error::{IntoTestResult, TestError, TestResult};
 use crate::remote::{KeyKind, MouseInput, MouseKind};
 use crate::selector::Selector;
-use crate::remote::{NodeMatch, UiSnapshot};
+use crate::remote::{NodeMatch, RawFrame, UiSnapshot};
 use makepad_studio_protocol::{KeyCode, KeyModifiers, StudioToApp};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -97,6 +97,10 @@ pub struct TestConfig {
     /// count wall time grows flaky under load. A suite whose waits count the app's own time (a
     /// sim's clock, its frames) can run its apps side by side.
     pub concurrent: bool,
+    /// Capture a final frame with `gq` on a pass. Defaults to
+    /// `MAKEPAD_TEST_KEEP_ARTIFACTS`, otherwise false. Failures, panics,
+    /// lookup clashes, startup failures and raw OwnedApp drops still grab.
+    pub keep_artifacts_on_pass: bool,
 }
 
 impl TestConfig {
@@ -131,6 +135,7 @@ impl TestConfig {
             action_delay: env_duration_ms("MAKEPAD_TEST_ACTION_DELAY_MS"),
             keep_open: env_duration_ms("MAKEPAD_TEST_KEEP_OPEN_MS"),
             concurrent: parallel_tests_enabled(),
+            keep_artifacts_on_pass: keep_artifacts_on_pass_enabled(),
         })
     }
 
@@ -184,6 +189,7 @@ pub struct TestApp {
 
 impl TestApp {
     fn start(mut config: TestConfig) -> TestResult<Self> {
+        // Clear the previous test's artifacts here so app launches in this test share one clash report.
         if config.artifacts_dir.exists() {
             fs::remove_dir_all(&config.artifacts_dir)?;
         }
@@ -299,6 +305,24 @@ impl TestApp {
     }
 
     pub fn try_screenshot(&self) -> TestResult<PathBuf> {
+        let (window, scale) = self.capture_target()?;
+        self.client().grab(Some(window), scale)
+    }
+
+    /// Read the primary window directly in RGBA8 at the requested screenshot DPI.
+    pub fn grab_rgba(&self) -> RawFrame {
+        match self.try_grab_rgba() {
+            Ok(frame) => frame,
+            Err(err) => panic_for_error(err),
+        }
+    }
+
+    pub fn try_grab_rgba(&self) -> TestResult<RawFrame> {
+        let (window, scale) = self.capture_target()?;
+        self.client().grab_rgba(window, scale).map_err(TestError::new)
+    }
+
+    fn capture_target(&self) -> TestResult<(usize, f64)> {
         self.ensure_running()?;
         let windows = self.client().windows()?;
         let window = windows
@@ -308,7 +332,7 @@ impl TestApp {
             Some(dpi) if window.dpi > 0.0 => dpi / window.dpi,
             _ => 1.0,
         };
-        self.client().grab(Some(window.id), scale)
+        Ok((window.id, scale))
     }
 
     /// The app's GPU device is lost, as a driver reset or a GPU hang recovery loses it (`hal
@@ -640,6 +664,11 @@ impl TestApp {
         self.client().mouse(&MouseInput::at(MouseKind::Move, Some(0), x, y)).unwrap_or_else(|err| panic_for_error(err));
     }
 
+    /// Double-click a point in the first window. Both presses share one app timestamp.
+    pub fn double_click_at(&self, x: f64, y: f64) {
+        self.client().mouse(&MouseInput::at(MouseKind::DoubleClick, Some(0), x, y)).unwrap_or_else(|err| panic_for_error(err));
+    }
+
     /// Press the mouse at a point of the first window and hold it, for what has no node of its own
     /// to press (a dock's splitter bar): [`PointerDrag::move_by`], then [`PointerDrag::release`].
     pub fn press_at(&self, x: f64, y: f64) -> PointerDrag {
@@ -752,7 +781,11 @@ impl TestApp {
         visible_only: bool,
     ) -> TestResult<Vec<NodeMatch>> {
         self.ensure_running()?;
-        self.client().find(selector, if visible_only { "state=visible" } else { "" })
+        let client = self.client();
+        let extra = if visible_only { "state=visible" } else { "" };
+        let mut budget = None;
+        self.wait_looks(&mut budget, "ui find: the app built no tree",
+            || client.find_with_timeout(selector, extra, LOOK), is_no_tree_yet)
     }
 
     fn collect_logs_text(&self) -> TestResult<String> {
@@ -780,21 +813,14 @@ impl TestApp {
     /// `ask` again while `pending` reads its error as "not yet" (each answer takes the app's
     /// look), until it answers or the app has spent the wait's [`Budget`], started at the first
     /// "not yet": the verdict says what did not come and what the app spent.
-    fn wait_looks<T>(&self, budget: &mut Option<Budget>, what: &str, mut ask: impl FnMut() -> TestResult<T>, pending: impl Fn(&str) -> bool) -> TestResult<T> {
-        loop {
-            match ask() {
-                Err(err) if pending(err.message()) => {
-                    let budget = match budget {
-                        Some(budget) => budget,
-                        None => budget.insert(Budget::start(self, self.action_timeout())?),
-                    };
-                    if let Some(spent) = budget.spent(self)? {
-                        return Err(TestError::new(format!("app remote {what}: {spent}")));
-                    }
-                }
-                done => return done,
-            }
-        }
+    fn wait_looks<T>(&self, budget: &mut Option<Budget>, what: &str, ask: impl FnMut() -> TestResult<T>, pending: impl Fn(&str) -> bool) -> TestResult<T> {
+        wait_looks_with(what, ask, pending, || {
+            let budget = match budget {
+                Some(budget) => budget,
+                None => budget.insert(Budget::start(self, self.action_timeout())?),
+            };
+            budget.spent(self)
+        })
     }
 
     fn action_timeout(&self) -> Duration {
@@ -835,20 +861,34 @@ impl TestApp {
         Ok(())
     }
 
-    fn shutdown(&self) -> ShutdownOutcome {
+    fn keep_artifacts_on_pass(&self) -> bool {
+        self.inner.borrow().config.keep_artifacts_on_pass
+    }
+
+    fn shutdown(&self, grab_frame: bool) -> ShutdownOutcome {
         let mut inner = self.inner.borrow_mut();
         let poll = inner.config.poll_interval;
-        let outcome = inner.app.shutdown(poll);
-        let note = match outcome {
-            ShutdownOutcome::Graceful => "graceful: owned process exited after /gq or /quit",
-            ShutdownOutcome::AlreadyExited => "process had already exited before shutdown",
-            ShutdownOutcome::Killed => "fallback: owned pid killed after /gq and /quit did not end it",
-        };
+        let outcome = inner.app.shutdown_with_grab(poll, grab_frame);
+        let note = shutdown_note(outcome, grab_frame);
         let _ = fs::write(
             inner.config.artifacts_dir.join("shutdown.txt"),
             format!("pid {}\n{note}\n", inner.app.pid),
         );
         outcome
+    }
+}
+
+fn should_grab_on_shutdown(result_is_err: bool, keep_artifacts_on_pass: bool) -> bool {
+    result_is_err || keep_artifacts_on_pass
+}
+
+fn shutdown_note(outcome: ShutdownOutcome, grab_frame: bool) -> &'static str {
+    match (outcome, grab_frame) {
+        (ShutdownOutcome::Graceful, true) => "graceful: owned process exited after /gq or /quit",
+        (ShutdownOutcome::Graceful, false) => "graceful: owned process exited after /quit (passing test; frame grab skipped)",
+        (ShutdownOutcome::AlreadyExited, _) => "process had already exited before shutdown",
+        (ShutdownOutcome::Killed, true) => "fallback: owned pid killed after /gq and /quit did not end it",
+        (ShutdownOutcome::Killed, false) => "fallback: owned pid killed after /quit did not end it",
     }
 }
 
@@ -1274,7 +1314,7 @@ impl Locator {
         // The app builds its tree for the act's own request: one with none yet (its first, a
         // look's time on a busy box) did nothing, and is asked again under the same Budget.
         let acted = self.app.wait_looks(&mut budget, &format!("{command}: the app built no tree to act in"),
-            || self.app.client().get_json(&command, &args), |e| e.contains(makepad_hal::a11y::remote::NO_TREE_YET));
+            || self.app.client().get_json(&command, &args), is_no_tree_yet);
         if let Err(refused) = acted {
             let Some(req) = pending_action(refused.message()) else {
                 // The app's refusal ("no such node", "ambiguous") names no selector: when the
@@ -1402,30 +1442,49 @@ where
     });
 
     // what the test runs is no app's progress for the waits of the tests beside it
-    let _drove = Drove;
+    let _drove = Drove::enter();
     let app = TestApp::start(config)?;
     let result = catch_unwind(AssertUnwindSafe(|| test(app.clone()).into_test_result()));
 
-    match result {
-        Ok(Ok(())) => {
-            app.pause_before_shutdown();
-            app.shutdown();
-            Ok(())
+    let clashes = read_lookup_clashes(&app);
+    let with_clashes = |err: TestError| {
+        let err = with_jit_capture(&app, err);
+        match &clashes {
+            Ok(lines) if !lines.is_empty() => {
+                TestError::new(format!("{err}\n  ambiguous widget lookups:\n{lines}"))
+            }
+            Err(read_err) => TestError::new(format!("{err}\n  {read_err}")),
+            _ => err,
         }
-        Ok(Err(err)) => {
-            let err = with_jit_capture(&app, err);
-            capture_failure_artifacts(&app, err.message());
-            app.pause_before_shutdown();
-            app.shutdown();
-            Err(err)
-        }
-        Err(payload) => {
-            let err = with_jit_capture(&app, TestError::from_panic_payload(payload));
-            capture_failure_artifacts(&app, err.message());
-            app.pause_before_shutdown();
-            app.shutdown();
-            Err(err)
-        }
+    };
+    let result = match result {
+        Ok(Ok(())) => clashes.and_then(|lines| {
+            if lines.is_empty() {
+                Ok(())
+            } else {
+                Err(TestError::new(format!(
+                    "ambiguous widget lookups: a lookup for one widget matched several; rename one or look it up by a longer path:\n{lines}"
+                )))
+            }
+        }).map_err(|err| with_jit_capture(&app, err)),
+        Ok(Err(err)) => Err(with_clashes(err)),
+        Err(payload) => Err(with_clashes(TestError::from_panic_payload(payload))),
+    };
+    let grab_frame = should_grab_on_shutdown(result.is_err(), app.keep_artifacts_on_pass());
+    if let Err(err) = &result {
+        capture_failure_artifacts(&app, err.message());
+    }
+    app.pause_before_shutdown();
+    app.shutdown(grab_frame);
+    result
+}
+
+fn read_lookup_clashes(app: &TestApp) -> TestResult<String> {
+    let path = app.artifacts_dir().join("lookup-clashes.txt");
+    match fs::read_to_string(&path) {
+        Ok(lines) => Ok(lines.trim_end().to_owned()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(err) => Err(TestError::new(format!("could not read {}: {err}", path.display()))),
     }
 }
 
@@ -1495,10 +1554,14 @@ pub fn run_current_package_test<F, R>(
 /// 1.2% memory pressure, and read as "waiting on memory (swapping)" for 1.0 of the 10.3 s, 11-22.)
 /// And a test may run what
 /// the app waits on in its own process (an AI hub on loopback with its GPU device): what the test
-/// process runs beside the thread driving the test ([`beside_cpu`]) is progress the app waits for,
-/// and while it runs at the idle share the app is not idle. (A grown part's refine on a cold cache:
-/// the app at 0%, the test's hub compiling its GPU programs, read as "sat idle 10.2 s", 11-10.) An
-/// app whose main thread runs nothing, its
+/// process runs beside the threads driving its tests ([`beside_now`]) is progress the app waits
+/// for, at half a core or more of what its threads wanted (as an app's own other threads): the app
+/// is not idle while it runs. (A grown part's refine on a cold cache: the app at 0%, the test's hub
+/// compiling its GPU programs, read as "sat idle 10.2 s", 11-10.) Below that it is a steady tick,
+/// no progress, and the verdict names it: held to the idle share, a hub the test process ran,
+/// started by an earlier test, ticked 5-9% of a core in its idle worker's 500 ms wakes, every look
+/// read as progress, and a wait for a panel line that never came ran 40 min beside an app at 0%
+/// (`grow_live`, 11-27). An app whose main thread runs nothing, its
 /// other threads under 1/[`TICK_SHARE`] of a core, with nothing pending, is idle too: a steady
 /// tick is no progress, while a thread at work, at half a core or more, still is. (A Fab test's
 /// wait for a button that never came ran 19 min beside its app's sim ticking at 4-12% of a core,
@@ -1545,9 +1608,14 @@ struct Budget {
     granted: Duration,
     /// Who held the CPU budget's slots at the last look that found the pool starved.
     slots: Vec<crate::remote::BudgetSlot>,
-    /// What the test process had run beside its driving thread at the last look ([`beside_cpu`]),
-    /// and how long, over the whole wait, that alone kept the app from counting as idle.
-    beside: (Duration, Duration),
+    /// What the test process had run and waited for beside its driving threads at the last look
+    /// ([`beside_now`]), and how long, over the whole wait, that alone kept the app from counting
+    /// as idle.
+    beside: (Beside, Duration),
+    /// Of the idle stretch, how long the test process's own threads only ticked (over
+    /// 1/[`IDLE_SHARE`] of a core, under 1/[`TICK_SHARE`] of what they wanted), and the CPU they
+    /// ran in it.
+    beside_ticked: (Duration, Duration),
     /// The time the wait spent asking the app (its closure ran), and the app's own CPU and its main
     /// thread's in it, since the last look.
     asked: (Duration, Duration, Duration),
@@ -1588,12 +1656,12 @@ impl Budget {
         let mut started = Started::default();
         let mut cpu = app.client().cpu(true)?;
         cpu.own += started.look(app.pid());
-        Ok(Budget { started, ..Budget::at(limit, app.action_timeout(), cpu, Instant::now(), beside_cpu()) })
+        Ok(Budget { started, ..Budget::at(limit, app.action_timeout(), cpu, Instant::now(), beside_now()) })
     }
 
     /// A wait's budget from the app's CPU `cpu` and the test process's `beside` it at `now`.
-    fn at(limit: Duration, idle_limit: Duration, cpu: crate::remote::AppCpu, now: Instant, beside: Duration) -> Budget {
-        Budget { limit, idle_limit, main: cpu.main, last: (now, cpu.own, cpu.main, cpu.waited), idle: Duration::ZERO, ticked: (Duration::ZERO, Duration::ZERO), faults: cpu.faults, memory: (Duration::ZERO, 0), paged: (Duration::ZERO, 0), disk: (Duration::ZERO, 0), disked: (Duration::ZERO, 0), taken: 0, queued: false, starved: (Duration::ZERO, [0; 3]), granted: Duration::ZERO, slots: Vec::new(), beside: (beside, Duration::ZERO), asked: (Duration::ZERO, Duration::ZERO, Duration::ZERO), pending: (Duration::ZERO, Vec::new()), started: Started::default() }
+    fn at(limit: Duration, idle_limit: Duration, cpu: crate::remote::AppCpu, now: Instant, beside: Beside) -> Budget {
+        Budget { limit, idle_limit, main: cpu.main, last: (now, cpu.own, cpu.main, cpu.waited), idle: Duration::ZERO, ticked: (Duration::ZERO, Duration::ZERO), faults: cpu.faults, memory: (Duration::ZERO, 0), paged: (Duration::ZERO, 0), disk: (Duration::ZERO, 0), disked: (Duration::ZERO, 0), taken: 0, queued: false, starved: (Duration::ZERO, [0; 3]), granted: Duration::ZERO, slots: Vec::new(), beside: (beside, Duration::ZERO), beside_ticked: (Duration::ZERO, Duration::ZERO), asked: (Duration::ZERO, Duration::ZERO, Duration::ZERO), pending: (Duration::ZERO, Vec::new()), started: Started::default() }
     }
 
     /// The wait asked the app from `since` (its closure ran): its CPU before and after.
@@ -1611,12 +1679,12 @@ impl Budget {
     fn spent(&mut self, app: &TestApp) -> TestResult<Option<String>> {
         let mut cpu = app.client().cpu(true)?;
         cpu.own += self.started.look(app.pid());
-        self.judge(cpu, Instant::now(), beside_cpu(), &mut || app.client().settled(), &mut || app.client().waits_on_jit())
+        self.judge(cpu, Instant::now(), beside_now(), &mut || app.client().settled(), &mut || app.client().waits_on_jit())
     }
 
     /// [`Self::spent`] from a look that found `cpu` and the test process's `beside` at `now`;
     /// `settled` and `waits_on_jit` ask the app, only when the app ran nothing.
-    fn judge(&mut self, cpu: crate::remote::AppCpu, now: Instant, beside: Duration, settled: &mut dyn FnMut() -> TestResult<crate::remote::AppSettled>, waits_on_jit: &mut dyn FnMut() -> TestResult<bool>) -> TestResult<Option<String>> {
+    fn judge(&mut self, cpu: crate::remote::AppCpu, now: Instant, beside: Beside, settled: &mut dyn FnMut() -> TestResult<crate::remote::AppSettled>, waits_on_jit: &mut dyn FnMut() -> TestResult<bool>) -> TestResult<Option<String>> {
         let main = cpu.main.saturating_sub(self.main);
         if main >= self.limit {
             return Ok(Some(format!("its main thread ran {:.1} s of CPU (budget {:.0} s)", main.as_secs_f64(), self.limit.as_secs_f64())));
@@ -1632,8 +1700,13 @@ impl Budget {
         let quiet = wanted * IDLE_SHARE < alone;
         // its main thread ran nothing and its other threads only tick: no progress either
         let ticking = !quiet && cpu.main.saturating_sub(main_then).saturating_sub(asked_main) * IDLE_SHARE < alone && wanted * TICK_SHARE < alone;
-        // what the test process ran meanwhile beside this thread: a service the app waits on
-        let busy_beside = beside.saturating_sub(self.beside.0) * IDLE_SHARE >= over;
+        // what the test process ran and waited for beside its driving threads: progress at half a
+        // core of what it wanted (TICK_SHARE), a steady tick below that over the idle share (no
+        // progress, as the app's other threads)
+        let beside_ran = beside.cpu.saturating_sub(self.beside.0.cpu);
+        let beside_wanted = beside_ran + beside.waited.saturating_sub(self.beside.0.waited);
+        let busy_beside = beside_wanted * TICK_SHARE >= over;
+        let beside_ticking = !busy_beside && beside_ran * IDLE_SHARE >= over;
         self.beside.0 = beside;
         if (quiet || ticking) && busy_beside {
             self.beside.1 += over;
@@ -1664,9 +1737,13 @@ impl Budget {
             if ticking {
                 self.ticked = (self.ticked.0 + over, self.ticked.1 + ran);
             }
+            if beside_ticking {
+                self.beside_ticked = (self.beside_ticked.0 + over, self.beside_ticked.1 + beside_ran);
+            }
         } else {
             self.idle = Duration::ZERO;
             self.ticked = (Duration::ZERO, Duration::ZERO);
+            self.beside_ticked = (Duration::ZERO, Duration::ZERO);
         }
         if stalled || waiting {
             if faults as f64 >= SWAP_FAULTS_PER_S * over.as_secs_f64() {
@@ -1747,11 +1824,15 @@ impl Budget {
                 self.stall_clauses(seconds)
             ),
             _ => format!(
-                "it sat idle for {seconds:.1} s (budget {budget:.0} s), nothing running and nothing pending{}{}{} (its main thread ran {main:.1} s of CPU){beside}",
+                "it sat idle for {seconds:.1} s (budget {budget:.0} s), nothing running and nothing pending{}{}{}{} (its main thread ran {main:.1} s of CPU){beside}",
                 if running > 0 { format!(" ({running} pool jobs on its workers ran no CPU)") } else { String::new() },
                 match self.ticked {
                     (Duration::ZERO, _) => String::new(),
                     (ticked, cpu) => format!("; for {:.1} s of it only a steady tick ran, {:.0}% of a core, its main thread nothing (no progress)", ticked.as_secs_f64(), 100.0 * cpu.as_secs_f64() / ticked.as_secs_f64()),
+                },
+                match self.beside_ticked {
+                    (Duration::ZERO, _) => String::new(),
+                    (ticked, cpu) => format!("; for {:.1} s of it the test process's own threads ticked {:.0}% of a core (no progress)", ticked.as_secs_f64(), 100.0 * cpu.as_secs_f64() / ticked.as_secs_f64()),
                 },
                 self.stall_clauses(seconds)
             ),
@@ -1793,6 +1874,28 @@ fn pressure(resource: &str) -> Option<f64> {
     some.split_whitespace().find_map(|field| field.strip_prefix("avg10="))?.parse().ok()
 }
 
+fn wait_looks_with<T>(
+    what: &str,
+    mut ask: impl FnMut() -> TestResult<T>,
+    pending: impl Fn(&str) -> bool,
+    mut spent: impl FnMut() -> TestResult<Option<String>>,
+) -> TestResult<T> {
+    loop {
+        match ask() {
+            Err(err) if pending(err.message()) => {
+                if let Some(reason) = spent()? {
+                    return Err(TestError::new(format!("app remote {what}: {reason}")));
+                }
+            }
+            done => return done,
+        }
+    }
+}
+
+fn is_no_tree_yet(message: &str) -> bool {
+    message.contains(makepad_hal::a11y::remote::NO_TREE_YET)
+}
+
 /// The number of an action the app has not taken yet, from its `action N timed out` answer.
 fn pending_action(message: &str) -> Option<u64> {
     let at = message.find(" timed out")?;
@@ -1814,13 +1917,44 @@ fn drove() {
     DRIVEN_NS.fetch_add(now.saturating_sub(DROVE_AT.with(|at| at.replace(now))), Ordering::Relaxed);
 }
 
-/// Counts the rest of a test's thread as driving it once the test ends.
-struct Drove;
+/// The OS ids of the threads driving tests now ([`Drove`]): what they wait for a core is no service
+/// the test process runs beside them ([`beside_now`]).
+static DRIVING_TIDS: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+
+/// A test's thread drives it while this lives ([`DRIVING_TIDS`]), and the rest of what it ran
+/// counts as driving once the test ends.
+struct Drove {
+    tid: u64,
+}
+
+impl Drove {
+    fn enter() -> Drove {
+        let tid = makepad_hal::clock::thread_id();
+        if tid != 0 {
+            DRIVING_TIDS.lock().unwrap_or_else(|e| e.into_inner()).push(tid);
+        }
+        Drove { tid }
+    }
+}
 
 impl Drop for Drove {
     fn drop(&mut self) {
         drove();
+        if self.tid != 0 {
+            let mut tids = DRIVING_TIDS.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(i) = tids.iter().position(|&t| t == self.tid) {
+                tids.swap_remove(i);
+            }
+        }
     }
+}
+
+/// What the test process has run and waited for beside the threads driving its tests
+/// ([`beside_now`]).
+#[derive(Clone, Copy, Debug, Default)]
+struct Beside {
+    cpu: Duration,
+    waited: Duration,
 }
 
 /// The CPU the test process has run beside the threads driving its tests: what a service the test
@@ -1831,11 +1965,16 @@ impl Drop for Drove {
 /// their own, and each counts what it runs as it waits ([`drove`]): one test's looks are no progress
 /// of another's app. (Three Fab tests side by side, their apps idle, each a failure: one test's
 /// looks every millisecond read as its hub at work for the other two, whose 20 looks a second did
-/// the same for it, and the three waited 1h20m, L1249194, 11-17.)
-fn beside_cpu() -> Duration {
+/// the same for it, and the three waited 1h20m, L1249194, 11-17.) And what its threads but those
+/// (by id), the remote's own and the runtime's spent runnable, waiting for a core: a service that
+/// wants a core a loaded box does not give it is at work all the same.
+fn beside_now() -> Beside {
     drove();
     let others = makepad_hal::clock::process_cpu_ns().saturating_sub(DRIVEN_NS.load(Ordering::Relaxed));
-    Duration::from_nanos(others.saturating_sub(makepad_remote::runtime_cpu_ns()).saturating_sub(makepad_remote::served_cpu_ns()).saturating_sub(makepad_remote::asked_cpu_ns()))
+    let cpu = Duration::from_nanos(others.saturating_sub(makepad_remote::runtime_cpu_ns()).saturating_sub(makepad_remote::served_cpu_ns()).saturating_sub(makepad_remote::asked_cpu_ns()));
+    let driving = DRIVING_TIDS.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let waited = makepad_hal::clock::threads_waited_ns_filtered(|tid, name| makepad_remote::own_thread(name) || driving.contains(&tid));
+    Beside { cpu, waited: Duration::from_nanos(waited.saturating_sub(makepad_remote::runtime_waited_ns())) }
 }
 
 /// A failed test of a JIT app names the app's state at the failure (first, before the
@@ -1977,6 +2116,8 @@ fn snapshot_summary(widget: &NodeMatch) -> String {
 
 fn parallel_tests_enabled() -> bool { env_truthy("MAKEPAD_TEST_PARALLEL") }
 
+fn keep_artifacts_on_pass_enabled() -> bool { env_truthy("MAKEPAD_TEST_KEEP_ARTIFACTS") }
+
 fn visible_mode_enabled() -> bool {
     env_truthy("MAKEPAD_TEST_VISIBLE")
 }
@@ -2012,10 +2153,37 @@ fn unseen_gap(since: u64, dropped: u64, seen: Option<u64>) -> Option<(u64, u64)>
 mod tests {
     use super::{
         button_index, env_duration_ms, sanitize_path_component,
-        snapshot_is_visible, unseen_gap, visible_mode_enabled, Budget, NodeMatch,
+        snapshot_is_visible, unseen_gap, visible_mode_enabled, Beside, Budget, NodeMatch,
     };
     use crate::remote::{AppCpu, AppSettled, BudgetSlot};
     use std::time::Instant;
+
+    #[test]
+    fn query_widgets_waits_while_the_app_has_no_tree() {
+        use super::{is_no_tree_yet, wait_looks_with, TestError};
+        use makepad_hal::a11y::remote::NO_TREE_YET;
+
+        let what = "ui find: the app built no tree";
+        let mut calls = 0;
+        let result = wait_looks_with(what, || {
+            calls += 1;
+            if calls <= 2 { Err(TestError::new(NO_TREE_YET)) } else { Ok(7) }
+        }, is_no_tree_yet, || Ok(None));
+        assert_eq!(result.unwrap(), 7);
+        assert_eq!(calls, 3, "two pending looks before the query succeeds");
+
+        let mut calls = 0;
+        let failed = wait_looks_with::<()>(what, || {
+            calls += 1;
+            Err(TestError::new("invalid query"))
+        }, is_no_tree_yet, || panic!("a query error must bypass the budget"));
+        assert_eq!(failed.unwrap_err().message(), "invalid query");
+        assert_eq!(calls, 1);
+
+        let idle = wait_looks_with::<()>(what, || Err(TestError::new(NO_TREE_YET)), is_no_tree_yet,
+            || Ok(Some("it sat idle for 10.0 s".into())));
+        assert_eq!(idle.unwrap_err().message(), "app remote ui find: the app built no tree: it sat idle for 10.0 s");
+    }
 
     /// A wait for what never comes fails on the idle rule while the app's other thread ticks a
     /// steady fifth of a core, its main thread running nothing and nothing pending (a Fab sim
@@ -2023,21 +2191,29 @@ mod tests {
     /// half a core or more, keeps the wait going, and so does a main thread that runs, and a thread
     /// a loaded box starves: one that runs a fifth of a core and waits for one the rest wants a
     /// whole one (J11427, 11-11). An app with nothing running fails as soon on a loaded box.
+    /// The test process's own threads beside its driving ones (a service it runs, as a hub) are
+    /// held to the same rule: a steady tick is no progress, and the verdict names it (an
+    /// in-process hub's idle worker at 5-9% of a core kept a wait for a panel line going 40 min
+    /// beside an app at 0%, `grow_live`, 11-27), while one at work, or starved of a core it wants,
+    /// keeps the wait going.
     #[test]
     fn a_steady_tick_is_no_progress_and_work_is() {
         let secs = Duration::from_secs_f64;
-        // its other threads' CPU, its main thread's and what they waited for a core, a second
-        let wait = |other: f64, main: f64, waited: f64| -> Option<(u64, String)> {
+        // its other threads' CPU, its main thread's and what they waited for a core, and the test
+        // process's own beside them and what those waited, a second
+        let wait_beside = |other: f64, main: f64, waited: f64, beside: f64, beside_waited: f64| -> Option<(u64, String)> {
             let (t0, cpu) = (Instant::now(), |m: f64, own: f64, waited: f64| AppCpu { main: secs(m), own: secs(own), faults: 0, waited: secs(waited), io_threads: 0 });
-            let mut budget = Budget::at(secs(300.0), secs(10.0), cpu(0.0, 0.0, 0.0), t0, Duration::ZERO);
+            let mut budget = Budget::at(secs(300.0), secs(10.0), cpu(0.0, 0.0, 0.0), t0, Beside::default());
             (1..=60u64).find_map(|look| {
                 let n = look as f64;
                 let now = t0 + Duration::from_secs(look);
                 let mut settled = || -> crate::TestResult<AppSettled> { Ok(AppSettled { settled: true, only_pool: false, pool: None, slots: Vec::new(), pending: Vec::new() }) };
                 let mut on_jit = || -> crate::TestResult<bool> { Ok(false) };
-                budget.judge(cpu(main * n, (main + other) * n, waited * n), now, Duration::ZERO, &mut settled, &mut on_jit).unwrap().map(|why| (look, why))
+                let beside = Beside { cpu: secs(beside * n), waited: secs(beside_waited * n) };
+                budget.judge(cpu(main * n, (main + other) * n, waited * n), now, beside, &mut settled, &mut on_jit).unwrap().map(|why| (look, why))
             })
         };
+        let wait = |other: f64, main: f64, waited: f64| wait_beside(other, main, waited, 0.0, 0.0);
         let (look, why) = wait(0.2, 0.0, 0.0).expect("a steady tick ends the wait");
         assert_eq!(look, 10, "after the idle budget: {why}");
         assert!(why.starts_with("it sat idle for 10.0 s") && why.contains("only a steady tick ran, 20% of a core"), "{why}");
@@ -2045,6 +2221,28 @@ mod tests {
         assert!(wait(0.2, 0.1, 0.0).is_none(), "a main thread that runs is progress");
         assert!(wait(0.2, 0.0, 0.8).is_none(), "a worker starved of a core it wants is at work");
         assert_eq!(wait(0.2, 0.0, 0.1).map(|(look, _)| look), Some(10), "a tick that waits a little on a loaded box is still a tick");
+        // the test process's own threads beside the app
+        let (look, why) = wait_beside(0.0, 0.0, 0.0, 0.09, 0.0).expect("a steady tick beside the test ends the wait");
+        assert!(look == 10 && why.starts_with("it sat idle for 10.0 s") && why.contains("for 10.0 s of it the test process's own threads ticked 9% of a core (no progress)"), "{look}: {why}");
+        assert!(wait_beside(0.0, 0.0, 0.0, 0.6, 0.0).is_none(), "the test process's own threads at 60% of a core are at work (a hub compiling its GPU programs)");
+        assert!(wait_beside(0.0, 0.0, 0.0, 0.2, 0.8).is_none(), "the test process's own threads starved of a core they want are at work");
+        let (look, why) = wait_beside(0.0, 0.0, 0.0, 0.09, 0.1).expect("a tick beside the test that waits a little is still a tick");
+        assert!(look == 10 && why.contains("ticked 9% of a core"), "{look}: {why}");
+        let (look, why) = wait_beside(0.0, 0.0, 0.0, 0.0, 0.08).expect("nothing beside the test but a little run delay is quiet");
+        assert!(look == 10 && !why.contains("tick"), "{look}: {why}");
+        // at work 5 s (a hub compiling), then ticking: the idle stretch counts from the tick, and
+        // the verdict says both
+        let t0 = Instant::now();
+        let mut budget = Budget::at(secs(300.0), secs(10.0), AppCpu { main: Duration::ZERO, own: Duration::ZERO, faults: 0, waited: Duration::ZERO, io_threads: 0 }, t0, Beside::default());
+        let (look, why) = (1..=60u64).find_map(|look| {
+            let ran = if look <= 5 { 0.8 * look as f64 } else { 4.0 + 0.09 * (look - 5) as f64 };
+            let quiet = AppCpu { main: Duration::ZERO, own: Duration::ZERO, faults: 0, waited: Duration::ZERO, io_threads: 0 };
+            let mut settled = || -> crate::TestResult<AppSettled> { Ok(AppSettled { settled: true, only_pool: false, pool: None, slots: Vec::new(), pending: Vec::new() }) };
+            budget.judge(quiet, t0 + Duration::from_secs(look), Beside { cpu: secs(ran), waited: Duration::ZERO }, &mut settled, &mut || Ok(false)).unwrap().map(|why| (look, why))
+        }).expect("a tick after work ends the wait");
+        assert_eq!(look, 15, "the idle limit after the work ended: {why}");
+        assert!(why.contains("for 10.0 s of it the test process's own threads ticked 9% of a core (no progress)"), "{why}");
+        assert!(why.contains("before that the test process's own threads (a service the test runs in it, as a hub) were busy for 5.0 s, which the wait counted as progress"), "{why}");
         let (look, why) = wait(0.0, 0.0, 0.02).expect("an app with nothing running is idle on a loaded box");
         assert!(look == 10 && why.starts_with("it sat idle for 10.0 s") && !why.contains("tick"), "{look}: {why}");
     }
@@ -2066,18 +2264,22 @@ mod tests {
             pending: vec!["loads (build: 1)".into()],
         };
         let pending = |_| load();
-        let wait = |cpu_at: &dyn Fn(u64) -> AppCpu, settled_at: &dyn Fn(u64) -> AppSettled| -> Option<(u64, String)> {
+        // and the test process's own threads beside the app, a second
+        let wait_beside = |cpu_at: &dyn Fn(u64) -> AppCpu, settled_at: &dyn Fn(u64) -> AppSettled, beside: f64| -> Option<(u64, String)> {
             let t0 = Instant::now();
-            let mut budget = Budget::at(secs(30.0), secs(10.0), cpu(0.0), t0, Duration::ZERO);
+            let mut budget = Budget::at(secs(30.0), secs(10.0), cpu(0.0), t0, Beside::default());
             (1..=120u64).find_map(|look| {
                 let now = t0 + Duration::from_secs(look);
-                budget.judge(cpu_at(look), now, Duration::ZERO, &mut || Ok(settled_at(look)), &mut || Ok(false))
+                budget.judge(cpu_at(look), now, Beside { cpu: secs(beside * look as f64), waited: Duration::ZERO }, &mut || Ok(settled_at(look)), &mut || Ok(false))
                     .unwrap().map(|why| (look, why))
             })
         };
+        let wait = |cpu_at: &dyn Fn(u64) -> AppCpu, settled_at: &dyn Fn(u64) -> AppSettled| wait_beside(cpu_at, settled_at, 0.0);
         let (look, why) = wait(&quiet, &pending).expect("a load that never comes ends the wait");
         assert_eq!(look, 30, "the wait ends after its budget, not at the idle limit: {why}");
         assert!(why.starts_with("it ran nothing for 30.0 s while it said it waited on loads (build: 1) (budget 30 s)"), "the verdict names what was pending: {why}");
+        let (look, why) = wait_beside(&quiet, &pending, 0.09).expect("a load that never comes ends the wait beside a tick in the test process");
+        assert!(look == 30 && why.starts_with("it ran nothing for 30.0 s while it said it waited on loads (build: 1) (budget 30 s)"), "a tick beside the test is no progress of the load: {look}: {why}");
         let (look, why) = wait(&|n| cpu(0.5 * n as f64), &pending).expect("a main thread at work spends the CPU budget");
         assert!(look == 60 && why.starts_with("its main thread ran 30.0 s"), "a working app is held to its CPU budget: {look}: {why}");
 
@@ -2135,7 +2337,7 @@ mod tests {
         // major page faults so far, and its threads waiting on the disk then
         let wait = |look: &dyn Fn(u64) -> (u64, u64, u64, u32)| -> (u64, String) {
             let (t0, cpu) = (Instant::now(), |faults: u64, io_threads: u32| AppCpu { main: Duration::ZERO, own: Duration::ZERO, faults, waited: Duration::ZERO, io_threads });
-            let mut budget = Budget::at(Duration::from_secs(300), Duration::from_secs(10), cpu(0, 0), t0, Duration::ZERO);
+            let mut budget = Budget::at(Duration::from_secs(300), Duration::from_secs(10), cpu(0, 0), t0, Beside::default());
             (1..=60u64).find_map(|n| {
                 let (queued, taken, faults, io_threads) = look(n);
                 // while jobs wait, a JIT build has held its slot since the wait began
@@ -2145,7 +2347,7 @@ mod tests {
                 };
                 let mut settled = || -> crate::TestResult<AppSettled> { Ok(AppSettled { settled: queued == 0, only_pool: queued > 0, pool: Some(([0, 0, queued], 0, taken)), slots: slots(), pending: Vec::new() }) };
                 let mut on_jit = || -> crate::TestResult<bool> { Ok(false) };
-                budget.judge(cpu(faults, io_threads), t0 + Duration::from_secs(n), Duration::ZERO, &mut settled, &mut on_jit).unwrap().map(|why| (n, why))
+                budget.judge(cpu(faults, io_threads), t0 + Duration::from_secs(n), Beside::default(), &mut settled, &mut on_jit).unwrap().map(|why| (n, why))
             }).expect("the wait ends")
         };
         let (n, why) = wait(&|n| if n == 1 { (1, 0, 0, 0) } else { (0, 1, 0, 0) });
@@ -2277,6 +2479,32 @@ mod tests {
         assert!(!member.env.contains_key("MAKEPAD"), "the default app environment leaves MAKEPAD unset");
         assert!(!member.env.contains_key("CARGO_TARGET_DIR"), "the default app environment inherits the Cargo target");
         assert_eq!(member.requested_screenshot_dpi(), None, "screenshot DPI is unset by default");
+    }
+
+    #[test]
+    fn keep_artifacts_on_pass_and_shutdown_grab_policy() {
+        use super::{should_grab_on_shutdown, shutdown_note, ShutdownOutcome};
+
+        let _guard = ENV_MUTEX.get_or_init(|| Mutex::new(())).lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let name = "MAKEPAD_TEST_KEEP_ARTIFACTS";
+        let saved = std::env::var_os(name);
+        let config = || TestConfig::new(".", "makepad-example", "shutdown");
+        std::env::remove_var(name);
+        let default = config();
+        std::env::set_var(name, "1");
+        let keeping = config();
+        restore_env_var(name, saved);
+
+        assert!(!default.unwrap().keep_artifacts_on_pass);
+        assert!(keeping.unwrap().keep_artifacts_on_pass);
+        assert!(!should_grab_on_shutdown(false, false));
+        assert!(should_grab_on_shutdown(false, true));
+        assert!(should_grab_on_shutdown(true, false));
+        assert!(should_grab_on_shutdown(true, true));
+        let pass = shutdown_note(ShutdownOutcome::Graceful, false);
+        assert!(pass.contains("/quit") && pass.contains("frame grab skipped") && !pass.contains("/gq"));
+        assert!(shutdown_note(ShutdownOutcome::Graceful, true).contains("/gq"));
     }
 
     #[test]

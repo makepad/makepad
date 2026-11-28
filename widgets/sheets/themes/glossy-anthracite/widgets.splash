@@ -125,11 +125,13 @@ let an_cap = fn(p: vec2, lo: vec2, hi: vec2, r: float, px: float, hover: float, 
     // The face: blue-grey metal lit from the top, #616a75 under the rim
     // falling fast to #23282e at the foot (luminance 0.41, 0.31 at a third,
     // 0.24 at half, 0.17 at the foot), brushed across.
+    let flat = step(gloss, -0.5)
+    let gl = max(gloss, 0.0)
     let t = clamp((p.y - lo.y) / max(hh, 1.0), 0.0, 1.0)
     let ft = 1.0 - pow(1.0 - t, 1.6)
-    var face = mix(vec3(0.380, 0.415, 0.458), vec3(0.137, 0.157, 0.180), ft) + tint
+    var face = mix(mix(vec3(0.380, 0.415, 0.458), vec3(0.137, 0.157, 0.180), ft), vec3(0.19608, 0.22745, 0.26667), flat) + tint
     let tx = an_plate_tex(p, px)
-    face = face + vec3(tx, tx, tx * 1.05) * 0.8 * up
+    face = face + vec3(tx, tx, tx * 1.05) * 0.8 * up * (1.0 - flat)
     // Under the hand the face lifts; a small cap (a check box, a radio, a
     // thumb, a handle) lifts twice as far, or the change is lost on it.
     face = face + vec3(0.050, 0.053, 0.060) * (1.0 + small) * hover * up
@@ -161,12 +163,12 @@ let an_cap = fn(p: vec2, lo: vec2, hi: vec2, r: float, px: float, hover: float, 
     // height; `gloss` 1 (buttons, thumbs, the segmented caps) takes all of
     // it, 0 six tenths. A held or disabled cap is matte.
     let uv = clamp((p - lo) / max(hi - lo, vec2(1.0, 1.0)), vec2(0.0, 0.0), vec2(1.0, 1.0))
-    face = face + vec3(0.060, 0.064, 0.070) * Finish.sheen(uv, 0.0, 0.46, 0.25) * up * (0.6 + 0.4 * gloss)
+    face = face + vec3(0.060, 0.064, 0.070) * Finish.sheen(uv, 0.0, 0.46, 0.25) * up * (0.6 + 0.4 * gl) * (1.0 - flat)
     // The specular: a pale bloom on the upper left of the lacquer, where the
     // light from the top left lands on every cap.
     let sw = max(min(0.26 * (hi.x - lo.x), 18.0), 2.0)
     let sq = (p - vec2(lo.x + min(0.22 * (hi.x - lo.x), 14.0), lo.y + 0.12 * hh)) / vec2(sw, max(0.22 * hh, 1.5))
-    face = face + vec3(0.130, 0.136, 0.146) * exp(-dot(sq, sq)) * up * (0.55 + 0.45 * gloss)
+    face = face + vec3(0.130, 0.136, 0.146) * exp(-dot(sq, sq)) * up * (0.55 + 0.45 * gl) * (1.0 - flat)
     // The chamfer: a bevel of two device pixels inside the outline all the
     // way round, lit by the way it faces. Along the top a near-white row
     // (#e0e7ec, luminance 0.9 as measured on the pictures' caps), two rows
@@ -175,7 +177,7 @@ let an_cap = fn(p: vec2, lo: vec2, hi: vec2, r: float, px: float, hover: float, 
     let topw = smoothstep(0.45, 0.97, -n.y)
     let botw = smoothstep(0.45, 0.97, n.y)
     let sidew = smoothstep(0.6, 1.0, abs(n.x))
-    let hot = mix(vec3(0.780, 0.810, 0.840), vec3(0.880, 0.905, 0.925), max(gloss, hover))
+    let hot = mix(vec3(0.780, 0.810, 0.840), vec3(0.880, 0.905, 0.925), max(gl, hover))
     face = mix(face, hot, r1 * topw * up)
     face = mix(face, hot * 0.62, r2 * topw * up)
     face = mix(face, hot * 0.52, r3 * topw * up * 0.45)
@@ -417,10 +419,12 @@ let an_button = fn(pos: vec2, size: vec2, o: vec2, dpi: float, hover: float, dow
             rim = vec4(0.56, 0.22, 0.18, 0.45 * lit)
         }
         var lift = 1.0
+        var cap_gloss = 1.0
         if kind < 0.5 {
             lift = 0.0
+            cap_gloss = -1.0
         }
-        res = Finish.over(res, an_cap(p, lo, hi, r, px, hover, down, disabled, focus, lift, tint, rim, 1.0))
+        res = Finish.over(res, an_cap(p, lo, hi, r, px, hover, down, disabled, focus, lift, tint, rim, cap_gloss))
         let dp = Material.sd_box(p, c, h, r)
         let inside = Finish.cover(dp, px)
         if kind > 1.5 && kind < 2.5 {
@@ -471,6 +475,7 @@ let an_button = fn(pos: vec2, size: vec2, o: vec2, dpi: float, hover: float, dow
 mod.widgets.ButtonFlat.draw_bg.pixel = fn() {
     return self.host_over(an_button(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.hover, self.down, self.disabled, self.focus, self.loading, self.anim_time, 0.0, 0.0), 14.0)
 }
+mod.widgets.ButtonFlat.draw_bg.face = {mode: @host_over, rest: #323a44, hover: #3f4853, down: #1c2128}
 mod.widgets.Button.draw_bg.pixel = fn() {
     return self.host_over(an_button(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.hover, self.down, self.disabled, self.focus, self.loading, self.anim_time, 1.0, 0.0), 14.0)
 }
@@ -492,6 +497,7 @@ mod.widgets.ButtonOutline.draw_bg.pixel = fn() {
 mod.widgets.ButtonFlatter.draw_bg.pixel = fn() {
     return self.host_over(an_button(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.hover, self.down, self.disabled, self.focus, self.loading, self.anim_time, 7.0, 0.0), 14.0)
 }
+mod.widgets.ButtonFlatter.draw_bg.face = {mode: @host_over, rest: #00000000, hover: #4f5761, down: #1c2128}
 
 // Label ink per state: caps #d4dae2, the primary's lit legend near white,
 // every variant dims to #626a74 when disabled.
@@ -725,6 +731,7 @@ mod.widgets.RadioButtonTabFlat.draw_bg.pixel = fn() {
     let below = (1.0 - inside) * step(hi.y - px, p.y)
     return an_rim_lamp(res, p, c.x, min(6.0, (hi.x - lo.x) * 0.3), hi.y - px, px, sel * (1.0 - self.disabled), 1.0, vec3(0.960, 0.985, 1.0), vec3(0.330, 0.600, 0.980), inside, below)
 }
+mod.widgets.RadioButtonTabFlat.draw_bg.face = {mode: @own_face, rest: #424951, hover: #4f5761, down: #1b2533, active: #1b2533}
 mod.widgets.RadioButtonTabFlat.draw_text.color = #c3c9d1
 mod.widgets.RadioButtonTabFlat.draw_text.color_hover = #dde2e8
 mod.widgets.RadioButtonTabFlat.draw_text.color_active = #fafafa

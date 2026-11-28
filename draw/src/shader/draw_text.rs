@@ -14,6 +14,7 @@ use {
         draw_list_2d::ManyInstances,
         glyph_capture::CapturedGlyph,
         makepad_platform::*,
+        makepad_platform::font_policy::needs_emoji_presentation,
         makepad_platform::recording_buffer::RecordingBuffer,
         text::{
             color::Color,
@@ -35,6 +36,7 @@ use {
         turtle::*,
         turtle::{Align, Walk},
     },
+    unicode_segmentation::UnicodeSegmentation,
     std::{
         cell::{Cell, RefCell},
         collections::hash_map::DefaultHasher,
@@ -1546,7 +1548,7 @@ impl DrawText {
         align: Align,
         text: &str,
     ) -> Rc<LaidoutText> {
-        self.text_style.font_family.ensure_fonts_loaded(cx);
+        let (fonts, pending_emoji) = self.text_style.font_family.ensure_fonts_for_text(cx, text);
         let laidout = self.layout_loaded(
             cx,
             first_row_indent_in_lpxs,
@@ -1582,17 +1584,22 @@ impl DrawText {
         // Under a `System` set the OS is asked first: while its font index is
         // still being built (Linux, started with the fonts, some ms) the
         // glyph waits for it instead of opening a bundled face it may not need.
-        if system_first && !cx.get_global::<Rc<RefCell<Fonts>>>().clone().borrow_mut().system_index_ready() {
+        if system_first && !fonts.borrow_mut().system_index_ready() {
             return laidout;
         }
         for system in [system_first, !system_first] {
             let started = Cx::time_now();
             let found = if system {
-                let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
-                let found = fonts
-                    .borrow_mut()
-                    .request_system_fallback(self.text_style.font_family.to_font_family_id(), text);
-                found
+                // An asynchronous emoji resource will redraw when it arrives. Other
+                // scripts in the same layout can use the OS immediately.
+                let other;
+                let system_text = if pending_emoji {
+                    other = text.graphemes(true).filter(|g| !needs_emoji_presentation(g)).collect::<String>();
+                    &other
+                } else {
+                    text
+                };
+                fonts.borrow_mut().request_system_fallback(self.text_style.font_family_id(), system_text)
             } else {
                 // Only what is still missing: an emoji the OS already drew
                 // does not bring in the bundled emoji face.
@@ -2138,8 +2145,8 @@ pub struct FontMember {
     /// (four-letter tag, value; axes the font lacks are ignored).
     #[live]
     pub axes: String,
-    /// `1` = CJK and `2` = emoji. These members are requested only after a
-    /// real glyph miss; zero keeps the ordinary eager behavior.
+    /// `1` = CJK and `2` = emoji. A glyph miss or explicit/default emoji
+    /// presentation requests a lazy face. Zero keeps the ordinary eager behavior.
     #[live(0.0)]
     pub lazy: f32,
     /// An installed font by family name instead of a packaged `res`:
@@ -2475,6 +2482,36 @@ impl FontFamily {
         fonts
     }
 
+    /// Request emoji presentation before shaping, including when a text face
+    /// already covers the base. The flag says this text awaits the emoji resource.
+    pub(crate) fn ensure_fonts_for_text(&self, cx: &mut Cx, text: &str) -> (Rc<RefCell<Fonts>>, bool) {
+        let fonts = self.ensure_fonts_loaded(cx);
+        let id = self.to_font_family_id();
+        let requested = fonts.borrow().lazy_font_is_requested(id, LazyFontFamily::Emoji);
+        // Every emoji-presentation range and U+FE0F sit at U+231A or above: text below that
+        // (Latin with accents, say) skips the grapheme scan, which runs on each layout until
+        // the emoji face has been asked for.
+        if (requested && !fonts.borrow().is_font_family_loading(id)) || !text.chars().any(|c| c >= '\u{231A}') {
+            return (fonts, false);
+        }
+        let Some(member) = self.members.iter().find(|m| m.lazy == Some(LazyFontFamily::Emoji)) else {
+            return (fonts, false);
+        };
+        let Some(cluster) = text.graphemes(true).find(|g| needs_emoji_presentation(g)) else {
+            return (fonts, false);
+        };
+        if !requested {
+            fonts.borrow_mut().take_lazy_font_request(id, LazyFontFamily::Emoji, cluster);
+            self.ensure_fonts_loaded(cx);
+        }
+        let pending = {
+            let fonts = fonts.borrow();
+            let font_id = font_member_font_id(member);
+            !fonts.is_font_known(font_id) && !fonts.is_font_unavailable(font_id)
+        };
+        (fonts, pending)
+    }
+
     /// Whether a lazy face was asked for (and, where the bytes are at hand,
     /// is in the family now).
     fn request_lazy_fonts_for_glyph_miss(
@@ -2624,7 +2661,7 @@ impl TextStyle {
 
     /// Shapes `text` like the layouter does, sharing its cache, without laying it out.
     pub fn get_or_shape(&self, cx: &mut Cx, text: &str) -> Rc<ShapedText> {
-        let fonts = self.font_family.ensure_fonts_loaded(cx);
+        let (fonts, _) = self.font_family.ensure_fonts_for_text(cx, text);
         let font_family = fonts.borrow_mut().get_or_load_font_family(self.font_family_id());
         font_family.get_or_shape(text.into())
     }
@@ -2806,6 +2843,61 @@ mod tests {
         assert!(is_new_request);
         family.ensure_fonts_loaded(&mut cx);
         assert_eq!(fonts.borrow_mut().get_or_load_font_family(family_id).fonts().len(), 2);
+    }
+
+    #[test]
+    fn emoji_presentation_prefers_color_in_a_lazy_family() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut draw = cx.with_vm(|vm| DrawText::script_new(vm));
+        let resources = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../widgets/resources");
+        let member = |file: &str, lazy| FontMemberDef {
+            resource_path: resources.join(file).to_string_lossy().into_owned(),
+            id: file.into(),
+            lazy,
+            ..Default::default()
+        };
+        let plex = member("IBMPlexSans-Text.ttf", None);
+        let wenkai = member("LXGWWenKaiRegular.ttf", None);
+        let noto = member("NotoColorEmoji.ttf", Some(LazyFontFamily::Emoji));
+        let [ui, cjk, emoji] = [&plex, &wenkai, &noto].map(super::font_member_font_id);
+        draw.text_style.font_family = FontFamily {
+            id: LiveId(0xE001),
+            members: Rc::from([plex, wenkai, noto]),
+            diagnostic_role: "regular".into(),
+            diagnostic_set: "test".into(),
+            loaded_fonts_generation: Default::default(),
+        };
+        let layout = |cx: &mut Cx, text: &str| {
+            draw.layout(cx, 0.0, 0.0, None, false, Default::default(), text)
+        };
+        let plain = layout(&mut cx, "☝→");
+        let plain_faces: Vec<_> = plain.rows[0].glyphs.iter().map(|g| g.font.id()).collect();
+        assert_eq!(plain_faces, [cjk, ui], "plain symbols follow the text chain");
+        let fonts = draw.text_style.font_family.ensure_fonts_loaded(&mut cx);
+        assert!(!fonts.borrow().is_font_known(emoji), "plain symbols keep the emoji face cold");
+        let cold = fonts.borrow_mut().get_or_load_font_family(draw.text_style.font_family_id());
+        assert_eq!(cold.get_or_shape("❌".into()).glyphs[0].font.id(), ui,
+            "without the colour face the existing text glyph wins");
+
+        // The first cluster needs its selector to request Noto: '#' alone is outside
+        // the lazy emoji ranges. The rest exercise overlapping glyphs in both text faces.
+        let cases = [("#️⃣", emoji), ("☝️", emoji), ("❌", emoji), ("⚾", emoji), ("☝", cjk), ("→", ui)];
+        let text: String = cases.iter().map(|(cluster, _)| *cluster).collect();
+        let shaped = layout(&mut cx, &text);
+        assert!(fonts.borrow().is_font_known(emoji), "layout loads the lazy colour face");
+        let mut glyphs = shaped.rows[0].glyphs.iter().peekable();
+        let mut offset = 0;
+        for (cluster, expected) in cases {
+            let first = glyphs.next().expect("a glyph for every cluster");
+            assert_eq!((first.cluster, first.font.id()), (offset, expected), "{cluster}");
+            assert_ne!(first.id, 0, "{cluster} must be covered");
+            while let Some(g) = glyphs.next_if(|g| g.cluster == offset) {
+                assert_eq!(g.font.id(), expected, "{cluster}");
+                assert_ne!(g.id, 0, "{cluster} must be covered");
+            }
+            offset += cluster.len();
+        }
+        assert!(glyphs.next().is_none());
     }
 
     #[test]

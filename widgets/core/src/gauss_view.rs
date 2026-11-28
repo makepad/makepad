@@ -493,8 +493,7 @@ script_mod! {
 
     mod.widgets.GaussRoundedViewBase = #(GaussRoundedView::register_widget(vm))
 
-    // The glass material (local/agent_state/wm-all/design/
-    // clock-weather-design.md §3): the scene behind the slab is TRANSMITTED,
+    // The glass material: the scene behind the slab is TRANSMITTED,
     // not frosted — a low blur inside, sharper still at the rim — and the
     // rim is a LENS: in a band just inside the edge the sample point is
     // pushed outward along the rounded-rect normal, up to `lensing_strength`

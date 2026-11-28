@@ -73,7 +73,7 @@ fn precise_vector_forms_read_their_operands_once() {
             // the helpers compile on the Metal device, as the HAL builds them
             #[cfg(target_os = "macos")]
             if backend == ShaderBackend::Metal {
-                makepad_draw::makepad_platform::makepad_hal::backend::apple::metal::compile_msl(&t).unwrap_or_else(|e| panic!("Metal: {e}\n{t}"));
+                makepad_draw::makepad_platform::makepad_hal::compile_msl(&t).unwrap_or_else(|e| panic!("Metal: {e}\n{t}"));
             }
         }
         // Vulkan: the same lowering into SPIR-V, which validates

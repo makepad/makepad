@@ -4,7 +4,7 @@
 //! bounded; UI sends and receives never block. A caller must request frames while `pending()` is true.
 use super::{
     font::FontId,
-    font_family::{FontDiagnostics, FontFamilyId},
+    font_family::{FontDiagnostics, FontFamily, FontFamilyId},
     fonts::Fonts,
     geom::Point,
     layouter::{BorrowedLayoutParams, LayoutOptions, Layouter, Settings, Style},
@@ -16,7 +16,7 @@ use super::rasterizer::PublishedGlyph;
 use crate::makepad_platform::recording_buffer::RecordingBuffer;
 use crate::{makepad_platform::*, Cx2d, DrawText};
 use crate::makepad_platform::makepad_network::mpsc::{self, Receiver, SyncSender, TrySendError};
-use std::{cell::RefCell, collections::VecDeque, rc::Rc, sync::Arc};
+use std::{cell::RefCell, collections::VecDeque, rc::{Rc, Weak}, sync::Arc};
 
 use crate::makepad_platform::thread::ui_hang::hashing::{HashMap, HashSet};
 
@@ -121,7 +121,7 @@ pub struct LabelCache {
     worker: Option<Worker>,
     texts: HashMap<Arc<str>, LabelText>,
     last_text: Option<LabelText>,
-    families: HashSet<FontFamilyId>,
+    families: HashMap<FontFamilyId, Weak<FontFamily>>,
     sent_fonts: HashSet<FontId>,
     waiting: HashSet<Key>,
     unsent: VecDeque<Request>,
@@ -376,10 +376,16 @@ impl LabelCache {
             return None;
         }
         self.start(cx);
-        draw.text_style.ensure_fonts_loaded(cx);
-        let family = if self.families.insert(key.family) {
-            let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
-            let family = fonts.borrow_mut().get_or_load_font_family(key.family);
+        let (fonts, pending_emoji) = draw.text_style.font_family.ensure_fonts_for_text(cx, text);
+        if pending_emoji {
+            return None;
+        }
+        let family = fonts.borrow_mut().get_or_load_font_family(key.family);
+        let current = Rc::downgrade(&family);
+        let family = if self.families.get(&key.family).is_some_and(|sent| sent.ptr_eq(&current)) {
+            None
+        } else {
+            self.families.insert(key.family, current);
             Some(FamilySnapshot {
                 id: key.family,
                 font_ids: family.fonts().iter().map(|f| f.id()).collect(),
@@ -393,8 +399,6 @@ impl LabelCache {
                     .collect(),
                 diagnostics: family.diagnostics().clone(),
             })
-        } else {
-            None
         };
         self.waiting.insert(key.clone());
         self.unsent.push_back(Request { key, family });

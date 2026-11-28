@@ -684,7 +684,8 @@ impl Widget for JobStrip {
             cx.stop_timer(self.tick_timer);
             self.tick_timer = cx.start_timeout(1.0);
         }
-        if self.view.button(cx, ids!(pop.cancel)).clicked(actions) {
+        // The popover's own Cancel, its direct child: each job row in its list has one too.
+        if self.view.widget(cx, ids!(pop)).child(id!(cancel)).as_button().clicked(actions) {
             if let Some(id) = self.shown.job {
                 let running = board().get(id).is_some_and(|j| j.end.is_running());
                 if running {
@@ -711,9 +712,8 @@ impl Widget for JobStrip {
         // while it is open).
         let visible = job.is_some() || open;
         let pop = self.view.widget(cx, ids!(pop));
-        let line_w = self.view.widget(cx, ids!(pop.line));
-        let cancel_w = self.view.widget(cx, ids!(pop.cancel));
-        let more_w = self.view.widget(cx, ids!(pop.more));
+        // The popover's own controls, its direct children (each job row has a `cancel` too).
+        let (line_w, cancel_w, more_w) = (pop.child(id!(line)), pop.child(id!(cancel)), pop.child(id!(more)));
         let cx1 = &mut *cx.cx.cx;
         put_visible(cx1, &pop, visible);
         if let Some(job) = job {

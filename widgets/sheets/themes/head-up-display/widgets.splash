@@ -333,6 +333,7 @@ mod.widgets.ButtonFlat.draw_bg.pixel = fn() {
     let f = h_button(p, self.rect_pos, self.rect_size, px, vec4(1.0, 0.0, 1.0, 0.0), self.hover, self.down, self.focus, self.disabled, 5.0)
     return self.host_over(h_wait(f, p, vec2(0.0, 0.0), self.rect_size, px, self.loading, self.anim_time), m)
 }
+mod.widgets.ButtonFlat.draw_bg.face = {mode: @host_over, rest: #00000000, hover: #12232c73, down: #002837cc}
 mod.widgets.Button.draw_bg.pixel = fn() {
     let m = self.glow_room
     let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
@@ -405,6 +406,7 @@ mod.widgets.ButtonFlatter.draw_bg.pixel = fn() {
     let f = h_button(p, self.rect_pos, self.rect_size, px, vec4(1.0, 0.0, 1.0, 0.0), self.hover, self.down, self.focus, self.disabled, 6.0)
     return self.host_over(h_wait(f, p, vec2(0.0, 0.0), self.rect_size, px, self.loading, self.anim_time), m)
 }
+mod.widgets.ButtonFlatter.draw_bg.face = {mode: @host_over, rest: #00000000, hover: #12232c73, down: #002837cc}
 
 // Button inks: the hot white-cyan on the primary, the accent on the armed
 // face, the red role's pale rose on danger, the dim line when off.
@@ -1767,6 +1769,7 @@ mod.widgets.RadioButtonTabFlat.draw_bg.pixel = fn() {
     // A disabled tab is its dim title and nothing else.
     return h_tab(p, self.rect_pos, self.rect_size, px, self.hover * live, self.focus * live, self.active * live, self.down * live)
 }
+mod.widgets.RadioButtonTabFlat.draw_bg.face = {mode: @own_face, rest: #00000000, hover: #0d1f2773, down: #002837cc, active: #10252ee6}
 mod.widgets.RadioButtonTabFlat.draw_text.color = #7fb3bc
 mod.widgets.RadioButtonTabFlat.draw_text.color_hover = #b8eef5
 mod.widgets.RadioButtonTabFlat.draw_text.color_active = #e6fdff

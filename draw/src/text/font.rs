@@ -20,6 +20,7 @@ pub use makepad_font_core::font::{FontId, GlyphId};
 #[derive(Debug)]
 pub struct Font {
     core: CoreFont,
+    has_color_bitmaps: bool,
     rasterizer: Rc<RefCell<Rasterizer>>,
 }
 
@@ -55,10 +56,18 @@ impl Font {
         ascender_fudge_in_ems: f32,
         descender_fudge_in_ems: f32,
     ) -> Self {
+        let has_color_bitmaps = face.with_ttf_parser_face(|f| {
+            f.tables().cbdt.is_some() || f.tables().sbix.is_some()
+        });
         Self {
+            has_color_bitmaps,
             core: CoreFont::new(id, face, ascender_fudge_in_ems, descender_fudge_in_ems),
             rasterizer,
         }
+    }
+
+    pub(super) fn has_color_bitmaps(&self) -> bool {
+        self.has_color_bitmaps
     }
 
     pub fn rasterize_glyph(&self, glyph_id: GlyphId, dpxs_per_em: f32) -> Option<RasterizedGlyph> {

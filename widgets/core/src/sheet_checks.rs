@@ -366,3 +366,252 @@ pub fn replaced_shaders_compile(register: fn(&mut ScriptVm), entry: &SheetEntry)
     });
     compiled
 }
+
+fn shader_color(vm: &ScriptVm, value: ScriptValue) -> Option<u32> {
+    if let Some(c) = value.as_color() {
+        return Some(c);
+    }
+    let obj = value.as_object()?;
+    vm.heap().as_shader_io(obj)?;
+    vm.heap().proto(obj).as_color()
+}
+
+fn max_channel_delta(a: u32, b: u32) -> f64 {
+    [24u32, 16, 8]
+        .into_iter()
+        .map(|s| (((a >> s) & 0xff) as i32 - ((b >> s) & 0xff) as i32).abs() as f64 / 255.0)
+        .fold(0.0_f64, f64::max)
+}
+
+fn host_over_opaque(face: u32, host: u32, default: u32) -> u32 {
+    let ch = |c: u32, shift: u32| ((c >> shift) & 0xff) as i32;
+    [24u32, 16, 8].into_iter().fold(0xff, |out, shift| {
+        let value = ch(face, shift) + ch(host, shift) - ch(default, shift);
+        out | ((value.clamp(0, 255) as u32) << shift)
+    })
+}
+
+/// `ink`, or the smallest mix toward white/black that reaches `need` on `ground`.
+/// Mirrors Fab's `ink_reading` (16 bisections via `theme_tokens::mix_rgba`) so
+/// the static check exercises the same zero-margin bisection floor when a
+/// sheet's `color_text_on_accent` does not natively read on `color_focus`.
+fn fit_ink_on(ground: u32, ink: u32, need: f64) -> u32 {
+    use crate::theme_tokens::{mix_rgba, reads_on};
+    if reads_on(ground, ink) >= need {
+        return ink;
+    }
+    let end = if reads_on(ground, 0xffffffff) >= reads_on(ground, 0x000000ff) {
+        0xffffffff
+    } else {
+        0x000000ff
+    };
+    if reads_on(ground, end) < need {
+        return end;
+    }
+    let (mut lo, mut hi) = (0.0_f64, 1.0_f64);
+    for _ in 0..16 {
+        let mid = 0.5 * (lo + hi);
+        if reads_on(ground, mix_rgba(ink, end, mid)) >= need {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    mix_rgba(ink, end, hi)
+}
+
+/// Every `ButtonFlat`, `ButtonFlatter`, and `RadioButtonTabFlat` reads cleanly
+/// on its own face across rest, hover, down, focus, and (for tabs) active:
+/// `READABLE` (4.5:1) for words (`draw_text`), `LEGIBLE` (3.0:1) for tinted
+/// icons (`draw_icon`).
+///
+/// Structural guard: any sheet that replaces `draw_bg.pixel` relative to
+/// `mod.stock_widgets` must declare `draw_bg.face` (and `ButtonFlatter` must
+/// declare its own `draw_bg.face` whenever its `pixel` differs from
+/// `ButtonFlat`'s), so a new sheet with a custom face cannot slip past.
+/// Opaque `@host_over` `ButtonFlat` faces must also align `color` and
+/// `color_default` within 0.06 per channel of `face.rest` and keep fitted
+/// `color_text_on_accent` readable (`READABLE`, 4.5:1) on
+/// `host_over(face.rest, color_focus, color_default)` so app-painted accents
+/// shift from the true baseline.
+pub fn button_and_tab_contrast(register: fn(&mut ScriptVm), entry: &SheetEntry) {
+    use crate::desktop_style::{try_widget_face, widget_pixel_key, widget_pixel_overridden, FaceMode};
+    use crate::theme_tokens::{over, reads_on, LEGIBLE, READABLE};
+
+    under(register, entry, |vm, _| {
+        let theme = vm.module(id!(theme));
+        let surface = vm
+            .value(theme, id!(color_surface_container))
+            .as_color()
+            .or_else(|| vm.value(theme, id!(color_bg_app)).as_color())
+            .expect("sheet has a container or app ground")
+            | 0xff;
+        let widgets = vm.module(id!(widgets));
+        let mut bad: Vec<String> = Vec::new();
+
+        let specs: [(LiveId, &str, bool); 3] = [
+            (id!(RadioButtonTabFlat), "RadioButtonTabFlat", true),
+            (id!(ButtonFlat), "ButtonFlat", false),
+            (id!(ButtonFlatter), "ButtonFlatter", false),
+        ];
+
+        let bf_pixel = widget_pixel_key(vm, id!(widgets), id!(ButtonFlat));
+
+        for (wid, wname, has_active) in specs {
+            let w = vm.value(widgets, wid).as_object().unwrap_or_else(|| panic!("{}: missing {wname}", entry.id));
+            let bg = vm.value(w, id!(draw_bg)).as_object().unwrap_or_else(|| panic!("{}: {wname} missing draw_bg", entry.id));
+            let dt = vm.value(w, id!(draw_text)).as_object().unwrap_or_else(|| panic!("{}: {wname} missing draw_text", entry.id));
+            let di = vm.value(w, id!(draw_icon)).as_object();
+
+            let face = try_widget_face(vm, wid).unwrap_or_else(|err| panic!("{}: {err}", entry.id));
+            let overridden = widget_pixel_overridden(vm, wid);
+
+            // 1. Structural guard: custom pixel shader must declare `draw_bg.face`.
+            if overridden {
+                if face.is_none() {
+                    bad.push(format!("{wname}: overrides draw_bg.pixel without declaring draw_bg.face"));
+                    continue;
+                }
+                if wid == id!(ButtonFlatter) && widget_pixel_key(vm, id!(widgets), wid) != bf_pixel {
+                    let has_own_face = vm.heap().map_own_value(bg, id!(face).into()).is_some();
+                    if !has_own_face {
+                        bad.push(format!("{wname}: overrides draw_bg.pixel separately from ButtonFlat without its own draw_bg.face"));
+                        continue;
+                    }
+                }
+            }
+
+            // 2. Resolve per-state face colour, composited over `surface`.
+            let read_bg = |vm: &mut ScriptVm, key: LiveId| shader_color(vm, vm.value(bg, key));
+            let (rest, hover, down, focus, active) = match face {
+                None => {
+                    let c = read_bg(vm, id!(color)).unwrap_or(0);
+                    if has_active {
+                        // Stock RadioButtonTabFlat mixes only `color` and `color_active`.
+                        let act = read_bg(vm, id!(color_active)).unwrap_or(c);
+                        (c, c, c, c, Some(act))
+                    } else {
+                        let h = read_bg(vm, id!(color_hover)).unwrap_or(c);
+                        let d = read_bg(vm, id!(color_down)).unwrap_or(c);
+                        let f = read_bg(vm, id!(color_focus)).unwrap_or(c);
+                        (c, h, d, f, None)
+                    }
+                }
+                Some(f) if f.mode == FaceMode::SelfColor => {
+                    let c = f.rest.or_else(|| read_bg(vm, id!(color))).unwrap_or(0);
+                    let h = f.hover.or_else(|| read_bg(vm, id!(color_hover))).unwrap_or(c);
+                    let d = f.down.or_else(|| read_bg(vm, id!(color_down))).unwrap_or(c);
+                    let fo = f.focus.or_else(|| read_bg(vm, id!(color_focus))).unwrap_or(c);
+                    let act = has_active.then(|| f.active.or_else(|| read_bg(vm, id!(color_active))).unwrap_or(c));
+                    (c, h, d, fo, act)
+                }
+                Some(f) => {
+                    let Some(r) = f.rest else {
+                        bad.push(format!("{wname}: draw_bg.face missing `rest`"));
+                        continue;
+                    };
+                    let Some(h) = f.hover else {
+                        bad.push(format!("{wname}: draw_bg.face missing `hover`"));
+                        continue;
+                    };
+                    let Some(d) = f.down else {
+                        bad.push(format!("{wname}: draw_bg.face missing `down`"));
+                        continue;
+                    };
+                    let fo = f.focus.unwrap_or(r);
+                    let act = if has_active {
+                        match f.active {
+                            Some(a) => Some(a),
+                            None => {
+                                bad.push(format!("{wname}: draw_bg.face missing `active`"));
+                                continue;
+                            }
+                        }
+                    } else {
+                        None
+                    };
+                    // 3. `host_over` baseline parity and accent readability on opaque ButtonFlat faces.
+                    if wid == id!(ButtonFlat) && f.mode == FaceMode::HostOver && (r & 0xff) == 0xff {
+                        let col = read_bg(vm, id!(color)).unwrap_or(0);
+                        let def = read_bg(vm, id!(color_default)).unwrap_or(0);
+                        if col != def {
+                            bad.push(format!(
+                                "{wname}: draw_bg.color #{col:08x} != draw_bg.color_default #{def:08x} on opaque @host_over face"
+                            ));
+                        }
+                        let delta = max_channel_delta(r, def);
+                        if delta > 0.06 {
+                            bad.push(format!(
+                                "{wname}: draw_bg.color_default #{def:08x} drifts {delta:.2} from face.rest #{r:08x} (> 0.06)"
+                            ));
+                        }
+                        let accent = vm
+                            .value(theme, id!(color_focus))
+                            .as_color()
+                            .or_else(|| vm.value(theme, id!(color_ctrl_selected)).as_color())
+                            .map_or(surface, |c| over(surface, c));
+                        let raw_on_accent = vm
+                            .value(theme, id!(color_text_on_accent))
+                            .as_color()
+                            .unwrap_or(0xffffffff);
+                        let painted = host_over_opaque(r, accent, def);
+                        let on_accent = fit_ink_on(accent, raw_on_accent, READABLE);
+                        let ratio = reads_on(painted, on_accent);
+                        if ratio < READABLE {
+                            bad.push(format!(
+                                "{wname}: host_over(face.rest #{r:08x}, color_focus #{accent:08x}, color_default #{def:08x}) = #{painted:08x} under fitted accent ink #{on_accent:08x} = {ratio:.2}:1 (need {READABLE:.1})"
+                            ));
+                        }
+                    }
+                    (r, h, d, fo, act)
+                }
+            };
+
+            let mut states: Vec<(&str, u32, LiveId)> = vec![
+                ("rest", over(surface, rest), id!(color)),
+                ("hover", over(surface, hover), id!(color_hover)),
+                ("down", over(surface, down), id!(color_down)),
+                ("focus", over(surface, focus), id!(color_focus)),
+            ];
+            if let Some(act) = active {
+                states.push(("active", over(surface, act), id!(color_active)));
+            }
+
+            // 4. Word contrast (`draw_text`, 4.5:1 READABLE) across all states.
+            let dt_rest = shader_color(vm, vm.value(dt, id!(color)));
+            for &(st, bg_rgb, key) in &states {
+                let ink = shader_color(vm, vm.value(dt, key)).or(dt_rest);
+                if let Some(ink) = ink {
+                    let ratio = reads_on(bg_rgb, ink);
+                    if ratio < READABLE {
+                        bad.push(format!(
+                            "{wname}.draw_text.{st}: #{ink:08x} on #{bg_rgb:08x} = {ratio:.2}:1 (need {READABLE:.1})"
+                        ));
+                    }
+                }
+            }
+
+            // 5. Icon contrast (`draw_icon`, 3.0:1 LEGIBLE) whenever tinted with a Splash color
+            //    (stock `DrawSvg` uses `vec4(-1,-1,-1,-1)` sentinel -> `shader_color` returns `None`).
+            if let Some(di_obj) = di {
+                for &(st, bg_rgb, key) in &states {
+                    if let Some(ink) = shader_color(vm, vm.value(di_obj, key)) {
+                        let ratio = reads_on(bg_rgb, ink);
+                        if ratio < LEGIBLE {
+                            bad.push(format!(
+                                "{wname}.draw_icon.{st}: #{ink:08x} on #{bg_rgb:08x} = {ratio:.2}:1 (need {LEGIBLE:.1})"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        assert!(
+            bad.is_empty(),
+            "{}: button/tab ink does not read on its own face:\n{}",
+            entry.id,
+            bad.join("\n")
+        );
+    });
+}

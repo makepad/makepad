@@ -6433,6 +6433,12 @@ impl Turtle {
         dvec2(self.used_width, self.used_height)
     }
 
+    /// Content extent including the space after the last child on each axis.
+    pub fn used_padded(&self) -> Vec2d {
+        let padding = self.padding();
+        dvec2((self.used_width + padding.right).max(0.0), (self.used_height + padding.bottom).max(0.0))
+    }
+
     pub fn set_used(&mut self, width_used: f64, height_used: f64) {
         self.used_width = width_used;
         self.used_height = height_used;

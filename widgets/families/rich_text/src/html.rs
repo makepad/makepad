@@ -19,7 +19,7 @@ use crate::{
     makepad_html::*,
     text_flow::TextFlow,
     widget::*,
-    WidgetMatchEvent,
+    HostGrants, WidgetMatchEvent,
 };
 
 const BULLET: &str = "•";
@@ -1556,7 +1556,7 @@ impl HtmlLink {
     /// Emits the given action with this link's URL, unless a restricted Splash is running:
     /// it must not hand its URLs to the host, which may open them.
     fn emit_url_action(&self, cx: &mut Cx, action: HtmlLinkAction) {
-        if !cx.script_data.std.host_io_only() {
+        if cx.script_data.std.has_grant(HostGrants::OPEN_URL) {
             cx.widget_action(self.widget_uid(), action);
         }
     }
@@ -1849,6 +1849,53 @@ impl InlineStyleTag {
 }
 
 #[cfg(test)]
+pub(crate) mod guard_test_support {
+    use super::*;
+    use crate::makepad_platform::event::{MouseButton, MouseDownEvent, MouseUpEvent};
+
+    pub(crate) fn frame(cx: &mut Cx, pass: &DrawPass, list: &mut DrawList2d, f: impl FnOnce(&mut Cx2d)) {
+        let size = dvec2(240., 100.);
+        pass.set_size(cx, size);
+        let event = DrawEvent::default();
+        let mut draw = CxDraw::new(cx, &event);
+        let mut cx = Cx2d::new(&mut draw);
+        cx.begin_pass(pass, None);
+        list.begin_always(&mut cx);
+        cx.begin_root_turtle(size, Layout::flow_down());
+        f(&mut cx);
+        cx.end_pass_sized_turtle();
+        list.end(&mut cx);
+        cx.end_pass(pass);
+    }
+
+    pub(crate) fn click(cx: &mut Cx, widget: &mut dyn Widget, area: Area) -> Vec<Action> {
+        let rect = area.clipped_rect(cx);
+        assert!(area.is_valid(cx) && rect.size.x > 0. && rect.size.y > 0., "link needs a real click target");
+        let abs = rect.center();
+        let button = MouseButton::PRIMARY;
+        let window_id = WindowId(0, 1);
+        cx.fingers.first_mouse_button = Some((button, window_id));
+        let mut actions = Vec::new();
+        for event in [
+            Event::MouseDown(MouseDownEvent {
+                abs, button, window_id, time: 1., modifiers: Default::default(), handled: Default::default(),
+            }),
+            Event::MouseUp(MouseUpEvent {
+                abs, button, window_id, time: 1.1, modifiers: Default::default(),
+            }),
+        ] {
+            let batch = cx.capture_actions(|cx| widget.handle_event(cx, &event, &mut Scope::empty()));
+            // Each pointer event has its own action dispatch in the platform loop.
+            let event = Event::Actions(batch);
+            actions.extend(cx.capture_actions(|cx| widget.handle_event(cx, &event, &mut Scope::empty())));
+            if let Event::Actions(batch) = event { actions.extend(batch); }
+        }
+        cx.fingers = Default::default();
+        actions
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1869,17 +1916,37 @@ mod tests {
     }
 
     #[test]
-    fn restricted_links_emit_no_url() {
+    fn html_link_obeys_open_url_grant() {
+        use crate::{widget_async::with_isolate, CxSplashVmExt};
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.with_vm(crate::script_mod);
-        let link = cx.with_vm(|vm| {
-            let value = crate::script_eval!(vm, {use mod.widgets.* HtmlLink{url: "https://example.invalid/"}});
-            HtmlLink::script_from_value(vm, value)
-        });
-        let click = || HtmlLinkAction::Clicked { url: "https://example.invalid/".into(), key_modifiers: Default::default() };
-        assert_eq!(cx.capture_actions(|cx| link.emit_url_action(cx, click())).len(), 1);
-        cx.script_data.std.restrict_to_host_io();
-        assert!(cx.capture_actions(|cx| link.emit_url_action(cx, click())).is_empty());
+        cx.global::<crate::widget_hooks::IsolateFamilies>().0.push(crate::rich_text_mod);
+        let pass = DrawPass::new(&mut cx);
+        let mut list = DrawList2d::new(&mut cx);
+        let default = cx.alloc_splash_vm();
+        let granted = cx.alloc_splash_vm_with_grants(HostGrants::OPEN_URL, None);
+        for (vm, allowed) in [(default, false), (granted, true)] {
+            with_isolate(&mut cx, vm, |cx| {
+                let mut link = cx.with_vm(|vm| {
+                    let value = crate::script_eval!(vm, {use mod.widgets.* HtmlLink{url: "https://example.invalid/"}});
+                    HtmlLink::script_from_value(vm, value)
+                });
+                // TextFlow supplies these areas when it lays out an inline anchor.
+                let mut area = Area::Empty;
+                guard_test_support::frame(cx, &pass, &mut list, |cx| {
+                    cx.walk_turtle_with_area(&mut area, Walk::fixed(80., 30.));
+                });
+                link.drawn_areas.push(area);
+                let actions = guard_test_support::click(cx, &mut link, area);
+                let urls: Vec<_> = actions.iter().filter_map(|action| match action.as_widget_action().cast() {
+                    HtmlLinkAction::Clicked { url, .. } => Some(url),
+                    _ => None,
+                }).collect();
+                assert_eq!(urls, if allowed { vec!["https://example.invalid/"] } else { vec![] },
+                    "HTML link may emit its clicked URL only with OPEN_URL");
+            });
+            cx.free_splash_vm(vm);
+        }
     }
 
     #[test]

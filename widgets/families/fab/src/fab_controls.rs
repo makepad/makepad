@@ -711,7 +711,12 @@ pub fn script_mod(vm: &mut ScriptVm) {
                 // A colour carried off its square leaves the square most of
                 // the way to an empty field, so the hand can see where it
                 // came from and that it is no longer there.
-                sdf.fill_keep(vec4(self.swatch.xyz, 1.0).mix(fab.color_input, self.lifted * 0.75))
+                let cx = floor(self.pos.x * self.rect_size.x / 4.0)
+                let cy = floor(self.pos.y * self.rect_size.y / 4.0)
+                let ch = modf(cx + cy, 2.0)
+                let back = vec3(0.22, 0.22, 0.22).mix(vec3(0.34, 0.34, 0.34), ch)
+                let rgb = back.mix(self.swatch.xyz, self.swatch.w)
+                sdf.fill_keep(vec4(rgb, 1.0).mix(fab.color_input, self.lifted * 0.75))
                 // The square a colour left is not the one in the hand, so it
                 // gives up its hover ring while it is empty.
                 let lit = max(max(self.hover, self.open) * (1.0 - self.lifted), self.target)

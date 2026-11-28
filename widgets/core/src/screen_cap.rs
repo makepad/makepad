@@ -14,6 +14,23 @@
 //! The key sits beside the AI's plain F10 and the tweaker's Shift+F10 on
 //! purpose: one assistant key, one designer key, one recorder key.
 //!
+//! The F10 family: F10 is the AI, Shift+F10 the tweaker, Ctrl+F10 records,
+//! Alt+F10 (Option+F10 on the Mac) reports an issue. Alt+F10 captures a
+//! full-size PNG still at once and records the window until the second press
+//! (both into `repo_screencap_dir()`, `issue` in their names), and hands them
+//! to whatever program serves `report` v1 in the remote registry: one read of
+//! the registry per press, the most recently started entry, a client
+//! connection that works with this app's own remote endpoint off. The first
+//! line `{"report":{"app","title","w","h","dpi","still"}}` is answered
+//! `{"taken":true}`; the second press sends `{"report_done":{"video",
+//! "seconds"}}` once the file is finalized. The registry read, the connect and
+//! every send run on one worker; a missing or slow taker never stalls the app.
+//! With no taker the files stay in the screencap folder and the window says
+//! so. There is never a Ctrl+Alt combination: Ctrl+Alt+F1..F12 switches
+//! virtual terminals on the Linux direct backend. One outside clash: GNOME
+//! maximizes a window on Alt+F10, which matters only on a GNOME desktop, not
+//! under the Makepad WM or on the Mac.
+//!
 //! Both halves come off platform seams added for this:
 //!
 //! - picture: `makepad_platform::screen_capture` — a standing sink on the
@@ -54,7 +71,7 @@ use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
 
 use makepad_platform::audio_output_tap::{add_audio_output_tap, remove_audio_output_tap};
 use makepad_platform::screen_capture::{
-    add_screen_capture, remove_screen_capture, ScreenCaptureOptions,
+    add_screen_capture, remove_screen_capture, FrameCapture, ScreenCaptureOptions,
 };
 #[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux"))]
 use makepad_platform::screen_capture::{
@@ -68,9 +85,10 @@ use makepad_platform::thread::{CancellationToken, TaskHandle, ThreadOptions};
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -110,6 +128,13 @@ script_mod! {
         dot_margin: 12.0
         max_fps: 60.0
         scale: 1.0
+        draw_text +: {
+            color: #xffffff
+            text_style: theme.font_bold{font_size: 11}
+        }
+        draw_pill +: {
+            color: #x000000cc
+        }
     }
 }
 
@@ -214,6 +239,11 @@ pub struct ScreenCap {
     /// in the encoder (Apple, Windows), not on the app's thread.
     #[live(1.0)]
     scale: f64,
+    /// The line shown on the window while an issue is reported, and its backdrop.
+    #[live]
+    draw_text: DrawText,
+    #[live]
+    draw_pill: DrawColor,
     /// Only a Studio-managed recording (an absolute directory handed over by
     /// the flow) sets this. Every other recording, in every app of a repo,
     /// lands in that repo's `local/screencap/` (see `repo_screencap_dir`).
@@ -241,6 +271,19 @@ pub struct ScreenCap {
     managed: bool,
     #[rust]
     managed_checked: bool,
+    /// The issue being reported (Alt+F10), from the first press to the end of its worker.
+    #[rust]
+    report: Option<Report>,
+    /// A line that stays on the window for a while after a report, such as where the files are.
+    #[rust]
+    notice: Option<String>,
+    #[rust]
+    notice_timer: Timer,
+    /// Set by [`crate::window::Window`], for the report.
+    #[rust]
+    window_title: String,
+    #[rust]
+    window_dpi: f64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -250,6 +293,43 @@ pub enum ScreenCapAction {
     Failed(String),
     #[default]
     None,
+}
+
+/// Encoded track metadata, available after the worker has finalized the file.
+pub struct RecordedWindow {
+    pub path: PathBuf,
+    pub frames: u64,
+    pub width: u32,
+    pub height: u32,
+    pub duration_ms: u64,
+}
+
+/// The completion of a named, silent window recording. Poll on the UI thread.
+pub struct WindowRecording {
+    receive: std::sync::mpsc::Receiver<Result<RecordedWindow, String>>,
+    /// The result `wait` took off the channel, for the next `try_finish`.
+    waited: std::cell::RefCell<Option<Result<RecordedWindow, String>>>,
+}
+
+impl WindowRecording {
+    pub fn try_finish(&self) -> Option<Result<RecordedWindow, String>> {
+        use std::sync::mpsc::TryRecvError;
+        if let Some(result) = self.waited.borrow_mut().take() { return Some(result); }
+        match self.receive.try_recv() {
+            Ok(result) => Some(result),
+            Err(TryRecvError::Empty) => None,
+            Err(TryRecvError::Disconnected) => Some(Err("The recording worker stopped.".into())),
+        }
+    }
+
+    /// Block until the encoder has posted its result, which `try_finish` then returns. For a
+    /// test or a worker after the recording was stopped; the UI thread polls `try_finish`.
+    pub fn wait(&self) {
+        let mut waited = self.waited.borrow_mut();
+        if waited.is_none() {
+            *waited = Some(self.receive.recv().unwrap_or_else(|_| Err("The recording worker stopped.".into())));
+        }
+    }
 }
 
 impl ScreenCap {
@@ -317,7 +397,7 @@ impl ScreenCap {
     fn toggle_at_fps(&mut self, cx: &mut Cx, fps: u32) {
         // Studio owns the lifetime of automatic evidence. The manual shortcut
         // remains unchanged for ordinary app launches without the managed env.
-        if self.managed { return; }
+        if self.managed || self.report.is_some() || self.session.as_ref().is_some_and(|s| s.picture_only) { return; }
         if self.is_recording() {
             self.stop(cx);
         } else if self.session.is_none() {
@@ -343,12 +423,26 @@ impl ScreenCap {
         let path = capture_path(&dir, self.window_id);
         let fps = if self.managed { fps.min(MANAGED_MAX_FPS) } else { fps };
         let scale = if self.managed { 1.0 } else { capture_scale(self.scale) };
-        let session = Session::start(cx, path.clone(), self.window_id, fps, scale, self.managed);
+        let session = Session::start(cx, path.clone(), self.window_id, fps, scale, self.managed, None);
         log!("ScreenCap: recording to {}", path.display());
         self.session = Some(session);
         self.next_frame = cx.new_next_frame();
         self.redraw_requested = true;
         cx.widget_action(self.uid, ScreenCapAction::Started(path));
+    }
+
+    /// Write only the window picture, without an indicator or an output-audio tap.
+    pub fn record_to(&mut self, cx: &mut Cx, path: PathBuf) -> Result<WindowRecording, String> {
+        if self.is_busy() { return Err("This window is already recording.".into()); }
+        let (send, receive) = std::sync::mpsc::sync_channel(1);
+        self.session = Some(Session::start(cx, path, self.window_id, capture_fps(self.max_fps).min(DEFAULT_FPS),
+            1.0, false, Some(send)));
+        self.next_frame = cx.new_next_frame();
+        Ok(WindowRecording { receive, waited: Default::default() })
+    }
+
+    pub fn stop_file_recording(&mut self, cx: &mut Cx) {
+        if self.session.as_ref().is_some_and(|s| s.picture_only) { self.stop(cx); }
     }
 
     /// Stop capturing and let the encoder finalize in the background. The
@@ -387,20 +481,151 @@ impl ScreenCap {
     /// `Window` can draw it last, over everything, without giving it a slot
     /// in the layout.
     pub fn draw_indicator(&mut self, cx: &mut Cx2d, rect: Rect) {
-        if !self.is_busy() || self.managed {
-            return;
-        }
         let size = self.dot_size.max(4.0);
         if rect.size.x < size * 2.0 || rect.size.y < size * 2.0 {
             return;
         }
         let m = self.dot_margin;
-        self.draw_dot.armed = if self.is_recording() { 1.0 } else { 0.0 };
-        let dot_rect = Rect {
-            pos: dvec2(rect.pos.x + rect.size.x - m - size, rect.pos.y + m),
-            size: dvec2(size, size),
+        if self.is_busy() && !self.managed && !self.session.as_ref().is_some_and(|s| s.picture_only) {
+            self.draw_dot.armed = if self.is_recording() { 1.0 } else { 0.0 };
+            let dot_rect = Rect {
+                pos: dvec2(rect.pos.x + rect.size.x - m - size, rect.pos.y + m),
+                size: dvec2(size, size),
+            };
+            self.draw_dot.draw_abs(cx, dot_rect);
+        }
+        if let Some(line) = self.status_line() {
+            let width = crate::badge::advance(&self.draw_text, cx, &line);
+            let pad = 8.0;
+            let height = self.draw_text.text_style.font_size as f64 * 1.6 + pad;
+            let room = (rect.size.x - m * 3.0 - size).max(0.0);
+            let pill = Rect {
+                pos: dvec2(rect.pos.x + m, rect.pos.y + m),
+                size: dvec2((width + pad * 2.0).min(room), height),
+            };
+            if pill.size.x > pad * 2.0 {
+                self.draw_pill.draw_abs(cx, pill);
+                self.draw_text.draw_abs(cx, dvec2(pill.pos.x + pad, pill.pos.y + pad * 0.5), &line);
+            }
+        }
+    }
+
+    /// The report's line on the window: its notice, else that it is recording and how to stop.
+    fn status_line(&self) -> Option<String> {
+        if let Some(notice) = &self.notice {
+            return Some(notice.clone());
+        }
+        self.report.as_ref().filter(|r| !r.stopped && !r.no_taker).map(|_| REPORTING_LINE.to_string())
+    }
+
+    /// The window's title and pixel density, for the report (see `Window`).
+    pub fn set_window_info(&mut self, title: &str, dpi: f64) {
+        if self.window_title != title {
+            self.window_title = title.to_string();
+        }
+        self.window_dpi = dpi;
+    }
+
+    /// Alt+F10. The first press takes a still and starts a recording and a worker that hands
+    /// both to the taker; the second ends the recording, and its file goes over when it is
+    /// finalized.
+    fn toggle_report(&mut self, cx: &mut Cx) {
+        if let Some(report) = &mut self.report {
+            if !report.stopped {
+                report.stopped = true;
+                report.seconds = report.started.elapsed().as_secs_f64();
+                self.stop(cx);
+                self.redraw_requested = true;
+            }
+            return;
+        }
+        if self.managed || self.session.is_some() {
+            log!("ScreenCap: Alt+F10 ignored, this window is already recording");
+            return;
+        }
+        let dir = repo_screencap_dir();
+        let still_path = capture_path_as(&dir, self.window_id, "issue", "png");
+        let video_path = capture_path_as(&dir, self.window_id, "issue", "mp4");
+        let (to_worker, from_ui) = channel();
+        let (to_ui, events) = channel();
+        let info = ReportInfo {
+            app: std::env::current_exe().ok().and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned())).unwrap_or_else(|| "app".into()),
+            title: self.window_title.clone(),
+            dpi: self.window_dpi,
         };
-        self.draw_dot.draw_abs(cx, dot_rect);
+        let worker_still = still_path.clone();
+        let worker = cx.thread_spawner().spawn_worker(
+            ThreadOptions { name: Some("makepad-issue-report".into()), ..Default::default() },
+            move || report_worker(None, info, worker_still, from_ui, to_ui),
+        );
+        let worker = match worker {
+            Ok(worker) => worker,
+            Err(error) => {
+                error!("ScreenCap: cannot start the issue report: {error:?}");
+                return;
+            }
+        };
+        let still = cx.capture_next_frame();
+        let fps = capture_fps(self.max_fps).min(DEFAULT_FPS);
+        let session = Session::start(cx, video_path.clone(), self.window_id, fps, capture_scale(self.scale), false, None);
+        log!("ScreenCap: reporting an issue, still {} and recording {}", still_path.display(), video_path.display());
+        self.session = Some(session);
+        self.report = Some(Report {
+            still, still_sent: false, to_worker: Some(to_worker), events, worker, started: Instant::now(),
+            stopped: false, no_taker: false, seconds: 0.0, folder: dir,
+        });
+        self.notice = None;
+        self.next_frame = cx.new_next_frame();
+        self.redraw_requested = true;
+        cx.widget_action(self.uid, ScreenCapAction::Started(video_path));
+    }
+
+    /// Hands the still to the worker when it arrives, takes what the worker says, and ends the
+    /// report once its worker has.
+    fn poll_report(&mut self, cx: &mut Cx) {
+        let Some(report) = &mut self.report else { return };
+        if !report.still_sent {
+            if let Some(result) = report.still.take() {
+                report.still_sent = true;
+                match result {
+                    Ok(png) => { if let Some(tx) = &report.to_worker { let _ = tx.send(ReportMsg::Still(png)); } }
+                    Err(why) => {
+                        error!("ScreenCap: no still for the issue: {why}");
+                        report.to_worker = None;
+                    }
+                }
+            }
+        }
+        loop {
+            match report.events.try_recv() {
+                Ok(ReportEvent::Taken) => {}
+                Ok(ReportEvent::NoTaker) => {
+                    report.no_taker = true;
+                    self.notice = Some(no_taker_line(&report.folder));
+                    self.redraw_requested = true;
+                    self.notice_timer = cx.start_timeout(NOTICE_SECS);
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => break,
+            }
+        }
+        if report.worker.is_finished() && self.session.is_none() {
+            self.report = None;
+            self.redraw_requested = true;
+        } else {
+            self.next_frame = cx.new_next_frame();
+        }
+    }
+
+    /// The recorder of a report finished: its file goes to the taker, or nothing does when it
+    /// failed (the still stays).
+    fn report_recording_ended(&mut self, cx: &mut Cx, action: &ScreenCapAction) {
+        let Some(report) = &mut self.report else { return };
+        let Some(tx) = report.to_worker.take() else { return };
+        if let ScreenCapAction::Finished(video) = action {
+            let _ = tx.send(ReportMsg::Done { video: video.clone(), seconds: report.seconds });
+        }
+        self.next_frame = cx.new_next_frame();
     }
 }
 
@@ -413,9 +638,13 @@ impl Widget for ScreenCap {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         if let Event::KeyDown(ke) = event {
+            // Alt+F10 reports an issue. Seen first, so a hotkey set up without Ctrl never
+            // takes it for a recording.
+            if is_report_key(ke.key_code, &ke.modifiers, ke.is_repeat) {
+                self.toggle_report(cx);
             // Every Makepad app can record itself: the hotkey needs no dev
             // overlays.
-            if ke.key_code == self.hotkey
+            } else if ke.key_code == self.hotkey
                 && ke.modifiers.control == self.hotkey_ctrl
                 && !ke.is_repeat
             {
@@ -432,10 +661,16 @@ impl Widget for ScreenCap {
                 }
             }
         }
+        if self.notice_timer.is_event(event).is_some() {
+            self.notice = None;
+            self.redraw_requested = true;
+        }
         if self.next_frame.is_event(event).is_some() {
             if let Some(action) = self.poll_finish() {
+                self.report_recording_ended(cx, &action);
                 cx.widget_action(self.uid, action);
             }
+            self.poll_report(cx);
             if let Some(session) = &self.session {
                 // Keep the window presenting: a still app presents nothing,
                 // and a recorder with no frames is an empty file. Only when
@@ -453,6 +688,174 @@ impl Widget for ScreenCap {
         let rect = cx.walk_turtle(walk);
         self.draw_indicator(cx, rect);
         DrawStep::done()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Reporting an issue (Alt+F10)
+// ---------------------------------------------------------------------------
+
+/// The line on the window while a report records.
+const REPORTING_LINE: &str = "Reporting an issue \u{b7} Alt+F10 stops";
+/// How long a notice stays on the window.
+const NOTICE_SECS: f64 = 8.0;
+
+/// Alt (Option) + F10, with no Ctrl, Shift or logo, and not a key repeat.
+fn is_report_key(key: KeyCode, modifiers: &KeyModifiers, is_repeat: bool) -> bool {
+    key == KeyCode::F10 && modifiers.alt && !modifiers.control && !modifiers.shift && !modifiers.logo && !is_repeat
+}
+
+fn no_taker_line(folder: &Path) -> String {
+    format!("No issue taker running: saved to {}", folder.display())
+}
+
+struct Report {
+    /// The still the platform is taking of the next presented frame.
+    still: FrameCapture,
+    still_sent: bool,
+    /// To the worker; dropped when nothing more goes over, which ends the worker.
+    to_worker: Option<Sender<ReportMsg>>,
+    events: Receiver<ReportEvent>,
+    worker: TaskHandle<()>,
+    started: Instant,
+    /// The second press happened.
+    stopped: bool,
+    no_taker: bool,
+    seconds: f64,
+    folder: PathBuf,
+}
+
+enum ReportMsg {
+    Still(Vec<u8>),
+    Done { video: PathBuf, seconds: f64 },
+}
+
+enum ReportEvent {
+    Taken,
+    /// Nobody took the report: the files stay where they are.
+    NoTaker,
+}
+
+struct ReportInfo {
+    app: String,
+    title: String,
+    dpi: f64,
+}
+
+/// Width and height from a PNG's IHDR.
+fn png_size(png: &[u8]) -> (u32, u32) {
+    let field = |at: usize| png.get(at..at + 4).map_or(0, |b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
+    (field(16), field(20))
+}
+
+fn write_still(path: &Path, png: &[u8]) -> Result<(), String> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    let temporary = path.with_extension("png.tmp");
+    std::fs::write(&temporary, png).map_err(|e| e.to_string())?;
+    std::fs::rename(&temporary, path).map_err(|e| e.to_string())
+}
+
+/// The report's worker: saves the still, looks for a taker once, and hands it the still and
+/// then the video. `registry` is the folder to read (the user's registry when `None`).
+fn report_worker(registry: Option<PathBuf>, info: ReportInfo, still: PathBuf, from_ui: Receiver<ReportMsg>, events: Sender<ReportEvent>) {
+    let Ok(ReportMsg::Still(png)) = from_ui.recv() else { return };
+    let outcome = write_still(&still, &png)
+        .and_then(|()| Taker::open(registry.as_deref(), report_line(&info, &still, png_size(&png))))
+        .and_then(|taker| {
+            let _ = events.send(ReportEvent::Taken);
+            match from_ui.recv() {
+                Ok(ReportMsg::Done { video, seconds }) => taker.finish(done_line(&video, seconds)),
+                _ => Ok(()),
+            }
+        });
+    if let Err(why) = outcome {
+        log!("ScreenCap: no issue taker: {why}");
+        let _ = events.send(ReportEvent::NoTaker);
+    }
+}
+
+/// The report's first line: `{"report":{"app","title","w","h","dpi","still"}}`.
+fn report_line(info: &ReportInfo, still: &Path, size: (u32, u32)) -> String {
+    use crate::makepad_micro_serde::SerJson;
+    let dpi = if info.dpi.is_finite() { info.dpi } else { 1.0 };
+    format!("{{\"report\":{{\"app\":{},\"title\":{},\"w\":{},\"h\":{},\"dpi\":{},\"still\":{}}}}}\n",
+        info.app.serialize_json(), info.title.serialize_json(), size.0, size.1, dpi,
+        still.to_string_lossy().into_owned().serialize_json())
+}
+
+/// The report's second line, once the video is finalized: `{"report_done":{"video","seconds"}}`.
+fn done_line(video: &Path, seconds: f64) -> String {
+    use crate::makepad_micro_serde::SerJson;
+    let seconds = if seconds.is_finite() { seconds } else { 0.0 };
+    format!("{{\"report_done\":{{\"video\":{},\"seconds\":{seconds:.2}}}}}\n",
+        video.to_string_lossy().into_owned().serialize_json())
+}
+
+/// The program that took a report. The web has no registry of running apps, so never one.
+#[cfg(target_arch = "wasm32")]
+enum Taker {}
+
+#[cfg(target_arch = "wasm32")]
+impl Taker {
+    fn open(_registry: Option<&Path>, _line: String) -> Result<Self, String> {
+        Err("this platform has no registry of running apps".into())
+    }
+    fn finish(self, _line: String) -> Result<(), String> {
+        match self {}
+    }
+}
+
+/// The program that took a report: the `report` channel and the client connection under it.
+#[cfg(not(target_arch = "wasm32"))]
+struct Taker {
+    channel: makepad_remote::conn::Channel,
+    _client: makepad_remote::link::Client,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Taker {
+    /// How long the worker waits for the taker's answer to `report`, and for it to close the
+    /// channel after `report_done`. The worker is its own thread: the app never waits on either.
+    const ANSWER: Duration = Duration::from_secs(5);
+    const CLOSE: Duration = Duration::from_secs(10);
+
+    /// Sends `line` to the most recently started program serving `report` v1 and waits for its
+    /// `{"taken":true}`.
+    fn open(registry: Option<&Path>, line: String) -> Result<Self, String> {
+        use makepad_remote::{conn::Event, discovery, link::{Client, Target}};
+        let apps = match registry {
+            Some(dir) => discovery::apps_in(dir),
+            None => discovery::apps(),
+        };
+        let taker = apps.into_iter()
+            .filter(|a| a.unreachable().is_none() && a.caps.iter().any(|c| c == "report/1"))
+            .max_by_key(|a| (a.started_ms, a.pid))
+            .ok_or("no running program serves `report`")?;
+        let client = Client::new(Target::of(&taker), "issue-report");
+        client.conn().map_err(|e| format!("cannot connect to pid {}: {e}", taker.pid))?;
+        let channel = client.open("report", "").map_err(|e| format!("pid {} refused `report`: {e}", taker.pid))?;
+        channel.send(line.into_bytes()).map_err(|e| e.to_string())?;
+        loop {
+            match channel.recv_timeout(Self::ANSWER) {
+                Ok(Event::Data(data)) if String::from_utf8_lossy(&data).contains("\"taken\":true") => break,
+                Ok(Event::Data(_)) | Ok(Event::Opened(_)) => {}
+                Ok(Event::Closed(_, why)) => return Err(format!("the taker closed without taking it: {why}")),
+                Err(_) => return Err("the taker did not answer".into()),
+            }
+        }
+        Ok(Self { channel, _client: client })
+    }
+
+    /// Sends `line`, then lets the taker finish with the channel before the connection goes.
+    fn finish(self, line: String) -> Result<(), String> {
+        use makepad_remote::conn::Event;
+        self.channel.send(line.into_bytes()).map_err(|e| e.to_string())?;
+        while let Ok(event) = self.channel.recv_timeout(Self::CLOSE) {
+            if matches!(event, Event::Closed(..)) { break; }
+        }
+        Ok(())
     }
 }
 
@@ -528,10 +931,13 @@ struct Session {
     running: Arc<AtomicBool>,
     join: Option<TaskHandle<Result<PathBuf, String>>>,
     stopping: bool,
+    picture_only: bool,
 }
 
 impl Session {
-    fn start(cx: &Cx, path: PathBuf, window_id: Option<usize>, fps: u32, scale: f64, managed: bool) -> Self {
+    fn start(cx: &Cx, path: PathBuf, window_id: Option<usize>, fps: u32, scale: f64, managed: bool,
+        finished: Option<std::sync::mpsc::SyncSender<Result<RecordedWindow, String>>>) -> Self {
+        let picture_only = finished.is_some();
         let slot = Arc::new((Mutex::new(FrameSlot::default()), Condvar::new()));
         let stop = Arc::new(AtomicBool::new(false));
         let audio = Arc::new(Mutex::new(AudioQueue::default()));
@@ -558,26 +964,26 @@ impl Session {
                     };
                     let capture_id = install_sink(options, capture_slot, capture_stop, sink_last_frame_ns);
 
-        let tap_audio = thread_audio.clone();
-        let tap_id = add_audio_output_tap(move |info, buffer| {
-            let Ok(mut queue) = tap_audio.try_lock() else {
-                return;
-            };
-            if queue.rate == 0 {
-                queue.rate = info.sample_rate.round().max(1.0) as u32;
-            }
-            let cap = queue.rate as usize * 2 * AUDIO_BACKLOG_SECONDS;
-            append_interleaved_i16(&mut queue.samples, buffer);
-            if queue.samples.len() > cap {
-                let excess = queue.samples.len() - cap;
-                queue.samples.drain(..excess);
-                queue.dropped += excess as u64;
-            }
-        });
-        if tap_id.is_none() {
-            log!("ScreenCap: every audio tap is taken; recording without sound");
-        }
-
+                    let tap_id = if picture_only {
+                        None
+                    } else {
+                        let tap_audio = thread_audio.clone();
+                        let id = add_audio_output_tap(move |info, buffer| {
+                            let Ok(mut queue) = tap_audio.try_lock() else { return; };
+                            if queue.rate == 0 {
+                                queue.rate = info.sample_rate.round().max(1.0) as u32;
+                            }
+                            let cap = queue.rate as usize * 2 * AUDIO_BACKLOG_SECONDS;
+                            append_interleaved_i16(&mut queue.samples, buffer);
+                            if queue.samples.len() > cap {
+                                let excess = queue.samples.len() - cap;
+                                queue.samples.drain(..excess);
+                                queue.dropped += excess as u64;
+                            }
+                        });
+                        if id.is_none() { log!("ScreenCap: every audio tap is taken; recording without sound"); }
+                        id
+                    };
                     let attachments = CaptureAttachments { capture_id, tap_id };
                     let mut info = RecordingInfo::default();
                     let result = (|| {
@@ -587,13 +993,18 @@ impl Session {
                         // previous run if a filesystem/clock collision occurs.
                         std::fs::OpenOptions::new().write(true).create_new(true).open(&path)
                             .map_err(|error| error.to_string())?;
-                        encode_loop(&path, thread_slot, thread_audio, thread_stop, fps, scale, managed, window_id, &mut info)
+                        encode_loop(&path, thread_slot, thread_audio, thread_stop, fps, scale, managed, picture_only, window_id, &mut info)
                     })();
                     drop(attachments);
                     if managed {
                         if let Err(error) = write_managed_result(&path, window_id, fps, &info, false, Some(&result)) {
                             error!("ScreenCap: capture evidence could not be saved: {}", error);
                         }
+                    }
+                    if let Some(done) = finished {
+                        let _ = done.try_send(result.clone().map(|()| RecordedWindow { path: path.clone(),
+                            frames: info.frames, width: info.width, height: info.height, duration_ms: info.duration_ms }));
+                        SignalToUI::set_ui_signal();
                     }
                     thread_running.store(false, Ordering::Release);
                     result.map(|_| path)
@@ -612,6 +1023,7 @@ impl Session {
             running,
             join,
             stopping: false,
+            picture_only,
         }
     }
 
@@ -633,8 +1045,14 @@ impl Session {
             return;
         }
         self.stopping = true;
+        // Under the slot's lock: the encoder checks `stop` and starts its wait
+        // while holding it, so a stop between the two is never missed. The
+        // worker holds this lock only to take a frame; never across encoding.
+        let (lock, cvar) = &*self.slot;
+        let guard = lock.lock();
         self.stop.store(true, Ordering::Release);
-        self.slot.1.notify_all();
+        drop(guard);
+        cvar.notify_all();
     }
 
     fn is_finished(&self) -> bool {
@@ -843,6 +1261,12 @@ fn main_checkout(dir: &Path) -> PathBuf {
 }
 
 fn capture_path(dir: &Path, window: Option<usize>) -> PathBuf {
+    capture_path_as(dir, window, "", "mp4")
+}
+
+/// A new file name in `dir` for this app and window: `tag` (`"issue"` for a report) goes into the
+/// name after the app's.
+fn capture_path_as(dir: &Path, window: Option<usize>, tag: &str, extension: &str) -> PathBuf {
     let app = std::env::current_exe()
         .ok()
         .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
@@ -850,7 +1274,8 @@ fn capture_path(dir: &Path, window: Option<usize>) -> PathBuf {
     let stamp = local_timestamp();
     let sequence = CAPTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
-    dir.join(format!("screencap-{app}-{stamp}-p{}-w{}-{nanos}-{sequence}.mp4", std::process::id(), window.unwrap_or(0)))
+    let tag = if tag.is_empty() { String::new() } else { format!("-{tag}") };
+    dir.join(format!("screencap-{app}{tag}-{stamp}-p{}-w{}-{nanos}-{sequence}.{extension}", std::process::id(), window.unwrap_or(0)))
 }
 
 /// `YYYYmmdd-HHMMSS`, so the files sort by when they were taken. Local time
@@ -897,6 +1322,7 @@ fn encode_loop(
     fps: u32,
     scale: f64,
     save_final_frame: bool,
+    picture_only: bool,
     window_id: Option<usize>,
     info: &mut RecordingInfo,
 ) -> Result<(), String> {
@@ -928,6 +1354,7 @@ fn encode_loop(
     // Let the audio device announce its rate before the AAC track is created.
     let grace_until = Cx::monotonic_now() + AUDIO_RATE_GRACE.as_secs_f64();
     let audio_rate = loop {
+        if picture_only { break 0; }
         let rate = audio.lock().map(|q| q.rate).unwrap_or(0);
         if rate != 0 {
             break rate;
@@ -950,7 +1377,7 @@ fn encode_loop(
         fps_num: fps,
         fps_den: 1,
         video_bitrate_bps: bitrate_for(width, height, fps),
-        audio: Some(PcmAudioTrackOptions {
+        audio: (!picture_only).then_some(PcmAudioTrackOptions {
             sample_rate: audio_rate,
             channels: 2,
             aac_bitrate_bps: 128_000,
@@ -958,8 +1385,9 @@ fn encode_loop(
         keyframe_only: false,
         ..Default::default()
     };
-    log!("ScreenCap: {}x{} at {}fps, H.264 target {:.1}Mbps, app audio AAC 128kbps",
-        width, height, fps, options.video_bitrate_bps as f64 / 1_000_000.0);
+    log!("ScreenCap: {}x{} at {}fps, H.264 target {:.1}Mbps, {}",
+        width, height, fps, options.video_bitrate_bps as f64 / 1_000_000.0,
+        if picture_only { "picture only" } else { "app audio AAC 128kbps" });
     let path_str = path.to_string_lossy().to_string();
     #[cfg(target_os = "windows")]
     let encoder = match (&first.pixels, d3d11_source) {
@@ -1015,9 +1443,11 @@ fn encode_loop(
             break;
         }
         let audio_target = ((frame_index + 1) as u128 * audio_rate as u128 / fps as u128) as u64;
-        if let Err(err) = push_audio_through(&mut encoder, &audio, audio_target, &mut audio_pushed) {
-            encode_error = Some(err);
-            break;
+        if !picture_only {
+            if let Err(err) = push_audio_through(&mut encoder, &audio, audio_target, &mut audio_pushed) {
+                encode_error = Some(err);
+                break;
+            }
         }
         let took = Cx::monotonic_now() - t0;
         push_time += took;
@@ -1026,6 +1456,7 @@ fn encode_loop(
             slow_pushes += 1;
         }
         info.frames = encoded;
+        info.duration_ms = (frame_index + 1) * 1000 / u64::from(fps);
         info.elapsed_ms = ((Cx::monotonic_now() - start).max(0.0) * 1000.0) as u64;
         if save_final_frame && (!info.preview_written || Cx::monotonic_now() - last_preview >= 1.0) {
             let published = (|| {
@@ -1129,6 +1560,7 @@ struct RecordingInfo {
     original_height: u32,
     frames: u64,
     elapsed_ms: u64,
+    duration_ms: u64,
     preview_written: bool,
     current_written: bool,
     current_width: u32,
@@ -1485,5 +1917,123 @@ mod tests {
         // Leap day, and the year boundary just after it.
         assert_eq!(civil_from_unix(1_709_208_000), (2024, 2, 29, 12, 0, 0));
         assert_eq!(civil_from_unix(0), (1970, 1, 1, 0, 0, 0));
+    }
+    #[test]
+    fn alt_f10_is_the_report_key_and_nothing_with_ctrl_shift_or_logo() {
+        let alt = KeyModifiers { alt: true, ..Default::default() };
+        assert!(is_report_key(KeyCode::F10, &alt, false), "Alt+F10 reports");
+        assert!(!is_report_key(KeyCode::F10, &alt, true), "a key repeat does not");
+        assert!(!is_report_key(KeyCode::F11, &alt, false), "another key does not");
+        for (name, modifiers) in [
+            ("Ctrl+F10", KeyModifiers { control: true, ..Default::default() }),
+            ("Ctrl+Shift+F10", KeyModifiers { control: true, shift: true, ..Default::default() }),
+            ("Ctrl+Alt+F10", KeyModifiers { control: true, alt: true, ..Default::default() }),
+            ("Shift+Alt+F10", KeyModifiers { shift: true, alt: true, ..Default::default() }),
+            ("Alt+logo+F10", KeyModifiers { logo: true, alt: true, ..Default::default() }),
+            ("F10", KeyModifiers::default()),
+        ] {
+            assert!(!is_report_key(KeyCode::F10, &modifiers, false), "{name} is not the report key");
+        }
+    }
+
+    #[test]
+    fn report_names_carry_issue_and_the_png_size_reads_back() {
+        let dir = Path::new("shots");
+        for extension in ["png", "mp4"] {
+            let name = capture_path_as(dir, Some(1), "issue", extension);
+            let file = name.file_name().unwrap().to_string_lossy().into_owned();
+            assert!(file.contains("-issue-") && file.ends_with(extension), "{file}");
+        }
+        assert!(!capture_path(dir, Some(1)).to_string_lossy().contains("issue"), "a plain recording is not an issue");
+        let png = Cx::encode_rgba_as_png(3, 2, &[0; 3 * 2 * 4]).unwrap();
+        assert_eq!(png_size(&png), (3, 2));
+        assert_eq!(png_size(&[1, 2, 3]), (0, 0), "a short buffer is no size, and no panic");
+    }
+
+    /// A fake taker in a test registry folder, and the report client against it: the first line
+    /// names a still that exists, the second a video that exists; with no taker both stay.
+    #[cfg(unix)]
+    #[test]
+    fn a_report_reaches_the_taker_and_without_one_the_files_stay() {
+        use makepad_remote::{conn::Event, endpoint::Endpoint};
+        let root = std::env::temp_dir().join(format!("mpiss-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let registry = root.join("registry");
+        let shots = root.join("shots");
+        std::fs::create_dir_all(&registry).unwrap();
+        std::fs::create_dir_all(&shots).unwrap();
+        let png = Cx::encode_rgba_as_png(4, 2, &[200; 4 * 2 * 4]).unwrap();
+        let info = || ReportInfo { app: "ana-app".into(), title: "Ana's \"window\"".into(), dpi: 2.0 };
+        let run = |registry: &Path, shots: &Path, name: &str| {
+            let still = shots.join(format!("{name}.png"));
+            let video = shots.join(format!("{name}.mp4"));
+            let (to_worker, from_ui) = channel();
+            let (to_ui, events) = channel();
+            let (registry, worker_still) = (registry.to_path_buf(), still.clone());
+            let worker = std::thread::spawn(move || report_worker(Some(registry), info(), worker_still, from_ui, to_ui));
+            to_worker.send(ReportMsg::Still(png.clone())).unwrap();
+            (still, video, to_worker, events, worker)
+        };
+
+        // No entry in the registry at all: nothing is taken, nothing is lost.
+        let (still, video, to_worker, events, worker) = run(&registry, &shots, "none");
+        assert!(matches!(events.recv().unwrap(), ReportEvent::NoTaker), "an empty registry has no taker");
+        std::fs::write(&video, b"mp4").unwrap();
+        let _ = to_worker.send(ReportMsg::Done { video: video.clone(), seconds: 1.5 });
+        worker.join().unwrap();
+        assert!(still.is_file() && video.is_file(), "both files stay with no taker");
+        assert_eq!(no_taker_line(&shots), format!("No issue taker running: saved to {}", shots.display()));
+
+        // The fake taker. A newer entry that serves `report` but whose socket is dead sits
+        // beside an older live one: the most recently started is the one tried.
+        let seen: Arc<Mutex<Vec<String>>> = Default::default();
+        let taker = Endpoint::new("fake-taker");
+        let log = seen.clone();
+        taker.register("report", 1, Arc::new(move |_, open| {
+            let (log, channel) = (log.clone(), open.channel);
+            std::thread::spawn(move || {
+                while let Some(event) = channel.recv() {
+                    let Event::Data(data) = event else { if matches!(event, Event::Closed(..)) { break } else { continue } };
+                    let line = String::from_utf8_lossy(&data).into_owned();
+                    let first = line.contains("\"report\":");
+                    let done = line.contains("\"report_done\":");
+                    log.lock().unwrap().push(line);
+                    if first { let _ = channel.send(b"{\"taken\":true}\n".to_vec()); }
+                    if done { channel.close(makepad_remote::conn::CLOSE_NORMAL, "done"); break; }
+                }
+            });
+            Ok(())
+        }));
+        let socket = root.join("t.sock");
+        makepad_remote::carrier::unix::listen_at(&taker, &socket).unwrap();
+        let entry = |pid: u32, socket: &Path, started: u64, caps: &str| std::fs::write(
+            registry.join(format!("makepad-remote-{pid}.json")),
+            format!("{{\"pid\":{pid},\"app\":\"fake\",\"socket\":{},\"started_ms\":{started},\"caps\":[{caps}]}}\n", makepad_remote::json_str(&socket.to_string_lossy()))).unwrap();
+        entry(std::process::id(), &socket, 5, "\"report/1\"");
+        entry(std::os::unix::process::parent_id(), &root.join("dead.sock"), 9, "\"cmd/1\"");
+
+        let (still, video, to_worker, events, worker) = run(&registry, &shots, "taken");
+        assert!(matches!(events.recv().unwrap(), ReportEvent::Taken), "an entry without `report` is not asked");
+        assert!(still.is_file(), "the still exists when the taker is told of it");
+        std::fs::write(&video, b"mp4").unwrap();
+        to_worker.send(ReportMsg::Done { video: video.clone(), seconds: 1.5 }).unwrap();
+        worker.join().unwrap();
+        let lines = seen.lock().unwrap().clone();
+        assert_eq!(lines.len(), 2, "report, then report_done: {lines:?}");
+        assert!(lines[0].contains(&format!("\"still\":{}", makepad_remote::json_str(&still.to_string_lossy())))
+            && lines[0].contains("\"w\":4,\"h\":2,\"dpi\":2") && lines[0].contains("\"app\":\"ana-app\"")
+            && lines[0].contains("Ana's \\\"window\\\""), "{}", lines[0]);
+        assert!(lines[1].contains(&makepad_remote::json_str(&video.to_string_lossy())) && lines[1].contains("\"seconds\":1.50"), "{}", lines[1]);
+
+        // The newer entry now serves `report` too, but nobody listens at its socket: it is the
+        // one tried, it fails, and the files stay.
+        entry(std::os::unix::process::parent_id(), &root.join("dead.sock"), 9, "\"report/1\"");
+        let (still, _video, to_worker, events, worker) = run(&registry, &shots, "dead");
+        assert!(matches!(events.recv().unwrap(), ReportEvent::NoTaker), "a failed connect is no taker");
+        drop(to_worker);
+        worker.join().unwrap();
+        assert!(still.is_file(), "the still stays when the connect fails");
+        assert_eq!(seen.lock().unwrap().len(), 2, "the live taker was not asked");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

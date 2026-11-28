@@ -335,7 +335,7 @@ fn d3d_compile(_hlsl: &str) -> Option<Result<(), String>> {
 /// (`newLibraryWithSource`, its options, both entry points); None off macOS.
 #[cfg(target_os = "macos")]
 fn metal_compile(src: &str) -> Option<Result<(), String>> {
-    Some(makepad_widgets::makepad_platform::makepad_hal::backend::apple::metal::compile_msl(src))
+    Some(makepad_widgets::makepad_platform::makepad_hal::compile_msl(src))
 }
 
 #[cfg(not(target_os = "macos"))]

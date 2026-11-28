@@ -223,6 +223,20 @@ impl<'a> CxDraw<'a> {
         self.cx.attach_child_pass(id, parent, attached_by);
     }
 
+    /// Declare that the pass being drawn samples `pass`'s output, on behalf
+    /// of the draw list being recorded. Call it on every draw that samples
+    /// the output so the read stays current when the list is recorded again.
+    pub fn read_pass(&mut self, pass: &DrawPass) {
+        self.read_pass_id(pass.draw_pass_id());
+    }
+
+    /// Declare a read by pass id, with the same per-draw ownership as [`Self::read_pass`].
+    pub fn read_pass_id(&mut self, id: DrawPassId) {
+        let reader = self.pass_stack.last().unwrap().pass_id;
+        let declared_by = self.draw_list_stack.last().copied();
+        self.cx.add_pass_reader(id, reader, declared_by);
+    }
+
     pub fn begin_pass(&mut self, pass: &DrawPass, dpi_override: Option<f64>) {
         let cxpass = &mut self.passes[pass.draw_pass_id()];
         cxpass.main_draw_list_id = None;

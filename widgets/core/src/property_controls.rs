@@ -447,13 +447,39 @@ pub struct PropSection {
     drawing: DrawStateWrap<()>,
 }
 
+impl PropSection {
+    pub fn header(&self) -> &WidgetRef { self.fold.header() }
+    pub fn is_open(&self, cx: &Cx) -> bool { self.fold.is_open(cx) }
+    pub fn set_is_open(&mut self, cx: &mut Cx, open: bool, animate: Animate) {
+        self.fold.set_is_open(cx, open, animate);
+    }
+    pub fn hovered(&self) -> bool { self.hovered }
+}
+
+#[cfg(test)]
+#[test]
+fn property_controls_section_accessors_follow_the_header_and_fold() {
+    let mut cx = Cx::new(Box::new(|_, _| {}));
+    let mut section = cx.with_vm(|vm| {
+        crate::script_mod(vm);
+        let value = crate::script_eval!(vm, {use mod.widgets.* PropSection{}});
+        PropSection::script_from_value(vm, value)
+    });
+    assert_eq!(section.header().widget(&cx, ids!(hdr.title)).text(), "Section");
+    assert!(!section.hovered());
+    for open in [false, true] {
+        section.set_is_open(&mut cx, open, Animate::No);
+        assert_eq!(section.is_open(&cx), open);
+    }
+}
+
 impl Widget for PropSection {
     fn visit_cancel(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) -> bool {
         self.visible && self.fold.visit_cancel(visit)
     }
     fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
         self.fold.semantics(cx, node);
-        node.name = self.fold.widget(cx, ids!(hdr.title)).text();
+        node.name = self.fold.header().widget(cx, ids!(hdr.title)).text();
     }
 
     fn handle_action(
@@ -474,7 +500,7 @@ impl Widget for PropSection {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if !self.visible { return; }
         self.fold.handle_event(cx, event, scope);
-        let header = self.fold.widget(cx, ids!(hdr));
+        let header = self.fold.header().widget(cx, ids!(hdr));
         match event.hits(cx, header.area()) {
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
                 let open = !self.fold.is_open(cx);
@@ -514,15 +540,15 @@ impl Widget for PropSection {
         if !self.visible { return DrawStep::done(); }
         if self.drawing.begin(cx, ()) {
             let opened = self.fold.opened() as f32;
-            let header = self.fold.widget(cx, ids!(hdr));
+            let header = self.fold.header().widget(cx, ids!(hdr));
             if let Some(mut view) = header.borrow_mut::<View>() {
                 view.draw_bg.set_dyn_instance(cx, id!(hover), &[self.hovered as u8 as f32]);
                 view.draw_bg.set_dyn_instance(cx, id!(opened), &[opened]);
             }
-            if let Some(mut view) = self.fold.widget(cx, ids!(hdr.chevron)).borrow_mut::<View>() {
+            if let Some(mut view) = self.fold.header().widget(cx, ids!(hdr.chevron)).borrow_mut::<View>() {
                 view.draw_bg.set_dyn_instance(cx, id!(opened), &[opened]);
             }
-            self.fold.widget(cx, ids!(hdr.grip)).set_visible(cx, self.grip);
+            self.fold.header().widget(cx, ids!(hdr.grip)).set_visible(cx, self.grip);
             self.draw_bg.begin(cx, walk, Layout::flow_down());
         }
         self.fold.draw_walk(
@@ -534,19 +560,24 @@ impl Widget for PropSection {
         // FoldHeader settles its endpoint during drawing.
         let opened = self.fold.opened() as f32;
         for path in [ids!(hdr).as_slice(), ids!(hdr.chevron).as_slice()] {
-            if let Some(mut view) = self.fold.widget(cx, path).borrow_mut::<View>() {
+            if let Some(mut view) = self.fold.header().widget(cx, path).borrow_mut::<View>() {
                 view.draw_bg.set_dyn_instance(cx, id!(opened), &[opened]);
                 view.draw_bg.set_instance_on_area(cx, id!(opened), &[opened]);
             }
         }
         self.drawing.end();
-        let header_area = self.fold.widget(cx, ids!(hdr)).area();
+        let header_area = self.fold.header().widget(cx, ids!(hdr)).area();
         cx.add_nav_stop(header_area, NavRole::TextInput, Inset::default());
         DrawStep::done()
     }
 }
 
 impl PropSectionRef {
+    /// The header of this section, including its own title, grip and custom controls.
+    pub fn header(&self) -> WidgetRef {
+        self.borrow().map(|section| section.fold.header().clone()).unwrap_or_default()
+    }
+
     pub fn set_is_open(&self, cx: &mut Cx, open: bool, animate: Animate) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.fold.set_is_open(cx, open, animate);

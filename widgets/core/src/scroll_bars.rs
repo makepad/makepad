@@ -466,6 +466,9 @@ impl ScrollBars {
     /// is the one exception (see the body): that press is not the reader reaching for the
     /// brake, it belongs to whatever the pointer is locked to.
     pub fn catch_fling_on_press(&mut self, cx: &mut Cx, event: &Event) -> bool {
+        if !matches!(event, Event::MouseDown(_) | Event::TouchUpdate(_)) {
+            return false;
+        }
         // The pointer-capture rule's other half. Catching a fling CONSUMES the
         // press, so while another control holds the mouse this must stand
         // down: a press that arrives with the pointer already locked to a
@@ -658,13 +661,17 @@ impl ScrollBars {
 
     pub fn scroll_into_view_abs(&mut self, cx: &mut Cx, rect: Rect) {
         let self_rect = self.area.rect(cx);
+        if self_rect.size.x <= 0.0 && self_rect.size.y <= 0.0 {
+            return;
+        }
+        let content_pos = rect.pos - self_rect.pos + self.scroll;
         if self.show_scroll_x {
             self.scroll_bar_x
-                .scroll_into_view(cx, rect.pos.x - self_rect.pos.x, rect.size.x, true);
+                .scroll_into_view(cx, content_pos.x, rect.size.x, true);
         }
         if self.show_scroll_y {
             self.scroll_bar_y
-                .scroll_into_view(cx, rect.pos.y - self_rect.pos.y, rect.size.y, true);
+                .scroll_into_view(cx, content_pos.y, rect.size.y, true);
         }
         self.arm_tail();
     }
@@ -728,7 +735,7 @@ impl ScrollBars {
 
     pub fn draw_scroll_bars(&mut self, cx: &mut Cx2d) {
         // lets ask the turtle our actual bounds
-        let view_total = cx.turtle().used();
+        let view_total = cx.turtle().used_padded();
         if self.bars_outside_view {
             self.pending_outside_view_total = Some(view_total);
             return;
@@ -845,6 +852,101 @@ mod style_reapply_tests {
 #[cfg(test)]
 mod extent_tests {
     use super::*;
+
+    #[test]
+    fn scroll_into_view_abs_ignores_empty_area_and_scrolls_down_from_nonzero_offset() {
+        use crate::makepad_draw::cx_draw::CxDraw;
+
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut bars = cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let value = crate::script_eval!(vm, {use mod.widgets.* ScrollBars{show_scroll_x: false show_scroll_y: true}});
+            ScrollBars::script_from_value(vm, value)
+        });
+        bars.scroll_bar_y.set_scroll_view_total(&mut cx, 300.0);
+        bars.scroll_into_view_abs(&mut cx, Rect { pos: dvec2(0.0, 500.0), size: dvec2(100.0, 28.0) });
+        assert_eq!(bars.get_scroll_pos().y, 0.0);
+        assert_eq!(bars.scroll_bar_y.get_scroll_pos(), 0.0);
+        assert_eq!(bars.scroll_bar_y.get_scroll_target(), 0.0);
+        assert_eq!(bars.scroll_bar_y.get_scroll_view_total(), 300.0);
+
+        let size = dvec2(100.0, 120.0);
+        let pass = DrawPass::new(&mut cx);
+        pass.set_size(&mut cx, size);
+        let mut list = DrawList2d::new(&mut cx);
+        let mut draw_frame = |cx: &mut Cx, bars: &mut ScrollBars| {
+            let event = DrawEvent::default();
+            let mut draw = CxDraw::new(cx, &event);
+            let mut cx = Cx2d::new(&mut draw);
+            cx.begin_pass(&pass, None);
+            list.begin_always(&mut cx);
+            cx.begin_root_turtle(size, Layout::flow_down());
+            cx.walk_turtle(Walk::fixed(100.0, 20.0));
+            bars.begin(&mut cx, Walk::fixed(100.0, 80.0), Layout::flow_down());
+            cx.walk_turtle(Walk::fixed(100.0, 300.0));
+            bars.end(&mut cx);
+            cx.end_pass_sized_turtle();
+            list.end(&mut cx);
+            cx.end_pass(&pass);
+        };
+        draw_frame(&mut cx, &mut bars);
+        assert_eq!(bars.area().rect(&cx), Rect { pos: dvec2(0.0, 20.0), size: dvec2(100.0, 80.0) });
+        assert!(bars.set_scroll_pos(&mut cx, dvec2(0.0, 100.0)));
+        draw_frame(&mut cx, &mut bars);
+        assert_eq!(bars.get_scroll_pos().y, 100.0);
+
+        bars.scroll_into_view_abs(&mut cx, Rect { pos: dvec2(0.0, 110.0), size: dvec2(100.0, 20.0) });
+        assert_eq!(bars.scroll_bar_y.get_scroll_pos(), 130.0);
+        draw_frame(&mut cx, &mut bars);
+        assert_eq!(bars.get_scroll_pos().y, 130.0);
+
+        bars.scroll_into_view_abs(&mut cx, Rect { pos: dvec2(0.0, -10.0), size: dvec2(100.0, 20.0) });
+        assert_eq!(bars.scroll_bar_y.get_scroll_pos(), 100.0);
+        draw_frame(&mut cx, &mut bars);
+        assert_eq!(bars.get_scroll_pos().y, 100.0);
+    }
+
+    #[test]
+    fn padded_scroll_extent_reaches_the_end_and_fill_fits() {
+        use crate::makepad_draw::cx_draw::CxDraw;
+
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut bars = cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let value = crate::script_eval!(vm, {use mod.widgets.* ScrollBars{}});
+            ScrollBars::script_from_value(vm, value)
+        });
+        let pass = DrawPass::new(&mut cx);
+        let mut list = DrawList2d::new(&mut cx);
+        let size = dvec2(100.0, 80.0);
+        pass.set_size(&mut cx, size);
+        let layout = Layout::flow_overlay().with_padding(Inset { left: 3.0, top: 5.0, right: 28.0, bottom: 12.0 });
+        for outside in [false, true] {
+            bars.bars_outside_view = outside;
+            for (child, overflow) in [(Walk::fixed(140.0, 100.0), true), (Walk::fill(), false)] {
+                let event = DrawEvent::default();
+                let mut draw = CxDraw::new(&mut cx, &event);
+                let mut cx = Cx2d::new(&mut draw);
+                cx.begin_pass(&pass, None);
+                list.begin_always(&mut cx);
+                cx.begin_root_turtle(size, Layout::flow_overlay());
+                bars.begin(&mut cx, Walk::fill(), layout);
+                let rect = cx.walk_turtle(child);
+                bars.end(&mut cx);
+                let extent = bars.extent();
+                if overflow {
+                    let end_gap = extent.visible - (rect.pos + rect.size - extent.max());
+                    assert_eq!(end_gap, dvec2(28.0, 12.0), "last child clears both trailing paddings, outside={outside}");
+                } else {
+                    assert_eq!(extent.total, size, "Fill plus padding equals the viewport, outside={outside}");
+                    assert_eq!(extent.max(), Vec2d::default(), "Fill has zero scroll range, outside={outside}");
+                }
+                cx.end_pass_sized_turtle();
+                list.end(&mut cx);
+                cx.end_pass(&pass);
+            }
+        }
+    }
 
     /// The extent is what the bars hold, and an axis the box was built
     /// without reads zero rather than whatever its idle bar last kept.

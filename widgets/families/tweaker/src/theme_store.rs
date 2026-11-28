@@ -38,13 +38,9 @@
 //!
 //! # Where the files are
 //!
-//! [`themes_dir`] is `<makepad home>/themes`, where the makepad home is the
-//! one shared per-user state directory the whole workspace already agrees on
-//! (`makepad_home`, which `MAKEPAD_HOME` redirects). A run that must leave
-//! the person's own themes alone -- a test, a demo, a CI job -- points
-//! `MAKEPAD_THEME_DIR` somewhere else instead, the same idiom the storybook's
-//! settings file uses. Nothing here ever writes outside that directory: every
-//! path is `dir.join(name + ".theme")` for a name that already passed
+//! [`themes_dir`] uses `themes` under [`app_state_home`], so a test instance
+//! keeps its own themes. `MAKEPAD_THEME_DIR` overrides that directory.
+//! Each path is `dir.join(name + ".theme")` for a name that already passed
 //! [`is_valid_name`], which admits no separator and no `..`.
 //!
 //! # Collisions
@@ -64,7 +60,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::makepad_platform::home::makepad_home;
+use crate::makepad_platform::home::app_state_home;
 use crate::theme_tokens::{theme_module_script, Scheme, TokenValue};
 use crate::Cx;
 
@@ -529,14 +525,13 @@ fn check_writable(theme: &SavedTheme) -> Result<(), StoreError> {
 // The folder
 // ---------------------------------------------------------------------------
 
-/// Where saved themes live: `MAKEPAD_THEME_DIR` when it is set, otherwise
-/// `themes` under the workspace's one per-user state directory, which
-/// `MAKEPAD_HOME` already redirects. Nothing is created until the first save.
+/// Saved themes live in `MAKEPAD_THEME_DIR` when set, otherwise in `themes`
+/// under [`app_state_home`]. The first save creates the directory.
 pub fn themes_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os(DIR_ENV) {
         return PathBuf::from(dir);
     }
-    makepad_home().join("themes")
+    app_state_home().join("themes")
 }
 
 /// The file a saved theme of this name would have. Errors on a name the

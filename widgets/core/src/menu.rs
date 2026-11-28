@@ -82,6 +82,9 @@ pub struct MenuRow {
     /// A small colour chip before the label (a theme, a colour, a tag):
     /// its fill and a dot of a second colour on it.
     pub swatch: Option<(Vec4f, Vec4f)>,
+    /// A quiet explanation under the label, one line per `\n`, for a row
+    /// whose effect should be known before it is chosen.
+    pub hint: String,
 }
 
 impl MenuRow {
@@ -97,7 +100,13 @@ impl MenuRow {
             danger: false,
             submenu: Vec::new(),
             swatch: None,
+            hint: String::new(),
         }
+    }
+
+    pub fn hint(mut self, hint: &str) -> Self {
+        self.hint = hint.to_string();
+        self
     }
 
     /// A rule between groups of rows.
@@ -298,6 +307,8 @@ const SEP_H: f64 = 5.0;
 const SECTION_H: f64 = 18.0;
 const MENU_PAD: f64 = 4.0;
 const MENU_MIN_W: f64 = 150.0;
+/// Each line of a row's hint adds this much under its label.
+const HINT_LINE_H: f64 = 15.0;
 /// The leading column that carries the check or radio mark.
 const MARK_COL: f64 = 24.0;
 /// The swatch column after the mark, when a row has one.
@@ -325,7 +336,7 @@ fn row_height(row: &MenuRow) -> f64 {
     } else if row.section {
         SECTION_H
     } else {
-        ROW_H
+        ROW_H + HINT_LINE_H * row.hint.lines().count() as f64
     }
 }
 
@@ -349,6 +360,9 @@ pub fn measure_rows(rows: &[MenuRow]) -> Vec2d {
         };
         let arrow = if row.submenu.is_empty() { 0.0 } else { ARROW_COL };
         w = w.max(lead_col(row) + label + short + arrow + RIGHT_PAD);
+        for line in row.hint.lines() {
+            w = w.max(lead_col(row) + line.chars().count() as f64 * SHORT_CHAR_W + RIGHT_PAD);
+        }
     }
     dvec2(w.ceil(), h)
 }
@@ -1267,6 +1281,7 @@ impl Widget for MenuLayer {
                         Role::MenuItem
                     },
                     name: row.label.clone(),
+                    description: row.hint.clone(),
                     bounds,
                     pos_in_set: index as u32 + 1,
                     set_size: level.rows.len() as u32,
@@ -1340,6 +1355,9 @@ impl Widget for MenuLayer {
                 };
                 let arrow_w = if row.submenu.is_empty() { 0.0 } else { ARROW_COL };
                 need = need.max(lead_col(&row) + label_w + short_w + arrow_w + RIGHT_PAD);
+                for line in row.hint.lines() {
+                    need = need.max(lead_col(&row) + self.text_width(cx, true, line) + RIGHT_PAD);
+                }
             }
             let need = need.ceil();
             if (need - self.levels[li].rect.size.x).abs() > 0.5 {
@@ -1434,7 +1452,7 @@ impl Widget for MenuLayer {
                     cx,
                     Walk::abs_rect(Rect {
                         pos: dvec2(r.pos.x + lead, r.pos.y),
-                        size: dvec2(text_w, r.size.y),
+                        size: dvec2(text_w, ROW_H),
                     }),
                     Align { x: 0.0, y: 0.5 },
                     &row.label,
@@ -1445,10 +1463,22 @@ impl Widget for MenuLayer {
                         cx,
                         Walk::abs_rect(Rect {
                             pos: dvec2(r.pos.x + r.size.x - RIGHT_PAD - arrow_w - short_w, r.pos.y),
-                            size: dvec2(short_w, r.size.y),
+                            size: dvec2(short_w, ROW_H),
                         }),
                         Align { x: 1.0, y: 0.5 },
                         &row.shortcut,
+                    );
+                }
+                // The hint sits under the label in the quiet shortcut style.
+                for (k, line) in row.hint.lines().enumerate() {
+                    self.draw_shortcut.draw_walk(
+                        cx,
+                        Walk::abs_rect(Rect {
+                            pos: dvec2(r.pos.x + lead, r.pos.y + ROW_H - 4.0 + k as f64 * HINT_LINE_H),
+                            size: dvec2((r.size.x - lead - RIGHT_PAD).max(8.0), HINT_LINE_H),
+                        }),
+                        Align { x: 0.0, y: 0.5 },
+                        line,
                     );
                 }
             }
@@ -1472,7 +1502,21 @@ impl Widget for MenuLayer {
         DrawStep::done()
     }
 
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        // The layer reads its rows and click-away from mouse events. A touch tap on
+        // its locked area is the same choice, so it is replayed as a press and a release.
+        if self.locked {
+            if let Hit::FingerUp(tap) = event.hits_with_sweep_area(cx, self.area, self.area) {
+                if tap.is_touch() && tap.was_tap() && tap.is_over {
+                    let (abs, window_id, time, modifiers) = (tap.abs, tap.window_id, tap.time, tap.modifiers);
+                    let button = MouseButton::PRIMARY;
+                    self.handle_event(cx, &Event::MouseDown(MouseDownEvent { abs, button, window_id, time, modifiers,
+                        handled: Default::default() }), scope);
+                    self.handle_event(cx, &Event::MouseUp(MouseUpEvent { abs, button, window_id, time, modifiers }), scope);
+                    return
+                }
+            }
+        }
         // Worked out before this event moves the pointer state on: the
         // release that ends a press-drag is still part of that gesture, and
         // the capture it belongs to is only let go of after the whole tree
@@ -1827,6 +1871,8 @@ mod tests {
         assert_eq!(l.row_rect(0).size.y, SECTION_H);
         assert_eq!(l.row_rect(3).size.y, SEP_H);
         assert_eq!(l.row_rect(1).size.y, ROW_H);
+        let hinted = [MenuRow::new(LiveId(1), "Delete").hint("Gone for everyone.\nKept in history.")];
+        assert_eq!(measure_rows(&hinted).y, MENU_PAD * 2.0 + ROW_H + HINT_LINE_H * 2.0, "each hint line adds to its row");
         });
     }
 

@@ -19,6 +19,11 @@ makepad-jobs = { path = "../../libs/jobs", version = "1.0.0" }
 # The app identity artwork of each desktop style (shared with Motion).
 makepad-app-icons = { path = "../../libs/app_icons" }
 
+# The registry and the blocking client: Alt+F10 hands an issue report to the taker an app finds
+# there (src/screen_cap.rs). The web has no remote.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+makepad-remote = { path = "../../libs/remote", version = "0.1.0" }
+
 
 [features]
 # No widget families here: each is a crate of its own (widgets/families),

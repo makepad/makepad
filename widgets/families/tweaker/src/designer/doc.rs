@@ -94,13 +94,13 @@ impl DesignDoc {
     /// A stable fingerprint of the base, for a commit to check the disk
     /// still holds what the document started from.
     pub fn base_hash(&self) -> u64 {
-        fnv1a(&self.base)
+        makepad_widgets_core::design_data::locate::source_hash(&self.base)
     }
 
     /// The same fingerprint of the working text: what the file holds once
     /// the patch is applied.
     pub fn text_hash(&self) -> u64 {
-        fnv1a(&self.text)
+        makepad_widgets_core::design_data::locate::source_hash(&self.text)
     }
 
     /// Whether the file on disk still equals the base.
@@ -279,14 +279,6 @@ fn repo_relative(file: &str) -> String {
     }
 }
 
-fn fnv1a(text: &str) -> u64 {
-    let mut hash: u64 = 0xcbf29ce484222325;
-    for byte in text.bytes() {
-        hash ^= byte as u64;
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    hash
-}
 
 /// A plain unified diff (one hunk per run of changed lines, three lines of
 /// context), built on a longest-common-subsequence over lines.

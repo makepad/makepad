@@ -1,3 +1,4 @@
+pub use crate::makepad_platform::script::HostGrants;
 use {
     crate::makepad_draw::*,
     crate::makepad_draw::makepad_platform::script::std::ScriptStd,
@@ -103,11 +104,11 @@ pub(crate) fn style_isolate(
     vm: &mut ScriptVm,
     theme: SplashTheme,
     script: Option<&SplashThemeScript>,
-    host_io_only: bool,
+    grants: HostGrants,
     set: IsolateWidgets,
 ) {
     let mut units = Vec::new();
-    style_isolate_units(vm, &mut units, theme, script.map(|script| std::rc::Rc::new(script.clone())), host_io_only, set);
+    style_isolate_units(vm, &mut units, theme, script.map(|script| std::rc::Rc::new(script.clone())), grants, set);
     run_units(vm, units);
 }
 
@@ -116,7 +117,7 @@ pub(crate) fn style_isolate_units(
     units: &mut Vec<UiUnit>,
     theme: SplashTheme,
     script: Option<std::rc::Rc<SplashThemeScript>>,
-    host_io_only: bool,
+    grants: HostGrants,
     set: IsolateWidgets,
 ) {
     let theme_script = script.clone();
@@ -135,7 +136,7 @@ pub(crate) fn style_isolate_units(
             eval_theme_script(vm, "theme", &script.theme);
         }
     }));
-    crate::widgets_mod_with_host_io_units(vm, units, host_io_only, set);
+    crate::isolate_widgets_mod_with_grants_units(vm, units, grants, set);
     if let Some(script) = script {
         units.push(UiUnit::new("style: widgets script", move |vm| {
             eval_theme_script(vm, "widgets", &script.widgets);
@@ -156,36 +157,28 @@ pub(crate) fn restyle_isolate(
 ) {
     let heap_key = vm.heap_key();
     let lazy = vm.has_lazy_modules();
-    let (host_io_only, set, host_mods) = match vm.cx_mut().global::<CxWidgetAsync>().isolate_ui.get_mut(&heap_key) {
+    let (grants, set, host_mods) = match vm.cx_mut().global::<CxWidgetAsync>().isolate_ui.get_mut(&heap_key) {
         Some(ui) => {
             ui.theme = theme;
             ui.script = script.clone();
-            (ui.host_io_only, ui.set, ui.host_mods.clone())
+            (ui.grants, ui.set, ui.host_mods.clone())
         }
-        None => (vm.cx_mut().script_data.std.host_io_only(), IsolateWidgets::Library, Vec::new()),
+        None => (vm.cx_mut().script_data.std.grants(), IsolateWidgets::Library, Vec::new()),
     };
     if lazy {
         return;
     }
-    // The registration is the host's own code (the library's fonts load through the loader the
-    // isolate was stripped of), and the restriction is back before any guest code runs again.
-    let restricted = vm.cx_mut().script_data.std.set_host_io_only_for_host_code(false);
-    let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        vm.with_reload(|vm| {
-            with_loader(vm, loader, |vm| {
-                style_isolate(vm, theme, script.as_deref(), host_io_only, set);
-                crate::desktop_style::apply_widgets(vm);
-                // Widget registration replaces mod.widgets: put this isolate's own host mods back.
-                for install in host_mods {
-                    install(vm);
-                }
-            })
+    // The host's registration uses its loader for the library's fonts.
+    vm.with_reload(|vm| {
+        with_loader(vm, loader, |vm| {
+            style_isolate(vm, theme, script.as_deref(), grants, set);
+            crate::desktop_style::apply_widgets(vm);
+            // Widget registration replaces mod.widgets: put this isolate's own host mods back.
+            for install in host_mods {
+                install(vm);
+            }
         })
-    }));
-    vm.cx_mut().script_data.std.set_host_io_only_for_host_code(restricted);
-    if let Err(payload) = out {
-        std::panic::resume_unwind(payload);
-    }
+    });
 }
 
 fn eval_theme_script(vm: &mut ScriptVm, phase: &str, code: &str) {
@@ -228,12 +221,8 @@ thread_local! {
 /// pass rebinds the same names. The isolate replays its allocation-time mods in
 /// reload mode when its host theme changes, restoring their widget definitions.
 ///
-/// Host mods install last: after the ambient-authority strip (`fs`, `run`, `res`,
-/// `cx.quit`) and after the jailed `fs` and brokered `host` re-registrations. A
-/// host mod therefore cannot be stripped by that pass, and it sees the isolate's
-/// final namespace. This does mean a host mod could re-expose ambient authority
-/// if it deliberately handed one back — the host is trusted code, and it already
-/// chose what to install.
+/// Host mods run after the isolate's UI library in a host resource scope.
+/// The embedding host chooses which additional APIs they expose to guests.
 pub fn register_splash_isolate_mod(f: fn(&mut ScriptVm)) {
     HOST_ISOLATE_MODS.with(|g| g.borrow_mut().push(f));
 }
@@ -454,14 +443,14 @@ struct WidgetToScriptCallRequest {
 struct IsolateUi {
     set: IsolateWidgets,
     sheet: Option<crate::desktop_style::StyleSheet>,
-    host_io_only: bool,
+    grants: HostGrants,
     theme: SplashTheme,
     /// the host's theme script (none when the Splash pins a stock theme)
     script: Option<std::rc::Rc<SplashThemeScript>>,
-    loader: Option<ScriptObjectRef>,
+    id: SplashVmId,
     /// the host's isolate mods as they were at allocation
     host_mods: Vec<fn(&mut ScriptVm)>,
-    /// the host's registration instead of the stock one (`alloc_splash_vm_with_ui`), kept for
+    /// the host's registration instead of the stock one (`SplashVmConfig::ui`), kept for
     /// the isolate's reload passes ([`reload_isolate`])
     custom: Option<std::rc::Rc<dyn Fn(&mut ScriptVm)>>,
     /// the sheet was set by a restyle before the expansion: its widget half goes over the library
@@ -525,14 +514,14 @@ fn step_isolate_ui_unit(vm: &mut ScriptVm) -> bool {
         }
         None => {
             // No record to keep a cursor in: the registration with the defaults, at once.
-            for unit in isolate_ui_units(vm, None, true, IsolateWidgets::Library, splash_theme(), None, Vec::new(), None, false) {
+            for unit in isolate_ui_units(vm, None, HostGrants::NONE, IsolateWidgets::Library, splash_theme(), None, Vec::new(), None, false) {
                 run_isolate_ui_unit(vm, &unit, None);
             }
             return false;
         }
     }
     let next = vm.cx_mut().global::<CxWidgetAsync>().isolate_ui.get_mut(&heap_key).and_then(|ui| {
-        let loader = ui.loader.clone();
+        let id = ui.id;
         let (units, next) = ui.units.as_mut()?;
         let unit = units.get(*next).cloned();
         *next += 1;
@@ -540,9 +529,10 @@ fn step_isolate_ui_unit(vm: &mut ScriptVm) -> bool {
         if !more {
             ui.units = None;
         }
-        Some((unit?, loader, more))
+        Some((unit?, id, more))
     });
-    let Some((unit, loader, more)) = next else { return false };
+    let Some((unit, id, more)) = next else { return false };
+    let loader = isolate_loader(vm.cx_mut(), id);
     let start = Cx::monotonic_now();
     let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_isolate_ui_unit(vm, &unit, loader.as_ref())));
     if let Err(payload) = out {
@@ -561,20 +551,13 @@ fn step_isolate_ui_unit(vm: &mut ScriptVm) -> bool {
 fn isolate_ui_units_of(vm: &mut ScriptVm) -> Option<Vec<UiUnit>> {
     let heap_key = vm.heap_key();
     let ui = vm.cx_mut().global::<CxWidgetAsync>().isolate_ui.get(&heap_key)?;
-    let (sheet, host_io_only, set, theme, script, host_mods, custom, apply_sheet_widgets) = (ui.sheet.clone(), ui.host_io_only, ui.set, ui.theme, ui.script.clone(), ui.host_mods.clone(), ui.custom.clone(), ui.apply_sheet_widgets);
-    Some(isolate_ui_units(vm, sheet, host_io_only, set, theme, script, host_mods, custom, apply_sheet_widgets))
+    let (sheet, grants, set, theme, script, host_mods, custom, apply_sheet_widgets) = (ui.sheet.clone(), ui.grants, ui.set, ui.theme, ui.script.clone(), ui.host_mods.clone(), ui.custom.clone(), ui.apply_sheet_widgets);
+    Some(isolate_ui_units(vm, sheet, grants, set, theme, script, host_mods, custom, apply_sheet_widgets))
 }
 
-/// One unit of an isolate's UI registration. The registration is the host's own code: it loads
-/// the library's fonts through the isolate's loader like before the isolate was restricted, and
-/// the restriction is back before any guest code runs again.
+/// Run one host registration unit with scoped access to its library resources.
 fn run_isolate_ui_unit(vm: &mut ScriptVm, unit: &UiUnit, loader: Option<&ScriptObjectRef>) {
-    let restricted = vm.cx_mut().script_data.std.set_host_io_only_for_host_code(false);
-    let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| with_loader(vm, loader, |vm| (unit.run)(vm))));
-    vm.cx_mut().script_data.std.set_host_io_only_for_host_code(restricted);
-    if let Err(payload) = out {
-        std::panic::resume_unwind(payload);
-    }
+    with_loader(vm, loader, |vm| (unit.run)(vm));
 }
 
 /// An isolate entry's first step when the host left its UI registration part way
@@ -598,7 +581,7 @@ fn take_isolate_ui_in_progress(cx: &mut Cx, vm_id: SplashVmId) -> bool {
 fn isolate_ui_units(
     vm: &mut ScriptVm,
     sheet: Option<crate::desktop_style::StyleSheet>,
-    host_io_only: bool,
+    grants: HostGrants,
     set: IsolateWidgets,
     theme: SplashTheme,
     script: Option<std::rc::Rc<SplashThemeScript>>,
@@ -624,7 +607,7 @@ fn isolate_ui_units(
         }
     }));
     crate::theme_mod_units(&mut units);
-    style_isolate_units(vm, &mut units, theme, script, host_io_only, set);
+    style_isolate_units(vm, &mut units, theme, script, grants, set);
     if apply_sheet_widgets {
         units.push(UiUnit::new("ui: sheet widgets", crate::desktop_style::apply_widgets));
     }
@@ -642,38 +625,32 @@ fn isolate_ui_units(
 /// unless its UI is still lazy (the coming expansion registers the edited code), then the
 /// host's isolate mods and what the host and libraries kept for the pass
 /// (`ScriptVmReload::keep_for_reload`). The base platform modules are left alone, as the main
-/// VM's are: the strip took ambient authority out of them. Runs where the isolate is first
+/// VM's are: each heap keeps its original platform registration. Runs where the isolate is first
 /// entered after the edit ([`with_isolate_installed`]); the trees built on the old
 /// registration are their hosts' to apply again (a Splash runs its body again).
 fn reload_isolate(vm: &mut ScriptVm) {
     let heap_key = vm.heap_key();
     let lazy = vm.has_lazy_modules();
-    let ui = vm.cx_mut().global::<CxWidgetAsync>().isolate_ui.get(&heap_key).map(|ui| (ui.host_io_only, ui.set, ui.theme, ui.script.clone(), ui.loader.clone(), ui.host_mods.clone(), ui.custom.clone()));
-    let restricted = vm.cx_mut().script_data.std.set_host_io_only_for_host_code(false);
-    let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        vm.with_reload(|vm| {
-            if let Some((host_io_only, set, theme, script, loader, host_mods, custom)) = ui.filter(|_| !lazy) {
-                with_loader(vm, loader.as_ref(), |vm| {
-                    match custom {
-                        Some(custom) => custom(vm),
-                        None => {
-                            crate::theme_mod(vm);
-                            style_isolate(vm, theme, script.as_deref(), host_io_only, set);
-                            crate::desktop_style::apply_widgets(vm);
-                        }
+    let ui = vm.cx_mut().global::<CxWidgetAsync>().isolate_ui.get(&heap_key).map(|ui| (ui.grants, ui.set, ui.theme, ui.script.clone(), ui.id, ui.host_mods.clone(), ui.custom.clone()));
+    vm.with_reload(|vm| {
+        if let Some((grants, set, theme, script, id, host_mods, custom)) = ui.filter(|_| !lazy) {
+            let loader = isolate_loader(vm.cx_mut(), id);
+            with_loader(vm, loader.as_ref(), |vm| {
+                match custom {
+                    Some(custom) => custom(vm),
+                    None => {
+                        crate::theme_mod(vm);
+                        style_isolate(vm, theme, script.as_deref(), grants, set);
+                        crate::desktop_style::apply_widgets(vm);
                     }
-                    for install in host_mods {
-                        install(vm);
-                    }
-                });
-            }
-            vm.run_kept_for_reload();
-        })
-    }));
-    vm.cx_mut().script_data.std.set_host_io_only_for_host_code(restricted);
-    if let Err(payload) = out {
-        std::panic::resume_unwind(payload);
-    }
+                }
+                for install in host_mods {
+                    install(vm);
+                }
+            });
+        }
+        vm.run_kept_for_reload();
+    });
 }
 
 struct IsolatedSplashVm {
@@ -722,10 +699,7 @@ struct CxWidgetAsync {
     /// Each isolate's own view-root uid (set by [`inject_splash_ui_handle`]). Isolate `ui`
     /// handles are confined to this subtree so a mini-app can't reach host/sibling widgets.
     vm_root_uids: HashMap<SplashVmId, WidgetUid>,
-    /// Each isolate's resource loader (`mod.res`), held here because the
-    /// isolate's own namespace is stripped of it before a body first runs.
-    /// Only the host's restyle hands it back, while it runs: a sheet's theme
-    /// half loads its fonts through `crate_resource` (see [`with_loader`]).
+    /// Each isolate's loader, rooted by its host across UI units and restyles.
     loaders: HashMap<SplashVmId, ScriptObjectRef>,
     isolated_vms: IsolatedScriptVms,
     current_vm_id: SplashVmId,
@@ -829,22 +803,32 @@ fn with_isolate_installed<R>(cx: &mut Cx, vm_id: SplashVmId, f: impl FnOnce(&mut
     }
 }
 
-/// The resource loader the isolate `vm_id` was stripped of, if it had one.
+/// The resource loader held by the host for this isolate.
 pub(crate) fn isolate_loader(cx: &mut Cx, vm_id: SplashVmId) -> Option<ScriptObjectRef> {
     cx.global::<CxWidgetAsync>().loaders.get(&vm_id).cloned()
 }
 
-/// Runs `f`, the host's own work in an isolate, with the isolate's resource
-/// loader back on `mod.res`, and strips it again after, a panic included, so
-/// no body code runs while it is there.
+/// Register trusted UI in the currently executing heap. In an isolate the
+/// loader is bound for this closure and only host-source calls may use its
+/// scoped local grant. Nested scopes and unwinding restore the prior state.
+pub fn with_splash_resources<R>(vm: &mut ScriptVm, f: impl FnOnce(&mut ScriptVm) -> R) -> R {
+    let heap = vm.heap_key();
+    let Some(state) = vm.cx().get_global_ref::<CxWidgetAsync>() else { return f(vm) };
+    let loader = state.isolate_ui.get(&heap).and_then(|ui| state.loaders.get(&ui.id)).cloned();
+    with_loader(vm, loader.as_ref(), f)
+}
+
 pub(crate) fn with_loader<R>(vm: &mut ScriptVm, loader: Option<&ScriptObjectRef>, f: impl FnOnce(&mut ScriptVm) -> R) -> R {
-    let Some(loader) = loader else {
-        return f(vm);
-    };
+    let Some(loader) = loader else { return f(vm) };
     let modules = vm.modules();
+    let previous = vm.heap().object_own_value(modules, &id!(res).into()).unwrap_or(NIL);
+    let previous = HeldValue::new(vm, previous);
     vm.set_value_def(modules, id!(res), loader.as_object());
+    let std = &mut vm.cx_mut().script_data.std;
+    let previous_grants = std.set_scoped_grants(std.scoped_grants().union(HostGrants::LOCAL_RESOURCES));
     let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(vm)));
-    vm.set_value_def(modules, id!(res), NIL);
+    vm.cx_mut().script_data.std.set_scoped_grants(previous_grants);
+    vm.set_value_def(modules, id!(res), previous.get());
     match out {
         Ok(out) => out,
         Err(payload) => std::panic::resume_unwind(payload),
@@ -871,32 +855,34 @@ pub fn contain_isolate_panic(what: &str, f: impl FnOnce()) -> bool {
     }
 }
 
+/// Host configuration for a new Splash isolate.
+#[derive(Clone)]
+pub struct SplashVmConfig {
+    /// Requested persistent capabilities, limited to the parent's persistent grants.
+    pub grants: HostGrants,
+    pub widgets: IsolateWidgets,
+    /// Custom host UI registration, run with the isolate's resource loader at creation and reload.
+    pub ui: Option<std::rc::Rc<dyn Fn(&mut ScriptVm)>>,
+    /// Pin the stock theme, or inherit the host's theme and theme script.
+    pub theme: Option<SplashTheme>,
+}
+
+impl Default for SplashVmConfig {
+    fn default() -> Self {
+        Self {
+            grants: HostGrants::NONE,
+            widgets: IsolateWidgets::Library,
+            ui: None,
+            theme: None,
+        }
+    }
+}
+
 pub trait CxSplashVmExt {
+    /// Allocate a library isolate with the host's theme and no persistent grants.
     fn alloc_splash_vm(&mut self) -> SplashVmId;
-    fn alloc_splash_vm_with_network(&mut self, network_enabled: bool) -> SplashVmId;
-    /// Allocate an isolate with the chosen widget set, using the host's theme and script.
-    /// A smaller set reduces UI registration and the isolate's live heap; a name outside
-    /// that set is an ordinary unknown name, with no fallback registration.
-    fn alloc_splash_vm_with_widgets(&mut self, network_enabled: bool, set: IsolateWidgets) -> SplashVmId;
-    /// Allocate an isolate whose external I/O must use the host service bridge.
-    fn alloc_splash_vm_with_host_io(&mut self) -> SplashVmId;
-    fn alloc_splash_vm_with_io(&mut self, network_enabled: bool, host_io_only: bool) -> SplashVmId;
-    /// An isolate whose UI registration is the host's own `ui` (a WM sheet, an appearance)
-    /// instead of the stock theme + widgets, run once, at allocation: so a host that restyles a
-    /// fresh isolate does not register the library twice. `ui` runs as host code (the isolate's
-    /// loader on `mod.res`, no host-io restriction); the host's isolate mods follow it. It runs
-    /// again in reload mode on each of the isolate's live-edit reload passes, so what it takes
-    /// from the host it reads as it is then (a sheet restyled since stays).
-    fn alloc_splash_vm_with_ui(&mut self, network_enabled: bool, ui: std::rc::Rc<dyn Fn(&mut ScriptVm)>) -> SplashVmId;
-    /// Like [`alloc_splash_vm_with_io`](Self::alloc_splash_vm_with_io), but
-    /// `Some(theme)` pins the isolate to that stock theme, without the host's
-    /// [`SplashThemeScript`]. `None` takes the host's theme and script.
-    fn alloc_splash_vm_with_theme(
-        &mut self,
-        network_enabled: bool,
-        host_io_only: bool,
-        theme: Option<SplashTheme>,
-    ) -> SplashVmId;
+    fn alloc_splash_vm_with_grants(&mut self, grants: HostGrants, ui: Option<std::rc::Rc<dyn Fn(&mut ScriptVm)>>) -> SplashVmId;
+    fn alloc_splash_vm_with_config(&mut self, config: SplashVmConfig) -> SplashVmId;
     /// The next unit of isolate `vm_id`'s lazy UI registration (its theme, widgets and prelude),
     /// for a host that spreads it over frames: true while units remain. Any other entry to the
     /// isolate runs the rest first, so nothing but these steps sees it half done. False when there
@@ -925,18 +911,11 @@ pub trait CxSplashVmExt {
     fn free_splash_vm(&mut self, vm_id: SplashVmId);
 }
 
-// The bodies of `CxSplashVmExt::with_script_vm_id*`, compiled once: the trait
-// methods are generic over their closure and result, so each call site would
-// otherwise carry its own copy of the VM routing below.
-
-/// The body of `alloc_splash_vm_with_io` / `alloc_splash_vm_with_ui`.
-/// `pin`: a stock theme the isolate keeps, without the host's [`SplashThemeScript`];
-/// `None` takes the host's theme and script.
-fn alloc_splash_vm_impl(cx: &mut Cx, network_enabled: bool, host_io_only: bool, set: IsolateWidgets, custom_ui: Option<std::rc::Rc<dyn Fn(&mut ScriptVm)>>, pin: Option<SplashTheme>) -> SplashVmId {
-
-    // A nested Splash cannot acquire authority its parent does not have.
-    let host_io_only = host_io_only || cx.script_data.std.host_io_only();
-    let network_enabled = network_enabled && !host_io_only;
+fn alloc_splash_vm_impl(cx: &mut Cx, config: SplashVmConfig) -> SplashVmId {
+    let grants = cx.script_data.std.grants().intersection(config.grants);
+    let set = config.widgets;
+    let pin = config.theme;
+    let network_enabled = grants.contains(HostGrants::NETWORK);
     ensure_widget_async_hooks_registered(cx);
     // Reclaim isolates from dropped Splashes before growing, so the live count
     // tracks the number of live Splash widgets rather than accumulating.
@@ -952,11 +931,12 @@ fn alloc_splash_vm_impl(cx: &mut Cx, network_enabled: bool, host_io_only: bool, 
         id
     };
 
-    let std = if network_enabled {
+    let mut std = if network_enabled {
         ScriptStd::with_network_runtime(cx.net.clone())
     } else {
         ScriptStd::new()
     };
+    std.set_grants(grants);
     let outer_std = std::mem::replace(&mut cx.script_data.std, std);
     let outer_vm = cx.script_vm.take();
     // An isolate wears the stylesheet of the VM that allocates it, as an
@@ -964,25 +944,28 @@ fn alloc_splash_vm_impl(cx: &mut Cx, network_enabled: bool, host_io_only: bool, 
     // stock widgets match the window they sit in.
     let inherited = outer_vm.as_ref().and_then(|outer| crate::desktop_style::sheet_of_heap(cx, outer.heap_ref().heap_key()));
     cx.script_vm = Some(Box::new(ScriptVmBase::new()));
-    let (bx, loader) = {
+    let bx = {
         let bx = cx.script_vm.take().unwrap();
         let mut vm = ScriptVm {
             host: cx.host_context(),
             bx,
         };
-        crate::makepad_draw::makepad_platform::script::script_mod(&mut vm);
+        crate::makepad_platform::script::script_mod_isolate(&mut vm);
+        let loader = crate::makepad_platform::script::res::new_loader(&mut vm);
+        let loader = vm.new_object_ref(loader);
+        vm.cx_mut().global::<CxWidgetAsync>().loaders.insert(id, loader);
         // The isolate's UI modules (theme, widgets, the prelude, the host's isolate mods) are
         // lazy: declared now, registered on the first read of any of them, once, in this heap.
         // The first isolate of the process registers them eagerly to learn their `mod` keys.
         let heap_key = vm.heap_key();
         let script = if pin.is_none() { splash_theme_script() } else { None };
-        vm.cx_mut().global::<CxWidgetAsync>().isolate_ui.insert(heap_key, IsolateUi { set, sheet: inherited, host_io_only, theme: pin.unwrap_or_else(splash_theme), script: script.clone(), loader: None, host_mods: HOST_ISOLATE_MODS.with(|g| g.borrow().clone()), custom: None, apply_sheet_widgets: false, units: None, lazy_key: None });
+        vm.cx_mut().global::<CxWidgetAsync>().isolate_ui.insert(heap_key, IsolateUi { set, sheet: inherited, grants, theme: pin.unwrap_or_else(splash_theme), script: script.clone(), id, host_mods: HOST_ISOLATE_MODS.with(|g| g.borrow().clone()), custom: None, apply_sheet_widgets: false, units: None, lazy_key: None });
         let shape: Vec<usize> = {
             let families = vm.cx_mut().global::<crate::widget_hooks::IsolateFamilies>().0.clone();
             let mut shape: Vec<usize> = families.iter().map(|f| *f as usize).collect();
             HOST_ISOLATE_MODS.with(|g| shape.extend(g.borrow().iter().map(|f| *f as usize)));
             shape.push(set as usize);
-            shape.push(host_io_only as usize);
+            shape.push(grants.bits() as usize);
             shape.push(script.as_ref().map_or(0, |script| {
                 use std::hash::{Hash, Hasher};
                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -993,7 +976,7 @@ fn alloc_splash_vm_impl(cx: &mut Cx, network_enabled: bool, host_io_only: bool, 
             shape
         };
         let known = ISOLATE_UI_KEYS.with(|k| k.borrow().iter().find(|(s, _)| *s == shape).map(|(_, keys)| keys.clone()));
-        if let Some(ui) = custom_ui {
+        if let Some(ui) = config.ui {
             // the host's own registration, now: it restyles what it registers, so nothing is
             // registered before it (and its keys are its own: nothing to learn)
             vm.cx_mut().global::<CxWidgetAsync>().isolate_ui.get_mut(&heap_key).expect("just inserted").custom = Some(ui);
@@ -1007,45 +990,19 @@ fn alloc_splash_vm_impl(cx: &mut Cx, network_enabled: bool, host_io_only: bool, 
                 let modules = vm.modules();
                 let before: Vec<LiveId> = vm.heap().map_entries(modules).iter().filter_map(|e| e.key.as_id()).collect();
                 expand_isolate_ui(&mut vm);
-                let keys: Vec<LiveId> = vm.heap().map_entries(modules).iter().filter_map(|e| e.key.as_id()).filter(|k| !before.contains(k)).collect();
+                let keys: Vec<LiveId> = vm.heap().map_entries(modules).iter().filter_map(|e| e.key.as_id()).filter(|k| *k != id!(res) && !before.contains(k)).collect();
                 ISOLATE_UI_KEYS.with(|k| k.borrow_mut().push((shape, keys)));
             }
         } }
-        // Splash isolates run untrusted-ish mini-app script; strip the
-        // ambient-authority modules from the isolate's namespace entirely:
-        // filesystem access (`fs`), child processes (`run`), and the resource
-        // loader (`res`), whose handles reach BOTH the filesystem (abs_path
-        // loads) and the network (web_url/http resources) without going
-        // through the gated net runtime. Raw sockets are gated separately:
-        // the stdlib's `net.socket_stream` errors when no net runtime is
-        // configured, same as `net.http_request`.
-        // `cx.quit` would let any mini-app close the whole host process.
-        let strip = crate::makepad_script::script! {
-            mod.fs = nil
-            mod.run = nil
-            mod.res = nil
-            mod.cx.quit = nil
-        };
-        // The loader itself is kept where no script can name it, for the
-        // host's own restyle: see `CxWidgetAsync::loaders`.
-        let loader = vm.heap_mut().module(id!(res));
-        let loader = (loader != ScriptObject::ZERO).then(|| vm.new_object_ref(loader));
-        vm.eval(strip);
-        // Re-register `fs` as the JAILED per-app storage module: inside an
-        // isolate, "the filesystem" is the app's private sandbox directory
-        // (assigned by the host via Splash::set_sandbox_dir; without one,
-        // every call errors). See splash_storage.rs for the containment.
+        // The isolate's fs is its private storage directory, assigned by the host.
         crate::splash_storage::script_mod(&mut vm);
         // `host` is the brokered doorway to host services (location,
         // clipboard, IPC, ...); requests queue for the embedding host to
         // answer, and no host = nothing resolves. See splash_host.rs.
         crate::splash_host::script_mod(&mut vm);
-        (vm.bx, loader)
+        vm.bx
     };
-    let mut std = std::mem::replace(&mut cx.script_data.std, outer_std);
-    if host_io_only {
-        std.restrict_to_host_io();
-    }
+    let std = std::mem::replace(&mut cx.script_data.std, outer_std);
     cx.script_vm = outer_vm;
 
     // Record this isolate's heap identity so any ref minted here (widget
@@ -1058,12 +1015,6 @@ fn alloc_splash_vm_impl(cx: &mut Cx, network_enabled: bool, host_io_only: bool, 
     // the dead one.
     state.dead_heaps.remove(&heap_key);
     state.heap_to_vm.insert(heap_key, id);
-    if let Some(loader) = loader {
-        if let Some(ui) = state.isolate_ui.get_mut(&heap_key) {
-            ui.loader = Some(loader.clone());
-        }
-        state.loaders.insert(id, loader);
-    }
     state.isolated_vms.vms.insert(
         id,
         IsolatedSplashVm {
@@ -1136,36 +1087,15 @@ fn with_script_vm_id_thread_dyn(
 
 impl CxSplashVmExt for Cx {
     fn alloc_splash_vm(&mut self) -> SplashVmId {
-        self.alloc_splash_vm_with_network(false)
+        self.alloc_splash_vm_with_config(SplashVmConfig::default())
     }
 
-    fn alloc_splash_vm_with_network(&mut self, network_enabled: bool) -> SplashVmId {
-        self.alloc_splash_vm_with_io(network_enabled, false)
+    fn alloc_splash_vm_with_grants(&mut self, grants: HostGrants, ui: Option<std::rc::Rc<dyn Fn(&mut ScriptVm)>>) -> SplashVmId {
+        self.alloc_splash_vm_with_config(SplashVmConfig { grants, ui, ..SplashVmConfig::default() })
     }
 
-    fn alloc_splash_vm_with_widgets(&mut self, network_enabled: bool, set: IsolateWidgets) -> SplashVmId {
-        alloc_splash_vm_impl(self, network_enabled, false, set, None, None)
-    }
-
-    fn alloc_splash_vm_with_host_io(&mut self) -> SplashVmId {
-        self.alloc_splash_vm_with_io(false, true)
-    }
-
-    fn alloc_splash_vm_with_io(&mut self, network_enabled: bool, host_io_only: bool) -> SplashVmId {
-        alloc_splash_vm_impl(self, network_enabled, host_io_only, IsolateWidgets::Library, None, None)
-    }
-
-    fn alloc_splash_vm_with_ui(&mut self, network_enabled: bool, ui: std::rc::Rc<dyn Fn(&mut ScriptVm)>) -> SplashVmId {
-        alloc_splash_vm_impl(self, network_enabled, false, IsolateWidgets::Library, Some(ui), None)
-    }
-
-    fn alloc_splash_vm_with_theme(
-        &mut self,
-        network_enabled: bool,
-        host_io_only: bool,
-        theme: Option<SplashTheme>,
-    ) -> SplashVmId {
-        alloc_splash_vm_impl(self, network_enabled, host_io_only, IsolateWidgets::Library, None, theme)
+    fn alloc_splash_vm_with_config(&mut self, config: SplashVmConfig) -> SplashVmId {
+        alloc_splash_vm_impl(self, config)
     }
 
     fn step_isolate_ui(&mut self, vm_id: SplashVmId) -> bool {
@@ -2147,8 +2077,14 @@ fn pump_widget_async(cx: &mut Cx) -> bool {
         state.gc_rr_last = next;
         if let Some(iso) = state.isolated_vms.vms.get_mut(&SplashVmId(next)) {
             if let Some(bx) = iso.vm.as_mut() {
-                if !bx.is_poisoned() && bx.heap_ref().needs_gc() {
-                    contain_isolate_panic("isolate gc", || bx.gc_if_needed());
+                // A guest's `gc.run()` is a request, honoured on the isolate's turn.
+                if !bx.is_poisoned() {
+                    let asked = bx.heap_mut().take_gc_request();
+                    if asked || bx.heap_ref().needs_gc() {
+                        contain_isolate_panic("isolate gc", || {
+                            bx.vm_ctl(&mut crate::makepad_script::vm_ctl::ScriptCtlReq::new(crate::makepad_script::vm_ctl::CTL_GC));
+                        });
+                    }
                 }
             }
         }
@@ -3034,6 +2970,189 @@ mod isolate_tests {
 }
 
 #[cfg(test)]
+mod isolate_capability_tests {
+    use super::*;
+    use crate::makepad_script::ScriptFnPtr;
+    use std::collections::{BTreeSet, HashSet};
+
+    // Resolve each reviewed binding to its native ID in this heap. Aliases,
+    // including closure captures, are classified by identity wherever found.
+    // New natives (including additional members of an existing module) fail closed.
+    const CLASSIFICATION: &[(&str, &str, &str)] = &[
+        ("mod.gc", "safe", "run run_status set_static"),
+        ("mod.gc", "gated (VM debug output)", "dump_tag"),
+        ("mod.cx", "info", "os_type"),
+        ("mod.cx.OsType", "safe", "Android Ios LinuxWindow Web"),
+        ("mod.fs", "gated (storage jail)", "append exists list mkdir read remove write"),
+        ("mod.host", "info", "capabilities has"),
+        ("mod.host", "gated (embedding host)", "request"),
+        ("mod.net", "gated (NETWORK, HTTP runtime policy)", "http_request"),
+        ("mod.net", "gated (NETWORK and configured network runtime)", "http_server socket_stream web_socket"),
+        ("mod.tween", "gated (main VM for changes)", "ticker"),
+        ("mod.tween", "safe", "clear_props from from_to is_tweening kill_tweens_of set timeline to"),
+        ("mod.prelude.widgets_internal", "gated (NETWORK, HTTP runtime policy)", "http_resource"),
+        ("mod.prelude.widgets_internal", "gated (LOCAL_RESOURCES or host source in scope)",
+            "binary_resource crate_resource file_resource load_all_resources"),
+        ("mod.prelude.widgets", "info", "local_time time_now"),
+        ("mod.prelude.widgets", "gated (VM debug output)", "log print println"),
+        ("mod.prelude.widgets", "safe",
+            "Base.Named Baseline.At Constant EventOrder.List Expr FitBound.Abs FitBound.Expr Fixed FromA
+                FromB Range.step RepeatMode.Count Track.Expr Track.Fr Track.Pct Track.Px TrackLen.Expr
+                TrackLen.Fr TrackLen.Pct TrackLen.Px Weighted abs acos acosh asfloat asin asinh asint assert
+                asuint atan atan2 atanh atomic_add atomic_max atomic_min barrier buffer buffer_rw ceil clamp
+                coopmat coopmat_convert coopmat_fill coopmat_load coopmat_mul_add coopmat_scale coopmat_store
+                cos cosh cross dFdx dFdy degrees depth_clip discard distance dot dot4_u8 exp exp2 extract_bits
+                floor fma fract fragment_depth fragment_output fragment_position global_id group_count group_id
+                instance instance_index inverse inverseSqrt length lerp ln local_id local_index log2 max min mix
+                modf normalize pack_half2 pow promise radians random random_seed random_u32 regex round
+                set_type_default sign sin sinh smoothstep snap sqrt start_interval start_timeout step stop_timer
+                subgroup_add subgroup_first subgroup_id subgroup_lane subgroup_max subgroup_min subgroup_shuffle
+                subgroup_shuffle_xor subgroup_size tan tanh task test_compile_draw test_compile_draw_const_table
+                test_compile_draw_contains test_compile_draw_errors test_compile_draw_rust_contains
+                test_compile_draw_source texture_1d texture_1d_array texture_2d texture_2d_array texture_2d_rw
+                texture_3d texture_3d_array texture_cube texture_cube_array texture_depth texture_depth_array
+                texture_video timeline trunc uniform uniform_buffer unpack2f16 unpack4u8 unpack_half2 varying
+                vertex_buffer vertex_position workgroup"),
+    ];
+
+    fn native_classes(vm: &ScriptVm) -> HashMap<u32, &'static str> {
+        let mut allowed = HashMap::new();
+        for &(module, class, names) in CLASSIFICATION {
+            for name in names.split_whitespace() {
+                let mut value: ScriptValue = vm.modules().into();
+                for field in module.split('.').skip(1).chain(name.split('.')) {
+                    let obj = value.as_object().unwrap_or_else(|| panic!("missing {module}.{name}"));
+                    value = vm.value(obj, LiveId::from_str(field));
+                }
+                let native = value.as_object().and_then(|obj| vm.heap().as_fn(obj));
+                let Some(ScriptFnPtr::Native(native)) = native else {
+                    panic!("{module}.{name} must be a native");
+                };
+                allowed.insert(native.index, class);
+            }
+        }
+        allowed
+    }
+
+    /// Visit each heap node once. A function's prototype includes its captured scope.
+    /// Both halves of an object entry can hold references, including in its vector part.
+    #[test]
+    fn design_isolate_native_capabilities() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let isolate = cx.alloc_splash_vm();
+        cx.with_script_vm_id(isolate, |vm| {
+            finish_isolate_ui(vm);
+            let prelude = vm.module(id!(prelude));
+            let widgets = vm.value(prelude, id!(widgets)).as_object().expect("widget prelude");
+            let theme = vm.module(id!(theme));
+            assert_ne!(theme, ScriptObject::ZERO);
+            assert!(!vm.has_lazy_modules());
+            let roots = [
+                ("mod", vm.modules()),
+                ("mod.prelude.widgets", widgets),
+                ("mod.theme", theme),
+            ];
+            let mut marker_roots = VecDeque::from(roots.map(|(path, obj)| (path.to_owned(), obj)));
+            let mut queue = VecDeque::from(roots.map(|(path, obj)| (path.to_owned(), obj.into())));
+            let mut marked = HashSet::new();
+            let mut seen_objects = HashSet::new();
+            let mut seen_arrays = HashSet::new();
+            let mut seen_bodies = HashSet::new();
+            let mut natives = HashMap::new();
+            let mut handles = BTreeSet::new();
+            let allowed = native_classes(vm);
+            let heap = vm.heap();
+            loop {
+                while let Some((path, value)) = queue.pop_front() {
+                    let value: ScriptValue = value;
+                    if let Some(obj) = value.as_object() {
+                        if !seen_objects.insert(obj) { continue; }
+                        match heap.as_fn(obj) {
+                            Some(ScriptFnPtr::Native(native)) => {
+                                natives.entry(native.index).or_insert_with(|| path.clone());
+                            }
+                            Some(ScriptFnPtr::Script(ip)) if seen_bodies.insert(ip.body) => {
+                                if let Some(scopes) = vm.body_scopes(ip.body) {
+                                    for (index, scope) in scopes.into_iter().enumerate() {
+                                        if let Some(scope) = scope {
+                                            let scope_path = format!("{path}.<scope {index}>");
+                                            marker_roots.push_back((scope_path.clone(), scope));
+                                            queue.push_back((scope_path, scope.into()));
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                        queue.push_back((format!("{path}.<proto>"), heap.proto(obj)));
+                        for entry in heap.map_entries(obj) {
+                            let field = entry.key.as_id().map_or_else(|| format!("[{:?}]", entry.key), |id| id.to_string());
+                            queue.push_back((format!("{path}.{field}"), entry.value));
+                            queue.push_back((format!("{path}.<key {field}>"), entry.key));
+                        }
+                        for (i, entry) in heap.vec_ref(obj).iter().enumerate() {
+                            queue.push_back((format!("{path}[{i}]"), entry.value));
+                            queue.push_back((format!("{path}.<key {i}>"), entry.key));
+                        }
+                    } else if let Some(array) = value.as_array() {
+                        if seen_arrays.insert(array) {
+                            for i in 0..heap.array_len(array) {
+                                queue.push_back((format!("{path}[{i}]"), heap.array_index_unchecked(array, i)));
+                            }
+                        }
+                    } else if value.as_handle().is_some() {
+                        handles.insert((value.value_type().to_redux(), path));
+                    }
+                }
+                // The marker also follows wildcard-import sources and POD owners.
+                // Prefer field paths and inspect anything reachable only by a VM
+                // reference from the same root, including each captured body scope.
+                while let Some((path, root)) = marker_roots.pop_front() {
+                    if heap.reach_count(&[root], &mut marked) == 0 { continue; }
+                    queue.extend(marked.difference(&seen_objects).map(|obj| {
+                        (format!("{path}.<retained {obj:?}>"), (*obj).into())
+                    }));
+                    if !queue.is_empty() { break; }
+                }
+                if queue.is_empty() { break; }
+            }
+            let unknown: BTreeSet<_> = natives.iter().filter(|(id, _)| !allowed.contains_key(id))
+                .map(|(_, path)| path.as_str()).collect();
+            assert!(unknown.is_empty(), "unclassified reachable natives: {unknown:#?}");
+            assert_eq!(natives.len(), allowed.len(), "walk missed a reviewed native");
+            // Every handle is audited, including types with no custom getter.
+            let handle_classes = [
+                (vm.handle_type(id!(res)).to_redux(), "info (existing handle's path, status and loaded bytes)"),
+                (vm.handle_type(id!(geometry)).to_redux(), "safe (geometry, no native getter)"),
+            ];
+            for (ty, path) in &handles {
+                assert!(handle_classes.iter().any(|(known, _)| known == ty), "unclassified handle {ty:?} at {path}");
+            }
+            let resource = vm.handle_type(id!(res)).to_redux();
+            assert!(handles.iter().any(|(ty, _)| *ty == resource), "walk missed the theme resource handles");
+            let modules = vm.modules();
+            assert!(vm.heap().object_own_value(modules, &id!(run).into()).is_none());
+            let cx = vm.module(id!(cx));
+            assert!(vm.heap().object_own_value(cx, &id!(quit).into()).is_none());
+            // These two names are also standard fs natives. Prove that the
+            // reviewed bindings above actually dispatch to the storage jail.
+            for (name, call) in [
+                ("read", script! { mod.fs.read(nil) }),
+                ("write", script! { mod.fs.write(nil, nil) }),
+            ] {
+                vm.capture_errors();
+                let result = vm.eval(call);
+                let errors = vm.take_errors();
+                assert!(result.is_err() && errors.iter().any(|e| e.contains("storage not available")),
+                    "mod.fs.{name} must use jailed storage: {errors:?}");
+            }
+        });
+        cx.free_splash_vm(isolate);
+    }
+}
+
+#[cfg(test)]
 mod host_io_tests {
     use super::*;
     use crate::splash_host::{take_splash_host_requests, splash_host_respond, SplashRespondOutcome};
@@ -3041,8 +3160,54 @@ mod host_io_tests {
     fn context() -> (Box<Cx>, SplashVmId) {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.with_vm(crate::script_mod);
-        let id = cx.alloc_splash_vm_with_host_io();
+        let id = cx.alloc_splash_vm();
         (Box::new(cx), id)
+    }
+
+    #[test]
+    fn default_isolate_refuses_every_desktop_cx_sink_and_granted_isolate_reaches_it() {
+        fn probe(cx: &mut Cx, expected: HostGrants) {
+            use crate::makepad_platform::event::{CameraPreviewMode, VideoSource};
+
+            let allowed = expected.contains(HostGrants::DESKTOP_ALL);
+            assert_eq!(cx.script_data.std.grants(), expected, "dispatch installed the requested grants");
+            assert!(!cx.has_internal_drag(), "each probe starts without an active drag");
+            let _ = cx.take_platform_ops();
+            cx.copy_to_clipboard("selection");
+            cx.open_url("https://example.invalid/", OpenUrlInPlace::No);
+            cx.browser_history_go(1);
+            cx.show_in_dock(false);
+            cx.start_dragging(vec![DragItem::String { value: "item".into(), internal_id: None }]);
+            let layer = cx.native_layer_new(NativeContent::Web { url: "about:blank".into() });
+            cx.open_select_file_dialog(FileDialog::new());
+            cx.prepare_video_playback(
+                LiveId(1), VideoSource::InMemory(std::rc::Rc::default()), CameraPreviewMode::Auto,
+                0, cx.null_texture().texture_id(), false, false,
+            );
+            let ops: Vec<_> = cx.take_platform_ops().iter().map(CxOsOp::name).collect();
+            if allowed {
+                assert_eq!(ops, ["CopyToClipboard", "OpenUrl", "BrowserHistoryGo", "ShowInDock",
+                    "NativeLayerCreate", "SelectFileDialog", "PrepareVideoPlayback"],
+                    "desktop grants reach each queued sink under {expected:?}");
+            } else {
+                assert!(ops.is_empty(), "default isolate queued desktop operations: {ops:?}");
+            }
+            assert_eq!(cx.has_internal_drag(), allowed, "internal drag under {expected:?}");
+            let mode = if allowed { NativeLayerMode::Pending } else { NativeLayerMode::Unsupported };
+            assert_eq!(layer.mode(cx), mode, "native layer mode under {expected:?}");
+            cx.native_layer(layer.id()).close();
+        }
+
+        let (mut cx, default) = context();
+        let desktop = cx.alloc_splash_vm_with_grants(HostGrants::DESKTOP_ALL, None);
+        with_isolate(&mut *cx, default, |cx| probe(cx, HostGrants::NONE));
+        assert_eq!(cx.script_data.std.grants(), HostGrants::ALL, "default dispatch restored the host");
+        with_isolate(&mut *cx, desktop, |cx| probe(cx, HostGrants::DESKTOP_ALL));
+        assert_eq!(cx.script_data.std.grants(), HostGrants::ALL, "granted dispatch restored the host");
+        let mut main_cx = Cx::new(Box::new(|_, _| {}));
+        probe(&mut main_cx, HostGrants::ALL);
+        cx.free_splash_vm(desktop);
+        cx.free_splash_vm(default);
     }
 
     #[test]
@@ -3060,10 +3225,11 @@ mod host_io_tests {
             .0
             .push(family);
         // Learn this shape first, so the measured base expands under the error sink.
-        let warm = cx.alloc_splash_vm_with_widgets(false, IsolateWidgets::Base);
+        let config = SplashVmConfig { widgets: IsolateWidgets::Base, ..SplashVmConfig::default() };
+        let warm = cx.alloc_splash_vm_with_config(config.clone());
         cx.free_splash_vm(warm);
-        let base = cx.alloc_splash_vm_with_widgets(false, IsolateWidgets::Base);
-        let library = cx.alloc_splash_vm_with_widgets(false, IsolateWidgets::Library);
+        let base = cx.alloc_splash_vm_with_config(config);
+        let library = cx.alloc_splash_vm();
         let inspect = |cx: &mut Cx, id, set| {
             with_isolate(cx, id, |cx| {
                 cx.with_vm(|vm| {
@@ -3146,7 +3312,7 @@ mod host_io_tests {
     }
 
     #[test]
-    fn host_io_blocks_native_http_sockets_listeners_and_resource_aliases() {
+    fn host_io_blocks_native_http_sockets_and_listeners() {
         let (mut cx, id) = context();
         // With a network runtime present, only the host I/O guards can refuse these calls.
         with_isolate(&mut *cx, id, |cx| {
@@ -3158,10 +3324,6 @@ mod host_io_tests {
             script! { mod.net.socket_stream(mod.net.SocketStreamOptions{host: "127.0.0.1", port: "9"}) },
             script! { mod.net.web_socket(mod.net.HttpRequest{url: "ws://127.0.0.1:9/private"}, mod.net.WebSocketEvents{}) },
             script! { mod.net.http_server(mod.net.HttpServerOptions{listen: "127.0.0.1:0"}, mod.net.HttpServerEvents{}) },
-            script! { mod.prelude.widgets.http_resource("http://127.0.0.1:9/private") },
-            script! { mod.prelude.widgets.file_resource("/etc/passwd") },
-            script! { mod.prelude.widgets.crate_resource("self:../../private") },
-            script! { mod.prelude.widgets.load_all_resources() },
         ];
         for attempt in attempts {
             cx.with_script_vm_id(id, |vm| {
@@ -3181,33 +3343,130 @@ mod host_io_tests {
     }
 
     #[test]
-    fn host_io_restriction_is_inherited_and_restored_after_unwind() {
+    fn guest_prelude_and_captured_loaders_obey_grants() {
+        let (mut cx, default) = context();
+        let online = cx.alloc_splash_vm_with_grants(HostGrants::NETWORK, None);
+        for id in [default, online] {
+            cx.with_script_vm_id(id, |vm| {
+                let prelude = vm.module(id!(prelude));
+                let public = vm.value(prelude, id!(widgets)).as_object().unwrap();
+                let internal = vm.value(prelude, id!(widgets_internal)).as_object().unwrap();
+                for (name, args) in [
+                    (id!(file_resource), "(\"resource-test.txt\")"),
+                    (id!(crate_resource), "(\"self:Cargo.toml\")"),
+                    (id!(http_resource), "(\"https://example.invalid/\")"),
+                    (id!(binary_resource), "(nil)"),
+                    (id!(load_all_resources), "()"),
+                ] {
+                    assert!(vm.heap().object_own_value(internal, &name.into()).is_some(), "internal {name}");
+                    let public_value = vm.heap().object_own_value(public, &name.into());
+                    if id == online && name == id!(http_resource) {
+                        assert_eq!(public_value, Some(vm.value(internal, name)));
+                        continue;
+                    }
+                    assert!(public_value.is_none(), "guest prelude contains {name}");
+                    let code = format!("mod.prelude.widgets_internal.{name}{args}");
+                    vm.capture_errors();
+                    let value = vm.eval(ScriptMod::new("", "", &format!("guest-{name}"), 0, 0, &code, &[]));
+                    let errors = vm.take_errors();
+                    assert!(value.is_err() && errors.iter().any(|e| e.contains("host request")),
+                        "{name} must refuse the guest: {value:?}, {errors:?}");
+                }
+            });
+        }
+        cx.with_script_vm_id(online, |vm| {
+            let check = |vm: &mut ScriptVm, url, expected: &str| {
+                let url = vm.new_string(url);
+                for call in [
+                    script! { mod.net.http_request(mod.net.HttpRequest{url: #(url)}, mod.net.HttpEvents{}) },
+                    script! { mod.prelude.widgets.http_resource(#(url)) },
+                ] {
+                    vm.capture_errors();
+                    let value = vm.eval(call);
+                    let errors = vm.take_errors();
+                    assert!(value.is_err() && errors.iter().any(|e| e.contains(expected)),
+                        "both HTTP entry points must refuse this URL: {value:?}, {errors:?}");
+                }
+            };
+            check(vm, "about:blank", "HTTP(S)");
+            if !crate::makepad_platform::makepad_network::lan::allowed() {
+                check(vm, "http://resource-test.local/", "network");
+            }
+            assert!(vm.cx().script_data.resources.http_resources.is_empty());
+        });
+        let child = cx.with_script_vm_id(online, |vm| with_splash_resources(vm, |vm| {
+            vm.cx_mut().alloc_splash_vm_with_grants(HostGrants::ALL, None)
+        }));
+        cx.with_script_vm_id(child, |vm| {
+            assert_eq!(vm.cx().script_data.std.grants(), HostGrants::NETWORK,
+                "a nested isolate can inherit only its parent's persistent grants");
+        });
+        cx.free_splash_vm(child);
+        for id in [default, online] { cx.free_splash_vm(id); }
+    }
+
+    #[test]
+    fn host_resource_scope_checks_the_calling_body_and_restores_on_unwind() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let id = cx.alloc_splash_vm();
+        cx.with_script_vm_id(id, |vm| {
+            finish_isolate_ui(vm);
+            let guest = vm.eval(ScriptMod::new("", "", "guest-callback", 0, 0,
+                "|| mod.prelude.widgets_internal.file_resource(\"guest-marker\")", &[]));
+            let guest = vm.new_object_ref(guest.as_object().expect("guest callback"));
+            let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                with_splash_resources(vm, |vm| {
+                    let resource = vm.eval(script! { mod.res.file_resource("host-marker") });
+                    assert!(resource.as_handle().is_some(), "the host body has its scoped grant");
+                    vm.capture_errors();
+                    let call = script! {
+                        let callback = #(guest.as_object())
+                        callback()
+                    };
+                    let result = vm.eval(call);
+                    let errors = vm.take_errors();
+                    assert!(result.is_err() && errors.iter().any(|e| e.contains("host request")),
+                        "guest callback acquired host grant: {result:?}, {errors:?}");
+                    with_splash_resources(vm, |vm| assert!(vm.value(vm.modules(), id!(res)).is_object()));
+                    assert!(vm.value(vm.modules(), id!(res)).is_object());
+                    panic!("end of scoped resource test");
+                });
+            }));
+            assert_eq!(panic.unwrap_err().downcast_ref::<&str>(), Some(&"end of scoped resource test"));
+            assert_eq!(vm.cx().script_data.std.scoped_grants(), HostGrants::NONE);
+            assert!(vm.value(vm.modules(), id!(res)).is_nil());
+        });
+        cx.free_splash_vm(id);
+    }
+
+    #[test]
+    fn grants_are_inherited_and_restored_after_unwind() {
         let (mut cx, id) = context();
-        assert!(!cx.script_data.std.host_io_only());
-        let child = with_isolate(&mut *cx, id, |cx| cx.alloc_splash_vm_with_network(true));
+        assert_eq!(cx.script_data.std.grants(), HostGrants::ALL, "main VM has all grants");
+        let child = with_isolate(&mut *cx, id, |cx| {
+            assert_eq!(cx.script_data.std.grants(), HostGrants::NONE, "default isolate has no grants");
+            cx.alloc_splash_vm_with_grants(HostGrants::ALL, None)
+        });
         with_isolate(&mut *cx, child, |cx| {
-            assert!(cx.script_data.std.host_io_only());
-            assert!(cx.script_data.std.net.is_none());
+            assert_eq!(cx.script_data.std.grants(), HostGrants::NONE, "child cannot exceed its parent");
+            assert!(cx.script_data.std.net.is_none(), "child has no network runtime");
         });
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            with_isolate(&mut *cx, id, |cx| {
-                assert!(cx.script_data.std.host_io_only());
-                panic!("test guest panic");
-            });
+            with_isolate(&mut *cx, id, |_| panic!("test guest panic"));
         }));
-        assert!(result.is_err());
-        assert!(!cx.script_data.std.host_io_only());
+        assert!(result.is_err(), "guest panic propagates after restoring the host");
+        assert_eq!(cx.script_data.std.grants(), HostGrants::ALL, "unwind restores the host grants");
         cx.free_splash_vm(child);
         cx.free_splash_vm(id);
     }
 
     #[test]
-    fn host_io_does_not_register_widgets_with_ambient_io() {
+    fn default_isolate_does_not_register_desktop_shell_widgets() {
         let (mut cx, id) = context();
         cx.with_script_vm_id(id, |vm| {
             let widgets = vm.module(id!(widgets));
-            // WebView and MapView are families of their own, which an isolate
-            // never gets (widgets_mod_with_host_io registers the core only).
+            // This host has registered neither the browser nor the map family.
             let keys = [
                 id!(Window), id!(WindowBase), id!(ScreenCap), id!(ScreenCapBase),
                 id!(WindowMenu), id!(WindowMenuBase), id!(CachedWidget),
@@ -3218,6 +3477,14 @@ mod host_io_tests {
                 assert!(value.is_nil() || value.is_err(), "unsafe widget {key:?} was registered");
             }
         });
+        let desktop = cx.alloc_splash_vm_with_grants(HostGrants::DESKTOP_SHELL, None);
+        cx.with_script_vm_id(desktop, |vm| {
+            let widgets = vm.module(id!(widgets));
+            for key in [id!(Window), id!(ScreenCap), id!(WindowMenu), id!(CachedWidget)] {
+                assert!(vm.value(widgets, key).is_object(), "desktop shell grant registers {key:?}");
+            }
+        });
+        cx.free_splash_vm(desktop);
         cx.free_splash_vm(id);
     }
 
@@ -3500,8 +3767,9 @@ mod isolate_ui_step_tests {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.with_vm(crate::script_mod);
         // The first isolate of a shape registers eagerly and teaches the keys; the rest are lazy.
-        let first = cx.alloc_splash_vm_with_widgets(false, set);
-        let [whole, stepped, entered, type_miss, restyled] = std::array::from_fn(|_| cx.alloc_splash_vm_with_widgets(false, set));
+        let config = SplashVmConfig { widgets: set, ..SplashVmConfig::default() };
+        let first = cx.alloc_splash_vm_with_config(config.clone());
+        let [whole, stepped, entered, type_miss, restyled] = std::array::from_fn(|_| cx.alloc_splash_vm_with_config(config.clone()));
         let names = unit_names(&mut cx, stepped);
         let errors_before = ERRORS.with(|errors| errors.get());
 

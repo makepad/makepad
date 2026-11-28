@@ -3,8 +3,8 @@
 //! The core never names a family: a `Window` hosts the design overlay, the
 //! voice wave and the AI chat slot,
 //! but each of those lives in a family crate an app may leave out. A family
-//! installs its hooks on the `Cx` when it registers (the same way the tweaker
-//! fills `Cx::tweak_callback` and the aichat crate fills `Cx::ai_callback`);
+//! installs its hooks on the `Cx` when it registers. The core data callback
+//! forwards overlay and structural design commands through the tweaker hook;
 //! a hook nobody installed is `None`, and the core then does what it did
 //! when the family was compiled out.
 //!
@@ -30,7 +30,7 @@ pub struct TweakerHooks {
     /// The overlay's panel covers this point (a window drag query answers
     /// Client there, not Caption).
     pub panel_owns_pointer: fn(Vec2d) -> bool,
-    /// Installed as `Cx::tweak_callback` by `set_ui_root`.
+    /// Handles overlay and structural operations delegated by the core design callback.
     pub tweak_callback: fn(&mut Cx, &str, &[(String, String)]) -> Result<String, String>,
     /// The widget type the tree tab reports as an inspector.
     pub inspector_type: ScriptTypeId,

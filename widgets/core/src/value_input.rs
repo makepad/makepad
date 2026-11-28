@@ -64,6 +64,10 @@ script_mod! {
         arrow_zone: theme.prop_arrow_zone
         pad: theme.prop_pad
         arrow_color: theme.prop_ink_dim
+        // a named field's value (its name in `draw_label`), and a value that stands for no value
+        // of its own (mixed, inherited, read-only, the placeholder)
+        labelled_value_color: theme.color_text
+        muted_color: theme.prop_ink_dim
         chip_error_color: theme.color_error
         draw_bg +: {
             color: uniform(theme.prop_field)
@@ -357,6 +361,10 @@ pub struct ValueInput {
     #[live] draw_chip_text: DrawText,
     #[live] chip_error_color: Vec4f,
     #[live] pub arrow_color: Vec4f,
+    /// The value's ink in a field with a name inside it (`draw_text`'s otherwise).
+    #[live] pub labelled_value_color: Vec4f,
+    /// The value's ink when it is not the field's own: mixed, inherited, read-only, the placeholder.
+    #[live] pub muted_color: Vec4f,
     #[live] draw_label: DrawText,
     #[live] text_input: TextInput,
     #[live(0.0)] pub min: f64,
@@ -398,6 +406,8 @@ pub struct ValueInput {
     #[rust] invalid_at: f64,
     #[rust] invalid_level: f32,
     #[rust] invalid_frame: NextFrame,
+    /// The last draw cut the label short (an ellipsis ends it): a host can show it whole in a tip.
+    #[rust] label_cut: bool,
 }
 
 impl ValueInput {
@@ -880,13 +890,35 @@ impl Widget for ValueInput {
         self.draw_bg.invalid = if typing_error { 1.0 } else { self.invalid_level };
         self.draw_bg.invalid_pulse = if typing_error { self.invalid_level } else { 0.0 };
         self.draw_bg.draw_abs(cx, face);
+        // a label longer than its room ends in an ellipsis (the value keeps its own room)
+        self.label_cut = false;
+        let shown_label = if labelled && advance(&self.draw_label, cx, &self.label) > label_width + 0.5 {
+            self.label_cut = true;
+            let mut cut: String = self.label.clone();
+            let trimmed = loop {
+                if cut.pop().is_none() { break String::new(); }
+                let trimmed = format!("{}…", cut.trim_end());
+                if advance(&self.draw_label, cx, &trimmed) <= label_width { break trimmed; }
+            };
+            // a name cut to a stub ("…", "Po…") says less than its last word ("Position X" → "X",
+            // the axis of a field's first segment), when that fits
+            let last = self.label.rsplit(' ').next().unwrap_or("");
+            if cut.trim_end().chars().count() < 3 && !last.is_empty() && last != self.label
+                && advance(&self.draw_label, cx, last) <= label_width {
+                last.to_string()
+            } else {
+                trimmed
+            }
+        } else {
+            self.label.clone()
+        };
         if labelled {
-            let line = self.draw_label.layout(cx, 0.0, 0.0, None, false, Align::default(), &self.label);
+            let line = self.draw_label.layout(cx, 0.0, 0.0, None, false, Align::default(), &shown_label);
             let scale = self.draw_label.font_scale as f64;
             let label_y = face.pos.y + (face.size.y - line.size_in_lpxs.height as f64 * scale) * 0.5
                 + line.ink_center_offset_in_lpxs() as f64 * scale;
             cx.push_clip_rect(rect(face.pos.x + edge, face.pos.y, label_width, face.size.y));
-            self.draw_label.draw_abs(cx, dvec2(face.pos.x + edge, label_y), &self.label);
+            self.draw_label.draw_abs(cx, dvec2(face.pos.x + edge, label_y), &shown_label);
             cx.pop_clip_rect();
         }
         if linked {
@@ -926,7 +958,8 @@ impl Widget for ValueInput {
             }
         } else {
             let color = self.draw_text.color;
-            if self.mixed || self.inherited || self.read_only || (self.value == self.placeholder_value && !self.placeholder.is_empty()) { self.draw_text.color = self.draw_label.color; }
+            if self.mixed || self.inherited || self.read_only || (self.value == self.placeholder_value && !self.placeholder.is_empty()) { self.draw_text.color = self.muted_color; }
+            else if labelled { self.draw_text.color = self.labelled_value_color; }
             let x = if linked { face.pos.x + left }
                 else if labelled { face.pos.x + face.size.x - edge - width }
                 else { face.pos.x + (face.size.x - width) * 0.5 };
@@ -1168,6 +1201,16 @@ impl Widget for ValueInput {
 }
 
 impl ValueInputRef {
+    /// Its last draw cut its label short (an ellipsis ends it).
+    pub fn label_cut(&self) -> bool {
+        self.borrow().is_some_and(|inner| inner.label_cut)
+    }
+
+    /// Its label (the name drawn inside it).
+    pub fn label(&self) -> String {
+        self.borrow().map(|inner| inner.label.clone()).unwrap_or_default()
+    }
+
     pub fn set_names(&self, cx: &mut Cx, names: Arc<[NamedValue]>, links: bool) {
         if let Some(mut inner) = self.borrow_mut() { inner.set_names(cx, names, links); }
     }

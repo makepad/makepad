@@ -358,6 +358,9 @@ let gl_button = fn(pos: vec2, size: vec2, o: vec2, dpi: float, hover: float, dow
 mod.widgets.ButtonFlat.draw_bg.pixel = fn() {
     return self.host_over(gl_button(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.hover, self.down, self.disabled, self.focus, self.loading, self.anim_time, 0.0, 0.0), 7.0)
 }
+mod.widgets.ButtonFlat.draw_bg.face = {mode: @host_over, rest: #34363f, hover: #393b45, down: #272930}
+mod.widgets.ButtonFlat.draw_bg.color = #34363f
+mod.widgets.ButtonFlat.draw_bg.color_default = #34363f
 mod.widgets.Button.draw_bg.pixel = fn() {
     return self.host_over(gl_button(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.hover, self.down, self.disabled, self.focus, self.loading, self.anim_time, 1.0, 0.0), 7.0)
 }
@@ -379,6 +382,7 @@ mod.widgets.ButtonOutline.draw_bg.pixel = fn() {
 mod.widgets.ButtonFlatter.draw_bg.pixel = fn() {
     return self.host_over(gl_button(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.hover, self.down, self.disabled, self.focus, self.loading, self.anim_time, 7.0, 0.0), 7.0)
 }
+mod.widgets.ButtonFlatter.draw_bg.face = {mode: @host_over, rest: #00000000, hover: #393b45, down: #272930}
 
 // Label ink per state: caps #d4d7de, the primary's lit legend near white,
 // every variant dims to #5c5e66 when disabled.
@@ -591,6 +595,7 @@ mod.widgets.RadioButtonTabFlat.draw_bg.pixel = fn() {
     let xs = vec2(gl_snap(c.x - 5.3333, o.x, px), gl_snap(c.x + 5.3333, o.x, px))
     return gl_lamp(res, p, xs, gl_snap(c.y + 6.5, o.y, px), px, sel * (1.0 - self.disabled), 1.0, vec3(0.910, 0.918, 0.922), vec3(0.405, 0.593, 0.752))
 }
+mod.widgets.RadioButtonTabFlat.draw_bg.face = {mode: @own_face, rest: #34363f, hover: #393b45, down: #272c37, active: #272c37}
 mod.widgets.RadioButtonTabFlat.draw_text.color = #c4c7ce
 mod.widgets.RadioButtonTabFlat.draw_text.color_hover = #dcdee3
 mod.widgets.RadioButtonTabFlat.draw_text.color_active = #fafafa

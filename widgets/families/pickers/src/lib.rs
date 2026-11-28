@@ -18,6 +18,7 @@ pub mod column_picker;
 pub mod combo_box;
 pub mod drop_down2;
 pub mod drop_toggles;
+pub mod emoji_picker;
 pub mod form;
 pub mod number_field;
 pub mod picker_parts;
@@ -49,6 +50,7 @@ pub fn pickers_mod(vm: &mut ScriptVm) {
     crate::tree_select::script_mod(vm);
     crate::transfer::script_mod(vm);
     crate::recent_list::script_mod(vm);
+    crate::emoji_picker::script_mod(vm);
 }
 
 // The pooled test contexts and the whole registration the tests build on:

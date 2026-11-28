@@ -5,6 +5,7 @@ use {
         slice::SliceExt,
         substr::Substr,
     },
+    crate::makepad_platform::font_policy::needs_emoji_presentation,
     fxhash::FxHashMap,
     rustybuzz,
     rustybuzz::UnicodeBuffer,
@@ -12,6 +13,7 @@ use {
         collections::{BTreeMap, HashSet},
         hash::{Hash, Hasher},
         mem,
+        ops::Range,
         rc::Rc,
         sync::Mutex,
     },
@@ -244,17 +246,7 @@ impl Shaper {
             // pass and vec allocations for the common case of ASCII / Latin /
             // Greek / Cyrillic / CJK / emoji text.
             if is_definitely_ltr(text) {
-                self.shape_recursive(
-                    text,
-                    &params.fonts[0],
-                    &params.fonts,
-                    features,
-                    &params.diagnostics,
-                    Direction::Ltr,
-                    0,
-                    text.len(),
-                    &mut glyphs,
-                );
+                self.shape_run(&params, features, Direction::Ltr, 0..text.len(), &mut glyphs);
             } else {
                 // The text contains at least one possibly-RTL character, so
                 // run the Unicode Bidirectional Algorithm to resolve embedding
@@ -271,17 +263,7 @@ impl Shaper {
                     // (e.g. isolated presentation-form characters), so a
                     // single LTR shape call is still correct and avoids the
                     // visual_runs allocation.
-                    self.shape_recursive(
-                        text,
-                        &params.fonts[0],
-                        &params.fonts,
-                        features,
-                        &params.diagnostics,
-                        Direction::Ltr,
-                        0,
-                        text.len(),
-                        &mut glyphs,
-                    );
+                    self.shape_run(&params, features, Direction::Ltr, 0..text.len(), &mut glyphs);
                 } else {
                     // `visual_runs` returns level runs in visual (left-to-right)
                     // order, so appending each run's shaped glyphs in iteration
@@ -293,17 +275,7 @@ impl Shaper {
                         } else {
                             Direction::Ltr
                         };
-                        self.shape_recursive(
-                            text,
-                            &params.fonts[0],
-                            &params.fonts,
-                            features,
-                            &params.diagnostics,
-                            direction,
-                            run.start,
-                            run.end,
-                            &mut glyphs,
-                        );
+                        self.shape_run(&params, features, direction, run.clone(), &mut glyphs);
                     }
                 }
             }
@@ -356,6 +328,59 @@ impl Shaper {
         if mark_missing_glyph_for_warning(&WARNED_MISSING_GLYPHS, ch) {
             crate::makepad_platform::log!("{}", missing_glyph_message(ch, diagnostics));
         }
+    }
+
+    fn shape_run(
+        &mut self,
+        params: &ShapeParams,
+        features: &[(u32, u32)],
+        direction: Direction,
+        range: Range<usize>,
+        out: &mut Vec<ShapedGlyph>,
+    ) {
+        let text = params.text.as_str();
+        let shape_text = |shaper: &mut Self, span: Range<usize>, out: &mut Vec<ShapedGlyph>| {
+            if !span.is_empty() {
+                shaper.shape_recursive(text, &params.fonts[0], &params.fonts, features,
+                    &params.diagnostics, direction, span.start, span.end, out);
+            }
+        };
+        let mut remaining = range.clone();
+        let run = &text[range.clone()];
+        if params.fonts.len() > 1 && !run.is_ascii() && params.fonts.iter().any(|f| f.has_color_bitmaps()) {
+            let mut trial = self.reusable_glyphs.pop().unwrap_or_default();
+            let mut try_emoji = |(index, cluster): (usize, &str)| {
+                if !needs_emoji_presentation(cluster) {
+                    return;
+                }
+                let start = range.start + index;
+                let end = start + cluster.len();
+                for font in params.fonts.iter().filter(|font| font.has_color_bitmaps()) {
+                    // Check the shaped glyphs: a flag or keycap may only have a colour
+                    // bitmap after substitution. This reads the strike, without decoding it.
+                    self.shape_step(text, font, features, direction, start, end, &mut trial);
+                    if trial.iter().all(|g| g.id != 0) && trial.iter().any(|g| {
+                        font.with_glyph_raster_image(g.id, u16::MAX as f32, |_| ()).is_some()
+                    }) {
+                        let preceding = match direction {
+                            Direction::Ltr => mem::replace(&mut remaining.start, end)..start,
+                            Direction::Rtl => end..mem::replace(&mut remaining.end, start),
+                        };
+                        shape_text(self, preceding, out);
+                        out.append(&mut trial);
+                        return;
+                    }
+                    trial.clear();
+                }
+            };
+            let clusters = run.grapheme_indices(true);
+            match direction {
+                Direction::Ltr => clusters.for_each(&mut try_emoji),
+                Direction::Rtl => clusters.rev().for_each(&mut try_emoji),
+            }
+            self.reusable_glyphs.push(trial);
+        }
+        shape_text(self, remaining, out);
     }
 
     fn shape_recursive(

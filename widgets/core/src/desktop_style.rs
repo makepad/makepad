@@ -322,19 +322,21 @@ struct Envelope {
     makepad_style: StyleSheet,
 }
 /// What a heap wears. `Inherited` is the sheet the window system handed
-/// down (`MAKEPAD_WIDGET_STYLE`, a WM's `makepad_style` event); `Picked` is
-/// what the app or somebody using it chose, `None` being the plain theme.
+/// down (`MAKEPAD_WIDGET_STYLE`, a WM's `makepad_style` event). `Default`
+/// is an app's standalone fallback. `Picked` is what the app or somebody
+/// using it chose, with `None` representing the plain theme.
 /// A pick stands: the window system's sheet neither comes back over it on
 /// the next read nor replaces it when the system look changes.
 #[derive(Clone, Debug, PartialEq)]
 enum Worn {
     Inherited(StyleSheet),
+    Default(StyleSheet),
     Picked(Option<StyleSheet>),
 }
 impl Worn {
     fn sheet(&self) -> Option<&StyleSheet> {
         match self {
-            Worn::Inherited(sheet) => Some(sheet),
+            Worn::Inherited(sheet) | Worn::Default(sheet) => Some(sheet),
             Worn::Picked(sheet) => sheet.as_ref(),
         }
     }
@@ -425,6 +427,38 @@ pub fn install(vm: &mut ScriptVm, sheet: StyleSheet) {
 pub fn uninstall(vm: &mut ScriptVm) {
     wear(vm, Worn::Picked(None));
 }
+/// Wear `make(vm)` as an app's standalone fallback sheet if this heap is
+/// unsettled. An environment or window-system sheet, an earlier default,
+/// and any explicit pick (including the plain theme) all take precedence.
+/// Only calls `make` and returns `true` when installing the fallback.
+pub fn install_default(vm: &mut ScriptVm, make: impl FnOnce(&mut ScriptVm) -> StyleSheet) -> bool {
+    let _ = current(vm); // Adopt the environment's sheet first.
+    let key = vm.heap_key();
+    if worn(vm.cx_mut(), key).is_some() {
+        return false;
+    }
+    let sheet = make(vm);
+    wear(vm, Worn::Default(sheet));
+    true
+}
+/// The id of the standing [`install_default`] sheet, if any.
+pub fn default_name(vm: &mut ScriptVm) -> Option<String> {
+    let key = vm.heap_key();
+    match vm.cx_mut().global::<Styles>().heaps.get(&key) {
+        Some(Worn::Default(sheet)) => Some(sheet.name.clone()),
+        _ => None,
+    }
+}
+/// Replace a standing standalone fallback and keep it a fallback. Returns
+/// `true` when replaced.
+pub fn replace_default(vm: &mut ScriptVm, sheet: StyleSheet) -> bool {
+    let key = vm.heap_key();
+    if !matches!(vm.cx_mut().global::<Styles>().heaps.get(&key), Some(Worn::Default(_))) {
+        return false;
+    }
+    wear(vm, Worn::Default(sheet));
+    true
+}
 fn wear(vm: &mut ScriptVm, worn: Worn) {
     if let Some(sheet) = worn.sheet() {
         crate::app_icon::install(vm.cx_mut(), sheet.family, &sheet.icons);
@@ -432,9 +466,8 @@ fn wear(vm: &mut ScriptVm, worn: Worn) {
     let key = vm.heap_key();
     vm.cx_mut().global::<Styles>().heaps.insert(key, worn);
 }
-/// What a VM wears, taken to put back later: the sheet and whether it was
-/// picked or handed down by the window system, so a tool that tries other
-/// sheets and returns leaves an app that followed the system following it.
+/// What a VM wears, taken to put back later, including whether the sheet
+/// was picked, installed as a fallback or handed down by the window system.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Wearing(Option<Worn>);
 impl Wearing {
@@ -501,6 +534,88 @@ pub fn current_name(vm: &mut ScriptVm) -> Option<String> {
     }
     current(vm).map(|sheet| sheet.name)
 }
+/// How a widget's `draw_bg.pixel` obtains its face colour, declared on
+/// `mod.widgets.<Widget>.draw_bg.face` by any sheet that replaces `draw_bg.pixel`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FaceMode {
+    /// Replaces `draw_bg.pixel` for shape/effects while still reading `self.color*` / `self.face_fill()` (e.g. `terminal`).
+    SelfColor,
+    /// Paints its own face colours, ignoring `self.color*` (Group C `RadioButtonTabFlat`).
+    OwnFace,
+    /// Paints its own face colours wrapped in `self.host_over(...)` (Group C `ButtonFlat` / `ButtonFlatter`).
+    HostOver,
+}
+
+/// Splash-declared face swatches read from `mod.widgets.<Widget>.draw_bg.face`.
+/// Each colour is `0xRRGGBBAA` (alpha `0x00` = transparent over parent surface;
+/// `0x01..=0xfe` = translucent veil composited over parent surface; `0xff` = opaque).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WidgetFace {
+    pub mode: FaceMode,
+    pub rest: Option<u32>,
+    pub hover: Option<u32>,
+    pub down: Option<u32>,
+    pub focus: Option<u32>,
+    pub active: Option<u32>,
+}
+
+/// Fallible reader for `sheet_checks` and GPU cross-checks: returns `Ok(None)` when
+/// absent, `Ok(Some(face))` when valid, and `Err(msg)` on an unknown `draw_bg.face.mode`.
+pub fn try_widget_face(vm: &mut ScriptVm, widget: LiveId) -> Result<Option<WidgetFace>, String> {
+    let widgets = vm.module(id!(widgets));
+    let Some(w) = vm.value(widgets, widget).as_object() else { return Ok(None); };
+    let Some(bg) = vm.value(w, id!(draw_bg)).as_object() else { return Ok(None); };
+    let Some(face) = vm.value(bg, id!(face)).as_object() else { return Ok(None); };
+    let mode = match vm.value(face, id!(mode)).as_id() {
+        Some(id!(self_color)) => FaceMode::SelfColor,
+        Some(id!(host_over)) => FaceMode::HostOver,
+        Some(id!(own_face)) | None => FaceMode::OwnFace,
+        Some(other) => return Err(format!("unknown draw_bg.face.mode `{other}` on `{widget}`")),
+    };
+    let color = |vm: &mut ScriptVm, key: LiveId| vm.value(face, key).as_color();
+    Ok(Some(WidgetFace {
+        mode,
+        rest: color(vm, id!(rest)),
+        hover: color(vm, id!(hover)),
+        down: color(vm, id!(down)),
+        focus: color(vm, id!(focus)),
+        active: color(vm, id!(active)),
+    }))
+}
+
+/// Runtime reader for app theme switches: logs once and returns `None` on an unknown mode.
+pub fn widget_face(vm: &mut ScriptVm, widget: LiveId) -> Option<WidgetFace> {
+    match try_widget_face(vm, widget) {
+        Ok(face) => face,
+        Err(err) => {
+            log!("desktop_style::widget_face: {err}");
+            None
+        }
+    }
+}
+
+/// Content hash of `module.<widget>.draw_bg.pixel`, for structural shader-override checks.
+pub fn widget_pixel_key(vm: &mut ScriptVm, module: LiveId, widget: LiveId) -> Option<u64> {
+    let m = vm.module(module);
+    let w = vm.value(m, widget).as_object()?;
+    let bg = vm.value(w, id!(draw_bg)).as_object()?;
+    let px = vm.value(bg, id!(pixel)).as_object()?;
+    let ip = vm.heap().fn_script_ip(px)?;
+    Some(vm.bx.code_ref().fn_content_key(ip))
+}
+
+/// True when `mod.widgets.<widget>.draw_bg.pixel` differs structurally from `mod.stock_widgets`.
+/// Requires `stock_apart = true` (true in apps and `sheet_checks`).
+pub fn widget_pixel_overridden(vm: &mut ScriptVm, widget: LiveId) -> bool {
+    match (
+        widget_pixel_key(vm, id!(widgets), widget),
+        widget_pixel_key(vm, id!(stock_widgets), widget),
+    ) {
+        (Some(cur), Some(stock)) => cur != stock,
+        _ => false,
+    }
+}
+
 /// The window system's family: the sheet the environment names (the WM hands every app
 /// its look) or the WM's newest style event, independent of what the app picked for
 /// itself. What the window's controls follow under a window manager (window.rs): they are
@@ -522,7 +637,7 @@ pub fn current_style(vm: &mut ScriptVm) -> DesktopStyle {
     current(vm).map(|sheet| sheet.family).unwrap_or_default()
 }
 fn evaluate(vm: &mut ScriptVm, sheet: &StyleSheet, phase: &str, code: String) {
-    vm.eval(ScriptMod::new(&sheet.resources, &format!("desktop_style_{}_{}", sheet.name, phase), &format!("themes/{}/{phase}.splash", sheet.name), 0, 0, &code, &[]));
+    crate::with_splash_resources(vm, |vm| vm.eval(ScriptMod::new(&sheet.resources, &format!("desktop_style_{}_{}", sheet.name, phase), &format!("themes/{}/{phase}.splash", sheet.name), 0, 0, &code, &[])));
 }
 pub fn apply_theme(vm: &mut ScriptVm) {
     if let Some(sheet) = current(vm) {
@@ -981,14 +1096,14 @@ pub fn caption_look(vm: &mut ScriptVm) -> CaptionLook {
 /// library (the sheet installed, then the theme and the widgets under it), freed after. What
 /// a window manager hands what draws its caption without widgets (`makepad run`'s load screen).
 pub fn caption_look_of(cx: &mut Cx, sheet: &StyleSheet) -> CaptionLook {
-    use crate::widget_async::CxSplashVmExt;
+    use crate::widget_async::{CxSplashVmExt, HostGrants};
     let sheet = sheet.clone();
-    let vm_id = cx.alloc_splash_vm_with_ui(false, std::rc::Rc::new(move |vm: &mut ScriptVm| {
+    let vm_id = cx.alloc_splash_vm_with_grants(HostGrants::DESKTOP_SHELL, Some(std::rc::Rc::new(move |vm: &mut ScriptVm| {
         install(vm, sheet.clone());
         crate::theme_mod(vm);
         crate::isolate_widgets_mod_with(vm, &[]);
         apply_widgets(vm);
-    }));
+    })));
     let look = cx.with_script_vm_id(vm_id, caption_look);
     cx.free_splash_vm(vm_id);
     look
@@ -1002,8 +1117,8 @@ pub fn handle_event(cx: &mut Cx, event: &Event) {
     let Some(sheet) = StyleSheet::parse(json) else {
         return;
     };
-    // The window system's look: it restyles an app that wears the system
-    // sheet (or has not read one yet), never one that picked its own. Its
+    // The window system's look restyles an app on a system sheet, on a
+    // standalone fallback or still unsettled. An explicit pick stands. Its
     // family is the window controls' style either way (`system_style`).
     cx.global::<Styles>().system = Some(Some(sheet.family));
     let changed = cx.with_vm(|vm| {
@@ -1027,6 +1142,45 @@ mod tests {
     use super::*;
 
     use crate::sheet_checks;
+
+    #[test]
+    fn install_default_yields_to_uninstall_pick_and_system_events() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        let dark = StyleSheet::named("macos-dark").unwrap();
+        let light = StyleSheet::named("macos").unwrap();
+        cx.with_vm(|vm| {
+            assert!(install_default(vm, |_| dark.clone()), "an unsettled heap accepts a fallback");
+            assert!(!install_default(vm, |_| panic!("a second fallback was built")));
+            assert_eq!(default_name(vm).as_deref(), Some("macos-dark"));
+            assert!(replace_default(vm, light.clone()), "a standing fallback can change appearance");
+            assert_eq!(default_name(vm).as_deref(), Some("macos"));
+
+            let fallback = wearing(vm);
+            uninstall(vm);
+            assert_eq!(default_name(vm), None);
+            assert!(!install_default(vm, |_| panic!("a fallback was built over the plain pick")));
+            assert!(!replace_default(vm, dark.clone()));
+            assert_eq!(current_name(vm), None, "the plain pick survives both fallback calls");
+
+            put_back(vm, fallback.clone());
+            assert_eq!(default_name(vm).as_deref(), Some("macos"), "restoring a fallback keeps its origin");
+            install(vm, light.clone());
+            assert_eq!(default_name(vm), None, "picking the very same sheet retires the fallback");
+            assert!(!install_default(vm, |_| panic!("a fallback was built over a picked sheet")));
+            assert!(!replace_default(vm, dark.clone()));
+            assert_eq!(current_name(vm).as_deref(), Some("macos"));
+            put_back(vm, fallback);
+        });
+
+        handle_event(&mut cx, &Event::Custom(dark.to_json()));
+        cx.with_vm(|vm| {
+            assert_eq!(current_name(vm).as_deref(), Some("macos-dark"), "the system supersedes the fallback");
+            assert_eq!(default_name(vm), None);
+            assert!(!install_default(vm, |_| panic!("a fallback was built over a system sheet")));
+            assert!(!replace_default(vm, light));
+        });
+    }
 
     /// A tool that tries a sheet and goes back (the Tweaker's lab and
     /// builder, a token resolve) leaves an app that wore the window system's
@@ -1105,6 +1259,12 @@ mod tests {
     fn every_sheet_button_face_takes_the_colour_the_app_paints() {
         for entry in catalogue() {
             sheet_checks::button_faces_take_the_host_colour(entry);
+        }
+    }
+    #[test]
+    fn button_and_tab_ink_reads_on_its_face_under_every_sheet() {
+        for entry in catalogue() {
+            sheet_checks::button_and_tab_contrast(crate::script_mod, entry);
         }
     }
     #[test]

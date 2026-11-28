@@ -7,6 +7,7 @@ use crate::{
     widget_async::{CxWidgetToScriptCallExt, ScriptAsyncResult},
 };
 
+use crate::makepad_draw::event::DigitId;
 use crate::makepad_draw::DrawSvg;
 use crate::pointer_field::{FieldArbiter, PointerField};
 
@@ -1411,6 +1412,10 @@ pub enum CopyButtonAction {
 /// 3. Then, either one of the following, but not both:
 ///    * `ButtonAction::Clicked` when the mouse/finger is lifted up while over the button area.
 ///    * `ButtonAction::Released` when the mouse/finger is lifted up while *not* over the button area.
+///
+/// Action data is snapshotted at press (`FingerDown` / `KeyDown`), so `LongPressed`,
+/// `Clicked`, and `Released` for that press carry what was bound when it started even if
+/// `set_action_data` rebinds the button before release.
 #[derive(Clone, Debug, Default)]
 pub enum ButtonAction {
     #[default]
@@ -1574,6 +1579,12 @@ pub struct Button {
     #[action_data]
     #[rust]
     action_data: WidgetActionData,
+    /// Action data snapshotted when a pointer digit captures this button, held until its release.
+    #[rust]
+    pressed_pointer: Option<(DigitId, WidgetActionData)>,
+    /// Action data snapshotted on keyboard activation press (`Space` / `Enter`), held until `KeyUp` or focus loss.
+    #[rust]
+    pressed_key: Option<(KeyCode, WidgetActionData)>,
 }
 
 impl ScriptHook for Button {
@@ -1631,7 +1642,8 @@ impl Widget for Button {
             cx.widget_to_script_call(uid, NIL, self.source.clone(), self.on_click.clone(), &[]);
         }
         if !self.text_to_copy.is_empty() {
-            self.copy_now(cx);
+            let action_data = self.snapshot_action_data();
+            self.copy_now(cx, &action_data);
         }
         self.animator_play(cx, ids!(hover.off));
         ActionResult::Handled
@@ -1840,17 +1852,29 @@ impl Widget for Button {
                 self.animator_play(cx, ids!(focus.on));
             }
             Hit::KeyFocusLost(_) => {
+                if self.pressed_key.take().is_some() && self.pressed_pointer.is_none() {
+                    self.animator_play(cx, ids!(hover.off));
+                }
                 self.animator_play(cx, ids!(focus.off));
                 self.draw_bg.redraw(cx);
             }
             // A focused button activates from the keyboard, with the keys the web and the
             // desktop toolkits use. Holding the key repeats the press, so repeats are ignored.
-            Hit::KeyDown(ke) if takes_input && is_activation_key(ke.key_code) && !ke.is_repeat => {
+            // One keyboard press runs at a time; a second activation key pressed while one is
+            // held is ignored so overlapping keys cannot overwrite the snapshot or double-click.
+            Hit::KeyDown(ke)
+                if takes_input
+                    && is_activation_key(ke.key_code)
+                    && !ke.is_repeat
+                    && self.pressed_key.is_none() =>
+            {
+                let data = self.snapshot_action_data();
                 cx.widget_action_with_data(
-                    &self.action_data,
+                    &data,
                     uid,
                     ButtonAction::Pressed(ke.modifiers),
                 );
+                self.pressed_key = Some((ke.key_code, data));
                 cx.widget_to_script_call(uid, NIL, self.source.clone(), self.on_press.clone(), &[]);
                 if self.trigger_on_press {
                     cx.widget_to_script_call(
@@ -1863,10 +1887,19 @@ impl Widget for Button {
                 }
                 self.animator_play(cx, ids!(hover.down));
             }
-            Hit::KeyUp(ke) if takes_input && is_activation_key(ke.key_code) => {
+            Hit::KeyUp(ke) if is_activation_key(ke.key_code) => {
+                let Some(action_data) = self.take_key_action_data(ke.key_code) else {
+                    return;
+                };
+                if !takes_input {
+                    if self.pressed_pointer.is_none() {
+                        self.animator_play(cx, ids!(hover.off));
+                    }
+                    return;
+                }
                 crate::makepad_platform::makepad_error_log::flight_mark!("ui.click", uid.0, 0, "button `{}` (key)", self.text.as_ref());
                 cx.widget_action_with_data(
-                    &self.action_data,
+                    &action_data,
                     uid,
                     ButtonAction::Clicked(ke.modifiers),
                 );
@@ -1879,15 +1912,22 @@ impl Widget for Button {
                         &[],
                     );
                 }
-                self.animator_play(cx, ids!(hover.off));
+                if self.pressed_pointer.is_none() {
+                    self.animator_play(cx, ids!(hover.off));
+                }
             }
             Hit::FingerDown(fe) if takes_input && fe.is_primary_hit() => {
                 // A touch waits until it clicks us, so a drag that scrolls from here keeps the keyboard up.
                 if self.grab_key_focus && !fe.device.is_touch() {
                     cx.set_key_focus_from_user(self.draw_bg.area());
                 }
+                // Only the digit that actually captured this button snapshots action_data; a
+                // second finger landing elsewhere while we hold one must not clobber it.
+                if cx.fingers.find_digit_for_captured_area(self.draw_bg.area()) == Some(fe.digit_id) {
+                    self.pressed_pointer = Some((fe.digit_id, self.snapshot_action_data()));
+                }
                 cx.widget_action_with_data(
-                    &self.action_data,
+                    self.pointer_action_data(fe.digit_id),
                     uid,
                     ButtonAction::Pressed(fe.modifiers),
                 );
@@ -1916,10 +1956,19 @@ impl Widget for Button {
             Hit::FingerHoverOut(_) => {
                 self.animator_play(cx, ids!(hover.off));
             }
-            Hit::FingerLongPress(_lp) if takes_input && self.enable_long_press => {
-                cx.widget_action_with_data(&self.action_data, uid, ButtonAction::LongPressed);
+            Hit::FingerLongPress(lp) if takes_input && self.enable_long_press => {
+                cx.widget_action_with_data(
+                    self.pointer_action_data(lp.digit_id),
+                    uid,
+                    ButtonAction::LongPressed,
+                );
             }
-            Hit::FingerUp(fe) if takes_input && fe.is_primary_hit() => {
+            Hit::FingerUp(fe) if fe.is_primary_hit() => {
+                let press_data = self.take_pointer_action_data(fe.digit_id);
+                if !takes_input {
+                    return;
+                }
+                let action_data = press_data.unwrap_or_else(|| self.snapshot_action_data());
                 let was_clicked = fe.is_over
                     && if self.enable_long_press {
                         fe.was_tap()
@@ -1932,7 +1981,7 @@ impl Widget for Button {
                     }
                     crate::makepad_platform::makepad_error_log::flight_mark!("ui.click", uid.0, 0, "button `{}`", self.text.as_ref());
                     cx.widget_action_with_data(
-                        &self.action_data,
+                        &action_data,
                         uid,
                         ButtonAction::Clicked(fe.modifiers),
                     );
@@ -1946,7 +1995,7 @@ impl Widget for Button {
                         );
                     }
                     if !self.text_to_copy.is_empty() {
-                        self.copy_now(cx);
+                        self.copy_now(cx, &action_data);
                     }
                     if self.reset_hover_on_click {
                         self.animator_cut(cx, ids!(hover.off));
@@ -1957,7 +2006,7 @@ impl Widget for Button {
                     }
                 } else {
                     cx.widget_action_with_data(
-                        &self.action_data,
+                        &action_data,
                         uid,
                         ButtonAction::Released(fe.modifiers),
                     );
@@ -2039,6 +2088,38 @@ impl Button {
         }
     }
 
+    fn snapshot_action_data(&self) -> WidgetActionData {
+        let mut data = WidgetActionData::default();
+        if let Some(boxed) = self.action_data.clone_data() {
+            data.set_box(boxed);
+        }
+        data
+    }
+
+    fn pointer_action_data(&self, digit_id: DigitId) -> &WidgetActionData {
+        self.pressed_pointer
+            .as_ref()
+            .filter(|(digit, _)| *digit == digit_id)
+            .map(|(_, data)| data)
+            .unwrap_or(&self.action_data)
+    }
+
+    fn take_pointer_action_data(&mut self, digit_id: DigitId) -> Option<WidgetActionData> {
+        if self.pressed_pointer.as_ref().is_some_and(|(digit, _)| *digit == digit_id) {
+            self.pressed_pointer.take().map(|(_, data)| data)
+        } else {
+            None
+        }
+    }
+
+    fn take_key_action_data(&mut self, key_code: KeyCode) -> Option<WidgetActionData> {
+        if self.pressed_key.as_ref().is_some_and(|(code, _)| *code == key_code) {
+            self.pressed_key.take().map(|(_, data)| data)
+        } else {
+            None
+        }
+    }
+
     /// The label the face shows right now.
     fn shown_label(&self) -> &str {
         if self.copied && !self.copied_text.is_empty() {
@@ -2049,14 +2130,14 @@ impl Button {
     }
 
     /// Puts `text_to_copy` on the clipboard and starts the copied moment.
-    fn copy_now(&mut self, cx: &mut Cx) {
+    fn copy_now(&mut self, cx: &mut Cx, action_data: &WidgetActionData) {
         let uid = self.widget_uid();
         cx.copy_to_clipboard(&self.text_to_copy);
         self.copied = true;
         cx.stop_timer(self.copied_timer);
         self.copied_timer = cx.start_timeout(self.copied_secs.max(0.1));
         self.animator_play(cx, ids!(copied.on));
-        cx.widget_action_with_data(&self.action_data, uid, CopyButtonAction::Copied);
+        cx.widget_action_with_data(action_data, uid, CopyButtonAction::Copied);
         self.draw_bg.redraw(cx);
     }
 
@@ -2590,5 +2671,179 @@ mod icon_layout_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod action_data_tests {
+    use super::*;
+    use crate::event::{LongPressEvent, TouchPoint, TouchState, TouchUpdateEvent};
+    use crate::makepad_platform::studio::{RemoteMouseDown, RemoteMouseUp, StudioToApp};
+    use crate::ui_checks::UiCheckTarget;
+
+    const WINDOW: WindowId = WindowId(1, 1);
+
+    fn draw_button(cx: &mut Cx, target: &mut UiCheckTarget) -> WidgetRef {
+        let button = cx.with_vm(|vm| {
+            let value = crate::script_eval!(vm, {
+                use mod.widgets.*
+                Button{width: 100. height: 40. enable_long_press: true}
+            });
+            WidgetRef::script_from_value(vm, value)
+        });
+        target.draw(cx, &button, dvec2(120.0, 60.0));
+        button
+    }
+
+    fn send(cx: &mut Cx, button: &WidgetRef, event: &Event) -> ActionsBuf {
+        cx.capture_actions(|cx| button.handle_event(cx, event, &mut Scope::empty()))
+    }
+
+    // The pooled Cx has an empty event handler. Studio dispatch manages the mouse
+    // capture around the event we deliver to the button.
+    fn mouse_down(cx: &mut Cx, button: &WidgetRef, at: DVec2, time: f64) -> ActionsBuf {
+        let primary = MouseButton::PRIMARY;
+        cx.dispatch_studio_msg(StudioToApp::MouseDown(RemoteMouseDown {
+            x: at.x, y: at.y, time, button_raw_bits: primary.bits(), ..Default::default()
+        }), WINDOW, DVec2::default());
+        send(cx, button, &Event::MouseDown(MouseDownEvent {
+            abs: at, button: primary, window_id: WINDOW, time,
+            modifiers: Default::default(), handled: Default::default(),
+        }))
+    }
+
+    fn mouse_up(cx: &mut Cx, button: &WidgetRef, at: DVec2, time: f64) -> ActionsBuf {
+        let primary = MouseButton::PRIMARY;
+        let actions = send(cx, button, &Event::MouseUp(MouseUpEvent {
+            abs: at, button: primary, window_id: WINDOW, time, modifiers: Default::default(),
+        }));
+        cx.dispatch_studio_msg(StudioToApp::MouseUp(RemoteMouseUp {
+            x: at.x, y: at.y, time, button_raw_bits: primary.bits(), ..Default::default()
+        }), WINDOW, DVec2::default());
+        actions
+    }
+
+    fn touch(cx: &mut Cx, button: &WidgetRef, uid: u64, state: TouchState, abs: DVec2, time: f64) -> ActionsBuf {
+        let event = Event::TouchUpdate(TouchUpdateEvent {
+            window_id: WINDOW, time, modifiers: Default::default(),
+            touches: vec![TouchPoint {
+                uid, state, abs, time, rotation_angle: 0.0, force: 1.0, radius: dvec2(1.0, 1.0),
+                handled: Default::default(), sweep_lock: Default::default(),
+            }],
+        });
+        let actions = send(cx, button, &event);
+        if let Event::TouchUpdate(update) = event {
+            cx.fingers.process_touch_update_end(&update.touches);
+        }
+        actions
+    }
+
+    fn focus(cx: &mut Cx, area: Area) {
+        cx.set_key_focus(area);
+        cx.action(());
+        cx.handle_actions();
+    }
+
+    #[test]
+    fn button_press_snapshots_action_data_until_release() {
+        use ButtonAction::{Clicked, LongPressed, Pressed, Released};
+        use KeyCode::{NumpadEnter, ReturnKey, Space};
+
+        macro_rules! expect_action {
+            ($actions:expr, $kind:pat, $data:expr) => {{
+                let actions = $actions;
+                let mut widgets = actions.iter().filter_map(|action| action.as_widget_action());
+                let action = widgets.next().expect("button emitted no action");
+                assert!(widgets.next().is_none(), "button emitted extra actions: {actions:?}");
+                assert!(matches!(action.cast::<ButtonAction>(), $kind), "unexpected action: {action:?}");
+                let data = action.data.as_ref().map(|data| *data.downcast_ref::<u32>().expect("u32 payload"));
+                assert_eq!(data, $data, "wrong data on {:?}", action.action);
+            }};
+        }
+
+        let mut cx = crate::checkout_test_cx();
+        let mut target = UiCheckTarget::new(&mut cx);
+        let button = draw_button(&mut cx, &mut target);
+        let center = button.area().rect(&cx).center();
+        let outside = dvec2(115.0, 55.0);
+
+        button.set_action_data(1u32);
+        expect_action!(mouse_down(&mut cx, &button, center, 1.0), Pressed(_), Some(1));
+        button.set_action_data(2u32);
+        expect_action!(mouse_up(&mut cx, &button, center, 1.1), Clicked(_), Some(1));
+        expect_action!(mouse_down(&mut cx, &button, center, 2.0), Pressed(_), Some(2));
+        expect_action!(mouse_up(&mut cx, &button, center, 2.1), Clicked(_), Some(2));
+
+        button.set_action_data(3u32);
+        expect_action!(mouse_down(&mut cx, &button, center, 3.0), Pressed(_), Some(3));
+        button.set_action_data(4u32);
+        expect_action!(mouse_up(&mut cx, &button, outside, 3.1), Released(_), Some(3));
+
+        // Press with no binding, then bind before release. Use this fresh button from here on.
+        let button = draw_button(&mut cx, &mut target);
+        let center = button.area().rect(&cx).center();
+        expect_action!(mouse_down(&mut cx, &button, center, 4.0), Pressed(_), None);
+        button.set_action_data(5u32);
+        expect_action!(mouse_up(&mut cx, &button, center, 4.1), Clicked(_), None);
+        expect_action!(mouse_down(&mut cx, &button, center, 5.0), Pressed(_), Some(5));
+        expect_action!(mouse_up(&mut cx, &button, center, 5.1), Clicked(_), Some(5));
+
+        // A second finger landing elsewhere cannot replace the first finger's snapshot.
+        button.set_action_data(6u32);
+        expect_action!(touch(&mut cx, &button, 1, TouchState::Start, center, 6.0), Pressed(_), Some(6));
+        button.set_action_data(7u32);
+        touch(&mut cx, &button, 2, TouchState::Start, outside, 6.1);
+        let long = Event::LongPress(LongPressEvent { window_id: WINDOW, abs: center, uid: 1, time: 6.5 });
+        expect_action!(send(&mut cx, &button, &long), LongPressed, Some(6));
+        expect_action!(touch(&mut cx, &button, 1, TouchState::Stop, center, 6.6), Released(_), Some(6));
+        touch(&mut cx, &button, 2, TouchState::Stop, outside, 6.7);
+
+        let key_down = |cx: &mut Cx, key_code| {
+            send(cx, &button, &Event::KeyDown(KeyEvent { key_code, ..Default::default() }))
+        };
+        let key_up = |cx: &mut Cx, key_code| {
+            send(cx, &button, &Event::KeyUp(KeyEvent { key_code, ..Default::default() }))
+        };
+        focus(&mut cx, button.area());
+        button.set_action_data(8u32);
+        expect_action!(key_down(&mut cx, Space), Pressed(_), Some(8));
+        button.set_action_data(9u32);
+        expect_action!(key_up(&mut cx, Space), Clicked(_), Some(8));
+        expect_action!(key_down(&mut cx, Space), Pressed(_), Some(9));
+        focus(&mut cx, Area::Empty);
+        send(&mut cx, &button, &Event::KeyFocus(KeyFocusEvent { prev: button.area(), focus: Area::Empty }));
+        focus(&mut cx, button.area());
+        button.set_action_data(10u32);
+        assert!(key_up(&mut cx, Space).is_empty(), "focus loss cancels the held key");
+        expect_action!(key_down(&mut cx, Space), Pressed(_), Some(10));
+        expect_action!(key_up(&mut cx, Space), Clicked(_), Some(10));
+
+        // Accessibility activation has no preceding down event.
+        button.set_action_data(11u32);
+        let request = a11y_tree::ActionRequest {
+            req: 1, node: a11y_tree::NodeId::widget(button.widget_uid().0),
+            action: a11y_tree::Actions::PRESS, arg: a11y_tree::ActionArg::None,
+        };
+        let actions = cx.capture_actions(|cx| {
+            button.borrow_mut::<Button>().unwrap().handle_action(cx, &request, &mut Scope::empty());
+        });
+        expect_action!(actions, Clicked(_), Some(11));
+
+        // Release the owning key first, then repeat with the other release order.
+        button.set_action_data(12u32);
+        expect_action!(key_down(&mut cx, Space), Pressed(_), Some(12));
+        button.set_action_data(13u32);
+        assert!(key_down(&mut cx, ReturnKey).is_empty(), "Return interrupted Space");
+        expect_action!(key_up(&mut cx, Space), Clicked(_), Some(12));
+        assert!(key_up(&mut cx, ReturnKey).is_empty(), "the ignored Return clicked");
+
+        button.set_action_data(14u32);
+        expect_action!(key_down(&mut cx, Space), Pressed(_), Some(14));
+        button.set_action_data(15u32);
+        assert!(key_down(&mut cx, NumpadEnter).is_empty(), "numpad Enter interrupted Space");
+        assert!(key_up(&mut cx, NumpadEnter).is_empty(), "the ignored numpad Enter clicked");
+        expect_action!(key_up(&mut cx, Space), Clicked(_), Some(14));
+        expect_action!(key_down(&mut cx, ReturnKey), Pressed(_), Some(15));
+        expect_action!(key_up(&mut cx, ReturnKey), Clicked(_), Some(15));
     }
 }

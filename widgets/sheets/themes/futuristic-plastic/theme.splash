@@ -111,6 +111,7 @@ mod.theme.color_icon_disabled = #5d6b78
 mod.theme.color_ctrl_selected = #56d4f2
 mod.theme.color_focus = #7fe3fb
 mod.theme.color_ctrl_active = #56d4f2
+mod.theme.color_text_on_accent = #0d1820
 mod.theme.color_val = #56d4f2
 mod.theme.color_cursor = #c8f4ff
 mod.theme.color_text_cursor = #c8f4ff

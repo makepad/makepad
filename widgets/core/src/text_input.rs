@@ -904,8 +904,9 @@ pub struct TextInput {
     /// layout points, so its rounded ends never clip a letter's edge.
     #[live(2.0)]
     selection_pad: f64,
+    /// Public so a host can give the caret the ink of the text it edits.
     #[live]
-    draw_cursor: DrawQuad,
+    pub draw_cursor: DrawQuad,
     #[live]
     draw_composition_underline: DrawQuad,
     #[live]
@@ -1579,8 +1580,9 @@ impl TextInput {
             (2.0 * self.draw_text.font_scale) as f64,
             ((row.ascender_in_lpxs - row.descender_in_lpxs) * self.draw_text.font_scale) as f64,
         );
-        self.draw_cursor
-            .draw_abs(cx, cursor_rect.translate(text_rect.pos));
+        if cx.has_key_focus(self.draw_bg.area()) {
+            self.draw_cursor.draw_abs(cx, cursor_rect.translate(text_rect.pos));
+        }
         cursor_rect
     }
 
@@ -3148,7 +3150,10 @@ impl Widget for TextInput {
         // The selection band's call goes in now, before the text: the band is
         // drawn after the text and caret (it needs their layout) and lands here
         // through its own draw_call_group, so it stays behind the glyphs.
-        self.draw_selection.new_draw_call(cx);
+        let has_selection = self.selection.anchor.index != self.selection.cursor.index;
+        if has_selection {
+            self.draw_selection.new_draw_call(cx);
+        }
         // Found text washes the same way, behind the glyphs; a field with no
         // match opens no call for it.
         let found = !self.is_password && self.marks.as_slice().iter().any(|mark| mark.kind == TextMarkKind::Match);
@@ -3167,7 +3172,9 @@ impl Widget for TextInput {
         self.layout_text(cx);
         let text_rect = self.draw_text(cx);
         let cursor_rect = self.draw_cursor(cx, text_rect);
-        self.draw_selection(cx, text_rect);
+        if has_selection {
+            self.draw_selection(cx, text_rect);
+        }
         if found {
             self.draw_found(cx, text_rect);
         }
@@ -5492,20 +5499,29 @@ mod takes_text_tests {
             draw(cx, &pass, &mut list, &root);
             let area = |cx: &Cx, id: LiveId| root.widget(cx, &[id]).area();
             let (save, name) = (area(cx, id!(save)), area(cx, id!(name)));
-            let list = list.id();
-            tab(cx, &mut nav, &root, list, false);
+            let list_id = list.id();
+            let field = root.widget(cx, &[id!(name)]);
+            assert!(!field.borrow::<TextInput>().unwrap().draw_cursor.area().is_valid(cx), "a new field has no caret before focus");
+            assert!(!field.borrow::<TextInput>().unwrap().draw_selection.area().is_valid(cx),
+                "a collapsed selection draws no band at the insertion point");
+            tab(cx, &mut nav, &root, list_id, false);
             assert_eq!(cx.key_focus(), save);
             assert!(!cx.key_focus_takes_text(), "a button takes no typed text");
-            tab(cx, &mut nav, &root, list, false);
+            tab(cx, &mut nav, &root, list_id, false);
             assert_eq!(cx.key_focus(), name);
             assert!(cx.key_focus_takes_text(), "Tab into the field: it takes typed text");
-            tab(cx, &mut nav, &root, list, false);
+            field.set_text(cx, "Sample");
+            field.borrow_mut::<TextInput>().unwrap().select_all(cx);
+            draw(cx, &pass, &mut list, &root);
+            assert!(field.borrow::<TextInput>().unwrap().draw_cursor.area().is_valid(cx), "the focused field draws its caret");
+            assert!(field.borrow::<TextInput>().unwrap().draw_selection.area().is_valid(cx), "a nonempty selection still draws its band");
+            tab(cx, &mut nav, &root, list_id, false);
+            let (save, name) = (area(cx, id!(save)), area(cx, id!(name)));
             assert_eq!(cx.key_focus(), save);
             assert!(!cx.key_focus_takes_text(), "Tab on to the button clears it");
-            tab(cx, &mut nav, &root, list, true);
+            tab(cx, &mut nav, &root, list_id, true);
             assert_eq!(cx.key_focus(), name);
             assert!(cx.key_focus_takes_text(), "Shift+Tab back into the field: typed text again");
-            let field = root.widget(cx, &[id!(name)]);
             field.borrow_mut::<TextInput>().unwrap().set_is_read_only(cx, true);
             assert!(!cx.key_focus_takes_text(), "the focused field turned read-only takes no text");
             field.borrow_mut::<TextInput>().unwrap().set_is_read_only(cx, false);

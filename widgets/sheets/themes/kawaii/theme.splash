@@ -186,7 +186,7 @@ mod.theme.color_mark_disabled = #e9dcea
 mod.theme.color_ctrl_selected = #f472b0
 mod.theme.color_bg_highlight = #fbc0db
 mod.theme.color_bg_highlight_inline = #f9a8d466
-mod.theme.color_text_on_accent = #ffffff
+mod.theme.color_text_on_accent = #2a081a
 // Selected words: a wash of strawberry the plum reads through.
 mod.theme.color_selection = #00000000
 mod.theme.color_selection_hover = #f9a8d44d

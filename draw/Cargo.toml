@@ -34,3 +34,10 @@ default = []
 [dev-dependencies]
 # The tests' GIFs.
 makepad-gif = { version = "0.1.0", path = "../libs/gif" }
+
+# Prints the draw calls, binds, bytes and CPU times a window pass costs per frame (10,000 draws, a
+# caret over a clean 50,000-instance list, its full repaint) in a hidden window on a GPU backend:
+# `cargo bench -p makepad-draw --bench draw_stream -- --frames N`. It reports; it asserts no behaviour.
+[[bench]]
+name = "draw_stream"
+harness = false

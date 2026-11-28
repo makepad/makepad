@@ -8,7 +8,7 @@ use crate::{
     text_flow::TextFlow,
     tip::TipAction,
     widget::*,
-    WidgetMatchEvent,
+    HostGrants, WidgetMatchEvent,
 };
 use std::{
     collections::HashMap,
@@ -698,7 +698,6 @@ impl Markdown {
         // Where the flow's text stood when the open image started: the image
         // (or its alt text) is one object for its whole source.
         let mut image_flat_start = 0;
-        let load_images = !cx.script_data.std.host_io_only();
         // What the open inline link pushed: (a colour, an underline).
         let mut inline_link: Option<bool> = None;
         // A host's hooks see more of the source than the plain widget draws.
@@ -883,9 +882,7 @@ impl Markdown {
                         image_flat_start = tf.text_len();
                         let src = resolve_source(&dest_url, self.base_dir.as_deref());
                         let supplied = host.as_deref().and_then(|host| host.pictures).and_then(|pictures| pictures.get(src.as_ref()));
-                        // A restricted Splash reads no files and makes no
-                        // requests on the host's behalf.
-                        image_drawn = load_images
+                        image_drawn = (supplied.is_some() || markdown_image_allowed(cx, &src, self.load_http_images))
                             && draw_inline_image(
                                 cx,
                                 tf,
@@ -1374,6 +1371,16 @@ pub fn resolve_source<'a>(src: &'a str, base_dir: Option<&Path>) -> std::borrow:
     base_dir.join(path).to_string_lossy().into_owned().into()
 }
 
+fn markdown_image_allowed(cx: &Cx, src: &str, load_http: bool) -> bool {
+    if src.starts_with("data:") {
+        true
+    } else if src.starts_with("http://") || src.starts_with("https://") {
+        load_http && cx.script_data.std.has_grant(HostGrants::NETWORK)
+    } else {
+        cx.script_data.std.has_grant(HostGrants::LOCAL_RESOURCES)
+    }
+}
+
 /// Starts loading `src` into `image` through the shared image cache: an
 /// `http(s)` URL (when allowed) with the platform's HTTP stack, a `data:`
 /// URL from its bytes, anything else as a file path (`file://` or plain,
@@ -1381,10 +1388,10 @@ pub fn resolve_source<'a>(src: &'a str, base_dir: Option<&Path>) -> std::borrow:
 /// SVG, from a `data:` URL or a `.svg` file, is parsed in place. Returns the
 /// cache key an asynchronous load completes under.
 fn request_inline_image(cx: &mut Cx, image: &ImageRef, src: &str, load_http: bool) -> Option<PathBuf> {
+    if !markdown_image_allowed(cx, src, load_http) {
+        return None;
+    }
     if src.starts_with("http://") || src.starts_with("https://") {
-        if !load_http {
-            return None;
-        }
         image.load_image_http_by_url_async(cx, src).ok()?;
         return Some(PathBuf::from(src));
     }
@@ -1532,7 +1539,7 @@ impl WidgetMatchEvent for MarkdownLink {
         let Some(modifiers) = self.link.clicked_modifiers(actions) else {
             return;
         };
-        if !cx.script_data.std.host_io_only() {
+        if cx.script_data.std.has_grant(HostGrants::OPEN_URL) {
             cx.widget_action(
                 self.widget_uid(),
                 MarkdownAction::LinkNavigated {
@@ -1610,25 +1617,130 @@ pub enum MarkdownAction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::button::ButtonAction;
+    use crate::{html::guard_test_support, widget_async::with_isolate, CxSplashVmExt};
 
     #[test]
-    fn restricted_links_emit_no_url() {
+    fn markdown_link_obeys_open_url_grant() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.with_vm(crate::script_mod);
-        let mut link = cx.with_vm(|vm| {
-            let value = crate::script_eval!(vm, {use mod.widgets.* MarkdownLink{href: "https://example.invalid/"}});
-            MarkdownLink::script_from_value(vm, value)
+        cx.global::<crate::widget_hooks::IsolateFamilies>().0.push(crate::rich_text_mod);
+        let pass = DrawPass::new(&mut cx);
+        let mut list = DrawList2d::new(&mut cx);
+        let default = cx.alloc_splash_vm();
+        let granted = cx.alloc_splash_vm_with_grants(HostGrants::OPEN_URL, None);
+        for (vm, allowed) in [(default, false), (granted, true)] {
+            with_isolate(&mut cx, vm, |cx| {
+                let mut link = cx.with_vm(|vm| {
+                    let value = crate::script_eval!(vm, {use mod.widgets.* MarkdownLink{text: "go" href: "https://example.invalid/"}});
+                    MarkdownLink::script_from_value(vm, value)
+                });
+                guard_test_support::frame(cx, &pass, &mut list, |cx| {
+                    link.draw_walk_all(cx, &mut Scope::empty(), Walk::fixed(80., 30.));
+                });
+                let area = link.area();
+                let actions = guard_test_support::click(cx, &mut link, area);
+                assert!(actions.iter().any(|a| matches!(a.as_widget_action().cast(), crate::button::ButtonAction::Clicked(_))),
+                    "pointer click reached the Markdown link in both isolates");
+                let urls: Vec<_> = actions.iter().filter_map(|action| match action.as_widget_action().cast() {
+                    MarkdownAction::LinkNavigated { url, .. } => Some(url),
+                    _ => None,
+                }).collect();
+                assert_eq!(urls, if allowed { vec!["https://example.invalid/"] } else { vec![] },
+                    "Markdown link may emit its navigation URL only with OPEN_URL");
+            });
+            cx.free_splash_vm(vm);
+        }
+    }
+
+    #[test]
+    fn markdown_inline_images_obey_network_and_local_resource_grants() {
+        use crate::makepad_draw::image_cache::{ensure_image_cache, ImageCache};
+        use crate::makepad_platform::makepad_network::{
+            EventSink, HttpMethod, HttpRequest, NetworkBackend, NetworkError, NetworkRuntime, WsSend,
+        };
+        use std::sync::Mutex;
+
+        const DATA_SVG: &str = "data:image/svg+xml,%3Csvg%20xmlns=%22http://www.w3.org/2000/svg%22%20width=%224%22%20height=%224%22/%3E";
+        const HTTP_PNG: &str = "https://example.invalid/a.png";
+        const REL_PNG: &str = "./local.png";
+        const FILE_PNG: &str = "file:///virtual/local.png";
+
+        #[derive(Default)]
+        struct RecordingNetworkBackend {
+            started: Mutex<Vec<(HttpMethod, String)>>,
+        }
+        impl NetworkBackend for RecordingNetworkBackend {
+            fn http_start(&self, _: LiveId, request: HttpRequest, _: EventSink) -> Result<(), NetworkError> {
+                self.started.lock().unwrap().push((request.method, request.url));
+                Ok(())
+            }
+            fn http_cancel(&self, _: LiveId) -> Result<(), NetworkError> { Ok(()) }
+            fn ws_open(&self, _: LiveId, _: HttpRequest, _: EventSink) -> Result<(), NetworkError> { Ok(()) }
+            fn ws_send(&self, _: LiveId, _: WsSend) -> Result<(), NetworkError> { Ok(()) }
+            fn ws_close(&self, _: LiveId) -> Result<(), NetworkError> { Ok(()) }
+        }
+
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let backend = Arc::new(RecordingNetworkBackend::default());
+        cx.net = Arc::new(NetworkRuntime::with_backend(backend.clone()));
+        cx.with_vm(crate::script_mod);
+        cx.global::<crate::widget_hooks::IsolateFamilies>().0.push(crate::rich_text_mod);
+        ensure_image_cache(&mut cx);
+        let tex = Texture::new_with_format(&mut cx, TextureFormat::VecBGRAu8_32 {
+            width: 2, height: 2, data: Some(vec![0xffff_ffff; 4]), updated: TextureUpdated::Full,
         });
-        let uid = link.widget_uid();
-        let clicked = cx.capture_actions(|cx| cx.widget_action(uid, ButtonAction::Clicked(Default::default())));
-        let mut navigations = |cx: &mut Cx| cx.capture_actions(|cx| link.handle_actions(cx, &clicked, &mut Scope::empty()))
-            .iter()
-            .filter(|action| matches!(action.as_widget_action().cast(), MarkdownAction::LinkNavigated { .. }))
-            .count();
-        assert_eq!(navigations(&mut cx), 1);
-        cx.script_data.std.restrict_to_host_io();
-        assert_eq!(navigations(&mut cx), 0);
+        let cache = cx.get_global::<ImageCache>();
+        cache.insert_loaded(PathBuf::from(REL_PNG), tex.clone());
+        cache.insert_loaded(PathBuf::from("/virtual/local.png"), tex);
+
+        let pass = DrawPass::new(&mut cx);
+        let mut list = DrawList2d::new(&mut cx);
+        let none = cx.alloc_splash_vm();
+        let local = cx.alloc_splash_vm_with_grants(HostGrants::LOCAL_RESOURCES, None);
+        let net = cx.alloc_splash_vm_with_grants(HostGrants::NETWORK, None);
+        let body = format!("![d]({DATA_SVG}) ![h]({HTTP_PNG}) ![r]({REL_PNG}) ![f]({FILE_PNG})");
+
+        for vm in [none, local, net] {
+            with_isolate(&mut cx, vm, |cx| {
+                for load_http in [false, true] {
+                    for (src, allowed) in [
+                        (DATA_SVG, true), ("data:image/png;base64,AAAA", true),
+                        ("http://example.invalid/a.png", vm == net && load_http), (HTTP_PNG, vm == net && load_http),
+                        (REL_PNG, vm == local), ("./local.svg", vm == local), (FILE_PNG, vm == local),
+                    ] {
+                        assert_eq!(markdown_image_allowed(cx, src, load_http), allowed,
+                            "scheme gate for {src} under {:?}, load_http={load_http}", cx.script_data.std.grants());
+                    }
+                }
+            });
+        }
+        for (vm, load_http) in [(none, true), (local, true), (net, false), (net, true)] {
+            with_isolate(&mut cx, vm, |cx| {
+                let mut md = cx.with_vm(|vm| {
+                    let v = crate::script_eval!(vm, {use mod.widgets.* Markdown{}});
+                    Markdown::script_from_value(vm, v)
+                });
+                md.load_http_images = load_http;
+                md.set_text(cx, &body);
+                guard_test_support::frame(cx, &pass, &mut list, |cx| {
+                    md.draw_walk_all(cx, &mut Scope::empty(), Walk::fixed(240., 100.));
+                });
+                let mut expected = vec![(DATA_SVG, None)];
+                if vm == local {
+                    expected.extend([(REL_PNG, Some(PathBuf::from(REL_PNG))), (FILE_PNG, Some(PathBuf::from("/virtual/local.png")))]);
+                }
+                let http = vm == net && load_http;
+                if http { expected.push((HTTP_PNG, Some(PathBuf::from(HTTP_PNG)))); }
+                let mut requests: Vec<_> = md.image_requests.values().map(|(src, key)| (src.as_str(), key.clone())).collect();
+                expected.sort();
+                requests.sort();
+                assert_eq!(requests, expected, "draw requested only authorized images under {:?}, load_http={load_http}", cx.script_data.std.grants());
+                let started = std::mem::take(&mut *backend.started.lock().unwrap());
+                assert_eq!(started, if http { vec![(HttpMethod::GET, HTTP_PNG.to_owned())] } else { vec![] },
+                    "only a NETWORK-enabled HTTP draw starts a GET");
+            });
+        }
+        for vm in [none, local, net] { cx.free_splash_vm(vm); }
     }
 
     #[test]

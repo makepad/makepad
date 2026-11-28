@@ -189,6 +189,9 @@ mod.widgets.ButtonFlat.draw_bg.pixel = fn() {
     let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
     return self.host_over(nm_button(pq, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, self.loading, self.anim_time, self.loading_color, 0.0, 0.0, 0.0, vec4(0.0, 0.0, 0.0, 0.0)), m)
 }
+mod.widgets.ButtonFlat.draw_bg.face = {mode: @host_over, rest: #e9edf0, hover: #eef2f5, down: #dfe3e8}
+mod.widgets.ButtonFlat.draw_bg.color = #e9edf0
+mod.widgets.ButtonFlat.draw_bg.color_default = #e9edf0
 // The standard, sized and compound buttons stand up off the page.
 mod.widgets.Button.draw_bg.pixel = fn() {
     let m = 8.0
@@ -271,6 +274,7 @@ mod.widgets.ButtonFlatter.draw_bg.pixel = fn() {
     let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
     return self.host_over(nm_button(pq, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, self.loading, self.anim_time, self.loading_color, 0.0, 0.0, 1.0, vec4(0.0, 0.0, 0.0, 0.0)), m)
 }
+mod.widgets.ButtonFlatter.draw_bg.face = {mode: @host_over, rest: #e9edf0, hover: #e4e8ec, down: #dfe3e8}
 
 // Rows of 26: 5 above and below a 16 point line, 14 either side.
 mod.widgets.ButtonFlat.padding = mod.turtle.Inset{left: 14.0 right: 14.0 top: 5.0 bottom: 5.0}
@@ -1439,6 +1443,7 @@ mod.widgets.RadioButtonTabFlat.draw_bg.pixel = fn() {
     acc = Finish.over(acc, vec4(col * a, a))
     return Finish.over(acc, nm_focus(d, px, self.focus * en))
 }
+mod.widgets.RadioButtonTabFlat.draw_bg.face = {mode: @own_face, rest: #e9edf0, hover: #eef2f5, down: #dfe3e8, active: #eaedf0}
 mod.widgets.RadioButtonTabFlat.padding = mod.turtle.Inset{left: 0.0 right: 8.0 top: 5.0 bottom: 5.0}
 mod.widgets.RadioButtonTabFlat.draw_text.color = #636a7a
 mod.widgets.RadioButtonTabFlat.draw_text.color_active = #3860d6

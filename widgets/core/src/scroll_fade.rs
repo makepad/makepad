@@ -194,7 +194,7 @@ enum Phase {
     Content,
 }
 
-#[derive(Script, ScriptHook, Widget)]
+#[derive(Script, ScriptHook, WidgetRef, WidgetRegister)]
 pub struct ScrollShadowView {
     #[source]
     source: ScriptObjectRef,
@@ -244,6 +244,12 @@ impl ScrollShadowView {
         self.view.redraw(cx);
     }
 
+    /// Bring a rectangle in absolute draw coordinates into view.
+    pub fn scroll_into_view_abs(&mut self, cx: &mut Cx, rect: Rect) {
+        self.bars.scroll_into_view_abs(cx, rect);
+        self.view.redraw(cx);
+    }
+
     /// Where the box is scrolled to and how far it can go. Read from the
     /// bars out here, because the inner view has none of its own.
     pub fn scroll_extent(&self) -> ScrollExtent {
@@ -259,7 +265,7 @@ impl ScrollShadowView {
         }
         let (rect, scroll, used) = {
             let turtle = cx.turtle();
-            (turtle.rect(), turtle.scroll(), turtle.used())
+            (turtle.rect(), turtle.scroll(), turtle.used_padded())
         };
         // The same turtle the bars are about to ask, put the same question, so
         // a fade and a bar never disagree about how long the box is.
@@ -326,6 +332,42 @@ impl ScrollShadowView {
     }
 }
 
+// The content owns the widget tree and its selection. The outer bars own scrolling.
+impl WidgetNode for ScrollShadowView {
+    fn set_scroll_pos(&mut self, cx: &mut Cx, pos: Vec2d) {
+        self.set_scroll(cx, pos);
+    }
+
+    fn widget_uid(&self) -> WidgetUid { self.view.widget_uid() }
+    fn walk(&mut self, cx: &mut Cx) -> Walk { self.view.walk(cx) }
+    fn area(&self) -> Area { self.view.area() }
+    fn redraw(&mut self, cx: &mut Cx) { self.view.redraw(cx); }
+    fn visible(&self) -> bool { self.view.visible() }
+    fn set_visible(&mut self, cx: &mut Cx, visible: bool) { self.view.set_visible(cx, visible); }
+    fn layer_areas(&self) -> Vec<(&'static str, Area)> {
+        vec![("draw_fade", self.draw_fade.area())]
+    }
+    fn children(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) { self.view.children(visit); }
+    fn cancel_children_impl(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) -> bool {
+        self.visible() && self.view.visit_cancel(visit)
+    }
+    fn search_scope(&self) -> bool { self.view.search_scope() }
+    fn find_widgets_from_point(&self, cx: &Cx, point: DVec2, found: &mut dyn FnMut(&WidgetRef)) {
+        self.view.find_widgets_from_point(cx, point, found);
+    }
+    fn selection_text_len(&self) -> usize { self.view.selection_text_len() }
+    fn selection_point_to_char_index(&self, cx: &Cx, abs: DVec2) -> Option<usize> {
+        self.view.selection_point_to_char_index(cx, abs)
+    }
+    fn selection_set(&mut self, anchor: usize, cursor: usize) { self.view.selection_set(anchor, cursor); }
+    fn selection_clear(&mut self) { self.view.selection_clear(); }
+    fn selection_select_all(&mut self) { self.view.selection_select_all(); }
+    fn selection_get_text_for_range(&self, start: usize, end: usize) -> String {
+        self.view.selection_get_text_for_range(start, end)
+    }
+    fn selection_get_full_text(&self) -> String { self.view.selection_get_full_text() }
+}
+
 impl Widget for ScrollShadowView {
     fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
         let _ = cx;
@@ -382,6 +424,12 @@ impl ScrollShadowViewRef {
         }
     }
 
+    pub fn scroll_into_view_abs(&self, cx: &mut Cx, rect: Rect) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.scroll_into_view_abs(cx, rect);
+        }
+    }
+
     /// See [`ScrollShadowView::scroll_extent`]. Zero on every axis when empty.
     pub fn scroll_extent(&self) -> ScrollExtent {
         self.borrow().map(|inner| inner.scroll_extent()).unwrap_or_default()
@@ -391,6 +439,55 @@ impl ScrollShadowViewRef {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scrolling_an_absolute_rect_into_view_reveals_the_whole_row() {
+        use crate::makepad_draw::cx_draw::CxDraw;
+
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let root = cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let value = crate::script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                ScrollShadowView{
+                    width: 100. height: 80. margin: Inset{top: 24.}
+                    spacer := View{width: Fill height: 160.}
+                    row := View{width: Fill height: 20.}
+                    tail := View{width: Fill height: 40.}
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        });
+        let size = dvec2(100.0, 120.0);
+        let pass = DrawPass::new(&mut cx);
+        pass.set_size(&mut cx, size);
+        let mut list = DrawList2d::new(&mut cx);
+        let mut draw = |cx: &mut Cx| {
+            let event = DrawEvent::default();
+            let mut draw = CxDraw::new(cx, &event);
+            let mut cx = Cx2d::new(&mut draw);
+            cx.begin_pass(&pass, None);
+            list.begin_always(&mut cx);
+            cx.begin_root_turtle(size, Layout::flow_down());
+            root.draw_all(&mut cx, &mut Scope::empty());
+            cx.end_pass_sized_turtle();
+            list.end(&mut cx);
+            cx.end_pass(&pass);
+        };
+        draw(&mut cx);
+        let scroll = root.as_scroll_shadow_view();
+        let viewport = scroll.borrow().unwrap().bars.area().rect(&cx);
+        let row = root.widget(&cx, ids!(row)).area().rect(&cx);
+        assert!(row.size.y > 0.0 && row.pos.y >= viewport.pos.y + viewport.size.y, "the row starts below the viewport");
+
+        scroll.scroll_into_view_abs(&mut cx, row);
+        draw(&mut cx);
+        let offset = scroll.scroll_pos().y;
+        assert!(offset > 0.0, "revealing the row moves the scroll position");
+        let top = row.pos.y - offset;
+        assert!(top >= viewport.pos.y && top + row.size.y <= viewport.pos.y + viewport.size.y, "the whole row is in view");
+    }
 
     /// A viewport of 200 into 1000 of content, with the preset's ramp.
     fn axis(scroll: f64) -> Axis {

@@ -371,20 +371,28 @@ pub struct Tip {
     /// Whether the pointer is over the wrapped child right now.
     #[rust]
     hovered: bool,
-    /// Whether the wrapped child held the key focus at the last look: a tip
-    /// that only answers the pointer is invisible to someone working by
-    /// keyboard.
+    /// Whether this wrapper currently has a raised focus tip (unsuppressed
+    /// key focus arrived while non-empty and visible): a tip that only
+    /// answers the pointer is invisible to someone working by keyboard.
     #[rust]
     focused: bool,
-    /// Whether the last press, a mouse button's or a finger's, landed on the
-    /// wrapped child with no key pressed since. The focus a press hands over
-    /// is the pointer's and raises no tip: a finger has no hover, so nothing
-    /// would ever take that tip down.
+    /// A mouse press, finger press or accessibility activation reached the
+    /// wrapped control. Suppress the tip for the focus that press hands over.
     #[rust]
     pressed: bool,
     /// The finger that came down on the wrapped child and is still down.
     #[rust]
     finger: Option<u64>,
+    /// Whether a long press on `finger` currently has a raised tip.
+    #[rust]
+    long_pressed: bool,
+    /// Whether a press took the tip down and the pointer has not left the child since.
+    #[rust]
+    spent: bool,
+    /// The text changed while this tip was raised: the next finished draw
+    /// reports it again, so the tip on screen follows its words.
+    #[rust]
+    refresh_request: bool,
 }
 
 impl WidgetNode for Tip {
@@ -400,6 +408,10 @@ impl WidgetNode for Tip {
         self.view.visible() && !self.children_all_hidden()
     }
     fn set_visible(&mut self, cx: &mut Cx, visible: bool) {
+        if !visible && self.view.visible {
+            // A hidden wrapper may receive no further pointer or focus events.
+            self.reset_hidden(cx, self.widget_uid());
+        }
         if self.sole_child().is_none() {
             return self.view.set_visible(cx, visible);
         }
@@ -487,16 +499,45 @@ impl Tip {
         }
     }
 
+    /// Takes a raised tip down: a press on the control, or nothing left to say.
+    fn drop_tip(&mut self, cx: &mut Cx, uid: WidgetUid) {
+        if self.hovered || self.focused || self.long_pressed {
+            self.hovered = false;
+            self.focused = false;
+            self.long_pressed = false;
+            cx.widget_action(uid, TipAction::HoverOut);
+        }
+    }
+
+    fn has_active_state(&self) -> bool {
+        self.hovered
+            || self.focused
+            || self.long_pressed
+            || self.finger.is_some()
+            || self.pressed
+            || self.spent
+    }
+
+    /// Clears all live interaction state when the wrapper or its control hides,
+    /// dropping any raised tip once.
+    fn reset_hidden(&mut self, cx: &mut Cx, uid: WidgetUid) {
+        self.finger = None;
+        self.drop_tip(cx, uid);
+        self.spent = false;
+        self.pressed = false;
+        self.refresh_request = false;
+    }
+
     /// The control holding the key focus was typed into, edited, or
     /// activated from the keyboard. A tip its focus raised has said what the
     /// control is by now, and goes rather than sit over what the typing is
     /// for. Only focus arriving raises one, so it stays gone until the focus
     /// moves again. A tip the pointer raised is the pointer's to take down,
     /// and the owner rule keeps one raised over another control up.
-    fn typed(&self, cx: &mut Cx) {
+    fn typed(&mut self, cx: &mut Cx) {
         let area = self.area();
         if self.focused && !self.hovered && !area.is_empty() && cx.has_key_focus(area) {
-            cx.widget_action(self.widget_uid(), TipAction::HoverOut);
+            self.drop_tip(cx, self.widget_uid());
         }
     }
 
@@ -513,6 +554,61 @@ impl Tip {
             KeyCode::KeyZ => key.modifiers.is_edit_primary(),
             _ => false,
         }
+    }
+
+    /// Accessibility actions that activate or edit a control, like a pointer press
+    /// or keyboard activation/edit (as against `FOCUS`, `SCROLL_INTO_VIEW`, or
+    /// `SET_TEXT_SELECTION`).
+    fn a11y_activates(action: a11y_tree::Actions) -> bool {
+        use a11y_tree::Actions as A;
+        action.intersects(
+            A::PRESS
+                | A::TOGGLE
+                | A::SELECT
+                | A::EXPAND
+                | A::COLLAPSE
+                | A::SHOW_MENU
+                | A::INCREMENT
+                | A::DECREMENT
+                | A::SET_VALUE
+                | A::REPLACE_TEXT,
+        )
+    }
+
+    /// Whether `node` (resolved to its owning widget uid) is this `Tip` or any
+    /// widget inside its wrapped subtree.
+    fn owns_a11y_node(&self, cx: &Cx, node: a11y_tree::NodeId) -> bool {
+        let target = WidgetUid(cx.a11y.action_owner(node).uid());
+        if target == WidgetUid(0) {
+            return false;
+        }
+        if self.widget_uid() == target {
+            return true;
+        }
+        fn walk(widget: &WidgetRef, target: WidgetUid) -> bool {
+            if widget.try_widget_uid() == Some(target) {
+                return true;
+            }
+            let mut found = false;
+            widget.try_children(&mut |_, child| {
+                if !found && walk(&child, target) {
+                    found = true;
+                }
+            });
+            found
+        }
+        self.view.children.iter().any(|(_, child)| walk(child, target))
+    }
+
+    /// Whether the wrapped control currently holds key focus or has a pending
+    /// focus request queued during the current event.
+    fn focus_pending_or_held(&self, cx: &Cx) -> bool {
+        let area = self.area();
+        !area.is_empty() && (cx.has_key_focus(area) || cx.next_key_focus() == area)
+    }
+
+    fn reports_tip(&self) -> bool {
+        self.hovered || self.focused || self.long_pressed
     }
 
     fn request(&self, cx: &Cx) -> TipRequest {
@@ -547,9 +643,6 @@ impl Widget for Tip {
         if self.children_all_hidden() {
             return DrawStep::done();
         }
-        let Some(child) = self.sole_child() else {
-            return self.view.draw_walk(cx, scope, walk);
-        };
         if !self.view.visible {
             return DrawStep::done();
         }
@@ -560,7 +653,22 @@ impl Widget for Tip {
         // child a second time, against a box that is not its parent. A
         // child that yields hands its step up unchanged and is resumed
         // through here with the same walk.
-        child.draw_walk(cx, scope, walk)
+        let step = match self.sole_child() {
+            Some(child) => child.draw_walk(cx, scope, walk),
+            None => self.view.draw_walk(cx, scope, walk),
+        };
+        if self.refresh_request && step.is_done() {
+            self.refresh_request = false;
+            if self.reports_tip() {
+                if self.text.is_empty() {
+                    self.drop_tip(cx, self.widget_uid());
+                } else {
+                    let request = self.request(cx);
+                    cx.widget_action(self.widget_uid(), TipAction::HoverInWith(request));
+                }
+            }
+        }
+        step
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
@@ -579,19 +687,27 @@ impl Widget for Tip {
             _ => Area::Empty,
         };
         self.view.handle_event(cx, event, scope);
-        if self.text.is_empty() {
+        let uid = self.widget_uid();
+        // A hidden wrapper accepts no focus, press, hover, or touch state.
+        if !self.view.visible {
+            self.reset_hidden(cx, uid);
             return;
         }
-        let uid = self.widget_uid();
         // A control that went away takes its tip with it: the pointer may never move again over
         // it, and a key focus stays on an area nothing draws any more. So does one a hidden
         // ancestor took out of sight (a row removed with its own button): no pointer event
         // reaches it there, only actions, which say so.
-        if (self.hovered || self.focused) && (self.children_all_hidden() || crate::held_events::in_hidden_subtree(cx)) {
-            self.hovered = false;
-            self.focused = false;
-            cx.widget_action(uid, TipAction::HoverOut);
+        let active = self.has_active_state();
+        if active && (self.children_all_hidden() || crate::held_events::in_hidden_subtree(cx)) {
+            self.reset_hidden(cx, uid);
             return;
+        }
+        // A raised tip whose text went empty has nothing left to say, so take it down.
+        // Keep press, spend and finger bookkeeping running below while text stays empty,
+        // without setting `hovered`/`focused`/`long_pressed` or emitting any tip actions for an empty tip.
+        let empty = self.text.is_empty();
+        if empty {
+            self.drop_tip(cx, uid);
         }
         let claimed = || {
             let claimed_after = event.pointer_claimed_area();
@@ -600,6 +716,16 @@ impl Widget for Tip {
         match event {
             Event::MouseMove(_) => {
                 let over = claimed();
+                if !over {
+                    self.spent = false;
+                } else if !active && self.children_all_hidden() {
+                    return;
+                }
+                if empty {
+                    return;
+                }
+                // A press spent the tip: it stays down until the pointer leaves and returns.
+                let over = over && !self.spent;
                 if over != self.hovered {
                     self.hovered = over;
                     if over {
@@ -612,33 +738,84 @@ impl Widget for Tip {
                 }
             }
             Event::MouseLeave(_) | Event::ClearHover => {
+                self.spent = false;
                 if self.hovered {
                     self.hovered = false;
                     cx.widget_action(uid, TipAction::HoverOut);
                 }
             }
-            Event::MouseDown(_) => self.pressed = claimed(),
+            // A pressed control drops its tip, and the tip stays down while the pointer stays.
+            Event::MouseDown(_) => {
+                if claimed() {
+                    if !active && self.children_all_hidden() {
+                        return;
+                    }
+                    self.pressed = true;
+                    self.spent = true;
+                    self.drop_tip(cx, uid);
+                } else {
+                    self.pressed = false;
+                }
+            }
+            Event::MouseUp(_) => {
+                if self.pressed && self.finger.is_none() && !self.focus_pending_or_held(cx) {
+                    self.pressed = false;
+                }
+            }
             // A finger landing raises nothing, not even through the focus it
             // hands the control: with no hover there is nothing to take such
             // a tip down, and it would stand over every control tapped.
             Event::TouchUpdate(touch) => {
                 if let Some(start) = touch.touches.iter().find(|t| t.state == TouchState::Start) {
-                    self.pressed = claimed();
-                    if self.pressed {
+                    if claimed() {
+                        if !active && self.children_all_hidden() {
+                            return;
+                        }
+                        self.pressed = true;
                         self.finger = Some(start.uid);
+                        self.drop_tip(cx, uid);
+                    } else if self.finger.is_none() {
+                        self.pressed = false;
                     }
                 }
                 if let Some(finger) = self.finger {
-                    if touch.touches.iter().any(|t| t.uid == finger && t.state == TouchState::Stop) {
+                    if touch
+                        .touches
+                        .iter()
+                        .any(|t| t.uid == finger && matches!(t.state, TouchState::Stop | TouchState::Cancel))
+                    {
                         self.finger = None;
+                        if std::mem::take(&mut self.long_pressed) && !self.hovered && !self.focused {
+                            cx.widget_action(uid, TipAction::HoverOut);
+                        }
+                        if !self.focus_pending_or_held(cx) {
+                            self.pressed = false;
+                        }
+                    }
+                }
+            }
+            Event::FingerCancel(cancel) => {
+                // Match touch cancels by `digit_id`, never `device`: `CxFingers::queue_cancel`
+                // stamps `DigitDevice::Touch { uid: 0 }` on gesture-claim and row-recycle cancels.
+                if self.finger.is_some_and(|f| cancel.digit_id == live_id_num!(touch, f).into()) {
+                    self.finger = None;
+                    if std::mem::take(&mut self.long_pressed) && !self.hovered && !self.focused {
                         cx.widget_action(uid, TipAction::HoverOut);
+                    }
+                    if !self.focus_pending_or_held(cx) {
+                        self.pressed = false;
+                    }
+                } else if self.pressed && self.finger.is_none() && cancel.digit_id == live_id!(mouse).into() {
+                    if !self.focus_pending_or_held(cx) {
+                        self.pressed = false;
                     }
                 }
             }
             // Holding a finger on the control is how touch asks what it is.
             // The hold was the dwell, so the tip shows at once, and lifting
             // the finger takes it down again.
-            Event::LongPress(press) if self.finger == Some(press.uid) => {
+            Event::LongPress(press) if !empty && self.finger == Some(press.uid) => {
+                self.long_pressed = true;
                 let mut request = self.request(cx);
                 request.delay_secs = 0.0;
                 cx.widget_action(uid, TipAction::HoverInWith(request));
@@ -647,18 +824,30 @@ impl Widget for Tip {
             // is not the only way in, and a tip nobody can reach by Tab is
             // a tip half the users never see.
             Event::KeyFocus(_) | Event::KeyFocusLost(_) => {
+                if empty && !self.pressed {
+                    return;
+                }
                 // An area that was never drawn is empty, and so is the key
                 // focus when nothing holds it: without the guard every such
                 // wrapper would count itself focused the moment focus left.
                 let area = self.area();
                 let focused = !area.is_empty() && cx.has_key_focus(area);
-                if focused != self.focused {
-                    self.focused = focused;
-                    // Focus a press handed over came by the pointer, which
-                    // raises its own tips.
-                    if focused && !self.hovered && !self.pressed {
+                if focused && !active && self.children_all_hidden() {
+                    return;
+                }
+                if !focused && self.finger.is_none() {
+                    self.pressed = false;
+                }
+                if empty {
+                    return;
+                }
+                let show_for_focus = focused && !self.pressed;
+                if show_for_focus != self.focused {
+                    self.focused = show_for_focus;
+                    // Focus a press handed over came by the pointer or an a11y activation.
+                    if show_for_focus && !self.hovered {
                         cx.widget_action(uid, TipAction::HoverInWith(self.request(cx)));
-                    } else if !focused && !self.hovered {
+                    } else if !show_for_focus && !self.hovered && !self.long_pressed {
                         cx.widget_action(uid, TipAction::HoverOut);
                     }
                 }
@@ -673,6 +862,22 @@ impl Widget for Tip {
             Event::TextInput(_) | Event::TextRangeReplace(_) | Event::TextCut(_) | Event::ImeAction(_) => {
                 self.typed(cx)
             }
+            Event::A11yAction(request) if Self::a11y_activates(request.action) => {
+                let hit = self.owns_a11y_node(cx, request.node);
+                if hit {
+                    if !active && self.children_all_hidden() {
+                        return;
+                    }
+                    self.spent |= self.hovered;
+                    self.drop_tip(cx, uid);
+                    self.pressed = self.focus_pending_or_held(cx);
+                } else {
+                    self.pressed = false;
+                }
+            }
+            Event::A11yAction(request) if request.action == a11y_tree::Actions::FOCUS => {
+                self.pressed = false;
+            }
             _ => {}
         }
     }
@@ -682,7 +887,10 @@ impl TipRef {
     /// State-aware tips ("Open output window" / "Close output window").
     pub fn set_text(&self, text: &str) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.text = text.to_string();
+            if inner.text != text {
+                text.clone_into(&mut inner.text);
+                inner.refresh_request = inner.reports_tip();
+            }
         }
     }
 }
@@ -985,6 +1193,15 @@ impl Widget for TipLayer {
                     TipAction::None => None,
                 };
                 if let Some(request) = request {
+                    if self.owner == Some(action.widget_uid) {
+                        if self.showing.is_some() {
+                            self.showing = Some(request);
+                            self.redraw_layer(cx);
+                        } else {
+                            self.pending = Some(request);
+                        }
+                        continue;
+                    }
                     cx.stop_timer(self.timer);
                     let now = cx.seconds_since_app_start();
                     let delay =
@@ -1013,7 +1230,7 @@ mod tests {
     //! its pointer through the same function the layer draws with.
     use super::*;
     use crate::makepad_draw::cx_draw::CxDraw;
-    use crate::makepad_draw::event::{LongPressEvent, TouchPoint, TouchState, TouchUpdateEvent};
+    use crate::makepad_draw::event::{DigitDevice, FingerCancelEvent, LongPressEvent, TouchPoint, TouchState, TouchUpdateEvent};
     use crate::makepad_script::{script, ScriptMod};
 
     fn cx() -> crate::PooledCx {
@@ -1282,23 +1499,35 @@ mod tests {
     /// Hands `event` to `root` and to `layer` the way a window does, then
     /// the reports the tree made, and says which tip the layer then holds.
     fn deliver(cx: &mut Cx, root: &mut View, layer: &mut TipLayer, event: &Event) -> Option<String> {
-        let actions = cx.capture_actions(|cx| root.handle_event(cx, event, &mut Scope::empty()));
-        layer.handle_event(cx, event, &mut Scope::empty());
-        layer.handle_event(cx, &Event::Actions(actions), &mut Scope::empty());
+        deliver_actions(cx, root, layer, event);
         held(layer)
+    }
+
+    fn deliver_actions(cx: &mut Cx, root: &mut View, layer: &mut TipLayer, event: &Event) -> ActionsBuf {
+        let reports = Event::Actions(cx.capture_actions(|cx| root.handle_event(cx, event, &mut Scope::empty())));
+        layer.handle_event(cx, event, &mut Scope::empty());
+        layer.handle_event(cx, &reports, &mut Scope::empty());
+        let Event::Actions(actions) = reports else { unreachable!() };
+        actions
     }
 
     /// Lets a key focus asked for during the last dispatch change hands the
     /// way the platform does, once actions drain, and reports the change.
     fn settle_focus(cx: &mut Cx, root: &mut View, layer: &mut TipLayer) -> Option<String> {
+        settle_focus_actions(cx, root, layer);
+        held(layer)
+    }
+
+    fn settle_focus_actions(cx: &mut Cx, root: &mut View, layer: &mut TipLayer) -> ActionsBuf {
         let prev = cx.key_focus();
         cx.action(());
         cx.handle_actions();
         let focus = cx.key_focus();
         if focus != prev {
-            deliver(cx, root, layer, &Event::KeyFocus(KeyFocusEvent { prev, focus }));
+            deliver_actions(cx, root, layer, &Event::KeyFocus(KeyFocusEvent { prev, focus }))
+        } else {
+            Vec::new()
         }
-        held(layer)
     }
 
     /// Moves the key focus to `to` the way the platform does, lets `root`
@@ -1559,6 +1788,833 @@ mod tests {
             None,
             "lifted, gone"
         );
+        });
+    }
+
+    /// A pressed control drops its tip, and a tip never covers live controls: the press takes it
+    /// down (the tip reports it itself, not only the layer's own press rule), it stays down while
+    /// the pointer stays, and it comes back once the pointer has left and returned. A raised tip
+    /// whose text goes empty, or whose control hides, goes on the next event.
+    #[test]
+    fn a_pressed_or_emptied_or_hidden_control_drops_its_tip() {
+        crate::on_test_cx(|| {
+        let mut cx = cx();
+        cx.init_cx_os();
+        let mut root = view(&mut cx, script! {
+            use mod.prelude.widgets.*
+            View{ width: 300 height: 20 flow: Right
+                call_tip := Tip{ text: "call" Button{ text: "c" width: 50 height: 20 } }
+                mute_tip := Tip{ text: "mute" Button{ text: "m" width: 50 height: 20 } }
+                Tip{ text: "away" Button{ text: "a" width: 50 height: 20 } }
+            }
+        });
+        let mut layer = tip_layer(&mut cx);
+        let mut target = Target::new(&mut cx, dvec2(300.0, 20.0));
+        target.draw(&mut cx, &mut root);
+        let over = |cx: &Cx, root: &View, index: usize| {
+            Event::MouseMove(MouseMoveEvent {
+                abs: middle(cx, &at(root, &[index])),
+                lock_delta: DVec2::default(),
+                window_id: WindowId(1, 1),
+                modifiers: KeyModifiers::default(),
+                time: 0.0,
+                handled: std::cell::Cell::new(Area::Empty),
+            })
+        };
+        let down = |cx: &Cx, root: &View, index: usize| {
+            Event::MouseDown(MouseDownEvent {
+                abs: middle(cx, &at(root, &[index])),
+                button: MouseButton::PRIMARY,
+                window_id: WindowId(1, 1),
+                modifiers: KeyModifiers::default(),
+                handled: std::cell::Cell::new(Area::Empty),
+                time: 0.0,
+            })
+        };
+        let hover_outs = |cx: &mut Cx, root: &mut View, event: &Event| {
+            let actions = cx.capture_actions(|cx| root.handle_event(cx, event, &mut Scope::empty()));
+            actions
+                .iter()
+                .filter_map(|a| a.as_widget_action())
+                .filter(|a| matches!(a.cast::<TipAction>(), TipAction::HoverOut))
+                .count()
+        };
+
+        // The press.
+        let e = over(&cx, &root, 0);
+        assert_eq!(deliver(&mut cx, &mut root, &mut layer, &e).as_deref(), Some("call"));
+        let update = |cx: &mut Cx, root: &mut View, target: &mut Target, layer: &mut TipLayer| {
+            let actions = cx.capture_actions(|cx| target.draw(cx, root));
+            layer.handle_event(cx, &Event::Actions(actions), &mut Scope::empty());
+        };
+        let timer = layer.timer;
+        root.tip(&cx, ids!(call_tip)).set_text("pending");
+        update(&mut cx, &mut root, &mut target, &mut layer);
+        assert!(layer.timer.0 == timer.0 && layer.pending.as_ref().is_some_and(|t| t.text == "pending"),
+            "updating the pending owner's words keeps its original dwell");
+        layer.show_pending(&mut cx);
+        root.tip(&cx, ids!(call_tip)).set_text("shown");
+        update(&mut cx, &mut root, &mut target, &mut layer);
+        assert!(layer.showing.as_ref().is_some_and(|t| t.text == "shown"), "the visible tip follows its text on the next draw without a focus or pointer move");
+        root.tip(&cx, ids!(mute_tip)).set_text("away");
+        update(&mut cx, &mut root, &mut target, &mut layer);
+        assert!(layer.showing.as_ref().is_some_and(|t| t.text == "shown"), "changing a tip that is neither hovered nor focused leaves the visible tip alone");
+        root.tip(&cx, ids!(call_tip)).set_text("call");
+        root.tip(&cx, ids!(mute_tip)).set_text("mute");
+        let e = down(&cx, &root, 0);
+        assert_eq!(hover_outs(&mut cx, &mut root, &e), 1, "the pressed control's tip reports itself down");
+        assert_eq!(deliver(&mut cx, &mut root, &mut layer, &e), None, "a press drops the tip");
+        let e = over(&cx, &root, 0);
+        assert_eq!(deliver(&mut cx, &mut root, &mut layer, &e), None, "the pointer staying does not raise it again");
+        let e = over(&cx, &root, 1);
+        assert_eq!(deliver(&mut cx, &mut root, &mut layer, &e).as_deref(), Some("mute"), "another control's tip rises");
+        let e = over(&cx, &root, 0);
+        assert_eq!(
+            deliver(&mut cx, &mut root, &mut layer, &e).as_deref(),
+            Some("call"),
+            "left and back: the tip rises again"
+        );
+
+        // The text goes empty under a raised tip.
+        let e = over(&cx, &root, 1);
+        assert_eq!(deliver(&mut cx, &mut root, &mut layer, &e).as_deref(), Some("mute"));
+        at(&root, &[1]).borrow_mut::<Tip>().unwrap().text = String::new();
+        assert_eq!(deliver(&mut cx, &mut root, &mut layer, &Event::Signal), None, "emptied text drops a raised tip");
+
+        // The control hides under a raised tip.
+        let e = over(&cx, &root, 2);
+        assert_eq!(deliver(&mut cx, &mut root, &mut layer, &e).as_deref(), Some("away"));
+        at(&root, &[2, 0]).set_visible(&mut cx, false);
+        assert_eq!(deliver(&mut cx, &mut root, &mut layer, &Event::Signal), None, "a hidden control drops its tip");
+        });
+    }
+
+    fn a11y_req(node: a11y_tree::NodeId, action: a11y_tree::Actions) -> Event {
+        Event::A11yAction(a11y_tree::ActionRequest { req: 1, node, action, arg: a11y_tree::ActionArg::None })
+    }
+
+    fn mouse_move(abs: DVec2) -> Event {
+        Event::MouseMove(MouseMoveEvent {
+            abs,
+            lock_delta: DVec2::default(),
+            window_id: WindowId(1, 1),
+            modifiers: KeyModifiers::default(),
+            time: 0.0,
+            handled: std::cell::Cell::new(Area::Empty),
+        })
+    }
+
+    fn mouse_down(abs: DVec2, button: MouseButton) -> Event {
+        Event::MouseDown(MouseDownEvent {
+            abs,
+            button,
+            window_id: WindowId(1, 1),
+            modifiers: KeyModifiers::default(),
+            handled: std::cell::Cell::new(Area::Empty),
+            time: 0.0,
+        })
+    }
+
+    fn mouse_up(abs: DVec2, button: MouseButton) -> Event {
+        Event::MouseUp(MouseUpEvent {
+            abs,
+            button,
+            window_id: WindowId(1, 1),
+            modifiers: KeyModifiers::default(),
+            time: 0.0,
+        })
+    }
+
+    fn tip_reports(actions: &Actions) -> Vec<(WidgetUid, TipAction)> {
+        actions.iter().filter_map(|a| {
+            let a = a.as_widget_action()?;
+            Some((a.widget_uid, a.action.downcast_ref::<TipAction>()?.clone()))
+        }).collect()
+    }
+
+    #[test]
+    fn a11y_press_on_wrapped_control_suppresses_and_drops_its_tip() {
+        use crate::button::ButtonAction;
+        use a11y_tree::{Actions as A, NodeId};
+        crate::on_test_cx(|| {
+            let mut cx = cx();
+            cx.init_cx_os();
+            let mut root = view(&mut cx, script! {
+                use mod.prelude.widgets.*
+                View{ width: 300 height: 20 flow: Right
+                    Tip{ text: "save" Button{ text: "s" width: 50 height: 20 } }
+                    Tip{ text: "toggle" CheckBox{ text: "t" width: 50 height: 20 } }
+                    Tip{ text: "nested" View{ width: 50 height: 20 Button{ text: "n" width: 50 height: 20 } } }
+                }
+            });
+            let mut layer = tip_layer(&mut cx);
+            let mut target = Target::new(&mut cx, dvec2(300.0, 20.0));
+            target.draw(&mut cx, &mut root);
+            let save_tip = at(&root, &[0]).widget_uid();
+            let save = at(&root, &[0, 0]);
+            let toggle_tip = at(&root, &[1]).widget_uid();
+            let toggle = at(&root, &[1, 0]);
+            let nested = at(&root, &[2, 0, 0]);
+            let over_save = middle(&cx, &save);
+            let over_nested = middle(&cx, &nested);
+            let away = dvec2(280.0, 10.0);
+            let press = a11y_req(NodeId::widget(save.widget_uid().0), A::PRESS);
+
+            let actions = deliver_actions(&mut cx, &mut root, &mut layer, &press);
+            assert!(actions.filter_widget_actions(save.widget_uid()).any(|a| matches!(a.cast(), ButtonAction::Clicked(_))));
+            assert!(tip_reports(&actions).is_empty(), "pressing the idle button requested a tip");
+            let actions = settle_focus_actions(&mut cx, &mut root, &mut layer);
+            assert!(cx.has_key_focus(save.area()));
+            assert!(tip_reports(&actions).is_empty(), "focus from the press requested a tip");
+            assert_eq!(held(&layer), None);
+
+            assert_eq!(deliver(&mut cx, &mut root, &mut layer, &mouse_move(over_save)).as_deref(), Some("save"));
+            let actions = deliver_actions(&mut cx, &mut root, &mut layer, &press);
+            assert_eq!(tip_reports(&actions), [(save_tip, TipAction::HoverOut)]);
+            assert_eq!(held(&layer), None);
+            assert_eq!(deliver(&mut cx, &mut root, &mut layer, &mouse_move(over_save)), None);
+            deliver(&mut cx, &mut root, &mut layer, &mouse_move(away));
+            assert_eq!(deliver(&mut cx, &mut root, &mut layer, &mouse_move(over_save)).as_deref(), Some("save"));
+            deliver(&mut cx, &mut root, &mut layer, &mouse_move(away));
+
+            for action in [A::TOGGLE, A::SELECT] {
+                assert_eq!(focus(&mut cx, &mut root, &mut layer, toggle.area()).as_deref(), Some("toggle"));
+                let req = a11y_req(NodeId::widget(toggle.widget_uid().0), action);
+                let actions = deliver_actions(&mut cx, &mut root, &mut layer, &req);
+                assert_eq!(tip_reports(&actions), [(toggle_tip, TipAction::HoverOut)]);
+                assert_eq!(held(&layer), None);
+                focus(&mut cx, &mut root, &mut layer, Area::Empty);
+            }
+
+            assert_eq!(deliver(&mut cx, &mut root, &mut layer, &mouse_move(over_nested)).as_deref(), Some("nested"));
+            let req = a11y_req(NodeId::widget(nested.widget_uid().0), A::PRESS);
+            assert_eq!(deliver(&mut cx, &mut root, &mut layer, &req), None);
+            assert_eq!(settle_focus(&mut cx, &mut root, &mut layer), None);
+            assert_eq!(deliver(&mut cx, &mut root, &mut layer, &mouse_move(over_save)).as_deref(), Some("save"));
+            let req = a11y_req(NodeId::part(save.widget_uid().0, 1), A::PRESS);
+            assert_eq!(deliver(&mut cx, &mut root, &mut layer, &req), None);
+        });
+    }
+
+    #[test]
+    fn mouse_press_still_drops_and_suppresses_focus_tip() {
+        crate::on_test_cx(|| {
+            let mut cx = cx();
+            cx.init_cx_os();
+            let mut root = view(&mut cx, script! {
+                use mod.prelude.widgets.*
+                View{ width: 100 height: 20
+                    Tip{ text: "save" Button{ text: "s" width: 50 height: 20 } }
+                }
+            });
+            let mut layer = tip_layer(&mut cx);
+            let mut target = Target::new(&mut cx, dvec2(100.0, 20.0));
+            target.draw(&mut cx, &mut root);
+            let save = at(&root, &[0, 0]);
+            let abs = middle(&cx, &save);
+            assert_eq!(deliver(&mut cx, &mut root, &mut layer, &mouse_move(abs)).as_deref(), Some("save"));
+            let down = Event::MouseDown(MouseDownEvent {
+                abs,
+                button: MouseButton::PRIMARY,
+                window_id: WindowId(1, 1),
+                modifiers: KeyModifiers::default(),
+                handled: std::cell::Cell::new(Area::Empty),
+                time: 0.0,
+            });
+            let actions = deliver_actions(&mut cx, &mut root, &mut layer, &down);
+            assert_eq!(tip_reports(&actions), [(at(&root, &[0]).widget_uid(), TipAction::HoverOut)]);
+            assert_eq!(held(&layer), None);
+            let actions = settle_focus_actions(&mut cx, &mut root, &mut layer);
+            assert!(cx.has_key_focus(save.area()));
+            assert!(tip_reports(&actions).is_empty(), "focus from the mouse press requested a tip");
+            assert_eq!(held(&layer), None);
+            assert_eq!(deliver(&mut cx, &mut root, &mut layer, &mouse_move(abs)), None);
+            deliver(&mut cx, &mut root, &mut layer, &mouse_move(dvec2(90.0, 10.0)));
+            assert_eq!(deliver(&mut cx, &mut root, &mut layer, &mouse_move(abs)).as_deref(), Some("save"));
+        });
+    }
+
+    #[test]
+    fn tab_focus_without_press_still_shows_tip_including_after_a11y_press() {
+        use a11y_tree::{Actions as A, NodeId};
+        crate::on_test_cx(|| {
+            let mut cx = cx();
+            cx.init_cx_os();
+            let mut root = view(&mut cx, script! {
+                use mod.prelude.widgets.*
+                View{ width: 100 height: 20 flow: Right
+                    Tip{ text: "first" Button{ text: "1" width: 50 height: 20 } }
+                    Tip{ text: "second" Button{ text: "2" width: 50 height: 20 } }
+                }
+            });
+            let mut layer = tip_layer(&mut cx);
+            let mut target = Target::new(&mut cx, dvec2(100.0, 20.0));
+            target.draw(&mut cx, &mut root);
+            let first_tip = at(&root, &[0]);
+            let first = at(&root, &[0, 0]);
+            let second = at(&root, &[1, 0]);
+            let tab = Event::KeyDown(KeyEvent {
+                key_code: KeyCode::Tab, is_repeat: false, modifiers: KeyModifiers::default(), time: 0.0,
+            });
+            let press = a11y_req(NodeId::widget(first.widget_uid().0), A::PRESS);
+
+            deliver(&mut cx, &mut root, &mut layer, &tab);
+            assert_eq!(focus(&mut cx, &mut root, &mut layer, first.area()).as_deref(), Some("first"));
+            assert_eq!(deliver(&mut cx, &mut root, &mut layer, &press), None);
+            assert_eq!(settle_focus(&mut cx, &mut root, &mut layer), None);
+            for (button, text) in [(&second, "second"), (&first, "first")] {
+                deliver(&mut cx, &mut root, &mut layer, &tab);
+                assert_eq!(focus(&mut cx, &mut root, &mut layer, button.area()).as_deref(), Some(text));
+            }
+
+            assert_eq!(deliver(&mut cx, &mut root, &mut layer, &press), None);
+            assert_eq!(settle_focus(&mut cx, &mut root, &mut layer), None);
+            assert!(first_tip.borrow::<Tip>().unwrap().pressed);
+            for (button, text) in [(&second, "second"), (&first, "first")] {
+                let req = a11y_req(NodeId::widget(button.widget_uid().0), A::FOCUS);
+                deliver(&mut cx, &mut root, &mut layer, &req);
+                assert!(!first_tip.borrow::<Tip>().unwrap().pressed, "FOCUS clears the press before focus moves");
+                assert_eq!(focus(&mut cx, &mut root, &mut layer, button.area()).as_deref(), Some(text));
+            }
+        });
+    }
+
+    #[test]
+    fn a11y_press_on_another_widget_does_not_affect_this_tip() {
+        use a11y_tree::{Actions as A, NodeId};
+        crate::on_test_cx(|| {
+            let mut cx = cx();
+            cx.init_cx_os();
+            let mut root = view(&mut cx, script! {
+                use mod.prelude.widgets.*
+                View{ width: 150 height: 20 flow: Right
+                    Tip{ text: "first" Button{ text: "1" width: 50 height: 20 } }
+                    Tip{ text: "second" Button{ text: "2" width: 50 height: 20 } }
+                    View{ width: 50 height: 20 }
+                }
+            });
+            let mut layer = tip_layer(&mut cx);
+            let mut target = Target::new(&mut cx, dvec2(150.0, 20.0));
+            target.draw(&mut cx, &mut root);
+            let first_tip = at(&root, &[0]);
+            let first = at(&root, &[0, 0]);
+            let second = at(&root, &[1, 0]);
+            let bare = at(&root, &[2]);
+            let over = mouse_move(middle(&cx, &first));
+            assert_eq!(deliver(&mut cx, &mut root, &mut layer, &over).as_deref(), Some("first"));
+            for other in [&bare, &second] {
+                let req = a11y_req(NodeId::widget(other.widget_uid().0), A::PRESS);
+                let actions = deliver_actions(&mut cx, &mut root, &mut layer, &req);
+                assert!(tip_reports(&actions).is_empty(), "a press elsewhere emitted a tip action");
+                let actions = settle_focus_actions(&mut cx, &mut root, &mut layer);
+                assert!(tip_reports(&actions).is_empty(), "focus from a press elsewhere emitted a tip action");
+                let tip = first_tip.borrow::<Tip>().unwrap();
+                assert!(tip.hovered && !tip.spent && !tip.pressed);
+                assert_eq!(held(&layer).as_deref(), Some("first"));
+            }
+            assert!(cx.has_key_focus(second.area()));
+            assert_eq!(deliver(&mut cx, &mut root, &mut layer, &Event::ClearHover), None);
+            let req = a11y_req(NodeId::widget(second.widget_uid().0), A::PRESS);
+            assert_eq!(deliver(&mut cx, &mut root, &mut layer, &req), None);
+            assert_eq!(focus(&mut cx, &mut root, &mut layer, first.area()).as_deref(), Some("first"));
+        });
+    }
+
+    #[test]
+    fn focus_leaving_while_text_is_empty_clears_press_for_later_focus() {
+        use a11y_tree::{Actions as A, NodeId};
+        crate::on_test_cx(|| {
+            let mut cx = cx();
+            cx.init_cx_os();
+            let mut root = view(&mut cx, script! {
+                use mod.prelude.widgets.*
+                View{ width: 150 height: 20 flow: Right
+                    first_tip := Tip{ text: "first" Button{ text: "1" width: 50 height: 20 } }
+                    second_tip := Tip{ text: "second" Button{ text: "2" width: 50 height: 20 } }
+                }
+            });
+            let mut layer = tip_layer(&mut cx);
+            let mut target = Target::new(&mut cx, dvec2(150.0, 20.0));
+            target.draw(&mut cx, &mut root);
+            let first_tip = root.tip(&cx, ids!(first_tip));
+            let second_tip = at(&root, &[1]).widget_uid();
+            let first = at(&root, &[0, 0]);
+            let second = at(&root, &[1, 0]);
+            let over_first = middle(&cx, &first);
+            let away = dvec2(140.0, 10.0);
+
+            // The text empties before the accessibility press hands the button focus.
+            let press = a11y_req(NodeId::widget(first.widget_uid().0), A::PRESS);
+            let actions = deliver_actions(&mut cx, &mut root, &mut layer, &press);
+            assert!(tip_reports(&actions).is_empty(), "pressing the idle button emitted a tip action");
+            assert!(first_tip.borrow().unwrap().pressed, "the tip missed its button's accessibility press");
+            assert_eq!(held(&layer), None, "the layer held a tip after the accessibility press");
+
+            first_tip.set_text("");
+            let actions = settle_focus_actions(&mut cx, &mut root, &mut layer);
+            assert!(cx.has_key_focus(first.area()), "the accessibility press did not focus the first button");
+            assert!(tip_reports(&actions).is_empty(), "press-driven focus emitted an empty tip action");
+            assert_eq!(held(&layer), None, "press-driven focus left a tip in the layer");
+            assert!(first_tip.borrow().unwrap().pressed, "the press was cleared while its button still had focus");
+            assert!(!first_tip.borrow().unwrap().focused, "the empty tip recorded a focus to report");
+
+            let actions = deliver_actions(&mut cx, &mut root, &mut layer, &mouse_move(over_first));
+            assert!(tip_reports(&actions).is_empty(), "hovering the empty tip emitted a tip action");
+            assert_eq!(held(&layer), None, "hovering the empty tip left a tip in the layer");
+            assert!(!first_tip.borrow().unwrap().hovered, "the empty tip recorded a hover to report");
+
+            cx.set_key_focus(second.area());
+            let actions = settle_focus_actions(&mut cx, &mut root, &mut layer);
+            assert!(matches!(tip_reports(&actions).as_slice(),
+                [(uid, TipAction::HoverInWith(request))] if *uid == second_tip && request.text == "second"),
+                "moving focus should emit only the second tip's hover-in");
+            assert_eq!(held(&layer).as_deref(), Some("second"), "the layer lost the newly focused button's tip");
+            assert!(!first_tip.borrow().unwrap().pressed, "focus leaving the empty tip stranded the accessibility press");
+
+            first_tip.set_text("first");
+            let draw_actions = cx.capture_actions(|cx| target.draw(cx, &mut root));
+            assert!(tip_reports(&draw_actions).is_empty(), "restoring text after the accessibility press emitted a draw-time tip action");
+            assert_eq!(focus(&mut cx, &mut root, &mut layer, first.area()).as_deref(), Some("first"),
+                "the old accessibility press suppressed returning programmatic focus");
+
+            // The mouse press hands over focus before the text empties.
+            assert_eq!(focus(&mut cx, &mut root, &mut layer, Area::Empty), None, "clearing focus left the first tip up");
+            assert_eq!(deliver(&mut cx, &mut root, &mut layer, &mouse_move(over_first)).as_deref(), Some("first"),
+                "hovering before the mouse press failed to raise the first tip");
+            let down = Event::MouseDown(MouseDownEvent {
+                abs: over_first,
+                button: MouseButton::PRIMARY,
+                window_id: WindowId(1, 1),
+                modifiers: KeyModifiers::default(),
+                handled: std::cell::Cell::new(Area::Empty),
+                time: 0.0,
+            });
+            assert_eq!(deliver(&mut cx, &mut root, &mut layer, &down), None, "the mouse press left the hovered tip up");
+            assert!(first_tip.borrow().unwrap().pressed, "the tip missed its button's mouse press");
+            assert!(first_tip.borrow().unwrap().spent, "the mouse press did not spend the hover");
+            assert_eq!(settle_focus(&mut cx, &mut root, &mut layer), None, "focus from the mouse press raised the tip");
+            assert!(!first_tip.borrow().unwrap().focused, "mouse-driven focus suppressed by press must not record focused");
+            assert!(first_tip.borrow().unwrap().pressed, "settling mouse-driven focus cleared its press");
+
+            first_tip.set_text("");
+            deliver(&mut cx, &mut root, &mut layer, &mouse_move(away));
+            assert!(!first_tip.borrow().unwrap().spent, "the hover stayed spent after the pointer left the empty tip");
+            assert!(first_tip.borrow().unwrap().pressed, "the pointer leaving cleared the press before focus left");
+            cx.set_key_focus(Area::Empty);
+            let actions = settle_focus_actions(&mut cx, &mut root, &mut layer);
+            assert!(tip_reports(&actions).is_empty(), "losing focus while empty emitted another tip action");
+            assert!(!first_tip.borrow().unwrap().pressed, "focus leaving the empty tip stranded the mouse press");
+
+            first_tip.set_text("first");
+            let draw_actions = cx.capture_actions(|cx| target.draw(cx, &mut root));
+            assert!(tip_reports(&draw_actions).is_empty(), "restoring text after the mouse press emitted a draw-time tip action");
+            assert_eq!(focus(&mut cx, &mut root, &mut layer, first.area()).as_deref(), Some("first"),
+                "the old mouse press suppressed returning programmatic focus");
+            assert_eq!(focus(&mut cx, &mut root, &mut layer, Area::Empty), None, "the restored tip stayed up after focus left");
+            assert_eq!(deliver(&mut cx, &mut root, &mut layer, &mouse_move(over_first)).as_deref(), Some("first"),
+                "the old mouse press suppressed direct hover after text was restored");
+        });
+    }
+
+    #[test]
+    fn press_suppression_never_pops_blocks_focus_refresh_or_strands_without_focus() {
+        use a11y_tree::{Actions as A, NodeId};
+        crate::on_test_cx(|| {
+            let mut cx = cx();
+            cx.init_cx_os();
+            let mut root = view(&mut cx, script! {
+                use mod.prelude.widgets.*
+                View{ width: 300 height: 20 flow: Right
+                    a_tip := Tip{ text: "alpha" Button{ text: "a" width: 50 height: 20 } }
+                    b_tip := Tip{ text: "beta" Button{ text: "b" width: 50 height: 20 } }
+                    no_focus_tip := Tip{ text: "no focus" Button{ text: "n" width: 50 height: 20 grab_key_focus: false } }
+                    disabled_tip := Tip{ text: "disabled" Button{ text: "d" width: 50 height: 20 enabled: false } }
+                    check_tip := Tip{ text: "check" CheckBox{ text: "c" width: 50 height: 20 } }
+                }
+            });
+            let mut layer = tip_layer(&mut cx);
+            let mut target = Target::new(&mut cx, dvec2(300.0, 20.0));
+            target.draw(&mut cx, &mut root);
+            let a_tip = root.tip(&cx, ids!(a_tip));
+            let b_tip = root.tip(&cx, ids!(b_tip));
+            let no_focus_tip = root.tip(&cx, ids!(no_focus_tip));
+            let disabled_tip = root.tip(&cx, ids!(disabled_tip));
+            let check_tip = root.tip(&cx, ids!(check_tip));
+            let a_tip_uid = a_tip.borrow().unwrap().widget_uid();
+            let check_tip_uid = check_tip.borrow().unwrap().widget_uid();
+            let a = at(&root, &[0, 0]);
+            let b = at(&root, &[1, 0]);
+            let no_focus = at(&root, &[2, 0]);
+            let disabled = at(&root, &[3, 0]);
+            let check = at(&root, &[4, 0]);
+            let over_a = middle(&cx, &a);
+            let over_b = middle(&cx, &b);
+            let over_check = middle(&cx, &check);
+            let away = dvec2(280.0, 10.0);
+
+            // #3: clearing the press later must not revive a suppressed focus tip.
+            assert_eq!(deliver(&mut cx, &mut root, &mut layer, &mouse_move(over_a)).as_deref(), Some("alpha"),
+                "#3: hovering alpha should raise its tip");
+            let down = mouse_down(over_a, MouseButton::PRIMARY);
+            let actions = deliver_actions(&mut cx, &mut root, &mut layer, &down);
+            assert_eq!(tip_reports(&actions), [(a_tip_uid, TipAction::HoverOut)], "#3: pressing alpha should only drop its tip");
+            assert_eq!(held(&layer), None, "#3: the layer kept alpha after the press");
+            assert!(a_tip.borrow().unwrap().pressed, "#3: alpha missed its press");
+            assert!(a_tip.borrow().unwrap().spent, "#3: pressing alpha should spend its hover");
+            let actions = settle_focus_actions(&mut cx, &mut root, &mut layer);
+            assert!(cx.has_key_focus(a.area()), "#3: the press should focus alpha");
+            assert!(tip_reports(&actions).is_empty(), "#3: press-driven focus emitted a tip action");
+            assert_eq!(held(&layer), None, "#3: press-driven focus raised alpha");
+            assert!(!a_tip.borrow().unwrap().focused, "#3: suppressed focus was recorded as a raised tip");
+            assert!(a_tip.borrow().unwrap().pressed, "#3: settling focus cleared the press");
+            deliver(&mut cx, &mut root, &mut layer, &mouse_up(over_a, MouseButton::PRIMARY));
+            down.unhandle(&mut cx, &a.area());
+            assert!(a_tip.borrow().unwrap().pressed, "#3: releasing the focused button cleared the press");
+            assert!(!a_tip.borrow().unwrap().focused, "#3: release recorded suppressed focus");
+            deliver(&mut cx, &mut root, &mut layer, &mouse_move(away));
+            assert!(!a_tip.borrow().unwrap().spent, "#3: leaving alpha should clear spent hover");
+            let shift = Event::KeyDown(KeyEvent { key_code: KeyCode::Shift, ..Default::default() });
+            deliver(&mut cx, &mut root, &mut layer, &shift);
+            assert!(!a_tip.borrow().unwrap().pressed, "#3: Shift should clear the press");
+            assert!(!a_tip.borrow().unwrap().focused, "#3: Shift recorded previously suppressed focus");
+            assert_eq!(held(&layer), None, "#3: Shift raised a suppressed tip");
+            a_tip.set_text("alpha updated");
+            let draw_actions = cx.capture_actions(|cx| target.draw(cx, &mut root));
+            assert!(tip_reports(&draw_actions).is_empty(), "#3: updating a suppressed tip emitted a draw-time action");
+            assert_eq!(held(&layer), None, "#3: the layer held alpha after the draw");
+            cx.set_key_focus(Area::Empty);
+            let actions = settle_focus_actions(&mut cx, &mut root, &mut layer);
+            assert!(tip_reports(&actions).is_empty(), "#3: losing suppressed focus emitted an unmatched tip action");
+            a_tip.set_text("alpha");
+
+            // #4: return by keyboard with the pointer still resting on the button.
+            assert_eq!(deliver(&mut cx, &mut root, &mut layer, &mouse_move(over_a)).as_deref(), Some("alpha"),
+                "#4: hovering alpha again should show its restored text");
+            let down = mouse_down(over_a, MouseButton::PRIMARY);
+            assert_eq!(deliver(&mut cx, &mut root, &mut layer, &down), None, "#4: the press left alpha up");
+            assert!(a_tip.borrow().unwrap().spent, "#4: the press should spend alpha's hover");
+            assert!(a_tip.borrow().unwrap().pressed, "#4: alpha missed the second press");
+            assert_eq!(settle_focus(&mut cx, &mut root, &mut layer), None, "#4: settling the press raised alpha");
+            deliver(&mut cx, &mut root, &mut layer, &mouse_up(over_a, MouseButton::PRIMARY));
+            down.unhandle(&mut cx, &a.area());
+            assert!(a_tip.borrow().unwrap().spent, "#4: releasing in place cleared spent hover");
+            let tab = KeyEvent { key_code: KeyCode::Tab, ..Default::default() };
+            deliver(&mut cx, &mut root, &mut layer, &Event::KeyDown(tab));
+            assert!(!a_tip.borrow().unwrap().pressed, "#4: Tab should clear the press");
+            assert!(a_tip.borrow().unwrap().spent, "#4: Tab should preserve spent hover");
+            assert_eq!(focus(&mut cx, &mut root, &mut layer, b.area()).as_deref(), Some("beta"), "#4: Tab missed beta's tip");
+            let back = Event::KeyDown(KeyEvent { modifiers: KeyModifiers { shift: true, ..Default::default() }, ..tab });
+            deliver(&mut cx, &mut root, &mut layer, &back);
+            assert_eq!(focus(&mut cx, &mut root, &mut layer, a.area()).as_deref(), Some("alpha"), "#4: Shift+Tab missed alpha's tip");
+            assert!(a_tip.borrow().unwrap().focused, "#4: keyboard focus should record a raised tip");
+            assert!(a_tip.borrow().unwrap().spent, "#4: returning by keyboard should preserve spent hover");
+            layer.show_pending(&mut cx);
+            assert_eq!(layer.showing.as_ref().map(|t| t.text.as_str()), Some("alpha"), "#4: the layer should show alpha before refresh");
+            a_tip.set_text("alpha live");
+            let draw_actions = cx.capture_actions(|cx| target.draw(cx, &mut root));
+            let draw_reports = tip_reports(&draw_actions);
+            layer.handle_event(&mut cx, &Event::Actions(draw_actions), &mut Scope::empty());
+            assert!(matches!(draw_reports.as_slice(),
+                [(uid, TipAction::HoverInWith(r))] if *uid == a_tip_uid && r.text == "alpha live"),
+                "#4: the draw should report alpha's updated focus tip exactly once");
+            assert_eq!(layer.showing.as_ref().map(|t| t.text.as_str()), Some("alpha live"), "#4: the visible tip kept its old text");
+            deliver(&mut cx, &mut root, &mut layer, &mouse_move(away));
+            assert!(!a_tip.borrow().unwrap().spent, "#4: leaving the button should clear spent hover");
+            assert_eq!(focus(&mut cx, &mut root, &mut layer, Area::Empty), None, "#4: clearing focus left alpha up");
+
+            // #2: presses that end without requesting focus must allow later programmatic focus.
+            let over_no_focus = middle(&cx, &no_focus);
+            let down = mouse_down(over_no_focus, MouseButton::PRIMARY);
+            deliver(&mut cx, &mut root, &mut layer, &down);
+            assert!(no_focus_tip.borrow().unwrap().pressed, "#2: the non-focusing button missed its press");
+            assert_eq!(settle_focus(&mut cx, &mut root, &mut layer), None, "#2: pressing the non-focusing button raised a tip");
+            assert!(!cx.has_key_focus(no_focus.area()), "#2: the button took focus despite grab_key_focus being false");
+            deliver(&mut cx, &mut root, &mut layer, &mouse_up(over_no_focus, MouseButton::PRIMARY));
+            down.unhandle(&mut cx, &no_focus.area());
+            assert!(!no_focus_tip.borrow().unwrap().pressed, "#2: release on the non-focusing button stranded the press");
+            assert_eq!(focus(&mut cx, &mut root, &mut layer, no_focus.area()).as_deref(), Some("no focus"),
+                "#2: programmatic focus after the non-focusing press missed its tip");
+            assert_eq!(focus(&mut cx, &mut root, &mut layer, Area::Empty), None, "#2: clearing focus left the non-focusing button's tip up");
+
+            for (control, tip, button, release, text, case) in [
+                (&disabled, &disabled_tip, MouseButton::PRIMARY, middle(&cx, &disabled), "disabled", "disabled button"),
+                (&b, &b_tip, MouseButton::SECONDARY, over_b, "beta", "secondary click"),
+                (&check, &check_tip, MouseButton::PRIMARY, away, "check", "checkbox drag-off"),
+            ] {
+                let down = mouse_down(middle(&cx, control), button);
+                deliver(&mut cx, &mut root, &mut layer, &down);
+                assert!(tip.borrow().unwrap().pressed, "#2: {case} missed the press");
+                deliver(&mut cx, &mut root, &mut layer, &mouse_up(release, button));
+                down.unhandle(&mut cx, &control.area());
+                assert!(!tip.borrow().unwrap().pressed, "#2: {case} stranded the press on release");
+                assert_eq!(focus(&mut cx, &mut root, &mut layer, control.area()).as_deref(), Some(text),
+                    "#2: {case} suppressed later programmatic focus");
+                assert_eq!(focus(&mut cx, &mut root, &mut layer, Area::Empty), None, "#2: {case} left a tip after focus moved away");
+            }
+
+            let down = mouse_down(over_check, MouseButton::PRIMARY);
+            deliver(&mut cx, &mut root, &mut layer, &down);
+            assert!(check_tip.borrow().unwrap().pressed, "#2: the checkbox missed the click inside");
+            assert!(!cx.has_key_focus(check.area()), "#2: the checkbox should defer focus to release");
+            deliver(&mut cx, &mut root, &mut layer, &mouse_up(over_check, MouseButton::PRIMARY));
+            down.unhandle(&mut cx, &check.area());
+            assert_eq!(cx.next_key_focus(), check.area(), "#2: releasing inside should queue checkbox focus");
+            assert!(check_tip.borrow().unwrap().pressed, "#2: release cleared the press while checkbox focus was pending");
+            let actions = settle_focus_actions(&mut cx, &mut root, &mut layer);
+            assert!(cx.has_key_focus(check.area()), "#2: the queued checkbox focus did not settle");
+            assert!(tip_reports(&actions).is_empty(), "#2: settling deferred focus emitted a tip action");
+            assert_eq!(held(&layer), None, "#2: deferred focus raised the checkbox tip");
+            assert!(!check_tip.borrow().unwrap().focused, "#2: the checkbox recorded suppressed focus");
+            assert_eq!(focus(&mut cx, &mut root, &mut layer, Area::Empty), None, "#2: leaving the checkbox left a tip up");
+            assert!(!check_tip.borrow().unwrap().pressed, "#2: leaving the checkbox stranded the press");
+
+            for (state, abs) in [(TouchState::Start, over_b), (TouchState::Stop, away)] {
+                let touch = TouchUpdateEvent {
+                    time: 0.0,
+                    window_id: WindowId(1, 1),
+                    modifiers: KeyModifiers::default(),
+                    touches: vec![TouchPoint {
+                        state, abs, time: 0.0, uid: 1, rotation_angle: 0.0, force: 1.0,
+                        radius: dvec2(1.0, 1.0),
+                        handled: std::cell::Cell::new(Area::Empty),
+                        sweep_lock: std::cell::Cell::new(Area::Empty),
+                    }],
+                };
+                let event = Event::TouchUpdate(touch);
+                deliver(&mut cx, &mut root, &mut layer, &event);
+                if state == TouchState::Start {
+                    assert!(b_tip.borrow().unwrap().pressed, "#2: the touch did not press beta");
+                    assert_eq!(b_tip.borrow().unwrap().finger, Some(1), "#2: beta missed the touching finger");
+                } else if let Event::TouchUpdate(touch) = &event {
+                    cx.fingers.process_touch_update_end(&touch.touches);
+                }
+            }
+            assert_eq!(b_tip.borrow().unwrap().finger, None, "#2: touch drag-off kept the finger");
+            assert!(!b_tip.borrow().unwrap().pressed, "#2: touch drag-off stranded the press");
+            assert!(!cx.has_key_focus(b.area()), "#2: touch drag-off gave beta focus");
+            assert_eq!(focus(&mut cx, &mut root, &mut layer, b.area()).as_deref(), Some("beta"),
+                "#2: touch drag-off suppressed later programmatic focus");
+            assert_eq!(focus(&mut cx, &mut root, &mut layer, Area::Empty), None, "#2: clearing focus after touch left beta up");
+
+            for (control, tip, text) in [(&no_focus, &no_focus_tip, "no focus"), (&disabled, &disabled_tip, "disabled")] {
+                let press = a11y_req(NodeId::widget(control.widget_uid().0), A::PRESS);
+                deliver(&mut cx, &mut root, &mut layer, &press);
+                assert!(!tip.borrow().unwrap().pressed, "#2: accessibility press on {text} stranded the press");
+                assert_eq!(focus(&mut cx, &mut root, &mut layer, control.area()).as_deref(), Some(text),
+                    "#2: accessibility press on {text} suppressed later programmatic focus");
+                assert_eq!(focus(&mut cx, &mut root, &mut layer, Area::Empty), None, "#2: {text} stayed up after focus left");
+            }
+            deliver(&mut cx, &mut root, &mut layer, &mouse_move(away));
+            assert!(!check_tip.borrow().unwrap().spent, "#2: moving away should clear spent checkbox hover");
+            assert_eq!(deliver(&mut cx, &mut root, &mut layer, &mouse_move(over_check)).as_deref(), Some("check"),
+                "#2: hovering the checkbox should raise its tip before the accessibility toggle");
+            let toggle = a11y_req(NodeId::widget(check.widget_uid().0), A::TOGGLE);
+            let actions = deliver_actions(&mut cx, &mut root, &mut layer, &toggle);
+            assert_eq!(tip_reports(&actions), [(check_tip_uid, TipAction::HoverOut)], "#2: toggle should only drop the checkbox tip");
+            assert_eq!(held(&layer), None, "#2: toggle left the checkbox tip up");
+            assert!(check_tip.borrow().unwrap().spent, "#2: toggle should spend the hovered checkbox tip");
+            assert!(!check_tip.borrow().unwrap().pressed, "#2: the unfocused toggle stranded the press");
+            assert_eq!(focus(&mut cx, &mut root, &mut layer, check.area()).as_deref(), Some("check"),
+                "#2: toggle suppressed later programmatic checkbox focus");
+        });
+    }
+
+    #[test]
+    fn cancelled_touch_and_hidden_tip_never_strand_or_raise_tips() {
+        use a11y_tree::{Actions as A, NodeId};
+        crate::on_test_cx(|| {
+            let mut cx = cx();
+            cx.init_cx_os();
+            let mut root = view(&mut cx, script! {
+                use mod.prelude.widgets.*
+                View{ width: 200 height: 20 flow: Right
+                    a_tip := Tip{ text: "alpha" Button{ text: "a" width: 50 height: 20 } }
+                    b_tip := Tip{ text: "beta" Button{ text: "b" width: 50 height: 20 } }
+                    empty_tip := Tip{ text: "" Button{ text: "e" width: 50 height: 20 } }
+                }
+            });
+            let mut layer = tip_layer(&mut cx);
+            let mut target = Target::new(&mut cx, dvec2(200.0, 20.0));
+            target.draw(&mut cx, &mut root);
+            let a_tip = root.tip(&cx, ids!(a_tip));
+            let b_tip = root.tip(&cx, ids!(b_tip));
+            let empty_tip = root.tip(&cx, ids!(empty_tip));
+            let a_tip_uid = a_tip.borrow().unwrap().widget_uid();
+            let b_tip_uid = b_tip.borrow().unwrap().widget_uid();
+            let a = at(&root, &[0, 0]);
+            let b = at(&root, &[1, 0]);
+            let empty_btn = at(&root, &[2, 0]);
+            let over_a = middle(&cx, &a);
+            let over_b = middle(&cx, &b);
+            let over_empty = middle(&cx, &empty_btn);
+            let away = dvec2(180.0, 10.0);
+            let window_id = WindowId(1, 1);
+            let touch = |uid, state, abs| {
+                let time = if state == TouchState::Start { 0.0 } else { 0.6 };
+                Event::TouchUpdate(TouchUpdateEvent {
+                    window_id,
+                    time,
+                    modifiers: KeyModifiers::default(),
+                    touches: vec![TouchPoint {
+                        uid, state, abs, time, rotation_angle: 0.0, force: 1.0,
+                        radius: dvec2(1.0, 1.0),
+                        handled: std::cell::Cell::new(Area::Empty),
+                        sweep_lock: std::cell::Cell::new(Area::Empty),
+                    }],
+                })
+            };
+            let end_touch = |cx: &mut Cx, event: &Event| {
+                let Event::TouchUpdate(update) = event else { unreachable!() };
+                cx.fingers.process_touch_update_end(&update.touches);
+            };
+            let long_press = |uid, abs| Event::LongPress(LongPressEvent { window_id, uid, abs, time: 0.5 });
+
+            // #1a: the host delivers both a cancelled touch and a finger cancellation.
+            let start = touch(1, TouchState::Start, over_a);
+            assert_eq!(deliver(&mut cx, &mut root, &mut layer, &start), None, "#1a: touch start raised alpha");
+            assert!(a_tip.borrow().unwrap().pressed, "#1a: alpha missed the touch press");
+            assert_eq!(a_tip.borrow().unwrap().finger, Some(1), "#1a: alpha missed the touching finger");
+            assert!(!a_tip.borrow().unwrap().long_pressed, "#1a: touch start recorded a long press");
+            let raised = deliver(&mut cx, &mut root, &mut layer, &long_press(1, over_a));
+            assert_eq!(raised.as_deref(), Some("alpha"), "#1a: long press missed alpha's tip");
+            assert_eq!(layer.showing.as_ref().map(|t| t.text.as_str()), Some("alpha"), "#1a: long press should show alpha immediately");
+            assert!(a_tip.borrow().unwrap().long_pressed, "#1a: alpha missed its long press");
+            let cancel = touch(1, TouchState::Cancel, over_a);
+            let actions = deliver_actions(&mut cx, &mut root, &mut layer, &cancel);
+            assert_eq!(tip_reports(&actions), [(a_tip_uid, TipAction::HoverOut)], "#1a: touch cancel should drop only alpha, exactly once");
+            assert_eq!(held(&layer), None, "#1a: touch cancel left alpha up");
+            assert_eq!(a_tip.borrow().unwrap().finger, None, "#1a: touch cancel kept the finger");
+            assert!(!a_tip.borrow().unwrap().long_pressed, "#1a: touch cancel kept the long press");
+            assert!(!a_tip.borrow().unwrap().pressed, "#1a: touch cancel stranded the press");
+            let paired_cancel = Event::FingerCancel(FingerCancelEvent {
+                window_id, digit_id: live_id_num!(touch, 1).into(), device: DigitDevice::Touch { uid: 1 },
+                abs: over_a, time: 0.6, modifiers: KeyModifiers::default(),
+            });
+            let actions = deliver_actions(&mut cx, &mut root, &mut layer, &paired_cancel);
+            assert!(tip_reports(&actions).is_empty(), "#1a: the paired finger cancel emitted a second tip action");
+            end_touch(&mut cx, &cancel);
+            assert_eq!(focus(&mut cx, &mut root, &mut layer, a.area()).as_deref(), Some("alpha"), "#1a: touch cancel suppressed later focus");
+            assert_eq!(focus(&mut cx, &mut root, &mut layer, Area::Empty), None, "#1a: clearing focus left alpha up");
+
+            // #1b: the gesture claim identifies the captured touch by digit, then beta reuses its UID.
+            deliver(&mut cx, &mut root, &mut layer, &touch(1, TouchState::Start, over_a));
+            assert!(a_tip.borrow().unwrap().pressed, "#1b: alpha missed the press before the claim");
+            assert_eq!(a_tip.borrow().unwrap().finger, Some(1), "#1b: alpha missed the finger before the claim");
+            let raised = deliver(&mut cx, &mut root, &mut layer, &long_press(1, over_a));
+            assert_eq!(raised.as_deref(), Some("alpha"), "#1b: long press missed alpha before the claim");
+            assert!(a_tip.borrow().unwrap().long_pressed, "#1b: alpha missed the long press before the claim");
+            cx.fingers.cancel_digit_except(live_id_num!(touch, 1).into(), Area::Empty);
+            let cancels = cx.fingers.take_pending_cancels(0.6);
+            assert_eq!(cancels.len(), 1, "#1b: the claim should queue exactly one cancellation");
+            assert!(matches!(cancels[0].device, DigitDevice::Touch { uid: 0 }), "#1b: a claim's cancel reports the touch device with uid 0");
+            let actions = deliver_actions(&mut cx, &mut root, &mut layer, &Event::FingerCancel(cancels[0].clone()));
+            assert_eq!(tip_reports(&actions), [(a_tip_uid, TipAction::HoverOut)], "#1b: the claim should drop only alpha, exactly once");
+            assert_eq!(held(&layer), None, "#1b: the claim left alpha up");
+            assert_eq!(a_tip.borrow().unwrap().finger, None, "#1b: the claim kept the captured finger");
+            assert!(!a_tip.borrow().unwrap().long_pressed, "#1b: the claim kept the long press");
+            assert!(!a_tip.borrow().unwrap().pressed, "#1b: the claim stranded the press");
+            end_touch(&mut cx, &touch(1, TouchState::Stop, over_a));
+            deliver(&mut cx, &mut root, &mut layer, &touch(1, TouchState::Start, over_b));
+            let actions = deliver_actions(&mut cx, &mut root, &mut layer, &long_press(1, over_b));
+            assert!(matches!(tip_reports(&actions).as_slice(),
+                [(uid, TipAction::HoverInWith(r))] if *uid == b_tip_uid && r.text == "beta"),
+                "#1b: long pressing with the reused finger should raise only beta");
+            assert_eq!(held(&layer).as_deref(), Some("beta"), "#1b: the layer missed beta for the reused finger");
+            let stop = touch(1, TouchState::Stop, away);
+            deliver(&mut cx, &mut root, &mut layer, &stop);
+            end_touch(&mut cx, &stop);
+            assert_eq!(held(&layer), None, "#1b: lifting the reused finger left beta up");
+            assert_eq!(b_tip.borrow().unwrap().finger, None, "#1b: beta kept the reused finger after lift");
+            assert!(!b_tip.borrow().unwrap().pressed, "#1b: beta kept the press after lift");
+            assert_eq!(focus(&mut cx, &mut root, &mut layer, a.area()).as_deref(), Some("alpha"), "#1b: the claim suppressed later alpha focus");
+            assert_eq!(focus(&mut cx, &mut root, &mut layer, Area::Empty), None, "#1b: clearing focus left alpha up");
+
+            // #1c: a hosted mouse cancellation ends the secondary press without a mouse-up.
+            deliver(&mut cx, &mut root, &mut layer, &mouse_down(over_b, MouseButton::SECONDARY));
+            assert!(b_tip.borrow().unwrap().pressed, "#1c: beta missed the secondary press");
+            assert_eq!(b_tip.borrow().unwrap().finger, None, "#1c: beta recorded a touch finger for the mouse");
+            cx.fingers.cancel_digit(live_id!(mouse).into());
+            let mouse_cancel = Event::FingerCancel(FingerCancelEvent {
+                window_id, digit_id: live_id!(mouse).into(), device: DigitDevice::Mouse { button: MouseButton::SECONDARY },
+                abs: over_b, time: 0.6, modifiers: KeyModifiers::default(),
+            });
+            deliver(&mut cx, &mut root, &mut layer, &mouse_cancel);
+            assert!(!b_tip.borrow().unwrap().pressed, "#1c: mouse cancel stranded the secondary press");
+            assert_eq!(focus(&mut cx, &mut root, &mut layer, b.area()).as_deref(), Some("beta"), "#1c: mouse cancel suppressed later focus");
+            assert_eq!(focus(&mut cx, &mut root, &mut layer, Area::Empty), None, "#1c: clearing focus left beta up");
+
+            // #1d: a long-press tip whose text empties still needs exactly one dismissal.
+            deliver(&mut cx, &mut root, &mut layer, &touch(2, TouchState::Start, over_a));
+            let raised = deliver(&mut cx, &mut root, &mut layer, &long_press(2, over_a));
+            assert_eq!(raised.as_deref(), Some("alpha"), "#1d: long press missed alpha before the text emptied");
+            assert!(a_tip.borrow().unwrap().long_pressed, "#1d: alpha missed the long press before the text emptied");
+            a_tip.set_text("");
+            let stop = touch(2, TouchState::Stop, away);
+            let actions = deliver_actions(&mut cx, &mut root, &mut layer, &stop);
+            end_touch(&mut cx, &stop);
+            assert_eq!(tip_reports(&actions), [(a_tip_uid, TipAction::HoverOut)], "#1d: lift should drop the emptied tip exactly once");
+            assert_eq!(held(&layer), None, "#1d: lift left the emptied tip up");
+            assert_eq!(a_tip.borrow().unwrap().finger, None, "#1d: the emptied tip kept the finger");
+            assert!(!a_tip.borrow().unwrap().long_pressed, "#1d: the emptied tip kept the long press");
+            assert!(!a_tip.borrow().unwrap().pressed, "#1d: the emptied tip kept the press");
+            a_tip.set_text("alpha");
+
+            // #5a: hiding an empty tip with a finger down clears the finger silently.
+            deliver(&mut cx, &mut root, &mut layer, &touch(3, TouchState::Start, over_empty));
+            assert_eq!(empty_tip.borrow().unwrap().finger, Some(3), "#5a: the empty tip missed the touching finger");
+            assert!(empty_tip.borrow().unwrap().pressed, "#5a: the empty tip missed the press");
+            assert!(!empty_tip.borrow().unwrap().long_pressed, "#5a: the empty tip recorded a long press");
+            let actions = cx.capture_actions(|cx| at(&root, &[2]).set_visible(cx, false));
+            assert!(tip_reports(&actions).is_empty(), "#5a: hiding an empty tip emitted a tip action");
+            assert_eq!(empty_tip.borrow().unwrap().finger, None, "#5a: hiding the empty tip kept the finger");
+            assert!(!empty_tip.borrow().unwrap().pressed, "#5a: hiding the empty tip kept the press");
+            end_touch(&mut cx, &touch(3, TouchState::Stop, over_empty));
+            at(&root, &[2]).set_visible(&mut cx, true);
+
+            let press = a11y_req(NodeId::widget(a.widget_uid().0), A::PRESS);
+            at(&root, &[0]).set_visible(&mut cx, false);
+            cx.set_key_focus(a.area());
+            let actions = settle_focus_actions(&mut cx, &mut root, &mut layer);
+            assert!(tip_reports(&actions).is_empty(), "#5a: focusing the hidden wrapper emitted a tip action");
+            assert_eq!(held(&layer), None, "#5a: focus raised the hidden wrapper's tip");
+            assert!(!a_tip.borrow().unwrap().focused, "#5a: the hidden wrapper recorded focus");
+            assert!(!a_tip.borrow().unwrap().pressed, "#5a: the hidden wrapper recorded a press on focus");
+            focus(&mut cx, &mut root, &mut layer, Area::Empty);
+            let actions = deliver_actions(&mut cx, &mut root, &mut layer, &press);
+            assert!(tip_reports(&actions).is_empty(), "#5a: accessibility press on the hidden wrapper emitted a tip action");
+            assert!(!a_tip.borrow().unwrap().pressed, "#5a: the hidden wrapper recorded the accessibility press");
+            assert!(!a_tip.borrow().unwrap().focused, "#5a: the hidden wrapper recorded focus on the accessibility press");
+            let actions = settle_focus_actions(&mut cx, &mut root, &mut layer);
+            assert!(tip_reports(&actions).is_empty(), "#5a: settling the hidden wrapper's accessibility press emitted a tip action");
+            assert_eq!(held(&layer), None, "#5a: the hidden wrapper raised a tip after the accessibility press");
+            assert!(!a_tip.borrow().unwrap().focused, "#5a: the hidden wrapper recorded focus after the accessibility press");
+            focus(&mut cx, &mut root, &mut layer, Area::Empty);
+            at(&root, &[0]).set_visible(&mut cx, true);
+
+            // #5b: the wrapper stays visible while only its child hides, with the last drawn rect intact.
+            a.set_visible(&mut cx, false);
+            let stale_hover = mouse_move(middle(&cx, &a));
+            let actions = deliver_actions(&mut cx, &mut root, &mut layer, &stale_hover);
+            assert!(tip_reports(&actions).is_empty(), "#5b: hovering the hidden child's rect emitted a tip action");
+            assert_eq!(held(&layer), None, "#5b: hovering the hidden child's rect raised a tip");
+            assert!(!a_tip.borrow().unwrap().hovered, "#5b: the wrapper recorded hover on its hidden child");
+            cx.set_key_focus(a.area());
+            let actions = settle_focus_actions(&mut cx, &mut root, &mut layer);
+            assert!(tip_reports(&actions).is_empty(), "#5b: focusing the hidden child emitted a tip action");
+            assert_eq!(held(&layer), None, "#5b: focusing the hidden child raised a tip");
+            assert!(!a_tip.borrow().unwrap().focused, "#5b: the wrapper recorded focus on its hidden child");
+            focus(&mut cx, &mut root, &mut layer, Area::Empty);
+            let actions = deliver_actions(&mut cx, &mut root, &mut layer, &press);
+            assert!(tip_reports(&actions).is_empty(), "#5b: accessibility press on the hidden child emitted a tip action");
+            assert!(!a_tip.borrow().unwrap().pressed, "#5b: the wrapper recorded the hidden child's accessibility press");
+            assert!(!a_tip.borrow().unwrap().focused, "#5b: the wrapper recorded focus on the hidden child's accessibility press");
+            let actions = settle_focus_actions(&mut cx, &mut root, &mut layer);
+            assert!(tip_reports(&actions).is_empty(), "#5b: settling the hidden child's accessibility press emitted a tip action");
+            assert_eq!(held(&layer), None, "#5b: the hidden child raised a tip after the accessibility press");
+            assert!(!a_tip.borrow().unwrap().focused, "#5b: the wrapper recorded focus after the hidden child's accessibility press");
+            focus(&mut cx, &mut root, &mut layer, Area::Empty);
+            a.set_visible(&mut cx, true);
+            assert_eq!(focus(&mut cx, &mut root, &mut layer, a.area()).as_deref(), Some("alpha"), "#5b: showing the child should restore its focus tip");
         });
     }
 

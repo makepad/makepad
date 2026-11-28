@@ -82,16 +82,18 @@ let lq_capm = fn(p: vec2, lo: vec2, hi: vec2, r: float, px: float, hover: float,
     let band = 1.0 - smoothstep(hz - 0.06, hz + 0.02, t)
     let upper = mix(top_c, hor_c, pow(clamp(t / max(hz, 0.01), 0.0, 1.0), 0.75))
     let lower = mix(low_c, foot_c, smoothstep(hz, 1.0, t))
+    let flat = step(gloss, -0.5)
+    let gl = max(gloss, 0.0)
     let matte = mix(mix(hor_c, low_c, 0.55), foot_c, t)
-    var face = mix(matte, mix(lower, upper, band), gloss) + tint
+    var face = mix(mix(matte, mix(lower, upper, band), gl), vec3(0.54118, 0.10196, 0.11765), flat) + tint
     // The reflected light: the lowest rows lift toward the chrome catch.
-    face = mix(face, rim_c, 0.30 * smoothstep(0.70, 1.0, t) * (1.0 - disabled))
+    face = mix(face, rim_c, 0.30 * smoothstep(0.70, 1.0, t) * (1.0 - disabled) * (1.0 - flat))
     // A window of light held in the gloss: a soft bright streak near the top.
     let wy = (t - 0.14) / 0.09
-    face = mix(face, line_c, 0.20 * exp(-wy * wy) * gloss * up)
+    face = mix(face, line_c, 0.20 * exp(-wy * wy) * gl * up)
     // Under the hand the gloss wakes: the face lifts and the streak grows.
     face = face + mix(vec3(0.050, 0.022, 0.024), vec3(0.04, 0.04, 0.042), step(0.5, mat)) * (1.0 + small) * hover * up
-    face = mix(face, line_c, 0.10 * exp(-wy * wy) * gloss * hover * up)
+    face = mix(face, line_c, 0.10 * exp(-wy * wy) * gl * hover * up)
     // Held or chosen: sunk. The gloss goes out, the floor falls dark and a
     // shade lies under the top edge for a fifth of the height.
     let shade = 0.55 * (1.0 - smoothstep(0.0, 0.22 * min(hh, 24.0), p.y - lo.y - px))
@@ -472,10 +474,12 @@ let lq_button = fn(pos: vec2, size: vec2, o: vec2, dpi: float, hover: float, dow
             rim = vec4(0.95, 0.62, 0.30, 0.40 * lit)
         }
         var lift = 1.0
+        var cap_gloss = 1.0
         if kind < 0.5 {
             lift = 0.0
+            cap_gloss = -1.0
         }
-        res = Finish.over(res, lq_cap(p, lo, hi, r, px, hover, down, disabled, focus, lift, tint, rim, 1.0))
+        res = Finish.over(res, lq_cap(p, lo, hi, r, px, hover, down, disabled, focus, lift, tint, rim, cap_gloss))
         if kind > 1.5 && kind < 3.5 || kind > 4.5 {
             // The lamp: the chosen segment's lamp (`lq_lamp`), its core two
             // device pixels whose middle stands 4 points above the bottom
@@ -515,6 +519,7 @@ let lq_button = fn(pos: vec2, size: vec2, o: vec2, dpi: float, hover: float, dow
 mod.widgets.ButtonFlat.draw_bg.pixel = fn() {
     return self.host_over(lq_button(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.hover, self.down, self.disabled, self.focus, self.loading, self.anim_time, 0.0, 0.0), 7.0)
 }
+mod.widgets.ButtonFlat.draw_bg.face = {mode: @host_over, rest: #8a1a1e, hover: #972024, down: #651417}
 mod.widgets.Button.draw_bg.pixel = fn() {
     return self.host_over(lq_button(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.hover, self.down, self.disabled, self.focus, self.loading, self.anim_time, 1.0, 0.0), 7.0)
 }
@@ -536,6 +541,7 @@ mod.widgets.ButtonOutline.draw_bg.pixel = fn() {
 mod.widgets.ButtonFlatter.draw_bg.pixel = fn() {
     return self.host_over(lq_button(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.hover, self.down, self.disabled, self.focus, self.loading, self.anim_time, 7.0, 0.0), 7.0)
 }
+mod.widgets.ButtonFlatter.draw_bg.face = {mode: @host_over, rest: #00000000, hover: #a12f34, down: #651417}
 
 // Label ink per state: caps #f6e8e6, the primary's lit legend near white,
 // every variant dims to #b07a7c when disabled.
@@ -1181,7 +1187,10 @@ mod.widgets.RadioButtonTabFlat.draw_bg.pixel = fn() {
     let xs = vec2(lq_snap(c.x - 5.3333, o.x, px), lq_snap(c.x + 5.3333, o.x, px))
     return lq_lamp(res, p, xs, lq_snap(c.y + 6.5, o.y, px), px, sel * (1.0 - self.disabled), 1.0, vec3(0.910, 0.918, 0.922), vec3(0.405, 0.593, 0.752))
 }
+mod.widgets.RadioButtonTabFlat.draw_bg.face = {mode: @own_face, rest: #a6a8ab, hover: #b6b8bb, down: #8d8b8d, active: #x474e59}
 mod.widgets.RadioButtonTabFlat.draw_text.color = #1e1618
+mod.widgets.RadioButtonTabFlat.draw_text.color_down = #120c0d
+mod.widgets.RadioButtonTabFlat.draw_text.color_focus = #x1e1618
 mod.widgets.RadioButtonTabFlat.draw_text.color_hover = #120c0d
 mod.widgets.RadioButtonTabFlat.draw_text.color_active = #d4eaff
 mod.widgets.RadioButtonTabFlat.draw_text.color_disabled = #2e2426

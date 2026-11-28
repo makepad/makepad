@@ -107,6 +107,15 @@ use crate::{
     widget::*,
     widget_tree::{live_id_token, widget_type_names, CxWidgetExt},
 };
+use makepad_widgets_core::design_data::pick::{pick_candidate, is_design_transparent, pick_of_widget, readable_paths};
+pub use makepad_widgets_core::design_data::pick::{indexed_path, resolve_widget_by_path, WidgetPick as TweakPick};
+use makepad_widgets_core::design_data::props::{fmt_f64, CascadeLevel, cascade_levels};
+pub use makepad_widgets_core::design_data::props::{reflect_flat, collect_row_docs};
+use makepad_widgets_core::design_data::apply::{require_target, layer_fn_sources, eval_chunk, single_prop_chunk, ShaderEdits, record_fn_overrides, reindent_two, reinject_fn_overrides};
+use makepad_widgets_core::design_data::states::animator_tracks;
+pub use makepad_widgets_core::design_data::states::StateTrack;
+use makepad_widgets_core::design_data::theme::{theme_val_text, hex_of};
+pub use makepad_widgets_core::design_data::theme::{ThemeVal, theme_values};
 use crate::makepad_script::script_eval;
 use crate::theme_lab::{Applied, PinnedTheme, ThemeLab};
 use crate::theme_builder::{all_suggestions_for, surface_sliders, Applied as Built, BuilderParams, Schemes, SeedSlot, Suggestion, ThemeBuilder, COLOR_COUNTS};
@@ -115,10 +124,9 @@ use crate::Animate;
 use crate::ButtonAction;
 use crate::button::{Button, ButtonWidgetRefExt};
 use crate::tooltip::Tooltip;
-use crate::animator::{AnimatorState, Ease as AnimEase, Play};
+use crate::animator::Play;
 use crate::makepad_draw::makepad_platform::DrawShaderId;
-use crate::makepad_script::trap::NoTrap;
-use crate::makepad_script::{parse_doc_hint, ScriptHeap, ScriptMod, ScriptObject};
+use crate::makepad_script::{parse_doc_hint, ScriptMod, ScriptObject};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -136,24 +144,6 @@ pub fn tweak_is_on() -> bool {
     TWEAK_ON.load(Ordering::Relaxed)
 }
 
-/// One resolved widget under the pointer (or pinned by a click).
-#[derive(Clone, Debug, PartialEq, Default)]
-pub struct TweakPick {
-    pub uid: u64,
-    /// Dotted id path from the ui root, the same tokens `/d` prints.
-    pub path: String,
-    pub ty: String,
-    /// Window-local rect.
-    pub rect: Rect,
-    pub window_id: usize,
-    /// `Some("padding")` / `Some("margin:<child>")` when the pointer sits in
-    /// the spacing band rather than on content — the gap between rects is a
-    /// first-class target.
-    pub band: Option<String>,
-    /// The plane the widget renders on in the exploded view (its component
-    /// nesting depth); 0 when it has not drawn while the mode was up.
-    pub level: usize,
-}
 
 #[derive(Clone, Copy, PartialEq)]
 enum PickStyle {
@@ -309,7 +299,7 @@ const RULES_STORE: &str = ".makepad-rules.txt";
 /// (not beside the app, as the notes are) because a favourite is a habit
 /// of the person's, whichever app the panel rides in.
 fn palette_favourites_path() -> std::path::PathBuf {
-    crate::makepad_platform::home::makepad_home().join("palette-favourites.txt")
+    crate::makepad_platform::home::app_state_home().join("palette-favourites.txt")
 }
 
 fn palette_favourites_load() -> BTreeSet<String> {
@@ -1136,16 +1126,9 @@ pub(crate) struct TweakSession {
     /// Eyedropper armed for this prop: the next press in the body samples
     /// the pixel under it instead of picking.
     eyedrop: Option<String>,
-    /// Shader fns applied live from the source view: (uid, layer, fn name)
-    /// → the text as applied, shown in place of the file's version.
-    fn_overrides: HashMap<(u64, String, String), String>,
     /// What the panel says under the prompt: "sent … waiting", "applied",
     /// or an error — the send must be visible, and so must the landing.
     vibe_status: String,
-    /// Bumped by every fn apply that did NOT come from the source view (the
-    /// AI, /tweak/apply): the view re-reads its text for those only —
-    /// otherwise a person's half-typed edit would be replaced under them.
-    fn_override_gen: u64,
     /// A remote undo (true) / redo (false) request, consumed by the
     /// tweaker's event loop (Cmd+Z / Shift+Cmd+Z by the bridge).
     undo_redo: Option<bool>,
@@ -1584,29 +1567,6 @@ pub fn set_tweak_on(cx: &mut Cx, on: bool) {
 // children resolve, it never does.
 // ---------------------------------------------------------------------------
 
-fn pick_candidate(
-    cx: &Cx,
-    widget: &WidgetRef,
-    abs: Vec2d,
-    attached: &HashSet<DrawListId>,
-) -> Option<Rect> {
-    if !widget.visible() {
-        return None;
-    }
-    // Only what is on screen: a hidden Dock page keeps its retained draw
-    // list and every rect in it, and clicking "through" to those was the
-    // stale-tab bug.
-    if !widget.area().is_attached(cx, attached) {
-        return None;
-    }
-    // All instances, not the first: a text run's area is its glyph run,
-    // and the first glyph alone is not a paragraph.
-    let rect = widget.area().clipped_rect_union(cx);
-    if rect.size.x <= 0.0 || rect.size.y <= 0.0 || !rect.contains(abs) {
-        return None;
-    }
-    Some(rect)
-}
 
 /// The draw lists on screen, over every pass: a hidden page's list hangs
 /// off no pass at all, so the union is exactly "visible". Computed at EVENT
@@ -1621,6 +1581,11 @@ fn attached_lists_of(cx: &Cx, _widget: &WidgetRef) -> HashSet<DrawListId> {
     }
     *attached_cache().lock().unwrap() = out.clone();
     out
+}
+
+fn resolve_pick(cx: &mut Cx, root: &WidgetRef, abs: Vec2d, window_id: usize) -> Option<TweakPick> {
+    let attached = attached_lists_of(cx, root);
+    makepad_widgets_core::design_data::pick::resolve_pick(cx, root, abs, window_id, &attached)
 }
 
 fn attached_cache() -> &'static Mutex<HashSet<DrawListId>> {
@@ -1868,234 +1833,6 @@ fn reveal_widget(cx: &mut Cx, uid: u64) {
     }
 }
 
-fn is_design_transparent(widget: &WidgetRef) -> bool {
-    widget
-        .borrow::<View>()
-        .map_or(false, |view| view.design_mode())
-}
-
-fn walk_pick(
-    cx: &Cx,
-    widget: &WidgetRef,
-    abs: Vec2d,
-    depth: usize,
-    max_level: Option<usize>,
-    attached: &HashSet<DrawListId>,
-    best: &mut Option<(WidgetRef, Rect, usize)>,
-) {
-    if !widget.visible() {
-        return;
-    }
-    // The inspector's own panel is never a pick, wherever an app has put it.
-    if widget.widget_type_id() == Some(Tweaker::script_type_id_static()) {
-        return;
-    }
-    // Exploded view: the cursor is on ONE plane. A widget nested deeper than
-    // that plane sits on another sheet, however its 2D rect overlaps the
-    // un-projected point — that is what makes a covered parent selectable.
-    let on_deeper_plane = max_level.is_some_and(|max| {
-        cx.sploded_depth_of(widget.widget_uid().0)
-            .is_some_and(|level| level > max)
-    });
-    if !on_deeper_plane && !is_design_transparent(widget) {
-        if let Some(rect) = pick_candidate(cx, widget, abs, attached) {
-            let take = match best {
-                // Deeper wins; equal depth: later in draw order wins.
-                Some((_, _, best_depth)) => depth >= *best_depth,
-                None => true,
-            };
-            if take {
-                *best = Some((widget.clone(), rect, depth));
-            }
-        }
-    }
-    widget.children(&mut |_id, child| {
-        walk_pick(cx, &child, abs, depth + 1, max_level, attached, best);
-    });
-}
-
-/// The spacing bands: when the picked widget is a container and the point
-/// missed all of its children, say whether the point sits in the container's
-/// padding ring or in a child's margin ring.
-fn resolve_band(cx: &mut Cx, widget: &WidgetRef, rect: Rect, abs: Vec2d) -> Option<String> {
-    let mut child_hit = false;
-    let mut margin_of = None;
-    widget.children(&mut |id, child| {
-        if !child.visible() {
-            return;
-        }
-        let child_rect = child.area().clipped_rect_union(cx);
-        if child_rect.size.x <= 0.0 || child_rect.size.y <= 0.0 {
-            return;
-        }
-        if child_rect.contains(abs) {
-            child_hit = true;
-            return;
-        }
-        let margin = child.walk(cx).margin;
-        let expanded = Rect {
-            pos: dvec2(
-                child_rect.pos.x - margin.left,
-                child_rect.pos.y - margin.top,
-            ),
-            size: dvec2(
-                child_rect.size.x + margin.left + margin.right,
-                child_rect.size.y + margin.top + margin.bottom,
-            ),
-        };
-        if margin_of.is_none() && expanded.contains(abs) {
-            margin_of = Some(format!("margin:{}", live_id_token(id)));
-        }
-    });
-    if child_hit {
-        return None;
-    }
-    if let Some(margin) = margin_of {
-        return Some(margin);
-    }
-    // The gap between two adjacent siblings (flow spacing) is a first-class
-    // target too: name both neighbours.
-    let mut above: Option<(f64, LiveId)> = None;
-    let mut below: Option<(f64, LiveId)> = None;
-    let mut left: Option<(f64, LiveId)> = None;
-    let mut right: Option<(f64, LiveId)> = None;
-    widget.children(&mut |id, child| {
-        if !child.visible() {
-            return;
-        }
-        let r = child.area().clipped_rect_union(cx);
-        if r.size.x <= 0.0 || r.size.y <= 0.0 {
-            return;
-        }
-        let x_overlaps = abs.x >= r.pos.x && abs.x <= r.pos.x + r.size.x;
-        let y_overlaps = abs.y >= r.pos.y && abs.y <= r.pos.y + r.size.y;
-        if x_overlaps {
-            let bottom = r.pos.y + r.size.y;
-            if bottom <= abs.y && above.as_ref().map_or(true, |(edge, _)| bottom > *edge) {
-                above = Some((bottom, id));
-            }
-            if r.pos.y >= abs.y && below.as_ref().map_or(true, |(edge, _)| r.pos.y < *edge) {
-                below = Some((r.pos.y, id));
-            }
-        }
-        if y_overlaps {
-            let edge = r.pos.x + r.size.x;
-            if edge <= abs.x && left.as_ref().map_or(true, |(e, _)| edge > *e) {
-                left = Some((edge, id));
-            }
-            if r.pos.x >= abs.x && right.as_ref().map_or(true, |(e, _)| r.pos.x < *e) {
-                right = Some((r.pos.x, id));
-            }
-        }
-    });
-    if let (Some((_, a)), Some((_, b))) = (&above, &below) {
-        return Some(format!("gap:{}~{}", live_id_token(*a), live_id_token(*b)));
-    }
-    if let (Some((_, a)), Some((_, b))) = (&left, &right) {
-        return Some(format!("gap:{}~{}", live_id_token(*a), live_id_token(*b)));
-    }
-    if let Some(view) = widget.borrow::<View>() {
-        let padding = view.layout.padding;
-        let content = Rect {
-            pos: dvec2(rect.pos.x + padding.left, rect.pos.y + padding.top),
-            size: dvec2(
-                rect.size.x - padding.left - padding.right,
-                rect.size.y - padding.top - padding.bottom,
-            ),
-        };
-        if (padding.left != 0.0
-            || padding.right != 0.0
-            || padding.top != 0.0
-            || padding.bottom != 0.0)
-            && !content.contains(abs)
-        {
-            return Some("padding".to_string());
-        }
-    }
-    None
-}
-
-fn resolve_pick(
-    cx: &mut Cx,
-    root: &WidgetRef,
-    abs: Vec2d,
-    window_id: usize,
-) -> Option<TweakPick> {
-    let mut best = None;
-    // Exploded: the router already re-addressed `abs` onto the plane the ray
-    // hit; a miss (off the deck) picks nothing.
-    let max_level = if cx.sploded_active() {
-        Some(cx.sploded_hit_level()?)
-    } else {
-        None
-    };
-    let attached = attached_lists_of(cx, root);
-    // Start below the root (the window body itself is chrome, not content).
-    root.children(&mut |_id, child| {
-        walk_pick(cx, &child, abs, 0, max_level, &attached, &mut best);
-    });
-    let (widget, rect, _depth) = best?;
-    let uid = widget.widget_uid();
-    let level = cx.sploded_depth_of(uid.0).unwrap_or(0);
-    let path_ids = cx.widget_tree().path_to(uid);
-    let path = if path_ids.is_empty() {
-        format!("uid:{}", uid.0)
-    } else {
-        path_ids
-            .iter()
-            .map(|id| live_id_token(*id))
-            .collect::<Vec<_>>()
-            .join(".")
-    };
-    let ty = widget
-        .widget_type_id()
-        .and_then(|type_id| widget_type_names(cx).get(&type_id).copied())
-        .map(live_id_token)
-        .unwrap_or_else(|| "-".to_string());
-    let band = resolve_band(cx, &widget, rect, abs);
-    Some(TweakPick {
-        uid: uid.0,
-        path,
-        ty,
-        rect,
-        window_id,
-        band,
-        level,
-    })
-}
-
-/// A TweakPick for a KNOWN widget (the climb's steps), same fields as a
-/// resolved one.
-fn pick_of_widget(
-    cx: &mut Cx,
-    widget: &WidgetRef,
-    abs: Vec2d,
-    window_id: usize,
-) -> Option<TweakPick> {
-    let uid = widget.try_widget_uid()?;
-    let rect = widget.area().clipped_rect_union(cx);
-    if rect.size.x <= 0.0 || rect.size.y <= 0.0 {
-        return None;
-    }
-    let level = cx.sploded_depth_of(uid.0).unwrap_or(0);
-    let path_ids = cx.widget_tree().path_to(uid);
-    let path = if path_ids.is_empty() {
-        format!("uid:{}", uid.0)
-    } else {
-        path_ids
-            .iter()
-            .map(|id| live_id_token(*id))
-            .collect::<Vec<_>>()
-            .join(".")
-    };
-    let ty = widget
-        .widget_type_id()
-        .and_then(|type_id| widget_type_names(cx).get(&type_id).copied())
-        .map(live_id_token)
-        .unwrap_or_else(|| "-".to_string());
-    let band = resolve_band(cx, widget, rect, abs);
-    Some(TweakPick { uid: uid.0, path, ty, rect, window_id, band, level })
-}
 
 /// The registered type name of a widget, `View`, `Grid`, `Label`.
 fn type_name_of(cx: &mut Cx, uid: u64) -> Option<String> {
@@ -2171,12 +1908,6 @@ fn discard_unavailable_picks(cx: &mut Cx) {
     }
 }
 
-fn require_tweak_target(widget: &WidgetRef) -> Result<(), String> {
-    if widget.try_widget_uid().is_none() {
-        return Err("widget is unavailable or currently handling an event/draw; apply between events".to_string());
-    }
-    Ok(())
-}
 
 /// Is `ancestor` on `uid`'s parent chain?
 fn is_ancestor_of(cx: &mut Cx, ancestor: u64, uid: u64) -> bool {
@@ -3330,267 +3061,6 @@ fn tag_stroke_widgets(cx: &mut Cx, body: &WidgetRef, window_id: usize, stroke_in
 // a property list with real current values.
 // ---------------------------------------------------------------------------
 
-/// Keys that are structure, not style: reflected objects skip them.
-fn skip_key(name: &str) -> bool {
-    matches!(name, "animator")
-}
-
-/// Draw-shader plumbing the GPU pipeline owns — never user style. Skipped in
-/// the dotted expansion so the sidebar shows design inputs, not internals.
-fn is_shader_plumbing(name: &str) -> bool {
-    matches!(
-        name,
-        "rect_pos"
-            | "rect_size"
-            | "draw_clip"
-            | "delta_clip"
-            | "draw_depth"
-            | "draw_zbias"
-            | "char_index"
-            | "texture_index"
-            | "atlas_plane"
-            | "t"
-            | "t_min"
-            | "t_max"
-            | "temp_y_shift"
-            | "aa_2x2"
-            | "aa_4x4"
-            | "pad1"
-            | "pad2"
-            | "font_scale"
-            | "depth_clip"
-            | "debug"
-            | "stem_darken_max"
-            | "draw_scroll"
-            | "view_shift"
-            | "view_clip"
-            | "camera_projection"
-            | "camera_view"
-            | "camera_inv"
-            | "dpi_factor"
-            | "dpi_dilate"
-            | "seed"
-            | "pos"
-            | "vertex_pos"
-            | "total_chars"
-            | "char_depth"
-            | "draw_call"
-            | "draw_list"
-            | "draw_pass"
-            | "geom"
-            | "world"
-            | "extend_area"
-            | "ink_centered"
-            | "sdf_sharpness"
-            | "sdf_luma_bias"
-            | "draw_flags"
-            | "clip_x"
-            | "clip_y"
-    )
-}
-
-fn fmt_scalar(heap: &ScriptHeap, value: ScriptValue) -> Option<String> {
-    if value.is_nil() {
-        return Some("null".to_string());
-    }
-    if let Some(color) = value.as_color() {
-        return Some(format!("#{color:08x}"));
-    }
-    if let Some(b) = value.as_bool() {
-        return Some(if b { "true" } else { "false" }.to_string());
-    }
-    if let Some(n) = value.as_number() {
-        if n.fract() == 0.0 && n.abs() < 1.0e15 {
-            return Some(format!("{}", n as i64));
-        }
-        return Some(format!("{}", (n * 10000.0).round() / 10000.0));
-    }
-    if let Some(id) = value.as_id() {
-        return Some(format!("@{}", live_id_token(id)));
-    }
-    if value.is_string_like() {
-        if let Some(text) = heap.string_with(value, |_, s| format!("{s:?}")) {
-            return Some(text);
-        }
-        return Some("\"\"".to_string());
-    }
-    if let Some(pod) = value.as_pod() {
-        let (pod_type, data) = heap.pod_data(pod);
-        let name = pod_type
-            .name()
-            .map(live_id_token)
-            .unwrap_or_else(|| "pod".to_string());
-        // A unit-range vec4f in UI code is a color; render it the way the
-        // splash source would spell it, so diffs paste straight back.
-        if name == "vec4f" && data.len() == 4 {
-            let mut components = [0.0f32; 4];
-            let mut unit = true;
-            for (index, raw) in data.iter().enumerate() {
-                let v = f32::from_bits(*raw);
-                if !(0.0..=1.0).contains(&v) {
-                    unit = false;
-                    break;
-                }
-                components[index] = v;
-            }
-            if unit {
-                let to_byte = |v: f32| (v * 255.0).round() as u32;
-                return Some(format!(
-                    "#{:02x}{:02x}{:02x}{:02x}",
-                    to_byte(components[0]),
-                    to_byte(components[1]),
-                    to_byte(components[2]),
-                    to_byte(components[3])
-                ));
-            }
-        }
-        let mut out = format!("{name}(");
-        for (index, raw) in data.iter().enumerate() {
-            if index > 0 {
-                out.push(' ');
-            }
-            let v = f32::from_bits(*raw);
-            if v.fract() == 0.0 {
-                out.push_str(&format!("{}", v as i64));
-            } else {
-                out.push_str(&format!("{v}"));
-            }
-        }
-        out.push(')');
-        return Some(out);
-    }
-    None
-}
-
-/// Splash-ish one-line rendering of a value, `depth` levels of objects deep.
-/// How an enum value is written out. `Full` names the enum and carries
-/// every field that is set, so the text re-applies exactly under
-/// `Apply::Eval`; `Display` is for a row's eye and drops the enum's name and
-/// the fields equal to the variant's own defaults.
-#[derive(Clone, Copy, PartialEq)]
-enum EnumFmt {
-    Full,
-    Display,
-}
-
-/// (enum, variant) for an object that came from a derived enum, else None.
-/// The derive stamps `__enum` on every variant object -- a bare variant, a
-/// tuple, a named one -- and instances inherit it through the proto chain;
-/// the variant itself is the first bare id in that chain.
-fn enum_info(heap: &ScriptHeap, obj: ScriptObject) -> Option<(LiveId, LiveId)> {
-    let en = heap.value(obj, live_id!(__enum).into(), NoTrap).as_id()?;
-    let mut ptr = obj;
-    for _ in 0..8 {
-        let proto = heap.proto(ptr);
-        if let Some(id) = proto.as_id() {
-            return Some((en, id));
-        }
-        ptr = proto.as_object()?;
-    }
-    None
-}
-
-/// The nearest proto that is an object: for an instance of a named variant
-/// that is the frozen variant itself, which holds the field defaults.
-fn enum_variant_proto(heap: &ScriptHeap, obj: ScriptObject) -> Option<ScriptObject> {
-    heap.proto(obj).as_object()
-}
-
-/// `Flow.Down`, `Size.Fixed(200)`, `Size.Fill{weight: 100 basis: 0 shrink: 0}`.
-/// A relative size prints as the CSS it was written as: `50%`, `25vw`.
-fn fmt_enum(heap: &ScriptHeap, obj: ScriptObject, fmt: EnumFmt) -> Option<String> {
-    let (en, var) = enum_info(heap, obj)?;
-    let en_name = live_id_token(en);
-    let var_name = live_id_token(var);
-
-    // A relative size is a string in the person's head, not a struct.
-    if var_name == "Rel" && (en_name == "Size" || en_name == "FitBound") {
-        let factor = heap.value(obj, live_id!(factor).into(), NoTrap).as_number();
-        let base = heap
-            .value(obj, live_id!(base).into(), NoTrap)
-            .as_object()
-            .and_then(|b| enum_info(heap, b))
-            .map(|(_, v)| live_id_token(v));
-        if let (Some(factor), Some(base)) = (factor, base) {
-            let unit = match base.as_str() {
-                "Parent" => Some("%"),
-                "Vw" => Some("vw"),
-                "Vh" => Some("vh"),
-                "Cqw" => Some("cqw"),
-                "Cqh" => Some("cqh"),
-                _ => None,
-            };
-            if let Some(unit) = unit {
-                // Quoted: this text is what a reset or an undo re-applies,
-                // and `50%` bare is an operator with nothing after it.
-                return Some(format!("\"{}{unit}\"", fmt_f64(factor * 100.0)));
-            }
-        }
-    }
-
-    let head = match fmt {
-        EnumFmt::Full => format!("{en_name}.{var_name}"),
-        EnumFmt::Display => var_name.clone(),
-    };
-
-    // Tuple: the positional values.
-    let len = heap.vec_len(obj);
-    if len > 0 {
-        let mut out = head;
-        out.push('(');
-        for index in 0..len {
-            if index > 0 {
-                out.push_str(", ");
-            }
-            let value = heap.vec_value_if_exist(obj, index)?;
-            out.push_str(&fmt_value(heap, value, 2).unwrap_or_else(|| "?".to_string()));
-        }
-        out.push(')');
-        return Some(out);
-    }
-
-    // Named: the instance's own fields first, in the order they were set,
-    // then the variant's defaults it did not set. Hidden keys stay hidden.
-    let mut keys: Vec<LiveId> = Vec::new();
-    collect_prop_keys(heap, obj, &mut keys);
-    keys.retain(|k| *k != live_id!(__enum) && !live_id_token(*k).starts_with('_'));
-    if keys.is_empty() {
-        return Some(head); // bare
-    }
-    let defaults = enum_variant_proto(heap, obj);
-    let mut out = head.clone();
-    out.push('{');
-    let mut first = true;
-    for key in keys {
-        let value = heap.value(obj, key.into(), NoTrap);
-        if value.is_nil() {
-            continue; // an Option that is None
-        }
-        let Some(text) = fmt_value(heap, value, 2) else { continue };
-        if fmt == EnumFmt::Display {
-            if let Some(defaults) = defaults {
-                let default = heap.value(defaults, key.into(), NoTrap);
-                if fmt_value(heap, default, 2).as_deref() == Some(text.as_str()) {
-                    continue;
-                }
-            }
-        }
-        if !first {
-            out.push(' ');
-        }
-        first = false;
-        out.push_str(&live_id_token(key));
-        out.push_str(": ");
-        out.push_str(&text);
-    }
-    if first {
-        // Nothing to say beyond the variant: every field is its default
-        // (Display) or none is set. `Fill`, not `Fill{}`.
-        return Some(head);
-    }
-    out.push('}');
-    Some(out)
-}
 
 /// One axis of a size, as the Props tab reads it off a reflected row. The
 /// row's text is whatever `fmt_enum` wrote -- `Size.Fill{weight: 100 ..}`,
@@ -4129,340 +3599,12 @@ fn size_chunk(axis: &str, typed: &str) -> Option<String> {
     }
 }
 
-fn fmt_value(heap: &ScriptHeap, value: ScriptValue, depth: usize) -> Option<String> {
-    if let Some(text) = fmt_scalar(heap, value) {
-        return Some(text);
-    }
-    if let Some(array) = value.as_array() {
-        let mut out = String::from("[");
-        // A list of plain values -- tracks, area rows -- prints whole, since
-        // an editor writes the printed list back; a list of objects is a
-        // dump and stops at eight.
-        let full = heap.array_len(array);
-        let objects = full > 0 && heap.array_index(array, 0, NoTrap).as_object().is_some();
-        let len = if objects { full.min(8) } else { full.min(4096) };
-        for index in 0..len {
-            if index > 0 {
-                out.push(' ');
-            }
-            let item = heap.array_index(array, index, NoTrap);
-            match fmt_value(heap, item, depth.saturating_sub(1)) {
-                Some(text) => out.push_str(&text),
-                None => out.push('?'),
-            }
-        }
-        out.push(']');
-        return Some(out);
-    }
-    if let Some(obj) = value.as_object() {
-        if heap.as_fn(obj).is_some() {
-            return None; // functions are not properties
-        }
-        // `instance(v)` / `uniform(v)` shader-io wrappers carry the value in
-        // their proto slot — unwrap so shader inputs read as plain values.
-        if heap.as_shader_io(obj).is_some() {
-            let inner = heap.proto(obj);
-            if inner.is_nil() {
-                return None; // texture/buffer declarations, not values
-            }
-            return fmt_value(heap, inner, depth);
-        }
-        // A derived enum prints as one whole value, never as its fields.
-        if let Some(text) = fmt_enum(heap, obj, EnumFmt::Full) {
-            return Some(text);
-        }
-        if depth == 0 {
-            return Some("{..}".to_string());
-        }
-        let mut keys: Vec<LiveId> = Vec::new();
-        collect_prop_keys(heap, obj, &mut keys);
-        let mut out = String::from("{");
-        let mut first = true;
-        for key in keys.into_iter().take(24) {
-            let value = heap.value(obj, key.into(), NoTrap);
-            let Some(text) = fmt_value(heap, value, depth - 1) else {
-                continue;
-            };
-            if !first {
-                out.push(' ');
-            }
-            first = false;
-            out.push_str(&live_id_token(key));
-            out.push_str(": ");
-            out.push_str(&text);
-        }
-        out.push('}');
-        return Some(out);
-    }
-    None
-}
-
-/// The union of map keys over the object and its proto chain, leaf first —
-/// exactly the widget's live surface: what was applied plus every default
-/// the type registered.
-fn collect_prop_keys(heap: &ScriptHeap, obj: ScriptObject, keys: &mut Vec<LiveId>) {
-    let mut ptr = obj;
-    let mut hops = 0;
-    loop {
-        heap.map_entries(ptr).into_iter().for_each(|e| {
-            let key = e.key;
-            if let Some(id) = key.as_id() {
-                if !keys.contains(&id) {
-                    let name = live_id_token(id);
-                    if !name.starts_with("__") && !skip_key(&name) {
-                        keys.push(id);
-                    }
-                }
-            }
-        });
-        match heap.proto(ptr).as_object() {
-            Some(next) => {
-                ptr = next;
-                hops += 1;
-                if hops > 24 {
-                    break;
-                }
-            }
-            None => break,
-        }
-    }
-}
-
-/// A value rendering that carries no information for the sidebar or diff.
-fn is_noise(text: &str) -> bool {
-    matches!(text, "{}" | "{..}" | "null")
-}
-
-/// Flat `name -> value` reflection of a widget's CURRENT state, one level of
-/// nesting expanded with dotted names (`draw_bg.color`). Values come from
-/// `script_to_value` — the Rust fields serialized back to script — so runtime
-/// applies are visible; the `#[source]` object's own map (what the DSL
-/// explicitly applied) supplies the `set` flag. This is both the sidebar's
-/// data and the before/after capture the diff log works from. Part of the
-/// [`crate::reflect`] surface: the same read a catalogue app's Docs and
-/// Controls panels build on.
-pub fn reflect_flat(cx: &mut Cx, widget: &WidgetRef) -> Vec<(String, String, bool)> {
-    cx.with_vm(|vm| {
-        // Serializing a widget back to script trips harmless type-check
-        // complaints on fn-ref fields (`on_click` serializes to a value its
-        // own type check rejects). Reflection is read-only — capture and
-        // drop them instead of spamming the log on every state read.
-        vm.capture_errors();
-        let current = widget.current_to_value(vm);
-        let _ = vm.take_errors();
-        let Some(current_obj) = current.as_object() else {
-            return Vec::new();
-        };
-        let source = widget.script_source();
-        let heap = vm.heap();
-        let own: Vec<LiveId> = if source == ScriptObject::ZERO {
-            Vec::new()
-        } else {
-            heap.map_entries(source)
-                .into_iter()
-                .filter_map(|e| e.key.as_id())
-                .collect()
-        };
-        let mut out = Vec::new();
-        // Only the object's OWN map: script_to_value wrote every live field
-        // explicitly, the proto behind it is just the type object.
-        let keys: Vec<LiveId> = heap
-            .map_entries(current_obj)
-            .into_iter()
-            .filter_map(|e| e.key.as_id())
-            .filter(|id| {
-                let name = live_id_token(*id);
-                !name.starts_with("__") && !skip_key(&name)
-            })
-            .collect();
-        for key in keys {
-            let value = heap.value(current_obj, key.into(), NoTrap);
-            let is_set = own.contains(&key);
-            let name = live_id_token(key);
-            if let Some(obj) = value.as_object() {
-                if heap.as_fn(obj).is_some() {
-                    continue;
-                }
-                // An enum is one row, whole -- `width: Size.Fill{weight: 100}`
-                // -- and is never dotted into `width.weight`: a field of a
-                // variant is not a property a person can set on its own.
-                if enum_info(heap, obj).is_some() {
-                    if let Some(text) = fmt_enum(heap, obj, EnumFmt::Full) {
-                        out.push((name, text, is_set));
-                    }
-                    continue;
-                }
-                // One level of dotted expansion for typed sub-structs
-                // (draw_bg.color, padding.left ...), own map only.
-                let sub_keys: Vec<LiveId> = heap
-                    .map_entries(obj)
-                    .into_iter()
-                    .filter_map(|e| e.key.as_id())
-                    .filter(|id| {
-                        let name = live_id_token(*id);
-                        !name.starts_with("__") && !is_shader_plumbing(&name)
-                    })
-                    .collect();
-                let had_subs = !sub_keys.is_empty();
-                let mut wrote_sub = false;
-                for sub_key in sub_keys.into_iter().take(200) {
-                    let sub_value = heap.value(obj, sub_key.into(), NoTrap);
-                    if sub_value.as_object().is_some_and(|o| heap.as_fn(o).is_some()) {
-                        continue;
-                    }
-                    if let Some(text) = fmt_value(heap, sub_value, 1) {
-                        if is_noise(&text) {
-                            continue;
-                        }
-                        out.push((format!("{name}.{}", live_id_token(sub_key)), text, is_set));
-                        wrote_sub = true;
-                    }
-                }
-                if !wrote_sub && !had_subs {
-                    if let Some(text) = fmt_value(heap, value, 1) {
-                        if !is_noise(&text) {
-                            out.push((name, text, is_set));
-                        }
-                    }
-                }
-            } else if let Some(text) = fmt_value(heap, value, 1) {
-                if !is_noise(&text) || is_set {
-                    out.push((name, text, is_set));
-                }
-            }
-            if out.len() > 400 {
-                break;
-            }
-        }
-        // Second pass: the type's shader-input registry. Instance/uniform
-        // inputs declared in the DSL (`border_radius: instance(2.0)`) are
-        // not Rust fields, so `script_to_value` never sees them — but they
-        // live in the source object's proto chain. Union them in (source
-        // values are the pre-tweak truth; tweaks to them land in the diff).
-        if source != ScriptObject::ZERO {
-            let mut keys = Vec::new();
-            collect_prop_keys(heap, source, &mut keys);
-            for key in keys {
-                let name = live_id_token(key);
-                if is_shader_plumbing(&name) {
-                    continue;
-                }
-                let value = heap.value(source, key.into(), NoTrap);
-                if let Some(obj) = value.as_object() {
-                    if heap.as_fn(obj).is_some() {
-                        continue;
-                    }
-                    if enum_info(heap, obj).is_some() {
-                        if !out.iter().any(|(existing, _, _)| *existing == name) {
-                            if let Some(text) = fmt_enum(heap, obj, EnumFmt::Full) {
-                                out.push((name, text, false));
-                            }
-                        }
-                        continue;
-                    }
-                    // The live value answered for this key with nothing --
-                    // `cell: null` after it was cleared -- so the source's
-                    // fields under it are what WAS, not what is. A live
-                    // object that dumped whole still gets its declared
-                    // inputs read out of the source (a draw layer's
-                    // `color`, `border_size`), which only live there.
-                    if out.iter().any(|(existing, text, _)| *existing == name && text == "null") {
-                        continue;
-                    }
-                    let mut sub_keys = Vec::new();
-                    collect_prop_keys(heap, obj, &mut sub_keys);
-                    sub_keys.retain(|id| {
-                        let name = live_id_token(*id);
-                        !name.starts_with("__") && !is_shader_plumbing(&name)
-                    });
-                    for sub_key in sub_keys.into_iter().take(200) {
-                        let sub_name = live_id_token(sub_key);
-                        let dotted = format!("{name}.{sub_name}");
-                        if out.iter().any(|(existing, _, _)| *existing == dotted) {
-                            continue;
-                        }
-                        let sub_value = heap.value(obj, sub_key.into(), NoTrap);
-                        if sub_value
-                            .as_object()
-                            .is_some_and(|o| heap.as_fn(o).is_some())
-                        {
-                            continue;
-                        }
-                        if let Some(text) = fmt_value(heap, sub_value, 1) {
-                            if !is_noise(&text) {
-                                out.push((dotted, text, false));
-                            }
-                        }
-                    }
-                } else {
-                    if out.iter().any(|(existing, _, _)| *existing == name) {
-                        continue;
-                    }
-                    if let Some(text) = fmt_value(heap, value, 1) {
-                        if !is_noise(&text) {
-                            out.push((name, text, false));
-                        }
-                    }
-                }
-                if out.len() > 400 {
-                    break;
-                }
-            }
-        }
-        out
-    })
-}
 
 // ---------------------------------------------------------------------------
 // live-load — evaluate a splash chunk and apply it onto the one selected
 // instance through the ordinary apply machinery, then a full redraw/relayout.
 // ---------------------------------------------------------------------------
 
-
-/// Apply `sel`'s draw-layer SOURCE object + the session-ledger overlay onto
-/// a preview quad — the swatch then renders with the selection's actual
-/// compiled shader (fn-hash cache) at its live-tweaked values. Quad-family
-/// layers only; anything else leaves the preview untouched.
-/// Re-indent a fn's source for the view: drop the common leading indent and
-/// turn every remaining 4-space (or tab) step into 2 spaces — "much less
-/// aggressive indenting like 2 spaces per tab".
-fn reindent_two(src: &str) -> String {
-    let lines: Vec<&str> = src.lines().collect();
-    let common = lines
-        .iter()
-        .filter(|l| !l.trim().is_empty())
-        .map(|l| l.chars().take_while(|c| *c == ' ' || *c == '\t').map(|c| if c == '\t' { 4 } else { 1 }).sum::<usize>())
-        .min()
-        .unwrap_or(0);
-    lines
-        .iter()
-        .map(|l| {
-            let indent: usize = l.chars().take_while(|c| *c == ' ' || *c == '\t').map(|c| if c == '\t' { 4 } else { 1 }).sum();
-            let rest = l.trim_start_matches([' ', '\t']);
-            let level = indent.saturating_sub(common) / 4;
-            format!("{}{}", "  ".repeat(level), rest)
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// Remember `name: fn() {…}` entries of an applied `<layer> +: { … }` chunk
-/// so the source view shows what runs, not what the file says.
-fn record_fn_overrides(uid: u64, chunk: &str) {
-    let chunk = chunk.trim();
-    let Some(open) = chunk.find("+:") else { return };
-    let layer = chunk[..open].trim().to_string();
-    let Some(body) = chunk[open..].find('{').map(|i| &chunk[open + i + 1..]) else { return };
-    let body = body.trim_end().trim_end_matches('}');
-    let mut s = session().lock().unwrap();
-    s.fn_override_gen += 1;
-    for name in ["pixel", "vertex"] {
-        if let Some(seg) = body.split(&format!("{name}:")).nth(1) {
-            let seg = format!("{name}:{seg}");
-            s.fn_overrides.insert((uid, layer.clone(), name.to_string()), reindent_two(seg.trim_end()));
-        }
-    }
-}
 
 /// Ctrl+Enter in the source view: apply the fn as edited to the pinned
 /// widget's layer, live — no AI needed for a hand edit.
@@ -4482,12 +3624,12 @@ fn apply_fn_edit(cx: &mut Cx, tweaker: &mut Tweaker, text: &str) -> Result<(), S
     match apply_splash_chunk(cx, &cx.widget_tree().widget(WidgetUid(sel.uid)), &sel.path, &chunk, "editor") {
         Ok(_) => {
             log!("TWEAK editor applied {} fn edit to {}", layer, sel.path);
-            let mut s = session().lock().unwrap();
+            let edits = cx.global::<ShaderEdits>();
             for (name, _, _) in &tweaker.vibe_fn_sources {
                 // Remember the applied text per fn so the view shows it.
                 if let Some(seg) = body.split(&format!("{name}:")).nth(1) {
                     let seg = format!("{name}:{seg}");
-                    s.fn_overrides.insert((sel.uid, layer.clone(), name.clone()), seg.trim_end().to_string());
+                    edits.functions.insert((sel.uid, layer.clone(), name.clone()), seg.trim_end().to_string());
                 }
             }
             Ok(())
@@ -4499,71 +3641,12 @@ fn apply_fn_edit(cx: &mut Cx, tweaker: &mut Tweaker, text: &str) -> Result<(), S
     }
 }
 
-/// The script-defined shader fns of a widget's draw layer — `pixel` and
-/// `vertex` when the layer (or a proto in its chain) sets one — as
-/// (name, "file:line", source text). What the Shader tab shows under the
-/// well and what a code-only prompt rewrites.
-fn layer_fn_sources(cx: &mut Cx, widget: &WidgetRef, layer: &str) -> Vec<(String, String, String)> {
-    let mut out = Vec::new();
-    let source = widget.script_source();
-    if source == ScriptObject::ZERO {
-        return out;
-    }
-    let layer_id = LiveId::from_str(layer);
-    cx.with_vm(|vm| {
-        let value = vm.value(source, layer_id);
-        if value.as_object().is_none() {
-            return;
-        }
-        // Closest level first: the fn the widget actually runs is the
-        // nearest definition up the layer's construction chain (a `+:`
-        // merge in the widget's script, else the draw type's own).
-        let chain = vm.construction_chain(value);
-        for (name, key) in [("pixel", id!(pixel)), ("vertex", id!(vertex))] {
-            for lvl in &chain {
-                if !lvl.own_keys().contains(&key) {
-                    continue;
-                }
-                let f = vm.value(lvl.object(), key);
-                let Some(fobj) = f.as_object() else { break };
-                let Some(ip) = vm.heap().fn_script_ip(fobj) else {
-                    break;
-                };
-                if let Some((loc, text)) = vm.fn_source_text(ip) {
-                    let base = loc.file().rsplit('/').next().unwrap_or(loc.file()).to_string();
-                    out.push((name.to_string(), format!("{base}:{}", loc.line()), text));
-                }
-                break;
-            }
-        }
-    });
-    out
+
+trait MirrorPose {
+    fn pose(&self, cx: &Cx, mirror: &mut MaterialMirror, mix: f32);
 }
 
-/// One animator track (hover, down, focus, disabled…) of a widget, read
-/// from its script cascade, ready to POSE the layer's instance slice: the
-/// values the off and on states apply to this layer, per shader input.
-#[derive(Clone)]
-pub struct StateTrack {
-    pub group: String,
-    fields: Vec<StateField>,
-    /// Into `on` from `off` (the track's own `from` map, `all` fallback).
-    on_play: Play,
-    on_ease: AnimEase,
-    /// Back into `off`.
-    off_play: Play,
-    off_ease: AnimEase,
-}
-
-#[derive(Clone)]
-struct StateField {
-    id: LiveId,
-    /// Slot values of the pose; None = whatever the live widget has.
-    off: Option<Vec<f32>>,
-    on: Option<Vec<f32>>,
-}
-
-impl StateTrack {
+impl MirrorPose for StateTrack {
     /// Write the pose between off (0) and on (1) over the mirrored
     /// instance, by the shader's own instance layout.
     fn pose(&self, cx: &Cx, mirror: &mut MaterialMirror, mix: f32) {
@@ -4623,138 +3706,6 @@ fn play_duration(play: Play) -> f64 {
     }
 }
 
-/// A state's `apply` values for one layer, as shader slots: numbers are
-/// one slot, colours four (rgba 0..1), bools one.
-fn pose_values(vm: &mut ScriptVm, state: &AnimatorState, layer_id: LiveId) -> Vec<(LiveId, Vec<f32>)> {
-    let mut out = Vec::new();
-    let Some(apply) = state.apply.as_ref().map(|apply| apply.as_object()) else { return out };
-    let layer_value = vm.value(apply, layer_id);
-    let Some(layer_obj) = layer_value.as_object() else { return out };
-    let mut keys: Vec<LiveId> = Vec::new();
-    for lvl in vm.construction_chain(layer_value) {
-        for key in lvl.own_keys() {
-            if !keys.contains(key) {
-                keys.push(*key);
-            }
-        }
-    }
-    for key in keys {
-        let mut value = vm.value(layer_obj, key);
-        // `snap(1.0)` / `instance(x)` wrap the value in an object keyed
-        // `value`; the pose is the wrapped scalar.
-        if value.as_color().is_none() && value.as_bool().is_none() && value.as_number().is_none() {
-            if let Some(obj) = value.as_object() {
-                let inner = vm.value(obj, id!(value));
-                if !inner.is_nil() {
-                    value = inner;
-                }
-            }
-        }
-        let slots = if let Some(c) = value.as_color() {
-            vec![
-                ((c >> 24) & 0xff) as f32 / 255.0,
-                ((c >> 16) & 0xff) as f32 / 255.0,
-                ((c >> 8) & 0xff) as f32 / 255.0,
-                (c & 0xff) as f32 / 255.0,
-            ]
-        } else if let Some(b) = value.as_bool() {
-            vec![if b { 1.0 } else { 0.0 }]
-        } else if let Some(n) = value.as_number() {
-            vec![n as f32]
-        } else {
-            continue;
-        };
-        out.push((key, slots));
-    }
-    out
-}
-
-/// The widget's animator tracks that touch `layer`, from its script
-/// cascade (the instance's own animator, else its type's): per group the
-/// default state is "off" and the first other state is "on".
-fn animator_tracks(cx: &mut Cx, widget: &WidgetRef, layer: &str) -> Vec<StateTrack> {
-    let mut out = Vec::new();
-    let source = widget.script_source();
-    if source == ScriptObject::ZERO {
-        return out;
-    }
-    let layer_id = LiveId::from_str(layer);
-    cx.with_vm(|vm| {
-        let anim = vm.value(source, id!(animator));
-        let Some(anim_obj) = anim.as_object() else { return };
-        let mut groups: Vec<LiveId> = Vec::new();
-        for lvl in vm.construction_chain(anim) {
-            for key in lvl.own_keys() {
-                if !groups.contains(key) {
-                    groups.push(*key);
-                }
-            }
-        }
-        for group in groups {
-            let group_value = vm.value(anim_obj, group);
-            let Some(group_obj) = group_value.as_object() else { continue };
-            let mut default = LiveId(0);
-            let mut states: Vec<LiveId> = Vec::new();
-            for lvl in vm.construction_chain(group_value) {
-                for key in lvl.own_keys() {
-                    if *key == id!(default) {
-                        continue;
-                    }
-                    if !states.contains(key) {
-                        states.push(*key);
-                    }
-                }
-            }
-            if let Some(id) = vm.value(group_obj, id!(default)).as_id() {
-                default = id;
-            }
-            if states.is_empty() {
-                continue;
-            }
-            let off = if states.contains(&default) { default } else { states[0] };
-            let Some(on) = states.iter().copied().find(|s| *s != off) else { continue };
-            let off_state = AnimatorState::script_from_value(vm, vm.value(group_obj, off));
-            let on_state = AnimatorState::script_from_value(vm, vm.value(group_obj, on));
-            let off_values = pose_values(vm, &off_state, layer_id);
-            let on_values = pose_values(vm, &on_state, layer_id);
-            if off_values.is_empty() && on_values.is_empty() {
-                // This track never touches the layer (a text-only state).
-                continue;
-            }
-            let mut fields: Vec<StateField> = Vec::new();
-            for (id, v) in &off_values {
-                fields.push(StateField { id: *id, off: Some(v.clone()), on: None });
-            }
-            for (id, v) in &on_values {
-                match fields.iter_mut().find(|f| f.id == *id) {
-                    Some(f) => f.on = Some(v.clone()),
-                    None => fields.push(StateField { id: *id, off: None, on: Some(v.clone()) }),
-                }
-            }
-            let on_play = on_state
-                .from
-                .get(&off)
-                .or_else(|| on_state.from.get(&id!(all)))
-                .copied()
-                .unwrap_or(Play::Forward { duration: 0.3 });
-            let off_play = off_state
-                .from
-                .get(&on)
-                .or_else(|| off_state.from.get(&id!(all)))
-                .copied()
-                .unwrap_or(Play::Forward { duration: 0.3 });
-            out.push(StateTrack {
-                group: format!("{}", live_id_token(group)),
-                fields,
-                on_play,
-                on_ease: on_state.ease.unwrap_or(AnimEase::Linear),
-                off_play,
-                off_ease: off_state.ease.unwrap_or(AnimEase::Linear),
-            });
-        }
-    });
-    out
-}
 
 /// One live draw call's inputs, copied from a widget's area: what the
 /// material swatch draws so it shows exactly what the widget shows.
@@ -4885,24 +3836,6 @@ pub(crate) fn track_undo(s: &mut TweakSession, entry: &TweakDiffEntry) {
     s.undo_open = true;
 }
 
-/// One level of the selection's construction chain, display-ready.
-/// Built from `vm.construction_chain` over the widget's `#[source]` object:
-/// the proto chain of `made_at` ips, each resolved to a source location and
-/// its `///` docs (see platform/script/src/docs.rs).
-#[derive(Clone)]
-struct CascadeLevel {
-    /// "button.rs:52" (basename:line), or "native" for Rust-built levels.
-    loc: String,
-    /// Full file path for click-through / the AI ("" for native levels).
-    file: String,
-    line: u32,
-    /// `///` doc attached to the level's object literal.
-    doc: Option<String>,
-    /// `///` docs attached to fields of that literal.
-    field_docs: Vec<(String, String)>,
-    /// Keys the level sets itself; true = overridden by a closer level.
-    sets: Vec<(String, bool)>,
-}
 
 /// Doc-channel text per row prop: field docs from the widget's own
 /// construction chain plus one dotted level into its object-valued keys
@@ -5249,46 +4182,6 @@ fn hook_sync(cx: &mut Cx) {
     cx.post_draw_hook = if live { Some(Box::new(pulse_after_draw)) } else { None };
 }
 
-/// One global theme value: a colour (packed `0xrrggbbaa`) or a number.
-/// Part of the [`crate::reflect`] surface.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum ThemeVal {
-    Color(u32),
-    Num(f64),
-}
-
-/// The app's theme: every colour and number in `mod.theme`, with the
-/// level (file:line) that defines it. Read from the script cascade. Part of
-/// the [`crate::reflect`] surface: a theme panel's rows and the probe behind
-/// `/tweak/op?op=theme&name=`.
-pub fn theme_values(cx: &mut Cx) -> Vec<(String, LiveId, ThemeVal, String)> {
-    let mut out: Vec<(String, LiveId, ThemeVal, String)> = Vec::new();
-    cx.with_vm(|vm| {
-        let theme = vm.module(id!(theme));
-        let chain = vm.construction_chain(theme.into());
-        let mut keys: Vec<(LiveId, String)> = Vec::new();
-        for lvl in &chain {
-            let loc = lvl.loc()
-                .map(|l| format!("{}:{}", l.file().rsplit('/').next().unwrap_or(l.file()), l.line()))
-                .unwrap_or_default();
-            for key in lvl.own_keys() {
-                if !keys.iter().any(|(k, _)| k == key) {
-                    keys.push((*key, loc.clone()));
-                }
-            }
-        }
-        for (key, loc) in keys {
-            let name = live_id_token(key);
-            let value = vm.value(theme, key);
-            if let Some(color) = value.as_color() {
-                out.push((name, key, ThemeVal::Color(color), loc));
-            } else if let Some(f) = value.as_f64() {
-                out.push((name, key, ThemeVal::Num(f), loc));
-            }
-        }
-    });
-    out
-}
 
 /// The theme's colours (`color_*`), for the chips, the pulse and the strip.
 fn theme_palette(cx: &mut Cx) -> Vec<(String, u32, String)> {
@@ -5301,76 +4194,6 @@ fn theme_palette(cx: &mut Cx) -> Vec<(String, u32, String)> {
         .collect()
 }
 
-/// Overwrite one theme value in the script heap, wherever in the theme's
-/// prototype chain it is defined (the module is immutable to scripts).
-///
-/// KNOWN LIMITATION, while a mix stands. This writes into `mod.theme`, and
-/// every `install_blend` replaces that map wholesale; what keeps an override
-/// on the screen across a mix is not this write but `pulse_sync`, which
-/// repaints the draw-buffer slots it recorded after each draw. So for as long
-/// as a blend is in force with an override open, the screen and `mod.theme`
-/// disagree BY CONSTRUCTION -- the screen wears the override, the heap wears
-/// the blend -- and the two readers of the heap say so:
-///
-/// - [`crate::theme_store::snapshot`] reads `mod.theme`, so "save as" over a
-///   mix records the BLEND's value for an overridden token rather than the
-///   one on screen. Pick the saved row back afterwards and the page changes
-///   colour. Its own doc says it takes "a value the person changed in the
-///   Theme tab a moment ago", and over a mix that is not true.
-/// - `Tweaker::mix_reading` measures `blend.color(...)`, so the readability
-///   line under the weights reports pairs the screen is not wearing whenever
-///   an override is open.
-///
-/// Neither is a wrong answer about the blend; both are the wrong answer about
-/// the screen. Closing this means the override surviving an `install_blend`
-/// rather than being repainted after it, which is a change to the blend
-/// install and not to this line.
-fn theme_heap_set(cx: &mut Cx, key: LiveId, value: ScriptValue) -> bool {
-    let mut hit = false;
-    cx.with_vm(|vm| {
-        let theme = vm.module(id!(theme));
-        let mut chain = Vec::new();
-        let mut current = Some(theme);
-        while let Some(obj) = current {
-            chain.push(obj);
-            current = vm.heap().proto(obj).as_object();
-        }
-        for obj in chain.into_iter().rev() {
-            if vm.heap().map_entries(obj).iter().any(|e| e.key == key.into()) {
-                // The own entry exists: update it in place, preserving its definition order.
-                vm.heap_mut().poke_scope_value(obj, key, value);
-                hit = true;
-            }
-        }
-    });
-    hit
-}
-
-/// One theme value as the text the ledger, the sidebar and the remote op
-/// all show: `#rrggbbaa` for a colour, `fmt_f64` for a number.
-pub(crate) fn theme_val_text(value: ThemeVal) -> String {
-    match value {
-        ThemeVal::Color(c) => hex_of(c),
-        ThemeVal::Num(f) => fmt_f64(f),
-    }
-}
-
-/// The text a theme edit applies. `theme.other` as a value means "what
-/// `other` is right now", so a colour can be pointed at another token
-/// without copying its hex; anything else is taken as written.
-pub(crate) fn theme_edit_text(
-    values: &[(String, LiveId, ThemeVal, String)],
-    text: &str,
-) -> Result<String, String> {
-    match text.strip_prefix("theme.") {
-        Some(other) => values
-            .iter()
-            .find(|(n, _, _, _)| n == other)
-            .map(|(_, _, v, _)| theme_val_text(*v))
-            .ok_or_else(|| format!("no theme value {other:?}")),
-        None => Ok(text.to_string()),
-    }
-}
 
 /// Where a theme edit's undo step goes: the session's own stack
 /// ([`track_undo`]) for a fresh gesture, nothing for an undo/redo replay
@@ -5402,66 +4225,41 @@ pub(crate) fn theme_apply(
     origin: &str,
     undo: Option<UndoSink>,
 ) -> Result<Option<(ThemeVal, String)>, String> {
-    let values = theme_values(cx);
-    let (key, value, loc) = values
-        .iter()
-        .find(|(n, _, _, _)| n == name)
-        .map(|(_, k, v, l)| (*k, *v, l.clone()))
-        .ok_or_else(|| format!("no theme value {name:?}"))?;
-    let text = theme_edit_text(&values, text)?;
-    let old_text = theme_val_text(value);
     let overridden = session().lock().unwrap().theme_overrides.iter().any(|(n, _)| n == name);
-    if old_text == text && !overridden {
+    let Some(edit) = makepad_widgets_core::design_data::theme::theme_set_value(cx, name, text, overridden)? else {
         return Ok(None);
-    }
-    // The literal the module run will read back: what the theme files write.
-    let literal;
-    match value {
-        ThemeVal::Color(current) => {
-            let (rgba, _) = parse_hex(&text).ok_or_else(|| format!("{text:?} is not a colour"))?;
-            let new = packed_of(rgba);
-            literal = format!("#x{new:08X}");
-            // The theme module is immutable to scripts; a design tool
-            // edits the value in place, at the level that defines it.
-            theme_heap_set(cx, key, ScriptValue::from_color(new));
-            let mut s = session().lock().unwrap();
-            match s.theme_overrides.iter().position(|(n, _)| n == name) {
-                Some(i) => {
-                    if new == packed_of(s.theme_overrides[i].1.target) {
-                        // Back at the original: restore and forget.
-                        let (_, st) = s.theme_overrides.remove(i);
-                        drop(s);
-                        pulse_restore(cx, &st);
-                    } else {
-                        s.theme_overrides[i].1.fixed = Some(rgba);
-                        drop(s);
-                    }
-                }
-                None => {
-                    let mut st = PulseState::new(current);
-                    st.fixed = Some(rgba);
-                    s.theme_overrides.push((name.to_string(), st));
+    };
+    let (value, loc, text, literal) = (edit.old, edit.site, edit.text, edit.literal);
+    let old_text = theme_val_text(value);
+    if let (ThemeVal::Color(current), ThemeVal::Color(new)) = (value, edit.new) {
+        let rgba = rgba_of(new);
+        let mut s = session().lock().unwrap();
+        match s.theme_overrides.iter().position(|(n, _)| n == name) {
+            Some(i) => {
+                if new == packed_of(s.theme_overrides[i].1.target) {
+                    // Back at the original: restore and forget.
+                    let (_, st) = s.theme_overrides.remove(i);
+                    drop(s);
+                    pulse_restore(cx, &st);
+                } else {
+                    s.theme_overrides[i].1.fixed = Some(rgba);
                     drop(s);
                 }
             }
-            theme_overrides_sync(cx);
-            hook_sync(cx);
-            let overrides = std::mem::take(&mut session().lock().unwrap().theme_overrides);
-            for (_, st) in &overrides {
-                pulse_repaint(cx, st);
+            None => {
+                let mut st = PulseState::new(current);
+                st.fixed = Some(rgba);
+                s.theme_overrides.push((name.to_string(), st));
+                drop(s);
             }
-            session().lock().unwrap().theme_overrides = overrides;
         }
-        ThemeVal::Num(_) => {
-            let f: f64 = text.parse().map_err(|_| format!("{text:?} is not a number"))?;
-            literal = format!("{f:?}");
-            // Numbers are baked into layouts at apply time: the heap
-            // holds the new value for everything applied from now on
-            // and the ledger carries it to the source; existing layout
-            // re-flows when the edit lands (a live reload cannot
-            // redefine the immutable widget modules today).
-            theme_heap_set(cx, key, ScriptValue::from_f64(f));
+        theme_overrides_sync(cx);
+        hook_sync(cx);
+        let overrides = std::mem::take(&mut session().lock().unwrap().theme_overrides);
+        for (_, st) in &overrides {
+            pulse_repaint(cx, st);
         }
+        session().lock().unwrap().theme_overrides = overrides;
     }
     let now = cx.seconds_since_app_start();
     let mut s = session().lock().unwrap();
@@ -5528,9 +4326,6 @@ fn fmt_measure(v: f64) -> String {
     }
 }
 
-fn hex_of(c: u32) -> String {
-    format_hex(rgba_of(c), true)
-}
 
 /// The theme rows' place in `rows_uid`: no widget, the theme itself.
 const THEME_ROWS: u64 = u64::MAX;
@@ -5963,7 +4758,7 @@ fn const_lookup(cx: &mut Cx, widget: &WidgetRef, name: &str) -> Option<(DrawShad
 /// file:line and scope "shader" — every draw sharing that compiled shader
 /// changes with it. Returns (old, new).
 fn const_set(cx: &mut Cx, widget: &WidgetRef, path: &str, name: &str, value: Option<f64>, origin: &str) -> Result<(f32, f32), String> {
-    require_tweak_target(widget)?;
+    require_target(widget)?;
     let (shader, index, loc, initial, old) = const_lookup(cx, widget, name).ok_or_else(|| format!("no shader constant named {name:?} on this widget"))?;
     // Every site in the shader annotated with this name is the same knob.
     let sites: Vec<usize> = cx
@@ -6094,191 +4889,6 @@ fn parse_struct(value: &str) -> (StructKind, Vec<f64>) {
     (StructKind::None, Vec::new())
 }
 
-/// Every `/** */` annotation behind a widget's properties, gathered up its
-/// construction chain: property name (dotted for a sub-object's field, as
-/// [`reflect_flat`] names it) to the doc's text. Part of the
-/// [`crate::reflect`] surface: a Docs panel's third column.
-pub fn collect_row_docs(cx: &mut Cx, widget: &WidgetRef) -> HashMap<String, String> {
-    let mut out = HashMap::new();
-    let source = widget.script_source();
-    if source == ScriptObject::ZERO {
-        return out;
-    }
-    cx.with_vm(|vm| {
-        let chain = vm.construction_chain(source.into());
-        for lvl in &chain {
-            for (f, d) in &lvl.field_docs() {
-                out.entry(live_id_token(*f)).or_insert_with(|| d.clone());
-            }
-        }
-        for lvl in &chain {
-            for key in lvl.own_keys() {
-                let value = vm.value(lvl.object(), *key);
-                let Some(obj) = value.as_object() else { continue };
-                if vm.heap().as_fn(obj).is_some() {
-                    continue;
-                }
-                let name = live_id_token(*key);
-                for sub in vm.construction_chain(value) {
-                    if let Some(doc) = sub.doc() {
-                        out.entry(name.clone()).or_insert_with(|| doc.to_owned());
-                    }
-                    for (f, d) in &sub.field_docs() {
-                        out.entry(format!("{name}.{}", live_id_token(*f)))
-                            .or_insert_with(|| d.clone());
-                    }
-                }
-            }
-        }
-    });
-    out
-}
-
-fn cascade_levels(cx: &mut Cx, widget: &WidgetRef) -> Vec<CascadeLevel> {
-    let source = widget.script_source();
-    if source == ScriptObject::ZERO {
-        return Vec::new();
-    }
-    cx.with_vm(|vm| {
-        let chain = vm.construction_chain(source.into());
-        let mut seen: std::collections::HashSet<String> = Default::default();
-        let mut out = Vec::new();
-        for lvl in chain {
-            let (loc, file, line) = match lvl.loc() {
-                Some(l) => {
-                    let base = l.file().rsplit('/').next().unwrap_or(l.file());
-                    (format!("{base}:{}", l.line()), l.file().to_owned(), l.line())
-                }
-                None => ("native".to_string(), String::new(), 0),
-            };
-            let mut sets: Vec<(String, bool)> = Vec::new();
-            for key in lvl.own_keys() {
-                let name = live_id_token(*key);
-                if name.starts_with("__") || skip_key(&name) {
-                    continue;
-                }
-                let overridden = seen.contains(&name);
-                sets.push((name, overridden));
-            }
-            for (name, _) in &sets {
-                seen.insert(name.clone());
-            }
-            out.push(CascadeLevel {
-                loc,
-                file,
-                line,
-                doc: lvl.doc().map(str::to_owned),
-                field_docs: lvl
-                    .field_docs()
-                    .iter()
-                    .map(|(f, d)| (live_id_token(*f), d.clone()))
-                    .collect(),
-                sets,
-            });
-        }
-        out
-    })
-}
-
-/// Every widget's path, in names a person can read.
-///
-/// `WidgetTree::path_to` renders an unnamed node as `-` and a list item as a
-/// bare index, so a real path came out as `-0.main_window.body.dock.-.-.3` —
-/// the same string for every unnamed sibling, and no help to anyone reading
-/// it. Here each segment is, in order of preference:
-///
-/// * the node's own name (`dock`, `tOverview`, `press_demo`), or
-/// * its TYPE when it has no name of its own (`View`, `Label`), and
-/// * `.1`, `.2`… appended when siblings would otherwise collide — four
-///   unnamed Labels under one View become `Label.1`..`Label.4`. The slash is
-///   the hierarchy; a dot is only which one of several.
-///
-/// The head is dropped, because it is on every path in the app and therefore
-/// tells nobody anything: the tree root (which has neither a name nor a
-/// reliably-registered type), any single-child chain under it, and the
-/// `Window`'s own `body` container. What is left starts at the first thing
-/// the app itself put on screen — `dock.tOverview.View.View.Label_1`.
-///
-/// Built from `flat_tree`, whose depth-first order and depth column give both
-/// the parent chain and the sibling order. That is a whole-tree walk, so this
-/// is for CLICKS (copy, @mention, a selection change) — never for hover.
-fn readable_paths(cx: &Cx) -> Vec<(u64, String)> {
-    let rows = cx.widget_tree().flat_tree(cx);
-    let n = rows.len();
-    // The parent of each row, read straight off the depth-first order.
-    let mut parent: Vec<Option<usize>> = vec![None; n];
-    let mut stack: Vec<usize> = Vec::new();
-    for (i, row) in rows.iter().enumerate() {
-        stack.truncate(row.depth as usize);
-        parent[i] = stack.last().copied();
-        stack.push(i);
-    }
-    let mut children: Vec<Vec<usize>> = vec![Vec::new(); n];
-    for (i, p) in parent.iter().enumerate() {
-        if let Some(p) = p {
-            children[*p].push(i);
-        }
-    }
-    let mut segment: Vec<String> = rows
-        .iter()
-        .map(|row| readable_segment(&row.name, &row.ty))
-        .collect();
-    // Siblings that want the same segment get numbered, in child order.
-    let roots: Vec<usize> = (0..n).filter(|i| parent[*i].is_none()).collect();
-    let sibling_groups = children
-        .iter()
-        .cloned()
-        .chain(std::iter::once(roots.clone()))
-        .filter(|group| group.len() > 1);
-    for group in sibling_groups {
-        let clashing: Vec<usize> = group
-            .iter()
-            .copied()
-            .filter(|i| group.iter().filter(|j| segment[**j] == segment[*i]).count() > 1)
-            .collect();
-        let mut ordinal: HashMap<String, usize> = HashMap::new();
-        for i in clashing {
-            let base = segment[i].clone();
-            let next = ordinal.entry(base.clone()).or_insert(0);
-            *next += 1;
-            segment[i] = format!("{base}.{next}");
-        }
-    }
-    // How many leading segments are the shared, meaningless head: the root
-    // itself, then any node that is the only way down, then the Window's
-    // `body`. Never so many that a path runs out.
-    let mut skip = 1usize; // the root
-    if roots.len() == 1 {
-        let mut cur = roots[0];
-        while children[cur].len() == 1 {
-            let next = children[cur][0];
-            if children[next].is_empty() {
-                break; // the chain ends here: this node IS the path
-            }
-            cur = next;
-            skip += 1;
-        }
-        // The Window's content container. It is named by the framework, it
-        // wraps everything an app draws, and it is on every path.
-        for child in children[cur].iter() {
-            if segment[*child] == "body" && !children[*child].is_empty() {
-                skip += 1;
-                break;
-            }
-        }
-    }
-    let mut full: Vec<String> = Vec::with_capacity(n);
-    for i in 0..n {
-        let depth = rows[i].depth as usize;
-        let path = match parent[i] {
-            Some(_) if depth <= skip => format!("/{}", segment[i]),
-            Some(p) => format!("{}/{}", full[p], segment[i]),
-            None => format!("/{}", segment[i]),
-        };
-        full.push(path);
-    }
-    rows.iter().map(|row| row.uid).zip(full).collect()
-}
 
 /// The app's rows without the inspectors: every inspector's subtree, in every
 /// window. A panel is in the widget tree so a remote ui find can drive its
@@ -6343,104 +4953,6 @@ fn tree_name_of(cx: &Cx, uid: u64) -> String {
         .unwrap_or_default()
 }
 
-/// One path segment, as a person would say it: the node's name, else its
-/// type, else a last-resort placeholder. A name that is only digits (a list
-/// item's index) is no name at all, so those take the type too.
-fn readable_segment(name: &str, ty: &str) -> String {
-    let named =
-        !name.is_empty() && name != "-" && !name.bytes().all(|b| b.is_ascii_digit());
-    if named {
-        return name.to_string();
-    }
-    if !ty.is_empty() && ty != "-" {
-        return ty.to_string();
-    }
-    "Widget".to_string()
-}
-
-/// One widget's readable path (`/window/body/Button.2`). See
-/// [`readable_paths`]. Part of the [`crate::reflect`] surface: how an action
-/// log names its sender.
-pub fn indexed_path(cx: &Cx, uid: u64) -> String {
-    readable_paths(cx)
-        .into_iter()
-        .find(|(u, _)| *u == uid)
-        .map(|(_, path)| path)
-        .unwrap_or_else(|| format!("uid:{uid}"))
-}
-
-/// The widget a path names. An exact match wins; otherwise anything whose
-/// path ENDS with it, which is what makes a shortened, hand-written or
-/// previously-stored tail still resolve.
-fn resolve_indexed(cx: &Cx, path: &str) -> Option<WidgetUid> {
-    let path = path.trim();
-    if path.is_empty() || path == "/" {
-        return None;
-    }
-    // A reference written or pasted without its leading slash still means
-    // the same thing. Dots are NOT separators here — `Label.2` is one
-    // segment, the second Label — so nothing else is normalised.
-    let wanted = format!("/{}", path.trim_start_matches('/'));
-    let paths = readable_paths(cx);
-    if let Some((uid, _)) = paths.iter().find(|(_, full)| **full == wanted) {
-        return Some(WidgetUid(*uid));
-    }
-    paths
-        .iter()
-        .find(|(_, full)| full.ends_with(&wanted))
-        .map(|(uid, _)| WidgetUid(*uid))
-}
-
-/// Is this segment an anonymous node's numbered stand-in (`-`, `-2`)? Those
-/// are positions, not names, so the loose finder must not turn them into ids.
-fn is_anonymous_segment(segment: &str) -> bool {
-    segment == "-"
-        || (segment.starts_with('-') && segment.len() > 1 && segment[1..].bytes().all(|b| b.is_ascii_digit()))
-}
-
-/// The widget a readable path names: an indexed path (`/window/body/Button.2`)
-/// taken as written, else a waypoint search over the named segments. Part
-/// of the [`crate::reflect`] surface: how a story names its subject.
-pub fn resolve_widget_by_path(cx: &Cx, path: &str) -> Result<WidgetRef, String> {
-    let tree = cx.widget_tree();
-    // An indexed path names one widget and nothing else: take it as written
-    // before falling back to the waypoint search below, which drops the
-    // anonymous segments and can only land on the nearest named ancestor.
-    if let Some(uid) = resolve_indexed(cx, path) {
-        let found = tree.widget(uid);
-        if !found.is_empty() {
-            return Ok(found);
-        }
-    }
-    let ids: Vec<LiveId> = path
-        .split(['.', '/'])
-        .filter(|segment| !segment.is_empty() && !is_anonymous_segment(segment))
-        .map(LiveId::from_str)
-        .collect();
-    if ids.is_empty() {
-        return Err("empty path".to_string());
-    }
-    let root = tree.root_uid();
-    let found = tree.find_within(root, &ids);
-    if !found.is_empty() {
-        return Ok(found);
-    }
-    // The full dotted path from /tweak/state includes ancestors the finder
-    // treats as waypoints; a stale head (window renamed) can still resolve
-    // from the tail.
-    if ids.len() > 1 {
-        let found = tree.find_within(root, &ids[1..]);
-        if !found.is_empty() {
-            return Ok(found);
-        }
-        let tail = [*ids.last().unwrap()];
-        let found = tree.find_within(root, &tail);
-        if !found.is_empty() {
-            return Ok(found);
-        }
-    }
-    Err(format!("no widget at path {path:?}"))
-}
 
 /// `file:line` of the site that constructed the widget's source object —
 /// the first level of its construction chain. A template instance answers
@@ -6528,196 +5040,6 @@ fn template_siblings(cx: &mut Cx, widget: &WidgetRef) -> Vec<WidgetRef> {
     out
 }
 
-/// Values survive an apply (they live in the Rust draw vars) but the
-/// SHADER is recomputed from the chain of the object just applied — and
-/// every chunk derives a fresh object from the widget's untouched source,
-/// so `draw_bg +: {color: #00f}` after a live `pixel: fn` edit compiled the
-/// file's pixel back in (the fn edit vanished on the next colour tweak).
-/// After a chunk that touches a layer with live fn edits, put those fns
-/// back on top; their text is unchanged, so the compiled shader is a cache
-/// hit.
-fn reinject_fn_overrides(cx: &mut Cx, widget: &WidgetRef, chunk: &str) {
-    let uid = widget.widget_uid().0;
-    let overrides: Vec<((u64, String, String), String)> = session()
-        .lock()
-        .unwrap()
-        .fn_overrides
-        .iter()
-        .filter(|((owner, _, _), _)| *owner == uid)
-        .map(|(key, text)| (key.clone(), text.clone()))
-        .collect();
-    if overrides.is_empty() {
-        return;
-    }
-    let mut layers: Vec<String> = Vec::new();
-    for ((_, layer, name), _) in &overrides {
-        let touches_layer = chunk.contains(&format!("{layer} +:"))
-            || chunk.contains(&format!("{layer}:"))
-            || chunk.contains(&format!("{layer}."));
-        let defines_fn = chunk.contains(&format!("{name}:"));
-        if touches_layer && !defines_fn && !layers.contains(layer) {
-            layers.push(layer.clone());
-        }
-    }
-    for layer in layers {
-        let mut body = String::new();
-        for ((_, l, _), text) in &overrides {
-            if *l == layer {
-                body.push_str(text);
-                body.push('\n');
-            }
-        }
-        let _ = makepad_platform::shader_error::take();
-        if let Err(error) = eval_chunk(cx, widget, &format!("{layer} +: {{\n{body}}}")) {
-            log!("TWEAK re-applying the live {layer} fns failed: {error}");
-        }
-        if let Some(error) = makepad_platform::shader_error::take() {
-            log!("TWEAK re-applied live {layer} fns did not compile: {}", terse_shader_error(&error));
-        }
-    }
-}
-
-/// The first problem of a draw-shader compile report, without the
-/// compiler's own source pointers; says how many more there were.
-fn terse_shader_error(report: &str) -> String {
-    let lines: Vec<&str> = report.lines().filter(|l| !l.trim().is_empty()).collect();
-    let first = lines.first().copied().unwrap_or(report);
-    // `DrawQuad: shader field …` — the type name is the layer's, keep it.
-    let first = match first.find(" (platform/") {
-        Some(at) => &first[..at],
-        None => first,
-    };
-    let first: String = first.chars().take(160).collect();
-    if lines.len() > 1 {
-        format!("{first} (+{} more)", lines.len() - 1)
-    } else {
-        first
-    }
-}
-
-/// Undo a chunk whose shader failed to compile: an fn chunk puts the
-/// layer's fns back (the last text applied from the view or the AI, else
-/// the fn as written); a single-property chunk puts the property back.
-fn revert_failed_chunk(cx: &mut Cx, widget: &WidgetRef, chunk: &str, before: &[(String, String, bool)]) {
-    if chunk.contains("fn") {
-        if let Some(open) = chunk.find("+:") {
-            let layer = chunk[..open].trim().to_string();
-            revert_layer_fns(cx, widget, &layer);
-            return;
-        }
-    }
-    if let Some((prop, _)) = single_prop_chunk(chunk) {
-        if let Some((_, old, quoted)) = before.iter().find(|(name, _, _)| *name == prop) {
-            let text = if *quoted { format!("{old:?}") } else { old.clone() };
-            let _ = makepad_platform::shader_error::take();
-            if let Err(error) = eval_chunk(cx, widget, &format!("{prop}: {text}")) {
-                log!("TWEAK revert of {prop} failed: {error}");
-            }
-            let _ = makepad_platform::shader_error::take();
-        }
-    }
-}
-
-fn revert_layer_fns(cx: &mut Cx, widget: &WidgetRef, layer: &str) {
-    let uid = widget.widget_uid().0;
-    let sources = layer_fn_sources(cx, widget, layer);
-    let overrides = session().lock().unwrap().fn_overrides.clone();
-    let mut body = String::new();
-    for (name, _loc, src) in &sources {
-        let text = overrides
-            .get(&(uid, layer.to_string(), name.clone()))
-            .cloned()
-            .unwrap_or_else(|| src.clone());
-        body.push_str(&text);
-        body.push('\n');
-    }
-    if body.trim().is_empty() {
-        return;
-    }
-    let _ = makepad_platform::shader_error::take();
-    if let Err(error) = eval_chunk(cx, widget, &format!("{layer} +: {{\n{body}}}")) {
-        log!("TWEAK revert of {layer} fns failed: {error}");
-    }
-    if let Some(error) = makepad_platform::shader_error::take() {
-        log!("TWEAK revert of {layer} fns did not compile either: {}", terse_shader_error(&error));
-    }
-}
-
-/// Rewrite every `tweak://apply:LINE:COL` in an error into the chunk's own
-/// line numbers.
-fn relocate_chunk_error(error: &str, callsite: u32) -> String {
-    let mut out = String::new();
-    let mut rest = error;
-    while let Some(at) = rest.find("tweak://apply:") {
-        out.push_str(&rest[..at]);
-        let tail = &rest[at + "tweak://apply:".len()..];
-        let digits: String = tail.chars().take_while(|c| c.is_ascii_digit()).collect();
-        match digits.parse::<u32>() {
-            Ok(line) if line > callsite => {
-                // The parser counts the `use` line and one more for the
-                // wrapper: measured, `@@` on chunk line 4 reports callsite+5.
-                out.push_str(&format!("line {}", line - callsite - 1));
-                rest = &tail[digits.len()..];
-            }
-            _ => {
-                out.push_str("tweak://apply:");
-                rest = tail;
-            }
-        }
-    }
-    out.push_str(rest);
-    out
-}
-
-/// A stable pseudo-line for a chunk: FNV-1a of its text, so each distinct
-/// chunk is its own script body (and its own fn ScriptIps).
-fn chunk_callsite_line(code: &str) -> u32 {
-    let mut h: u32 = 2166136261;
-    for b in code.bytes() {
-        h ^= b as u32;
-        h = h.wrapping_mul(16777619);
-    }
-    (h % 1_000_000) + 2
-}
-
-/// The bare eval-apply: evaluate a splash chunk with the widget's own
-/// `__script_source__` scope and apply it through the ordinary machinery.
-/// No diff, no log — [`apply_splash_chunk`] wraps this for user-visible
-/// edits; the tweaker's own scaffolding uses it raw. Never for the room the
-/// panel takes from the app: that is kept back by the window as it lays the
-/// body out (`View::set_child_reserve`), because an apply to the body is a
-/// rebuild of it and a reload takes whatever it wrote away again.
-fn eval_chunk(cx: &mut Cx, widget: &WidgetRef, chunk: &str) -> Result<(), String> {
-    require_tweak_target(widget)?;
-    let chunk = chunk.trim();
-    let body = if chunk.starts_with('{') {
-        chunk.to_string()
-    } else {
-        format!("{{{chunk}}}")
-    };
-    let code = format!("use mod.prelude.widgets.*\n__script_source__{body};");
-    let callsite = chunk_callsite_line(&code);
-    let errors = cx.with_vm(|vm| {
-        // Install a captured-error sink so parse/apply problems come back to
-        // the caller instead of only landing in the log.
-        vm.capture_errors();
-        let script_mod = ScriptMod::new("", "tweak", "tweak://apply", callsite as usize, 1, &(code), &[]);
-        let mut target = widget.clone();
-        use crate::makepad_script::traits::ScriptApply;
-        target.script_apply_eval(vm, script_mod);
-        vm.take_errors()
-    });
-    if !errors.is_empty() {
-        // `tweak://apply:<callsite+n>:<col>` → `line <n>:<col>` of the chunk
-        // (chunk line 1 sits on code line 2, right after the `use`).
-        let errors: Vec<String> = errors
-            .iter()
-            .map(|e| relocate_chunk_error(e, callsite))
-            .collect();
-        return Err(format!("splash error: {}", errors.join("; ")));
-    }
-    Ok(())
-}
 
 /// Apply one splash chunk onto a widget: eval + ordinary apply + full
 /// relayout; the value diff (flat reflection before vs after) is logged and
@@ -6729,20 +5051,13 @@ pub fn apply_splash_chunk(
     chunk: &str,
     origin: &str,
 ) -> Result<Vec<TweakDiffEntry>, String> {
-    require_tweak_target(widget)?;
     let chunk = chunk.trim();
-    let before = reflect_flat(cx, widget);
-    // The draw shader compiles inside the apply itself, so an fn that names
-    // a field this layer does not have fails RIGHT HERE. Never answer ok
-    // with a widget that stopped drawing: put the layer back and say why.
-    let _ = makepad_platform::shader_error::take();
-    eval_chunk(cx, widget, chunk)?;
-    if let Some(error) = makepad_platform::shader_error::take() {
-        revert_failed_chunk(cx, widget, chunk, &before);
-        let terse = terse_shader_error(&error);
-        log!("TWEAK {} {} rejected, shader did not compile: {}", origin, path, terse);
-        return Err(format!("shader compile error: {terse}"));
-    }
+    let before = makepad_widgets_core::design_data::apply::apply_splash_chunk(cx, widget, chunk)
+        .inspect_err(|error| {
+            if let Some(terse) = error.strip_prefix("shader compile error: ") {
+                log!("TWEAK {} {} rejected, shader did not compile: {}", origin, path, terse);
+            }
+        })?;
     // Template-built widgets (tabs, list items) share one source object;
     // an edit to one is an edit to the template, so every live sibling
     // takes it too — and the ledger names the template's site as the
@@ -7043,26 +5358,6 @@ fn arg<'a>(args: &'a [(String, String)], keys: &[&str]) -> Option<&'a str> {
     None
 }
 
-/// `"a.b: value"` (no braces, one property) — the shape every sidebar edit
-/// and `prop=`/`value=` shorthand takes.
-fn single_prop_chunk(chunk: &str) -> Option<(String, String)> {
-    let chunk = chunk.trim();
-    let inner = chunk.strip_prefix('{').map_or(chunk, |rest| rest.strip_suffix('}').unwrap_or(rest));
-    let inner = inner.trim();
-    if inner.contains('\n') || inner.contains('{') || inner.contains(',') {
-        return None;
-    }
-    let (name, value) = inner.split_once(':')?;
-    let name = name.trim();
-    if name.is_empty()
-        || !name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
-    {
-        return None;
-    }
-    Some((name.to_string(), value.trim().to_string()))
-}
 
 /// The apply chunk for a vector row: components comma-separated, as Splash
 /// reads `vec2f(0.5 -1)` as one subtraction.
@@ -7070,13 +5365,6 @@ fn vec_chunk(prop: &str, pfx: &str, vals: &[String]) -> String {
     format!("{prop}: {pfx}({})", vals.join(", "))
 }
 
-fn fmt_f64(value: f64) -> String {
-    if value.fract() == 0.0 && value.abs() < 1.0e15 {
-        format!("{}", value as i64)
-    } else {
-        format!("{}", (value * 10000.0).round() / 10000.0)
-    }
-}
 
 fn json_str(input: &str) -> String {
     let mut out = String::with_capacity(input.len() + 2);
@@ -7873,7 +6161,7 @@ pub fn tweak_callback(
             cx.redraw_all();
             let changed = applied?;
             // A fn rewrite from the AI shows in the source view as applied.
-            record_fn_overrides(widget.widget_uid().0, &chunk);
+            record_fn_overrides(cx, widget.widget_uid().0, &chunk);
             let inspection = pin_remote_edit(cx, &widget, &resolved_path);
             Ok(format!(
                 "{{\"ok\":1,\"path\":{},\"changed\":{},\"selected\":{},\"inspection\":{}}}",
@@ -10259,7 +8547,7 @@ pub struct Tweaker {
     #[rust]
     palette_filter: String,
     /// The widget types the person starred, by name (kept in
-    /// `makepad_home()/palette-favourites.txt`, read on the first draw).
+    /// `app_state_home()/palette-favourites.txt`, read on the first draw).
     #[rust]
     palette_starred: BTreeSet<String>,
     #[rust]
@@ -15944,7 +14232,7 @@ impl Tweaker {
                         layer_fn_sources(cx, &widget, &layer)
                     };
                     let mut text = String::new();
-                    let overrides = session().lock().unwrap().fn_overrides.clone();
+                    let edits = cx.get_global_ref::<ShaderEdits>();
                     for (name, loc, src) in &fns {
                         if !text.is_empty() {
                             text.push_str("\n\n");
@@ -15952,7 +14240,7 @@ impl Tweaker {
                         // A fn applied live from this view shows as applied,
                         // not as the file has it.
                         let key = (self.rows_uid, layer.clone(), name.clone());
-                        let body = overrides.get(&key).cloned().unwrap_or_else(|| reindent_two(src));
+                        let body = edits.and_then(|edits| edits.functions.get(&key)).cloned().unwrap_or_else(|| reindent_two(src));
                         text.push_str(&format!("// {name} \u{2014} {loc}\n{body}"));
                     }
                     if text.is_empty() {
@@ -15965,7 +14253,7 @@ impl Tweaker {
                     // the editor focused or holding exactly what it last
                     // applied (a failed edit stays on screen to be fixed).
                     let key = (self.rows_uid, layer.clone());
-                    let external = session().lock().unwrap().fn_override_gen;
+                    let external = cx.get_global_ref::<ShaderEdits>().map_or(0, |edits| edits.generation);
                     let typing = self.live_key == key
                         && self.fn_external_seen == external
                         && (cx.has_key_focus(editor.area()) || editor.text() == self.live_last_applied);
@@ -23711,6 +21999,7 @@ impl Widget for Tweaker {
 
 #[cfg(test)]
 mod tests {
+    use makepad_widgets_core::design_data::theme::theme_heap_set;
     use super::*;
     use crate::theme_builder::{all_suggestions_from, Harmony, COMBINATION_LABEL, OWN_LABEL};
     use crate::theme_combinations::COMBINATIONS;
@@ -24571,6 +22860,7 @@ mod tests {
 
     #[test]
     fn what_is_typed_into_a_size_field_becomes_the_chunk_the_engine_accepts() {
+        assert_eq!(parse_size_text("\"50%\""), SizeText::Rel("50%".into()));
         assert_eq!(size_chunk("width", "fill").as_deref(), Some("width: Fill"));
         assert_eq!(size_chunk("width", "Fit").as_deref(), Some("width: Fit"));
         assert_eq!(size_chunk("width", "200").as_deref(), Some("width: 200"));
@@ -24587,53 +22877,6 @@ mod tests {
         assert_eq!(size_chunk("width", "25VW").as_deref(), Some("width: \"25vw\""));
     }
 
-    #[test]
-    fn layout_enums_print_as_whole_values() {
-        use crate::makepad_draw::turtle::RowAlign;
-        use crate::makepad_draw::{Base, FitBound, Flow, Size};
-        use crate::makepad_script::{ScriptApply, ScriptNew};
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.with_vm(|vm| {
-            // In dependency order, the way the draw crate's module does it:
-            // building a named variant's proto converts its DEFAULT fields
-            // to script values, and a bare default such as `Base::Full` or
-            // `RowAlign::Top` looks its own type up on the way.
-            <Base as ScriptNew>::script_api(vm);
-            <RowAlign as ScriptNew>::script_api(vm);
-            <FitBound as ScriptNew>::script_api(vm);
-            <Size as ScriptNew>::script_api(vm);
-            <Flow as ScriptNew>::script_api(vm);
-            let fill = Size::Fill {
-                weight: 100.0,
-                basis: FitBound::Abs(0.0),
-                shrink: 0.0,
-                min: None,
-                max: None,
-            }
-            .script_to_value(vm);
-            let fixed = Size::Fixed(200.0).script_to_value(vm);
-            let rel = Size::Rel { base: Base::Parent, factor: 0.5 }.script_to_value(vm);
-            let down = Flow::Down.script_to_value(vm);
-            let heap = vm.heap();
-            let fill_obj = fill.as_object().expect("a named variant is an object");
-            assert_eq!(
-                enum_info(heap, fill_obj).map(|(e, v)| (live_id_token(e), live_id_token(v))),
-                Some(("Size".to_string(), "Fill".to_string()))
-            );
-            assert_eq!(
-                fmt_value(heap, fill, 2).as_deref(),
-                Some("Size.Fill{weight: 100 basis: FitBound.Abs(0) shrink: 0}")
-            );
-            assert_eq!(fmt_value(heap, fixed, 2).as_deref(), Some("Size.Fixed(200)"));
-            assert_eq!(fmt_value(heap, down, 2).as_deref(), Some("Flow.Down"));
-            // A relative size prints quoted: the text is what a reset
-            // re-applies, and the panel reads it back the same.
-            assert_eq!(fmt_value(heap, rel, 2).as_deref(), Some("\"50%\""));
-            assert_eq!(parse_size_text("\"50%\""), SizeText::Rel("50%".into()));
-            // Display drops the enum and the fields equal to the defaults.
-            assert_eq!(fmt_enum(heap, fill_obj, EnumFmt::Display).as_deref(), Some("Fill"));
-        });
-    }
 
     #[test]
     fn a_mention_lands_after_the_at_that_armed_it() {
@@ -24647,32 +22890,6 @@ mod tests {
         assert_eq!(insert_mention("", "/a/b"), "@/a/b");
     }
 
-    #[test]
-    fn a_path_segment_says_what_the_widget_is() {
-        // A real name wins.
-        assert_eq!(readable_segment("main_window", "Window"), "main_window");
-        // No name: the type is what a person would call it.
-        assert_eq!(readable_segment("-", "View"), "View");
-        // A list item's index is not a name either — the type reads better.
-        assert_eq!(readable_segment("3", "Label"), "Label");
-        // Neither: something has to be said.
-        assert_eq!(readable_segment("-", "-"), "Widget");
-    }
-
-    #[test]
-    fn an_anonymous_segment_is_a_position_not_a_name() {
-        // Legacy `-` / `-2` stand-ins can still arrive from a hand-written
-        // path or an older note store; the loose finder must drop them
-        // rather than hash them into ids.
-        assert!(is_anonymous_segment("-"));
-        assert!(is_anonymous_segment("-0"));
-        assert!(is_anonymous_segment("-12"));
-        assert!(!is_anonymous_segment("-a"));
-        assert!(!is_anonymous_segment("main_window"));
-        // `Label.2` is a NAME with an ordinal, not a position stand-in: the
-        // slash is the hierarchy, the dot is only which one of several.
-        assert!(!is_anonymous_segment("Label.2"));
-    }
 
     #[test]
     fn mentions_are_read_back_out_of_the_note_text() {
@@ -24852,21 +23069,6 @@ line two");
         assert_eq!(json_str("a\"b\n"), "\"a\\\"b\\n\"");
     }
 
-    #[test]
-    fn single_prop_chunks_parse() {
-        assert_eq!(
-            single_prop_chunk("padding.left: 12"),
-            Some(("padding.left".to_string(), "12".to_string()))
-        );
-        assert_eq!(
-            single_prop_chunk("{draw_bg.border_radius: 8}"),
-            Some(("draw_bg.border_radius".to_string(), "8".to_string()))
-        );
-        // multi-property or nested chunks are not single props
-        assert_eq!(single_prop_chunk("{a: 1, b: 2}"), None);
-        assert_eq!(single_prop_chunk("padding: Inset{left: 4}"), None);
-        assert_eq!(single_prop_chunk("draw_bg +: {color: #f00}"), None);
-    }
 
     #[test]
     fn a_vector_chunk_keeps_its_negative_components() {
@@ -24874,12 +23076,6 @@ line two");
         assert_eq!(vec_chunk("size", "vec3f", &vals), "size: vec3f(0.5, -1, 2)");
     }
 
-    #[test]
-    fn fmt_f64_stays_compact() {
-        assert_eq!(fmt_f64(12.0), "12");
-        assert_eq!(fmt_f64(2.5), "2.5");
-        assert_eq!(fmt_f64(0.33333333), "0.3333");
-    }
 
     #[test]
     fn center_and_zoom_follow_the_lock() {

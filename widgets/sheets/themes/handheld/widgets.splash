@@ -451,6 +451,7 @@ mod.widgets.ButtonFlat.draw_bg.pixel = fn() {
     let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
     return self.host_over(pa_button(self.pos, self.rect_size, self.rect_pos, px, self.kind, self.frame, self.hover, self.down, self.focus, self.disabled, self.loading, self.anim_time, 4.0), 4.0)
 }
+mod.widgets.ButtonFlat.draw_bg.face = {mode: @host_over, rest: #00000000, hover: #00000000, down: #788d65}
 mod.widgets.ButtonFlat.clip_x = false
 mod.widgets.ButtonFlat.clip_y = false
 
@@ -833,6 +834,7 @@ mod.widgets.RadioButtonTabFlat.draw_bg.pixel = fn() {
     let sb = pa_sbox(self.rect_pos, vec2(0.0, 0.0), self.rect_size, b)
     return pa_caption(p, self.rect_pos, sb, b, self.active, self.hover, self.down, self.focus, self.disabled, 3.0)
 }
+mod.widgets.RadioButtonTabFlat.draw_bg.face = {mode: @own_face, rest: #82976e, hover: #96ab82, down: #2f4836, active: #2f4836}
 mod.widgets.RadioButtonTabFlat.clip_x = false
 mod.widgets.RadioButtonTabFlat.clip_y = false
 mod.widgets.RadioButtonTab.clip_x = false

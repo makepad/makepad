@@ -323,6 +323,7 @@ mod.widgets.ButtonFlat.draw_bg.pixel = fn() {
     let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
     return self.host_over(cc_button(self.pos, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, self.loading, self.anim_time, cc_corners(self.border_radius_tl, self.border_radius_tr, self.border_radius_br, self.border_radius_bl, 2.5), 0.0, 6.0, vec4(0.0, 0.0, 0.0, 0.0)), 6.0)
 }
+mod.widgets.ButtonFlat.draw_bg.face = {mode: @host_over, rest: #979692, hover: #a4a39f, down: #83827e}
 mod.widgets.Button.draw_bg.pixel = fn() {
     let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
     return self.host_over(cc_button(self.pos, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, self.loading, self.anim_time, cc_corners(self.border_radius_tl, self.border_radius_tr, self.border_radius_br, self.border_radius_bl, 2.5), 0.0, 6.0, vec4(0.0, 0.0, 0.0, 0.0)), 6.0)
@@ -351,6 +352,7 @@ mod.widgets.ButtonFlatter.draw_bg.pixel = fn() {
     let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
     return self.host_over(cc_button(self.pos, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, self.loading, self.anim_time, cc_corners(self.border_radius_tl, self.border_radius_tr, self.border_radius_br, self.border_radius_bl, 2.5), 6.0, 6.0, vec4(0.0, 0.0, 0.0, 0.0)), 6.0)
 }
+mod.widgets.ButtonFlatter.draw_bg.face = {mode: @host_over, rest: #898884, hover: #979692, down: #81807c}
 
 // Templates that draw a face of their own on top of these roots keep the
 // plain quad: the grown one is only for the faces written here.
@@ -625,6 +627,7 @@ mod.widgets.RadioButtonTabFlat.draw_bg.pixel = fn() {
     out = Finish.over(out, cc_deep(p, (lo + hi) * 0.5, (hi - lo) * 0.5, 2.5, o, px, self.hover) * self.active)
     return out
 }
+mod.widgets.RadioButtonTabFlat.draw_bg.face = {mode: @own_face, rest: #979692, hover: #a4a39f, down: #83827e, active: #4a4947}
 mod.widgets.RadioButtonTabFlat.draw_text.color = #161615
 mod.widgets.RadioButtonTabFlat.draw_text.color_hover = #0e0e0d
 mod.widgets.RadioButtonTabFlat.draw_text.color_active = #ecebe5

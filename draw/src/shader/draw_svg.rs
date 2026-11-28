@@ -612,7 +612,8 @@ impl DrawSvg {
 
 #[cfg(test)]
 mod tests {
-    use super::device_anchor;
+    use super::*;
+    use crate::{cx_draw::CxDraw, draw_list_2d::{DrawList2d, DrawListExt}};
 
     /// Wherever an icon's box lands, its content origin is on a device pixel, moved by at most
     /// half of one.
@@ -625,6 +626,51 @@ mod tests {
                 assert!((origin - origin.round()).abs() < 1e-3, "dpi {dpi} pos {pos}: origin at {origin} device px");
                 assert!(((snapped - offset) * dpi).abs() <= 0.5 + 1e-4);
             }
+        }
+    }
+
+    /// An icon kept outside the reloaded tree (an `AppIcon`'s cache, made from the type's
+    /// default) draws its kept mesh on the first frame after a live reload, and after the reload
+    /// that reverts it: the reload rebinds its shader from the type's new default, and the
+    /// geometry the icon binds stays the one it draws.
+    #[test]
+    fn a_held_icon_draws_its_kept_mesh_after_a_reload_and_a_revert() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let register = |vm: &mut ScriptVm| {
+            crate::makepad_platform::script::script_mod(vm);
+            crate::script_mod(vm);
+        };
+        cx.with_vm(register);
+        let mut icon = cx.with_vm(|vm| DrawSvg::script_new_with_default(vm));
+        icon.load_from_str(r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect x="1" y="1" width="8" height="8" fill="#fff"/></svg>"##);
+        let pass = DrawPass::new(&mut cx);
+        let mut list = DrawList2d::new(&mut cx);
+        let mut frame = |cx: &mut Cx, icon: &mut DrawSvg| {
+            let event = DrawEvent::default();
+            let mut draw = CxDraw::new(cx, &event);
+            let mut cx = Cx2d::new(&mut draw);
+            cx.begin_pass(&pass, None);
+            list.begin_always(&mut cx);
+            cx.begin_root_turtle(dvec2(64.0, 64.0), Layout::flow_down());
+            icon.draw_abs(&mut cx, Rect { pos: dvec2(8.0, 8.0), size: dvec2(48.0, 48.0) });
+            cx.end_pass_sized_turtle();
+            list.end(&mut cx);
+            cx.end_pass(&pass);
+        };
+        let reload = |cx: &mut Cx| {
+            cx.draw_shaders.reset_for_design_rerun();
+            cx.reload_generation += 1;
+            cx.with_vm(|vm| vm.with_reload(register));
+        };
+        frame(&mut cx, &mut icon);
+        assert_eq!(icon.meshes.len(), 1, "the first frame keeps one mesh");
+        let kept = icon.meshes[0].geometry.geometry_id();
+        assert_eq!(icon.draw_super.draw_vars.geometry_id, Some(kept), "the first frame draws the kept mesh");
+        for step in ["reload", "revert"] {
+            reload(&mut cx);
+            frame(&mut cx, &mut icon);
+            assert!(icon.draw_super.draw_vars.draw_shader_id.is_some(), "after the {step}: the icon has a shader");
+            assert_eq!(icon.draw_super.draw_vars.geometry_id, Some(kept), "after the {step}: its first frame draws the kept mesh");
         }
     }
 }

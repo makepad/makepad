@@ -623,6 +623,12 @@ impl Image {
 }
 
 impl Widget for Image {
+    /// A picture takes no pointer input of its own: a press on it belongs to whatever holds it,
+    /// such as a list's click or a reorder drag.
+    fn is_interactive(&self) -> bool {
+        false
+    }
+
     fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
         let _ = cx;
         node.role = a11y_tree::Role::Image;

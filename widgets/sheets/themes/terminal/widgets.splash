@@ -203,6 +203,7 @@ mod.widgets.ButtonFlat.draw_bg.pixel = fn() {
     let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
     return tm_button(self.pos, self.rect_size, self.rect_pos, px, self.face_fill(), self.face_stroke(), self.frame, self.hover, self.down, self.focus, self.disabled, self.loading, self.anim_time, self.glow_ink, self.glow_rest, 7.0)
 }
+mod.widgets.ButtonFlat.draw_bg.face = {mode: @self_color}
 mod.widgets.ButtonFlat.clip_x = false
 mod.widgets.ButtonFlat.clip_y = false
 
@@ -679,6 +680,7 @@ mod.widgets.RadioButtonTabFlat.draw_bg.pixel = fn() {
         .mix(self.border_color_disabled, self.disabled)
     return tm_button(self.pos, self.rect_size, self.rect_pos, px, fill, stroke, 1.0, self.hover, self.down, self.focus, self.disabled, 0.0, 0.0, vec4(0.596, 1.0, 0.125, 1.0), 0.05 * self.active, 7.0)
 }
+mod.widgets.RadioButtonTabFlat.draw_bg.face = {mode: @self_color, down: #74fa4b}
 mod.widgets.RadioButtonTabFlat.clip_x = false
 mod.widgets.RadioButtonTabFlat.clip_y = false
 mod.widgets.RadioButtonTab.clip_x = false

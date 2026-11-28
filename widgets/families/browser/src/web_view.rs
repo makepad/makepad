@@ -481,3 +481,92 @@ impl WebViewRef {
         if let Some(mut inner) = self.borrow_mut() { inner.close(cx); }
     }
 }
+
+#[cfg(test)]
+mod g1_guard_tests {
+    use super::*;
+    use crate::{widget_async::with_isolate, CxSplashVmExt, HostGrants, WindowFamilies};
+
+    #[test]
+    fn web_view_and_native_app_view_blocked_in_default_isolate_and_allowed_when_granted() {
+        const URL: &str = "https://example.invalid/";
+        const BODY: &str = r#"flow: Down
+            web := WebView{ width: 80 height: 30 url: "https://example.invalid/" }
+            app := NativeAppView{ width: 80 height: 30 app: "wl.foot" }"#;
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| makepad_widgets_core::script_mod_with(vm, WindowFamilies::default(), &[crate::browser_mod]));
+        cx.global::<crate::widget_hooks::IsolateFamilies>().0.push(crate::browser_mod);
+        let window = WindowHandle::new(&mut cx);
+        let pass = DrawPass::new(&mut cx);
+        window.set_pass(&mut cx, &pass);
+        pass.set_size(&mut cx, dvec2(100., 80.));
+        let mut list = DrawList2d::new(&mut cx);
+        let mut draw = |cx: &mut Cx, root: &WidgetRef, allowed: bool| {
+            let _ = cx.take_platform_ops();
+            {
+                let event = DrawEvent::default();
+                let mut draw = CxDraw::new(cx, &event);
+                let mut cx = Cx2d::new(&mut draw);
+                cx.begin_pass(&pass, None);
+                list.begin_always(&mut cx);
+                cx.begin_root_turtle(dvec2(100., 80.), Layout::flow_down());
+                root.draw_walk_all(&mut cx, &mut Scope::empty(), Walk::fixed(100., 80.));
+                cx.end_pass_sized_turtle();
+                list.end(&mut cx);
+                cx.end_pass(&pass);
+            }
+            let web_ref = root.child(id!(web));
+            let web = web_ref.borrow::<WebView>().expect("the WebView must be mounted");
+            assert!(web.area().is_valid(cx), "WebView drew a real area");
+            assert!(root.child(id!(app)).area().is_valid(cx), "NativeAppView drew a real area");
+            assert!(!web.textured.is_open(), "headless draw must never open a browser backend");
+            assert!(!web.textured.was_attempted(), "headless draw must never attempt to open the textured browser backend");
+            let ops = cx.take_platform_ops();
+            if allowed {
+                let layer = web.layer.as_ref().expect("granted WebView retained its window layer");
+                assert_eq!(layer.mode(cx), NativeLayerMode::Pending, "granted WebView awaits realization");
+                assert!(ops.iter().any(|op| matches!(op, CxOsOp::NativeLayerCreate { id, content: NativeContent::Web { url } }
+                    if *id == layer.id() && url == URL)), "WebView requested its native layer");
+                let app_id = ops.iter().find_map(|op| match op {
+                    CxOsOp::NativeLayerCreate { id, content: NativeContent::WaylandApp { app } } if app == "wl.foot" => Some(*id),
+                    _ => None,
+                }).expect("granted NativeAppView requested its app layer");
+                assert!(ops.iter().any(|op| matches!(op, CxOsOp::NativeLayerOp { id, op: NativeLayerOperation::Size { .. } }
+                    if *id == app_id)), "NativeAppView sized its own layer");
+            } else {
+                assert_eq!(web.state.mode, WebViewMode::Unsupported, "denied WebView reported unsupported");
+                assert!(!ops.iter().any(|op| matches!(op, CxOsOp::NativeLayerCreate { .. } | CxOsOp::NativeLayerOp { .. })),
+                    "ungranted draw must enqueue no native layer creations or operations");
+            }
+        };
+
+        for allowed in [false, true] {
+            let vm_id = if allowed { cx.alloc_splash_vm_with_grants(HostGrants::NATIVE_LAYERS, None) } else { cx.alloc_splash_vm() };
+            with_isolate(&mut cx, vm_id, |cx| {
+                let root = cx.with_vm(|vm| {
+                    let v = crate::script_eval!(vm, {use mod.widgets.* View{
+                        flow: Down
+                        web := WebView{width: 80 height: 30 url: "https://example.invalid/"}
+                        app := NativeAppView{width: 80 height: 30 app: "wl.foot"}
+                    }});
+                    WidgetRef::script_from_value(vm, v)
+                });
+                if !allowed {
+                    let mut textured = TexturedWebView::default();
+                    textured.open(cx, URL);
+                    assert!(!textured.is_open(), "direct textured open was denied");
+                    assert!(!textured.was_attempted(), "ungranted textured open must stop before accessing the browser host");
+                }
+                draw(cx, &root, allowed);
+            });
+            cx.free_splash_vm(vm_id);
+        }
+
+        let splash = cx.with_vm(|vm| {
+            let v = crate::script_eval!(vm, {use mod.widgets.* Splash{}});
+            WidgetRef::script_from_value(vm, v)
+        });
+        splash.set_text(&mut cx, BODY);
+        draw(&mut cx, &splash, false);
+    }
+}

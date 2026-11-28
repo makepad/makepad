@@ -1074,13 +1074,7 @@ impl WidgetRef {
     */
     pub fn set_action_data<T: ActionTrait + PartialEq>(&self, data: T) {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
-            if let Some(v) = inner.widget.action_data() {
-                if let Some(v) = v.downcast_ref::<T>() {
-                    if v.ne(&data) {
-                        inner.widget.set_action_data(Arc::new(data));
-                    }
-                }
-            } else {
+            if inner.widget.action_data().is_none_or(|v| v.downcast_ref::<T>() != Some(&data)) {
                 inner.widget.set_action_data(Arc::new(data));
             }
         }
@@ -2413,6 +2407,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn action_data_reuses_equal_values_and_replaces_changed_values_or_types() {
+        struct DataWidget(WidgetActionData);
+
+        impl ScriptApply for DataWidget {}
+        impl Widget for DataWidget {}
+        impl WidgetNode for DataWidget {
+            fn widget_uid(&self) -> WidgetUid { WidgetUid(1) }
+            fn walk(&mut self, _cx: &mut Cx) -> Walk { Walk::default() }
+            fn area(&self) -> Area { Area::Empty }
+            fn redraw(&mut self, _cx: &mut Cx) {}
+
+            fn set_action_data(&mut self, data: Arc<dyn ActionTrait>) { self.0.set_box(data); }
+            fn action_data(&self) -> Option<Arc<dyn ActionTrait>> { self.0.clone_data() }
+        }
+
+        let widget = WidgetRef::new_with_inner(Box::new(DataWidget(WidgetActionData::default())));
+        widget.set_action_data(1u32);
+        let first = widget.action_data().expect("setting an empty widget stores action data");
+        assert_eq!(first.downcast_ref::<u32>(), Some(&1), "the first set stores the supplied value");
+
+        widget.set_action_data(1u32);
+        assert!(Arc::ptr_eq(&first, &widget.action_data().unwrap()), "equal data keeps the original Arc");
+
+        widget.set_action_data(2u32);
+        assert_eq!(widget.action_data().unwrap().downcast_ref::<u32>(), Some(&2),
+            "a different value of the same type replaces the old value");
+
+        widget.set_action_data(2i32);
+        assert_eq!(widget.action_data().unwrap().downcast_ref::<i32>(), Some(&2),
+            "a different type replaces the old payload even for the same number");
+    }
+
+    #[test]
     fn source_less_widgets_keep_generic_semantic_overrides() {
         crate::test_cx::on_test_cx(|| {
             let mut cx = crate::test_cx::checkout_test_cx(crate::script_mod);
@@ -2523,6 +2550,10 @@ mod tests {
 fn semantic_action(widget: &mut dyn Widget, cx: &mut Cx, event: &Event, scope: &mut Scope) {
     if let Event::A11yAction(req) = event {
         if cx.a11y.action_owner(req.node).uid() == widget.widget_uid().0 {
+            let area = widget.area();
+            if area.is_valid(cx) {
+                cx.a11y.refresh_node_area(req.node, area);
+            }
             let result = widget.handle_action(cx, req, scope);
             cx.a11y.record_action(req.req, result);
         }

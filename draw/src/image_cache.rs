@@ -19,7 +19,7 @@ pub struct ImageBuffer {
     pub animation: Option<TextureAnimation>,
     /// `Some(n)` when `data` holds the full concatenated mip chain (level 0 first,
     /// highest level `n`) instead of level 0 only. Set by
-    /// [`ImageBuffer::build_cpu_mip_chain_if_uploaded`].
+    /// [`ImageBuffer::prepare_for_texture`].
     max_level: Option<usize>,
     /// The size of the image (or of each animation frame) before it was shrunk, if it was.
     natural_size: Option<(usize, usize)>,
@@ -326,15 +326,13 @@ impl ImageBuffer {
         })
     }
 
-    /// Expands `data` from level 0 to the full concatenated mip chain when the current
-    /// configuration actually uploads CPU-built mips: a static image, with mipmaps
-    /// enabled, on a backend that reads levels past 0. Idempotent. Called from the
-    /// decode worker so the box-filter cost stays off the UI thread.
-    fn build_cpu_mip_chain_if_uploaded(&mut self) {
+    fn prepare_cpu_mip_chain(&mut self) {
         if self.max_level.is_some()
             || self.animation.is_some()
+            || self.width == 0
+            || self.height == 0
+            || self.data.len() < self.width.saturating_mul(self.height)
             || !backend_uploads_cpu_mip_chain()
-            || !image_cache_use_mipmaps()
         {
             return;
         }
@@ -344,10 +342,20 @@ impl ImageBuffer {
         self.max_level = Some(max_level);
     }
 
+    /// Performs any CPU-side pixel preparation that [`ImageBuffer::into_new_texture`]
+    /// would otherwise run on the UI thread (building the concatenated mip chain when
+    /// the current configuration uploads CPU-built mips). Idempotent, requires no `Cx`,
+    /// and intended for decode workers before handing the buffer to the UI thread.
+    pub fn prepare_for_texture(&mut self) {
+        if image_cache_use_mipmaps() {
+            self.prepare_cpu_mip_chain();
+        }
+    }
+
     pub fn into_new_texture(mut self, cx: &mut Cx) -> Texture {
         // Mipmap static images (not animations — frames must not bleed across mip levels) to avoid aliasing when minified.
         let format = if self.animation.is_none() && image_cache_use_mipmaps() {
-            self.build_cpu_mip_chain_if_uploaded();
+            self.prepare_for_texture();
             let max_level = self
                 .max_level
                 .unwrap_or_else(|| mip_chain_max_level(self.width, self.height));
@@ -391,12 +399,7 @@ impl ImageBuffer {
         if self.animation.is_some() {
             return self.into_new_texture(cx);
         }
-        if self.max_level.is_none() && backend_uploads_cpu_mip_chain() {
-            let level0 = std::mem::take(&mut self.data);
-            let (data, max_level) = generate_bgra_mip_chain(self.width, self.height, level0);
-            self.data = data;
-            self.max_level = Some(max_level);
-        }
+        self.prepare_cpu_mip_chain();
         let max_level = self
             .max_level
             .unwrap_or_else(|| mip_chain_max_level(self.width, self.height));
@@ -1041,6 +1044,67 @@ mod tests {
     }
 
     #[test]
+    fn prepare_for_texture_builds_mips_once_and_installs_without_rebuilding() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+
+        let mut image = ImageBuffer::new(&[0x80u8; 4 * 4 * 4], 4, 4).unwrap();
+        image.prepare_for_texture();
+        let prepared_len = image.data.len();
+        let prepared_ptr = image.data.as_ptr();
+        let prepared_max_level = image.max_level;
+        image.prepare_for_texture();
+        assert_eq!(
+            (image.data.len(), image.data.as_ptr(), image.max_level),
+            (prepared_len, prepared_ptr, prepared_max_level),
+            "prepare_for_texture must be idempotent"
+        );
+        if image_cache_use_mipmaps() && backend_uploads_cpu_mip_chain() {
+            assert_eq!((prepared_len, prepared_max_level), (21, Some(2)));
+        } else {
+            assert_eq!((prepared_len, prepared_max_level), (16, None));
+        }
+        let texture = image.into_new_texture(&mut cx);
+        match texture.get_format(&mut cx) {
+            TextureFormat::VecMipBGRAu8_32 { data: Some(buf), max_level: Some(2), .. }
+                if image_cache_use_mipmaps() =>
+            {
+                assert_eq!((buf.len(), buf.as_slice().as_ptr()), (prepared_len, prepared_ptr));
+            }
+            TextureFormat::VecBGRAu8_32 { data: Some(buf), .. }
+                if !image_cache_use_mipmaps() =>
+            {
+                assert_eq!((buf.len(), buf.as_ptr()), (prepared_len, prepared_ptr));
+            }
+            other => panic!("unexpected texture format after prepare_for_texture: {other:?}"),
+        }
+
+        // Exercise the CPU mip-chain path unconditionally on every host OS.
+        let mut mip_image = ImageBuffer::new(&[0x80u8; 4 * 4 * 4], 4, 4).unwrap();
+        mip_image.prepare_cpu_mip_chain();
+        if backend_uploads_cpu_mip_chain() {
+            assert_eq!((mip_image.data.len(), mip_image.max_level), (21, Some(2)));
+        }
+        let mip_len = mip_image.data.len();
+        let mip_ptr = mip_image.data.as_ptr();
+        mip_image.prepare_cpu_mip_chain();
+        assert_eq!((mip_image.data.len(), mip_image.data.as_ptr()), (mip_len, mip_ptr));
+        let mip_texture = mip_image.into_new_mip_texture(&mut cx);
+        match mip_texture.get_format(&mut cx) {
+            TextureFormat::VecMipBGRAu8_32 { data: Some(buf), max_level: Some(2), .. } => {
+                assert_eq!((buf.len(), buf.as_slice().as_ptr()), (mip_len, mip_ptr));
+            }
+            other => panic!("unexpected mip texture format: {other:?}"),
+        }
+
+        // Animated atlases never build mip chains across frame boundaries.
+        let mut anim = ImageBuffer::from_gif(&animated_gif()).unwrap();
+        let anim_len = anim.data.len();
+        anim.prepare_cpu_mip_chain();
+        anim.prepare_for_texture();
+        assert_eq!((anim.data.len(), anim.max_level), (anim_len, None));
+    }
+
+    #[test]
     fn test_mip_chain_max_level_matches_generated_chain() {
         for (w, h) in [(1, 1), (2, 1), (3, 2), (5, 9), (16, 16), (300, 200)] {
             let (_, max_level) = generate_bgra_mip_chain(w, h, vec![0u32; w * h]);
@@ -1518,7 +1582,7 @@ where
             let result = decode_image_buffer(&image_path, (*data).as_ref(), drawn_size).map(|mut buffer| {
                 // Mip-chain generation belongs with the decode: doing it here keeps the
                 // box-filter cost off the UI thread when the texture is committed.
-                buffer.build_cpu_mip_chain_if_uploaded();
+                buffer.prepare_for_texture();
                 buffer
             });
             if image_decode_debug_enabled() {

@@ -505,7 +505,10 @@ impl PrintJob {
                             None => Decoded::Failed("not readable".to_string()),
                             Some(bytes) if looks_like_svg(&bytes) => Decoded::Svg,
                             Some(bytes) => match decode_image_from_data(&bytes) {
-                                Ok(image) => Decoded::Raster(image),
+                                Ok(mut image) => {
+                                    image.prepare_for_texture();
+                                    Decoded::Raster(image)
+                                }
                                 Err(error) => Decoded::Failed(format!("{error:?}")),
                             },
                         };

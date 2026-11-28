@@ -214,13 +214,16 @@ fn frames_service(requests: Arc<Mutex<Vec<String>>>) -> Factory {
         } else {
             arg("n").and_then(|v| v.parse().ok()).unwrap_or(1)
         };
+        let raw = arg("codec").as_deref() == Some("raw");
         thread::spawn(move || {
             let channel = open.channel;
             for index in 0..count {
+                let codec = if raw { "raw" } else { "png" };
                 let head = format!(
-                    "{{\"seq\":{index},\"w\":4,\"h\":3,\"window\":{window},\"t_ns\":5,\"codec\":\"png\",\"capture_ms\":1.5,\"encode_ms\":0.5,\"capture_kind\":\"pixels\"}}"
+                    "{{\"seq\":{index},\"w\":4,\"h\":3,\"window\":{window},\"t_ns\":5,\"codec\":\"{codec}\",\"capture_ms\":1.5,\"encode_ms\":0.5,\"capture_kind\":\"pixels\"}}"
                 );
-                let record = makepad_remote::frames::encode_record(&head, format!("PNG{window}-{index}").as_bytes());
+                let bytes = if raw { [window as u8, index as u8, 2, 255].repeat(4 * 3) } else { format!("PNG{window}-{index}").into_bytes() };
+                let record = makepad_remote::frames::encode_record(&head, &bytes);
                 if channel.send(record).is_err() {
                     return;
                 }

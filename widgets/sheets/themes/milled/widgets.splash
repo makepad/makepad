@@ -428,10 +428,14 @@ mod.widgets.ButtonFlat.draw_bg.pixel = fn() {
     let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
     return self.host_over(ml_button(self.pos, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, self.loading, self.anim_time, 2.0, 0.0, 0.0), 0.0)
 }
+mod.widgets.ButtonFlat.draw_bg.face = {mode: @host_over, rest: #1f2229, hover: #262930, down: #131218}
+mod.widgets.ButtonFlat.draw_bg.color = #1f2229
+mod.widgets.ButtonFlat.draw_bg.color_default = #1f2229
 mod.widgets.ButtonFlatter.draw_bg.pixel = fn() {
     let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
     return self.host_over(ml_button(self.pos, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, self.loading, self.anim_time, 2.0, 6.0, 0.0), 0.0)
 }
+mod.widgets.ButtonFlatter.draw_bg.face = {mode: @host_over, rest: #00000000, hover: #2629308c, down: #13121873}
 mod.widgets.Button.draw_bg.vertex = fn() {
     let g = grow_vertex(self.rect_pos, self.rect_size, 8.0)
     self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
@@ -811,6 +815,7 @@ mod.widgets.RadioButtonTabFlat.draw_bg.pixel = fn() {
     let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
     return ml_segment(p, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, self.active, 1.0)
 }
+mod.widgets.RadioButtonTabFlat.draw_bg.face = {mode: @own_face, rest: #1f2229, hover: #262930, down: #131218, active: #0ee6fd}
 mod.widgets.RadioButtonTabFlat.draw_text.text_style = mod.theme.font_bold{font_size: 8.25}
 mod.widgets.RadioButtonTabFlat.draw_text.color = #9a9aa0
 mod.widgets.RadioButtonTabFlat.draw_text.color_hover = #c8cacf

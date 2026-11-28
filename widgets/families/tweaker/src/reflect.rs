@@ -26,8 +26,9 @@
 //!   the overlay's own gestures use.
 
 use crate::makepad_draw::*;
-pub use crate::tweaker::{
-    collect_row_docs, indexed_path, reflect_flat, resolve_widget_by_path, theme_values, ThemeVal,
+pub use makepad_widgets_core::design_data::{
+    pick::{indexed_path, resolve_widget_by_path}, props::{collect_row_docs, reflect_flat},
+    theme::{theme_values, ThemeVal},
 };
 
 /// Set one theme value at runtime. `name` is a token of `mod.theme`
@@ -50,7 +51,6 @@ pub fn theme_set_value(cx: &mut Cx, name: &str, text: &str) -> Result<(), String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tweaker::{theme_edit_text, theme_val_text};
     use crate::widget::WidgetRef;
     use std::collections::HashMap;
 
@@ -67,36 +67,5 @@ mod tests {
         assert_ne!(ThemeVal::Color(0xff5c39ff), ThemeVal::Num(1.0));
     }
 
-    #[test]
-    fn a_theme_value_reads_the_way_the_ledger_writes_it() {
-        assert_eq!(theme_val_text(ThemeVal::Color(0xff5c39ff)), "#ff5c39ff");
-        assert_eq!(theme_val_text(ThemeVal::Color(0x00000080)), "#00000080");
-        assert_eq!(theme_val_text(ThemeVal::Num(2.0)), "2");
-        assert_eq!(theme_val_text(ThemeVal::Num(0.125)), "0.125");
-    }
 
-    #[test]
-    fn a_theme_alias_resolves_to_the_other_tokens_current_text() {
-        let values = vec![
-            (
-                "color_a".to_string(),
-                LiveId::from_str("color_a"),
-                ThemeVal::Color(0xff5c39ff),
-                "t.rs:1".to_string(),
-            ),
-            (
-                "space_factor".to_string(),
-                LiveId::from_str("space_factor"),
-                ThemeVal::Num(10.0),
-                "t.rs:2".to_string(),
-            ),
-        ];
-        assert_eq!(theme_edit_text(&values, "theme.color_a").unwrap(), "#ff5c39ff");
-        assert_eq!(theme_edit_text(&values, "theme.space_factor").unwrap(), "10");
-        // Anything that is not an alias is taken as written; parsing is the
-        // apply path's job, not this one's.
-        assert_eq!(theme_edit_text(&values, "#000").unwrap(), "#000");
-        assert_eq!(theme_edit_text(&values, "12").unwrap(), "12");
-        assert!(theme_edit_text(&values, "theme.nope").unwrap_err().contains("nope"));
-    }
 }

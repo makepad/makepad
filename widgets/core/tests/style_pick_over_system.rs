@@ -12,6 +12,10 @@ use makepad_widgets_core::*;
 fn cx_under_system_sheet() -> Cx {
     let mut cx = Cx::new(Box::new(|_, _| {}));
     cx.init_cx_os();
+    cx.with_vm(|vm| {
+        assert!(!desktop_style::install_default(vm, |_| panic!("a fallback was built under a system sheet")));
+        assert_eq!(desktop_style::current_name(vm).as_deref(), Some("macos-dark"), "the environment's sheet takes precedence");
+    });
     cx.with_vm(|vm| makepad_widgets_core::script_mod(vm));
     cx
 }

@@ -12,7 +12,7 @@ use crate::{
     widget::*,
 };
 use crate::event::ScrollEvent;
-use crate::log_list::LogList;
+use crate::log_list::{LogList, LogListAction};
 use crate::makepad_draw::cx_draw::CxDraw;
 use std::cell::Cell;
 /// One row of daylight between a recalled row and the edge it came over.
@@ -158,6 +158,57 @@ fn the_list_holds_the_row_it_was_asked_to_keep() {
         far + LEAD < now + rows,
         "the recalled row landed pinned to the bottom edge: {now} + {rows} for {far}"
     );
+    });
+}
+
+#[test]
+fn a_growing_last_log_line_keeps_the_pane_following() {
+    crate::on_test_cx(|| {
+        let mut cx = test_cx();
+        let mut log = cx.with_vm(LogList::script_new_with_default);
+        log.lines = (0..20).map(|n| format!("log | line {n}")).collect();
+        let pass = DrawPass::new(&mut cx);
+        pass.set_size(&mut cx, PANE);
+        let mut draw_list = DrawList2d::new(&mut cx);
+        let mut draw = |cx: &mut Cx, log: &mut LogList| {
+            cx.capture_actions(|cx| frame(cx, log, &pass, &mut draw_list))
+        };
+        let deliver = |cx: &mut Cx, log: &mut LogList, actions: ActionsBuf| {
+            let emitted = cx.capture_actions(|cx| {
+                if !actions.is_empty() {
+                    log.handle_event(cx, &Event::Actions(actions), &mut Scope::empty());
+                }
+            });
+            emitted.filter_widget_actions_cast::<LogListAction>(log.widget_uid())
+                .filter_map(|action| match action {
+                    LogListAction::Following(following) => Some(following),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let list = log.portal_list(&cx, ids!(list));
+        for _ in 0..3 {
+            let actions = draw(&mut cx, &mut log);
+            assert!(deliver(&mut cx, &mut log, actions).is_empty());
+        }
+        assert!(list.is_at_end());
+        let before = list.drawn_slot(19).unwrap().size;
+        log.lines[19] = format!("log | {}", "wrapping ".repeat(40));
+
+        let jump = draw(&mut cx, &mut log);
+        assert!(list.drawn_slot(19).unwrap().size > before, "last line must wrap");
+        assert!(jump.is_empty() && !list.scrolled(&jump), "no action during the tail jump");
+        let settled = draw(&mut cx, &mut log);
+        assert!(list.scrolled(&settled) && list.is_at_end());
+        assert!(deliver(&mut cx, &mut log, settled).is_empty(), "the log was already following");
+
+        for (dy, following) in [(-60.0, false), (240.0, true)] {
+            wheel(&mut cx, &mut log, dy, false);
+            let actions = draw(&mut cx, &mut log);
+            assert!(list.scrolled(&actions));
+            assert_eq!(list.is_at_end(), following);
+            assert_eq!(deliver(&mut cx, &mut log, actions), [following]);
+        }
     });
 }
 

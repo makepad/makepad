@@ -235,7 +235,7 @@ pub(crate) fn gc_heaps(cx: &mut Cx, dead_heaps: &[usize]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::widget_async::CxSplashVmExt;
+    use crate::widget_async::{CxSplashVmExt, HostGrants};
 
     /// Creates a `CachedWidget` in the current VM and returns the UID of the widget it caches.
     fn cached_widget_uid(vm: &mut ScriptVm) -> WidgetUid {
@@ -250,7 +250,7 @@ mod tests {
         cx.with_vm(crate::script_mod);
         let app_uid = cx.with_vm(cached_widget_uid);
         assert_eq!(cx.with_vm(cached_widget_uid), app_uid, "the same heap reuses its widget");
-        let id = cx.alloc_splash_vm();
+        let id = cx.alloc_splash_vm_with_grants(HostGrants::DESKTOP_SHELL, None);
         assert_ne!(cx.with_script_vm_id(id, cached_widget_uid), app_uid);
         cx.free_splash_vm(id);
         assert_eq!(cx.get_global::<WidgetWrapperCache>().map.len(), 1, "a dead isolate's widgets are forgotten");

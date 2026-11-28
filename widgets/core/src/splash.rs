@@ -1,3 +1,6 @@
+//! Guest source must enter the VM with an empty cargo manifest directory. Add
+//! each new source entry point to `guest_funnels::GUEST_FUNNELS` below.
+
 use crate::{
     gauss_view::CaptureGauss,
     makepad_derive_widget::*,
@@ -5,8 +8,8 @@ use crate::{
     view::View,
     widget::*,
     widget_async::{
-        splash_theme, splash_theme_generation, splash_theme_script, CxSplashVmExt, SplashTheme,
-        SplashThemeScript, SplashVmId, MAIN_SPLASH_VM_ID,
+        splash_theme, splash_theme_generation, splash_theme_script, CxSplashVmExt, HostGrants, SplashTheme,
+        SplashThemeScript, SplashVmConfig, SplashVmId, MAIN_SPLASH_VM_ID,
     },
     widget_tree::CxWidgetExt,
 };
@@ -42,9 +45,12 @@ pub struct Splash {
     body: ArcStringMut,
     #[live]
     allow_net: bool,
-    /// Host-only, inherited restriction on external I/O. Never script-settable.
+    /// Host-only grant override, taking precedence over `allow_net`.
     #[rust]
-    host_io_only: bool,
+    host_grants: Option<HostGrants>,
+    /// Effective persistent grants after intersection with the enclosing VM.
+    #[rust(HostGrants::NONE)]
+    granted: HostGrants,
     /// The app's private storage directory — the root of its jailed `fs`
     /// module (see splash_storage.rs). None (the default) = every storage
     /// call errors, which is right for previews/validation-less contexts.
@@ -312,9 +318,18 @@ impl Splash {
     fn ensure_isolate(&mut self, cx: &mut Cx) {
         if self.vm_id == MAIN_SPLASH_VM_ID {
             self.showing_stop = false;
-            self.host_io_only |= cx.script_data.std.host_io_only();
+            let requested = self.host_grants.unwrap_or(if self.allow_net {
+                HostGrants::NETWORK
+            } else {
+                HostGrants::NONE
+            });
             self.styled = self.current_style();
-            self.vm_id = cx.alloc_splash_vm_with_theme(self.allow_net, self.host_io_only, self.theme);
+            self.vm_id = cx.alloc_splash_vm_with_config(SplashVmConfig {
+                grants: requested,
+                theme: self.theme,
+                ..SplashVmConfig::default()
+            });
+            self.granted = cx.with_script_vm_id(self.vm_id, |vm| vm.cx().script_data.std.grants());
         }
     }
 
@@ -334,6 +349,8 @@ impl Splash {
         })
     }
 
+    /// Guest source on initial load, live reload and restyle. Keep every entry in
+    /// the `guest_funnels::GUEST_FUNNELS` provenance test below.
     fn eval_styled_body(&mut self,cx:&mut Cx,preserve:bool) {
         if self.show_poison(cx) || self.body.as_ref().is_empty() {
             return;
@@ -353,7 +370,7 @@ impl Splash {
 
         let body_key = self.body_key();
         // Full code string: prefix + body (no closing - parser auto-closes)
-        let prefix = splash_prefix(self.allow_net);
+        let prefix = splash_prefix(self.granted.contains(HostGrants::NETWORK));
         let code = format!("{}{}", prefix, body);
 
         // Identity is stable (same module_path each call) AND the location
@@ -362,7 +379,7 @@ impl Splash {
         let script_mod = ScriptMod::new("", &self.body_key(), &self.source_label(), 0, 0, "", &[]);
 
         let vm_id = self.vm_id;
-        let sheet=if self.host_io_only {None} else {self.stylesheet.clone()};
+        let sheet = self.stylesheet.clone();
         let loader=if sheet.is_some() {crate::widget_async::isolate_loader(cx,vm_id)} else {None};
         let (theme, script) = (self.styled.theme, self.styled.script.clone());
         self.style_pending=false;
@@ -558,6 +575,7 @@ impl Splash {
         self.body_modules.clear();
         crate::widget_async::mark_splash_isolate_dead(self.vm_id);
         self.vm_id = MAIN_SPLASH_VM_ID;
+        self.granted = HostGrants::NONE;
         // Reclaim now (Cx is in hand and nothing runs in the isolate) so the
         // timers stop immediately rather than lingering to the next pump.
         crate::widget_async::gc_dead_splash_isolates(cx);
@@ -641,30 +659,21 @@ fn restore_modules(vm: &mut ScriptVm, saved: Vec<(LiveId, ScriptValue, Option<Sc
 /// not heap growth, so a hostile script can still allocate aggressively within
 /// its instruction limit; and top-level side effects (e.g. `start_interval`) run and live
 /// until the marked-dead isolate is reclaimed by `gc_dead_splash_isolates`.
-pub fn validate_splash_body(cx: &mut Cx, body: &str, allow_net: bool) -> Vec<String> {
-    validate_splash_body_with_io(cx, body, allow_net, false)
-}
-
-/// Validate untrusted source with all external I/O confined to the host bridge.
 ///
-/// The throwaway isolate has a fresh, empty filesystem jail and no host
-/// identity. Its files and queued bridge requests are discarded on completion.
-pub fn validate_splash_body_with_host_io(cx: &mut Cx, body: &str) -> Vec<String> {
-    validate_splash_body_with_io(cx, body, false, true)
-}
-
-fn validate_splash_body_with_io(cx: &mut Cx, body: &str, allow_net: bool, host_io_only: bool) -> Vec<String> {
-    let vm_id = cx.alloc_splash_vm_with_io(allow_net, host_io_only);
+/// This guest entry is exercised by `guest_funnels::GUEST_FUNNELS`.
+pub fn validate_splash_body(cx: &mut Cx, body: &str, allow_net: bool) -> Vec<String> {
+    let requested = if allow_net { HostGrants::NETWORK } else { HostGrants::NONE };
+    let vm_id = cx.alloc_splash_vm_with_grants(requested, None);
     // Boot-time storage checks see a fresh jail; validation never opens the
     // app's retained files. Only an exclusively created directory is owned.
     let scratch = ValidationScratch::new(vm_id);
     #[cfg(test)]
     LAST_VALIDATION_JAIL.with_borrow_mut(|jail| *jail = scratch.as_ref().map(|scratch| scratch.0.clone()));
-    let heap_key = cx.with_script_vm_id(vm_id, |vm| vm.heap_key());
+    let (heap_key, granted) = cx.with_script_vm_id(vm_id, |vm| (vm.heap_key(), vm.cx().script_data.std.grants()));
     if let Some(scratch) = &scratch {
         crate::splash_storage::set_root_for_heap(heap_key, Some(scratch.0.clone()));
     }
-    let prefix = splash_prefix(allow_net);
+    let prefix = splash_prefix(granted.contains(HostGrants::NETWORK));
     let code = format!("{}{}", prefix, body);
     let script_mod = ScriptMod::new("", &format!("splash-validate#{}", vm_id.0), "splash:validating", 0, 0, "", &[]);
     let mut errors_out = vec!["the script crashed its isolate during validation".to_string()];
@@ -802,31 +811,27 @@ impl Widget for Splash {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if self.show_poison(cx) { return; }
-        if self.host_io_only && matches!(event, Event::TextCopy(_) | Event::TextCut(_)) {
-            return;
-        }
         if self.vm_id == MAIN_SPLASH_VM_ID {
             return self.view.handle_event(cx, event, scope);
+        }
+        if !self.granted.contains(HostGrants::CLIPBOARD) && matches!(event, Event::TextCopy(_) | Event::TextCut(_)) {
+            return;
         }
         let mark = SplashDispatchMark::new(cx);
         // A panicking child's capture_actions can drop the buffer it swapped out.
         let pending = (!cx.new_actions.is_empty()).then(|| std::mem::take(&mut cx.new_actions));
         let mut stopped = None;
         let ok = crate::widget_async::contain_isolate_panic("widget event", || {
-            if self.allow_net {
+            if self.granted.contains(HostGrants::NETWORK) {
                 if let Event::NetworkResponses(responses) = event {
                     crate::widget_async::handle_splash_network_responses(cx, self.vm_id, responses);
                     stopped = self.pending_stop(cx);
                     if stopped.is_some() { return; }
                 }
             }
-            if self.host_io_only {
-                crate::widget_async::with_isolate(cx, self.vm_id, |cx| {
-                    self.view.handle_event(cx, event, scope);
-                });
-            } else {
+            crate::widget_async::with_isolate(cx, self.vm_id, |cx| {
                 self.view.handle_event(cx, event, scope);
-            }
+            });
         });
         let stopped = stopped.or_else(|| self.pending_stop(cx));
         if !ok || stopped.is_some() {
@@ -854,7 +859,9 @@ impl Widget for Splash {
         if self.vm_id != MAIN_SPLASH_VM_ID && self.needs_restyle() {
             self.restyle_theme(cx);
         }
-        if self.style_pending && self.vm_id!=MAIN_SPLASH_VM_ID && !self.host_io_only {self.eval_styled_body(cx,true);}
+        if self.style_pending && self.vm_id != MAIN_SPLASH_VM_ID {
+            self.eval_styled_body(cx, true);
+        }
         // A live edit: the isolate registers its UI again (its reload pass, on this first entry)
         // and the body runs again on it, as a restyle runs it, so the edited widgets draw.
         if self.vm_id != MAIN_SPLASH_VM_ID && self.reloaded_at != cx.reload_generation {
@@ -875,13 +882,9 @@ impl Widget for Splash {
         let draw_owner = cx.draw_owners.as_ref().map_or(0, |owners| owners.current);
         let mut step = DrawStep::done();
         let ok = crate::widget_async::contain_isolate_panic("widget draw", || {
-            step = if self.host_io_only {
-                crate::widget_async::with_isolate(cx, self.vm_id, |cx| {
-                    self.view.draw_walk(cx, scope, walk)
-                })
-            } else {
+            step = crate::widget_async::with_isolate(cx, self.vm_id, |cx| {
                 self.view.draw_walk(cx, scope, walk)
-            };
+            });
         });
         let stopped = self.pending_stop(cx);
         if ok && stopped.is_none() {
@@ -904,6 +907,8 @@ impl Widget for Splash {
         self.body.as_ref().to_string()
     }
 
+    /// Receives guest text from widget hosts, including Markdown's `runsplash`
+    /// fence. Keep new handoffs in `guest_funnels::GUEST_FUNNELS`.
     fn set_text(&mut self, cx: &mut Cx, v: &str) {
         if self.body.as_ref() != v {
             self.body.set(v);
@@ -978,15 +983,15 @@ impl Splash {
         called
     }
 
-    /// Require all external I/O to go through `host.request`.
-    ///
-    /// Call before `set_text`. This host-owned restriction cannot be disabled
-    /// after selection, including by nested Splash widgets or `allow_net: true`.
-    /// Raw sockets, HTTP, listeners, browser widgets, resource path/URL loading,
-    /// media sources, clipboard copying, and drag export are unavailable.
-    pub fn set_host_io_only(&mut self, enabled: bool) {
-        assert!(self.vm_id == MAIN_SPLASH_VM_ID, "set_host_io_only must precede set_text");
-        self.host_io_only |= enabled;
+    /// Set the persistent capabilities requested for this isolate, overriding `allow_net`.
+    /// Set them before `set_text` or `set_vm_policy`. Repeating the same request is safe.
+    /// The enclosing VM's persistent grants limit the capabilities the isolate receives.
+    pub fn set_grants(&mut self, grants: HostGrants) {
+        if self.host_grants == Some(grants) {
+            return;
+        }
+        assert!(self.vm_id == MAIN_SPLASH_VM_ID, "set_grants must precede isolate allocation");
+        self.host_grants = Some(grants);
     }
 
     /// Sets whether this Splash's isolate gets the networking runtime. Must be
@@ -1098,6 +1103,13 @@ impl Splash {
 }
 
 impl SplashRef {
+    /// See [`Splash::set_grants`].
+    pub fn set_grants(&self, grants: HostGrants) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_grants(grants);
+        }
+    }
+
     pub fn set_text(&self, cx: &mut Cx, v: &str) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_text(cx, v);
@@ -1193,7 +1205,11 @@ mod panic_tests {
     use crate::widget_async::current_splash_vm_id;
 
     #[derive(Default)]
-    struct ObservedScroll(Option<[u32; 2]>);
+    struct ObservedDispatch {
+        scroll_depth: Option<[u32; 2]>,
+        event_grants: Option<HostGrants>,
+        draw_grants: Option<HostGrants>,
+    }
 
     #[derive(Script, ScriptHook, Widget)]
     struct PanicChild {
@@ -1208,7 +1224,8 @@ mod panic_tests {
     impl Widget for PanicChild {
         fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
             if self.on_event && matches!(event, Event::Scroll(_)) {
-                cx.global::<ObservedScroll>().0 = Some(cx.scroll_container_depth());
+                cx.global::<ObservedDispatch>().scroll_depth = Some(cx.scroll_container_depth());
+                cx.global::<ObservedDispatch>().event_grants = Some(cx.script_data.std.grants());
                 cx.capture_actions(|_| panic!("child event"));
             }
         }
@@ -1219,6 +1236,7 @@ mod panic_tests {
                 return DrawStep::done();
             }
             if self.yielded {
+                cx.global::<ObservedDispatch>().draw_grants = Some(cx.script_data.std.grants());
                 cx.add_begin_scroll();
                 cx.sploded_scene = Some(cx.current_pass_id());
                 cx.push_clip_rect(Rect::default());
@@ -1234,20 +1252,22 @@ mod panic_tests {
     fn a_panicking_child_stops_only_its_splash() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.with_vm(crate::script_mod);
-        let new_splash = |cx: &mut Cx, restricted, body: &str| {
+        let new_splash = |cx: &mut Cx, grants, body: &str| {
             let mut splash = cx.with_vm(|vm| Splash::script_new_with_default(vm));
-            splash.set_host_io_only(restricted);
+            if let Some(grants) = grants {
+                splash.set_grants(grants);
+            }
             splash.set_text(cx, body);
             assert!(splash.last_errors.is_empty(), "the test body must load: {:?}", splash.last_errors);
             splash
         };
-        let mut on_event = new_splash(&mut cx, false, r#"
+        let mut on_event = new_splash(&mut cx, None, r#"
             flow: Down
             scroll_bars: mod.widgets.ScrollBars{show_scroll_x: false show_scroll_y: true}
             spacer := View{width: 20 height: 160}
         "#);
-        let mut on_draw = new_splash(&mut cx, true, "body := View{}");
-        let mut sibling = new_splash(&mut cx, false, r#"body := Label{text: "host sibling"}"#);
+        let mut on_draw = new_splash(&mut cx, Some(HostGrants::CLIPBOARD), "body := View{}");
+        let mut sibling = new_splash(&mut cx, None, r#"body := Label{text: "host sibling"}"#);
         let sibling_node = a11y_tree::NodeId::widget(sibling.view.children[0].1.widget_uid().0);
         for (splash, fail_event) in [(&mut on_event, true), (&mut on_draw, false)] {
             let child = cx.with_script_vm_id(splash.vm_id, |vm| {
@@ -1328,7 +1348,11 @@ mod panic_tests {
                     time: 0.,
                     phase: ScrollPhase::None,
                 }), &mut scope);
-                assert_eq!(cx.global::<ObservedScroll>().0, Some([depth[0], depth[1] + 1]),
+                assert_eq!(cx.global::<ObservedDispatch>().event_grants, Some(HostGrants::NONE),
+                    "the default Splash dispatched its event without host grants");
+                assert_eq!(cx.global::<ObservedDispatch>().draw_grants, Some(HostGrants::CLIPBOARD),
+                    "the resumed draw ran with the granted Splash's capabilities");
+                assert_eq!(cx.global::<ObservedDispatch>().scroll_depth, Some([depth[0], depth[1] + 1]),
                     "the scrolling View opened its vertical event scope before the child panicked");
                 assert_eq!(cx.scroll_container_depth(), depth, "the host kept its enclosing scroll scopes");
                 cx.end_scroll_container([true, true]);
@@ -1553,6 +1577,83 @@ mod live_edit_tests {
 }
 
 #[cfg(test)]
+pub(crate) mod guest_funnels {
+    use super::*;
+
+    /// Every path that gives guest source to a Splash VM belongs here. A nonempty
+    /// cargo manifest would make that source eligible for scoped host grants.
+    pub(crate) const GUEST_FUNNELS: &[(&str, fn(&mut Cx, &str) -> Vec<String>)] = &[
+        ("Splash body", |cx, source| {
+            let mut splash = cx.with_vm(Splash::script_new_with_default);
+            splash.set_text(cx, source);
+            splash.last_errors.clone()
+        }),
+        ("Splash reload/restyle body", |cx, source| {
+            let mut splash = cx.with_vm(Splash::script_new_with_default);
+            splash.set_text(cx, "View{}");
+            // A fresh file forces reload to create a body with its own metadata.
+            splash.set_debug_name("restyled-funnel");
+            splash.body.set(source);
+            splash.restyle_theme(cx);
+            splash.last_errors.clone()
+        }),
+        ("validate_splash_body", |cx, source| validate_splash_body(cx, source, false)),
+        ("Markdown fenced Splash (AI Chat)", |cx, source| {
+            // The rich-text widget delivers the extracted fence through this
+            // WidgetRef. Flow's test also runs the actual Markdown parser.
+            let item = cx.with_vm(|vm| {
+                let value = vm.eval(makepad_script::script! {
+                    use mod.widgets.* View{splash_view := Splash{allow_net: true}}
+                });
+                WidgetRef::script_from_value(vm, value)
+            });
+            let target = item.widget(cx, ids!(splash_view));
+            target.set_text(cx, source);
+            target.as_splash().last_errors()
+        }),
+    ];
+
+    #[derive(Default)]
+    struct GuestBodies(Vec<(u16, Option<(String, String)>)>);
+
+    const PROBE_CALL: &str = "mod.guest_funnel_probe.record()";
+
+    // Read provenance in the executing guest so validation can free its VM as usual.
+    fn install_probe(vm: &mut ScriptVm) {
+        let probe = vm.new_module(id!(guest_funnel_probe));
+        vm.add_method(probe, id!(record), &[], |vm, _| {
+            for index in 0..vm.body_count() {
+                let body = u16::try_from(index).unwrap();
+                if vm.body_text(ScriptIp { body, index: 0 }).is_some_and(|(_, text)| text.contains(PROBE_CALL)) {
+                    let module = vm.body_module(body);
+                    vm.cx_mut().global::<GuestBodies>().0.push((body, module));
+                }
+            }
+            NIL
+        });
+    }
+
+    #[test]
+    fn guest_funnels_evaluate_source_with_an_empty_manifest() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        cx.global::<crate::widget_hooks::IsolateFamilies>().0.push(install_probe);
+        let source = format!("let observed = {PROBE_CALL}");
+        for &(funnel, run) in GUEST_FUNNELS {
+            let errors = run(&mut cx, &source);
+            assert!(errors.is_empty(), "{funnel}: {errors:?}");
+            let bodies = std::mem::take(&mut cx.global::<GuestBodies>().0);
+            assert!(!bodies.is_empty(), "{funnel} did not execute the guest source");
+            for (body, module) in bodies {
+                let (manifest, path) = module.unwrap_or_else(|| panic!("{funnel}: missing module for body {body}"));
+                assert!(manifest.is_empty(), "{funnel}: guest body {body} ({path}) has manifest {manifest:?}");
+            }
+        }
+        crate::widget_async::gc_dead_splash_isolates(&mut cx);
+    }
+}
+
+#[cfg(test)]
 mod host_io_validation_tests {
     use super::*;
 
@@ -1570,18 +1671,18 @@ mod host_io_validation_tests {
     fn host_io_validation_blocks_resources_and_has_only_empty_storage() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.with_vm(crate::script_mod);
-        assert!(validate_splash_body_with_host_io(&mut cx, "Label{text: \"safe\"}").is_empty());
-        assert!(!validate_splash_body_with_host_io(&mut cx, "let resource = http_resource(\"http://127.0.0.1:9/private\")").is_empty());
-        assert!(!validate_splash_body_with_host_io(&mut cx, "let resource = file_resource(\"/private\")").is_empty());
+        assert!(validate_splash_body(&mut cx, "Label{text: \"safe\"}", false).is_empty(), "a safe widget validates");
+        assert!(!validate_splash_body(&mut cx, "let resource = http_resource(\"http://127.0.0.1:9/private\")", false).is_empty(), "offline validation refuses HTTP resources");
+        assert!(!validate_splash_body(&mut cx, "let resource = file_resource(\"/private\")", false).is_empty(), "offline validation refuses file resources");
         let source = r#"use mod.std.assert
             assert(!fs.exists("/items.json"))
             fs.write("/items.json", "validation only")
             assert(fs.read("/items.json") == "validation only")
             Label{text: "safe"}
         "#;
-        let errors = validate_splash_body_with_host_io(&mut cx, source);
+        let errors = validate_splash_body(&mut cx, source, false);
         assert!(errors.is_empty(), "{errors:?}");
-        let errors = validate_splash_body_with_host_io(&mut cx, source);
+        let errors = validate_splash_body(&mut cx, source, false);
         assert!(errors.is_empty(), "a second validation must have fresh storage: {errors:?}");
     }
 
@@ -1593,7 +1694,7 @@ mod host_io_validation_tests {
             mod.host.request("network.http", {url: "https://example.invalid/"}, fn(result) {})
             Label{text: "safe"}
         "#;
-        let errors = validate_splash_body_with_host_io(&mut cx, source);
+        let errors = validate_splash_body(&mut cx, source, false);
         assert!(errors.is_empty(), "{errors:?}");
         let jail = LAST_VALIDATION_JAIL.with_borrow_mut(Option::take).expect("validation had a jail");
         assert!(!jail.exists(), "validation left its jail behind");
@@ -1783,7 +1884,6 @@ mod theme_tests {
         set_splash_theme_script(host_script("#x112233"));
         let mut cx = Cx::new(Box::new(|_, _| {}));
         let mut splash = new_splash(&mut cx);
-        splash.set_host_io_only(true);
         splash.set_text(&mut cx, BODY);
         assert_eq!(seen_token(&mut cx, &mut splash), Some(0x112233ff));
 
@@ -1791,6 +1891,180 @@ mod theme_tests {
         // Registering the widgets again needs the resources the trusted boot loaded.
         assert_eq!(restyle(&mut cx, &mut splash), Vec::<String>::new());
         assert_eq!(seen_token(&mut cx, &mut splash), Some(0x445566ff));
+        splash.stop(&mut cx);
+    }
+}
+
+#[cfg(test)]
+mod g1_guard_tests {
+    use super::*;
+    use crate::makepad_draw::text::selection::{Cursor, Selection};
+    use crate::makepad_platform::event::TextClipboardEvent;
+    use crate::makepad_platform::studio::{RemoteMouseDown, RemoteMouseUp, StudioToApp};
+    use crate::text_input::TextInput;
+    use crate::widget_async::with_isolate;
+
+    fn mount(cx: &mut Cx, grants: Option<HostGrants>, body: &str) -> Splash {
+        let mut splash = cx.with_vm(Splash::script_new_with_default);
+        if let Some(grants) = grants {
+            splash.set_grants(grants);
+        }
+        splash.set_text(cx, body);
+        assert!(splash.last_errors.is_empty(), "guest body must load: {:?}", splash.last_errors);
+        splash
+    }
+
+    #[test]
+    fn default_splash_blocks_link_label_copy_button_and_text_clipboard_while_granted_allows_them() {
+        const URL: &str = "https://example.invalid/";
+        const BODY: &str = r#"
+            flow: Down
+            link := LinkLabel{ width: 80 height: 30 text: "go" url: "https://example.invalid/" }
+            copy := Button{ width: 80 height: 30 text: "copy" text_to_copy: "secret" }
+            input := TextInput{ width: 100 height: 30 text: "hello world" }
+        "#;
+
+        #[derive(Default)]
+        struct Mounted(WidgetRef);
+        let mut cx = Cx::new(Box::new(|cx, event| {
+            let root = cx.global::<Mounted>().0.clone();
+            root.handle_event(cx, event, &mut Scope::empty());
+        }));
+        cx.with_vm(crate::script_mod);
+        let window = WindowHandle::new(&mut cx);
+        let pass = DrawPass::new(&mut cx);
+        let size = dvec2(120., 100.);
+        pass.set_size(&mut cx, size);
+        let mut list = DrawList2d::new(&mut cx);
+
+        for grants in [None, Some(HostGrants::OPEN_URL.union(HostGrants::CLIPBOARD))] {
+            let splash = mount(&mut cx, grants, BODY);
+            let root = WidgetRef::new_with_inner(Box::new(splash));
+            cx.global::<Mounted>().0 = root.clone();
+            {
+                let event = DrawEvent::default();
+                let mut draw = CxDraw::new(&mut cx, &event);
+                let mut cx = Cx2d::new(&mut draw);
+                cx.begin_pass(&pass, None);
+                list.begin_always(&mut cx);
+                cx.begin_root_turtle(size, Layout::flow_down());
+                root.draw_walk_all(&mut cx, &mut Scope::empty(), Walk::fixed(size.x, size.y));
+                cx.end_pass_sized_turtle();
+                list.end(&mut cx);
+                cx.end_pass(&pass);
+            }
+
+            let click = |cx: &mut Cx, child: &WidgetRef| {
+                let area = child.area();
+                let rect = area.clipped_rect(cx);
+                assert!(area.is_valid(cx) && rect.size.x > 0. && rect.size.y > 0., "click target must be drawn");
+                let at = rect.center();
+                for msg in [
+                    StudioToApp::MouseDown(RemoteMouseDown { x: at.x, y: at.y, button_raw_bits: 1, time: 1., ..Default::default() }),
+                    StudioToApp::MouseUp(RemoteMouseUp { x: at.x, y: at.y, button_raw_bits: 1, time: 1.1, ..Default::default() }),
+                ] {
+                    cx.dispatch_studio_msg(msg, window.window_id(), dvec2(0., 0.));
+                }
+            };
+            let link = root.child(id!(link));
+            let copy = root.child(id!(copy));
+            let input = root.child(id!(input));
+            let _ = cx.take_platform_ops();
+            click(&mut cx, &link);
+            let urls: Vec<_> = cx.take_platform_ops().into_iter().filter_map(|op| match op {
+                CxOsOp::OpenUrl { url, in_place } => Some((url, in_place)),
+                _ => None,
+            }).collect();
+            assert_eq!(urls, grants.map(|_| (URL.to_owned(), OpenUrlInPlace::No)).into_iter().collect::<Vec<_>>(),
+                "link click opens its exact URL only with OPEN_URL");
+
+            let copies = |cx: &mut Cx| cx.take_platform_ops().into_iter().filter_map(|op| match op {
+                CxOsOp::CopyToClipboard(write) => Some(write.text),
+                _ => None,
+            }).collect::<Vec<_>>();
+            let expected = grants.map(|_| "secret".to_owned()).into_iter().collect::<Vec<_>>();
+            click(&mut cx, &copy);
+            assert_eq!(copies(&mut cx), expected, "pointer press copies exactly once only with CLIPBOARD");
+            root.handle_event(&mut cx, &Event::A11yAction(a11y_tree::ActionRequest {
+                req: 1, node: a11y_tree::NodeId::widget(copy.widget_uid().0),
+                action: a11y_tree::Actions::PRESS, arg: a11y_tree::ActionArg::None,
+            }), &mut Scope::empty());
+            assert_eq!(copies(&mut cx), expected, "accessibility press copies exactly once only with CLIPBOARD");
+
+            {
+                let mut field = input.borrow_mut::<TextInput>().expect("input is a TextInput");
+                field.take_key_focus(&mut cx);
+                field.set_selection(&mut cx, Selection { anchor: Cursor::default(), cursor: Cursor { index: 5, ..Default::default() } });
+            }
+            cx.handle_actions(); // Deliver the queued button action and commit the field's focus.
+            assert!(cx.has_key_focus(input.area()), "clipboard events must reach the focused field");
+            let selected = grants.map(|_| "hello".to_owned());
+            let copy_event = TextClipboardEvent::default();
+            root.handle_event(&mut cx, &Event::TextCopy(copy_event.clone()), &mut Scope::empty());
+            assert_eq!(copy_event.written().map(|w| w.text), selected, "copy returns the selection only with CLIPBOARD");
+            assert_eq!(input.text(), "hello world", "copy preserves the selection's text");
+            let cut_event = TextClipboardEvent::default();
+            root.handle_event(&mut cx, &Event::TextCut(cut_event.clone()), &mut Scope::empty());
+            assert_eq!(cut_event.written().map(|w| w.text), selected, "cut returns the selection only with CLIPBOARD");
+            assert_eq!(input.text(), if grants.is_some() { " world" } else { "hello world" },
+                "only a granted cut removes the selection");
+            root.borrow_mut::<Splash>().unwrap().stop(&mut cx);
+        }
+    }
+
+    #[test]
+    fn nested_splash_cannot_escalate_allow_net_or_desktop_grants() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let mut outer = mount(&mut cx, None, "online := Splash{ allow_net: true }\ndesktop := Splash{}");
+        let outer_id = outer.vm_id;
+        assert_eq!(outer.granted, HostGrants::NONE, "outer Splash must have default grants");
+        with_isolate(&mut cx, outer_id, |cx| {
+            for (name, widget) in &outer.view.children {
+                let mut inner = widget.borrow_mut::<Splash>().expect("nested Splash");
+                if *name == id!(desktop) {
+                    inner.set_grants(HostGrants::DESKTOP_ALL);
+                } else {
+                    assert!(inner.allow_net, "the nested DSL must request NETWORK");
+                }
+                inner.set_text(cx, r#"lbl := Label{ text: "hi" }"#);
+                assert!(inner.last_errors.is_empty(), "nested body must load: {:?}", inner.last_errors);
+                assert_ne!(inner.vm_id, MAIN_SPLASH_VM_ID, "nested Splash allocated an isolate");
+                assert_ne!(inner.vm_id, outer_id, "nested Splash has its own isolate");
+                assert_eq!(inner.granted, HostGrants::NONE, "parent restricts the nested grant request");
+                cx.with_script_vm_id(inner.vm_id, |vm| {
+                    assert_eq!(vm.cx().script_data.std.grants(), HostGrants::NONE, "nested VM has no persistent grants");
+                    assert!(vm.cx().script_data.std.net.is_none(), "nested VM has no network runtime");
+                });
+                inner.stop(cx);
+            }
+        });
+        assert_eq!(outer.view.children.len(), 2, "both nested requests were exercised");
+        outer.stop(&mut cx);
+    }
+
+    #[test]
+    fn splash_set_grants_none_overrides_dsl_allow_net() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let mut splash = cx.with_vm(Splash::script_new_with_default);
+        splash.set_allow_net(true);
+        splash.set_grants(HostGrants::NONE);
+        splash.set_text(&mut cx, "lbl := Label{}");
+        assert!(splash.last_errors.is_empty(), "offline body must load");
+        assert_ne!(splash.vm_id, MAIN_SPLASH_VM_ID, "the host override was applied to an allocated isolate");
+        assert_eq!(splash.granted, HostGrants::NONE, "the override wins over allow_net");
+        cx.with_script_vm_id(splash.vm_id, |vm| {
+            assert_eq!(vm.cx().script_data.std.grants(), HostGrants::NONE, "guest sees the override");
+            assert!(vm.cx().script_data.std.net.is_none(), "offline VM has no network runtime");
+            vm.capture_errors();
+            let result = vm.eval(makepad_script::script! {
+                mod.net.http_request(mod.net.HttpRequest{url: "about:blank"}, mod.net.HttpEvents{})
+            });
+            let errors = vm.take_errors();
+            assert!(result.is_err() && errors.iter().any(|e| e.contains("host request")),
+                "guest HTTP calls must be denied by the grant: {errors:?}");
+        });
         splash.stop(&mut cx);
     }
 }

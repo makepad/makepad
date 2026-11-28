@@ -811,13 +811,14 @@ impl Runtime {
         self.mounted = Some(body.clone());
         // (The old program's places go with it.)
         makepad_value_pickers::panel::host::program_changed();
-        let splash = panel.widget(cx, ids!(p_splash));
+        let splash = panel.widget(cx, ids!(p_splash)).as_splash();
+        splash.set_grants(HostGrants::CLIPBOARD);
         match &body {
             Some(body) => {
                 // Mounted either way (what runs of it shows), the mount's own
                 // errors in the state line: no second isolate to check it first.
-                splash.as_splash().set_text(cx, body);
-                let errors = splash.as_splash().last_errors();
+                splash.set_text(cx, body);
+                let errors = splash.last_errors();
                 self.status = match errors.first() {
                     Some(error) => {
                         log!("editor panel: {}", errors.join("; "));
@@ -827,7 +828,7 @@ impl Runtime {
                 };
             }
             None => {
-                splash.as_splash().set_text(cx, "");
+                splash.set_text(cx, "");
                 self.status.clear();
             }
         }

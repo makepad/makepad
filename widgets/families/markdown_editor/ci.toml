@@ -1,7 +1,7 @@
 # CI (devhub ci): [ci] is hand-written settings; the other sections are proofs devhub writes.
 
 [tests.linux]
-date = "2026-11-26"
-digest = "25a1d4ce3f0958702fdfeb95f513147cb7eca9486edfc30eed129ba1353dcc0a"
-main = "f0a2ef91c7ae77fb351dad4870fecffc13ce6863"
-work = "c87cdfc86d6ff85dc54a9425ec4853867560b460"
+date = "2026-11-27"
+digest = "019ad37b9afd11cdb70e7d7aa8bd908b740af3ecf243d546ec9a18221683f81f"
+main = "8f48d8f8324d8d41881f4db50c7d3686c0277b41"
+work = "58430777793087176ad7de310279b38cf1c200bf"

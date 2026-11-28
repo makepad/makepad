@@ -1400,6 +1400,11 @@ impl CodeEditor {
             Hit::KeyFocus(_) => {
                 cx.set_key_focus_takes_text(self.scroll_bars.area(), !self.is_read_only());
                 self.animator_play(cx, ids!(focus.on));
+                // Keyboard and assistive-tech focus arrive without pointer input, so the
+                // blink timer must start here too (a no-op when read-only or steady).
+                if !self.is_read_only() {
+                    self.reset_cursor_blinker(cx);
+                }
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::Escape,

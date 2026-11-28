@@ -565,6 +565,13 @@ pub struct Popover {
     content: WidgetRef,
     #[rust]
     draw_list: Option<DrawList2d>,
+    /// Whether the overlay list holds content from an open draw: the draw after a close
+    /// begins it once more, empty, and after that a closed popover does no overlay work.
+    #[rust]
+    overlay_shown: bool,
+    /// An open popover found no overlay to draw on, and said so once.
+    #[rust]
+    told_no_overlay: bool,
     #[rust]
     open: bool,
     /// The anchor's FINAL rect, captured on the event side. Mid-draw the
@@ -832,11 +839,13 @@ impl Popover {
             self.lock_pending = false;
             // Key focus goes back where it came from, or to the anchor when
             // nothing held it.
+            // What held it may have drawn again while this was open: follow it to its handle now.
             self.focus_trap.end(cx);
-            let back = if self.focus_before.is_empty() {
+            let before = crate::modal::area_after_redraws(cx, self.focus_before);
+            let back = if before.is_empty() {
                 self.view.area()
             } else {
-                self.focus_before
+                before
             };
             cx.restore_key_focus(back, self.is_focus_before_from_user);
         }
@@ -992,11 +1001,24 @@ impl Widget for Popover {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         // The anchor, in layout, exactly as it would be without the wrapper.
         self.view.draw_walk(cx, scope, walk)?;
+        // A list that is not begun keeps showing what it showed last, so the
+        // draw after a close begins it once more to empty it. Closed and
+        // already empty, there is nothing to do.
+        if !self.open && !self.overlay_shown {
+            return DrawStep::done();
+        }
+        // With no overlay to hang the content on (a bare pass with no window),
+        // only the anchor draws.
+        if !cx.has_overlay() {
+            if self.open && !self.told_no_overlay {
+                self.told_no_overlay = true;
+                log!("Popover: open, but this draw has no overlay to show its content on");
+            }
+            return DrawStep::done();
+        }
 
-        // The overlay list is begun on every draw, open or not: a list that
-        // is not begun keeps showing what it showed last. The handle is
-        // taken out of `self` for the duration so the borrow does not pin
-        // every other field.
+        // The handle is taken out of `self` for the duration so the borrow
+        // does not pin every other field.
         let Some(mut draw_list) = self.draw_list.take() else {
             return DrawStep::done();
         };
@@ -1093,6 +1115,7 @@ impl Widget for Popover {
         }
         draw_list.end(cx);
         self.draw_list = Some(draw_list);
+        self.overlay_shown = self.open && !self.content.is_empty();
         DrawStep::done()
     }
 
@@ -1519,8 +1542,9 @@ impl FocusTrap {
             return;
         }
         self.active = false;
-        if !self.restore.is_empty() {
-            cx.restore_key_focus(self.restore, self.is_restore_from_user);
+        let restore = crate::modal::area_after_redraws(cx, self.restore);
+        if !restore.is_empty() {
+            cx.restore_key_focus(restore, self.is_restore_from_user);
         }
     }
 

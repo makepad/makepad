@@ -413,10 +413,14 @@ mod.widgets.ButtonFlat.draw_bg.pixel = fn() {
     let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
     return self.host_over(bz_button(self.pos, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, self.loading, self.anim_time, 2.0, 0.0, 0.0), 0.0)
 }
+mod.widgets.ButtonFlat.draw_bg.face = {mode: @host_over, rest: #383530, hover: #44413c, down: #191816}
+mod.widgets.ButtonFlat.draw_bg.color = #383530
+mod.widgets.ButtonFlat.draw_bg.color_default = #383530
 mod.widgets.ButtonFlatter.draw_bg.pixel = fn() {
     let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
     return self.host_over(bz_button(self.pos, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, self.loading, self.anim_time, 2.0, 6.0, 0.0), 0.0)
 }
+mod.widgets.ButtonFlatter.draw_bg.face = {mode: @host_over, rest: #00000000, hover: #0000001f, down: #0000003d}
 mod.widgets.Button.draw_bg.vertex = fn() {
     let g = grow_vertex(self.rect_pos, self.rect_size, 8.0)
     self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
@@ -861,6 +865,7 @@ mod.widgets.RadioButtonTabFlat.draw_bg.pixel = fn() {
     }
     return out
 }
+mod.widgets.RadioButtonTabFlat.draw_bg.face = {mode: @own_face, rest: #bca169, hover: #cbb37c, down: #a58b55, active: #181613}
 mod.widgets.RadioButtonTabFlat.draw_text.text_style = mod.theme.font_regular{font_size: 8.25}
 mod.widgets.RadioButtonTabFlat.draw_text.color = #261a0a
 mod.widgets.RadioButtonTabFlat.draw_text.color_hover = #160f05

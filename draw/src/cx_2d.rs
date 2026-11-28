@@ -319,6 +319,12 @@ impl<'a, 'b> Cx2d<'a, 'b> {
         self.overlay_draw_depth > 0
     }
 
+    /// Whether this draw has an overlay to hang popups on: a window's draw does, a bare pass
+    /// (a test's, or an offscreen one) may not.
+    pub fn has_overlay(&self) -> bool {
+        self.overlay_id.is_some()
+    }
+
     /// Draw one turtle scope's wireframe frame, while — and only while — the
     /// exploded z-layer view is up.
     ///

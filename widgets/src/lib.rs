@@ -45,7 +45,7 @@ pub use makepad_widgets_collections::{
 #[cfg(feature = "pickers")]
 pub use makepad_widgets_pickers::{
     avatar, avatar::*, column_picker, column_picker::*, combo_box, combo_box::*, drop_down2,
-    drop_down2::*, drop_toggles, drop_toggles::*, form, form::*, number_field, number_field::*,
+    drop_down2::*, drop_toggles, drop_toggles::*, emoji_picker, emoji_picker::*, form, form::*, number_field, number_field::*,
     picker_parts, picker_parts::*, radio_group, radio_group::*, range_slider, range_slider::*,
     rating, rating::*, recent_list, recent_list::*, tag_field, tag_field::*, transfer, transfer::*, tree_select,
     tree_select::*, wheel_picker, wheel_picker::*,

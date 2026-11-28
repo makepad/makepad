@@ -37,7 +37,8 @@
 //!   [`ReorderList::set_external_gap`]. The list opens that gap and draws
 //!   its line in it as it does for its own carry, until the host closes it
 //!   with `None`; the drop itself is the host's too. The list's own drag,
-//!   while one is live, wins.
+//!   while one is live, wins. Hosts can opt into a full-height outline for
+//!   the incoming row with [`ReorderList::set_external_gap_height`], including in an empty list.
 //!
 //! The host names the gripper in its item template and points at it:
 //!
@@ -141,9 +142,10 @@ fn drop_slot(point: DVec2, list: Rect, rows: &[RowBand]) -> Option<usize> {
 /// The gap a drop from outside holds open at `slot`, as a carry of a row
 /// from past the end of the list: every row from the slot down makes way
 /// and nothing is lifted, since no row is that one. As tall as the row the
-/// gap opens before, the last row's after the end. `None` with no row drawn.
-fn outside_gap(slot: usize, rows: &[RowBand]) -> Option<ReorderDrag> {
-    let (_, _, height) = rows.iter().find(|(id, _, _)| *id == slot).or(rows.last()).copied()?;
+/// gap opens before, the last row's after the end. A supplied height takes
+/// precedence and lets an empty list preview the incoming row too.
+fn outside_gap(slot: usize, rows: &[RowBand], incoming_height: Option<f64>) -> Option<ReorderDrag> {
+    let height = incoming_height.or_else(|| rows.iter().find(|(id, _, _)| *id == slot).or(rows.last()).map(|r| r.2))?;
     let mut gap = ReorderDrag::press(usize::MAX, 0.0).on_row(0.0, height);
     gap.slot = slot;
     gap.active = true;
@@ -304,6 +306,8 @@ pub struct ReorderList {
     /// carries one over it ([`ReorderList::set_external_gap`]).
     #[rust]
     external_gap: Option<usize>,
+    #[rust]
+    external_gap_height: Option<f64>,
 }
 
 impl ReorderList {
@@ -371,13 +375,23 @@ impl ReorderList {
         }
     }
 
+    /// Use an outlined external gap matching the incoming item's height, even in an empty list.
+    /// With `None` the list uses its usual insertion line and the destination row's height.
+    pub fn set_external_gap_height(&mut self, cx: &mut Cx, height: Option<f64>) {
+        let height = height.filter(|h| h.is_finite() && *h > 0.0);
+        if self.external_gap_height != height {
+            self.external_gap_height = height;
+            self.list.redraw(cx);
+        }
+    }
+
     /// The gap the rows stand open for this pass: the list's own live
     /// carry's, else the one a drop from outside would land in.
     fn open_gap(&self) -> Option<ReorderDrag> {
         if let Some(drag) = self.drag.filter(|d| d.active) {
             return Some(drag);
         }
-        outside_gap(self.external_gap?, &self.bands)
+        outside_gap(self.external_gap?, &self.bands, self.external_gap_height)
     }
 
     /// Take down where the list just put every visible row, in entry order.
@@ -723,6 +737,25 @@ impl ReorderList {
     /// Drawn after the list's own pass, so it rides on top of the rows.
     fn draw_drop_indicator(&mut self, cx: &mut Cx2d) {
         let Some(drag) = self.open_gap() else { return };
+        if drag.from == usize::MAX && self.external_gap_height.is_some() {
+            let view = self.list.area().rect(cx);
+            let top = if let Some((_, top, _)) = self.bands.iter().find(|(id, _, _)| *id == drag.slot) { *top }
+                else if let Some(&(last, top, h)) = self.bands.last() {
+                    if drag.slot != last + 1 { return }
+                    top + h
+                } else { view.pos.y };
+            let width = (view.size.x - 2.0).max(0.0);
+            let height = (drag.height - 2.0).max(1.0);
+            let x = view.pos.x + 1.0;
+            let y = top + 1.0;
+            for (pos, size) in [(dvec2(x, y), dvec2(width, 1.0)), (dvec2(x, y + height - 1.0), dvec2(width, 1.0)),
+                (dvec2(x, y), dvec2(1.0, height)), (dvec2(x + width - 1.0, y), dvec2(1.0, height))] {
+                // The list has ended its turtle. Clip the outline to its viewport explicitly.
+                let r = Rect { pos, size }.clip((view.pos, view.pos + view.size));
+                if r.size.x > 0.0 && r.size.y > 0.0 { self.draw_indicator.draw_abs(cx, r); }
+            }
+            return
+        }
         let Some((last, last_top, last_height)) = self.bands.last().copied() else { return };
         let y = if let Some((id, top, _)) = self.bands.iter().find(|(id, _, _)| *id == drag.slot) {
             top + drag.gap_offset(*id) - 4.0
@@ -991,24 +1024,26 @@ mod tests {
     #[test]
     fn a_gap_from_outside_moves_every_row_from_its_slot_down() {
         let rows = rows();
-        let gap = outside_gap(2, &rows).expect("rows are drawn");
+        let gap = outside_gap(2, &rows, None).expect("rows are drawn");
         assert_eq!(gap.slot, 2);
         assert_eq!(gap.gap_offset(0), 0.0, "rows above the gap stay");
         assert_eq!(gap.gap_offset(1), 0.0);
         assert_eq!(gap.gap_offset(2), 60.0, "the slot's own row makes way by a row's height");
         assert_eq!(gap.gap_offset(3), 60.0);
         // At the top, everything moves; after the end, nothing does.
-        let top = outside_gap(0, &rows).unwrap();
+        let top = outside_gap(0, &rows, None).unwrap();
         assert!((0..4).all(|id| top.gap_offset(id) == 60.0));
-        let end = outside_gap(4, &rows).unwrap();
+        let end = outside_gap(4, &rows, None).unwrap();
         assert!((0..4).all(|id| end.gap_offset(id) == 0.0));
         // Its height is the row it opens before, the last one's after the end.
         let mixed: Vec<RowBand> = vec![(0, 100.0, 40.0), (1, 140.0, 22.0), (2, 162.0, 54.0)];
-        assert_eq!(outside_gap(0, &mixed).unwrap().height, 40.0);
-        assert_eq!(outside_gap(1, &mixed).unwrap().height, 22.0);
-        assert_eq!(outside_gap(3, &mixed).unwrap().height, 54.0, "after the end");
-        assert_eq!(outside_gap(0, &mixed).unwrap().gap_offset(2), 40.0, "every row moves by the gap's height");
-        assert!(outside_gap(0, &[]).is_none(), "no row drawn, no gap");
+        assert_eq!(outside_gap(0, &mixed, None).unwrap().height, 40.0);
+        assert_eq!(outside_gap(1, &mixed, None).unwrap().height, 22.0);
+        assert_eq!(outside_gap(3, &mixed, None).unwrap().height, 54.0, "after the end");
+        assert_eq!(outside_gap(0, &mixed, None).unwrap().gap_offset(2), 40.0, "every row moves by the gap's height");
+        assert!(outside_gap(0, &[], None).is_none(), "an empty list has no implicit gap height");
+        assert_eq!(outside_gap(0, &[], Some(41.0)).unwrap().height, 41.0, "an empty list previews the supplied height");
+        assert_eq!(outside_gap(1, &mixed, Some(41.0)).unwrap().gap_offset(2), 41.0, "rows move by the incoming height");
     }
 
 }

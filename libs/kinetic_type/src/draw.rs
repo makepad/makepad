@@ -44,7 +44,7 @@ script_mod! {
         // x = the curve's length, y = its samples
         k_curve: uniform(vec4(0.0, 2.0, 0.0, 0.0))
 
-        backface_culling: false
+        cull_mode: @None
         alpha_blend: true
         depth_write: true
 

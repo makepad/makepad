@@ -287,6 +287,8 @@ script_mod! {
 pub enum LabelAction {
     HoverIn(Rect),
     HoverOut,
+    /// An accessibility press activated this span index from `set_links`.
+    LinkPressed(usize),
     #[default]
     None,
 }
@@ -465,6 +467,61 @@ impl Widget for Label {
                 false,
             );
         }
+    }
+
+    fn semantics_parts(&self, cx: &Cx, out: &mut Vec<(u64, Option<u64>, a11y_tree::Node)>) {
+        if !self.visible || self.links.is_empty() {
+            return;
+        }
+        let Some((rect, laid)) = &self.laid else { return };
+        if laid.rows.is_empty() {
+            return;
+        }
+        let text = self.text.as_ref();
+        let pos = rect.pos + self.shift(cx);
+        let scale = self.draw_text.font_scale as f64;
+        let ink_shift = if self.draw_text.ink_centered {
+            laid.ink_center_offset_in_lpxs() as f64 * scale
+        } else {
+            0.0
+        };
+        for (i, &(a, b)) in self.links.iter().enumerate() {
+            let Some(slice) = text.get(a..b).filter(|s| !s.is_empty()) else { continue };
+            let selection = Selection {
+                anchor: Cursor { index: a, prefer_next_row: false },
+                cursor: Cursor { index: b, prefer_next_row: false },
+            };
+            let bounds = laid.selection_rects(selection).into_iter().map(|span| {
+                let r = span.rect_in_lpxs;
+                Rect {
+                    pos: dvec2(pos.x + r.origin.x as f64 * scale, pos.y + ink_shift + r.origin.y as f64 * scale),
+                    size: dvec2(r.size.width as f64 * scale, r.size.height as f64 * scale),
+                }
+            }).filter(|r| r.size.x > 0.0 && r.size.y > 0.0).reduce(|a, b| a.hull(b));
+            if let Some(bounds) = bounds {
+                out.push((i as u64 + 1, None, a11y_tree::Node {
+                    role: a11y_tree::Role::Link,
+                    name: slice.to_owned(),
+                    actions: a11y_tree::Actions::PRESS,
+                    bounds: makepad_platform::a11y::semantic_rect(bounds),
+                    ..Default::default()
+                }));
+            }
+        }
+    }
+
+    fn handle_action(&mut self, cx: &mut Cx, action: &a11y_tree::ActionRequest, _scope: &mut Scope) -> a11y_tree::ActionResult {
+        use a11y_tree::{ActionResult, Actions};
+        if self.visible && action.action == Actions::PRESS {
+            if let Some(index) = cx.a11y.action_part_key(action.node).and_then(|k| k.checked_sub(1)) {
+                let index = index as usize;
+                if index < self.links.len() {
+                    cx.widget_action(self.uid, LabelAction::LinkPressed(index));
+                    return ActionResult::Handled;
+                }
+            }
+        }
+        ActionResult::Unhandled
     }
 
     /// A label reports the pointer at most (hover actions); it never takes
@@ -815,9 +872,19 @@ impl LabelRef {
         }
     }
 
+    /// Returns the link span index activated by an accessibility press on this label.
+    pub fn link_pressed(&self, actions: &Actions) -> Option<usize> {
+        actions.filter_widget_actions(self.widget_uid()).find_map(|item| {
+            match item.cast::<LabelAction>() {
+                LabelAction::LinkPressed(index) => Some(index),
+                _ => None,
+            }
+        })
+    }
+
     /// Draw these byte ranges of the text as links (in `link_color`), the
     /// `hover` one underlined. The host hit-tests them itself (through
-    /// `selection_point_to_char_index`); the label takes no presses.
+    /// `selection_point_to_char_index`); the label takes no pointer presses.
     pub fn set_links(&self, cx: &mut Cx, links: &[(usize, usize)], hover: Option<usize>) {
         if let Some(mut inner) = self.borrow_mut() {
             if inner.links != links || inner.link_hover != hover {
@@ -958,6 +1025,122 @@ mod pointer_capture_tests {
                 a.widget_uid == note.widget_uid()
                     && matches!(a.cast::<LabelAction>(), LabelAction::HoverIn(_))
             })
+    }
+
+    fn link_scene(cx: &mut Cx) -> (WidgetRef, LabelRef) {
+        cx.init_cx_os();
+        cx.with_vm(crate::script_mod);
+        let root = cx.with_vm(|vm| {
+            let value = crate::script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    width: Fill
+                    height: Fill
+                    flow: Down
+                    align: Align{y: 1.0}
+                    note := Label{text: "See #12 and #34"}
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        });
+        let note = root.label(cx, ids!(note));
+        note.set_links(cx, &[(4, 7), (12, 15)], None);
+        (root, note)
+    }
+
+    fn draw_link_tree(cx: &mut Cx, target: &mut Target, root: &WidgetRef) -> a11y_tree::mirror::Tree {
+        use makepad_platform::a11y::{semantic_rect, snapshot_rect};
+        cx.a11y.on = true;
+        cx.a11y.begin_frame();
+        let window = cx.a11y.begin_node(WidgetUid::new().0, None);
+        cx.a11y.begin_window(WINDOW);
+        target.draw(cx, root);
+        cx.a11y.end_window();
+        cx.a11y.end_node(window, a11y_tree::Node { role: a11y_tree::Role::Window, ..Default::default() }, Area::Empty);
+        let mut a11y = std::mem::take(&mut cx.a11y);
+        let mut tree = a11y_tree::mirror::Tree::default();
+        a11y.finish_frame(
+            Area::Empty,
+            |_| None,
+            |area| snapshot_rect(&area, cx).map(semantic_rect),
+            |area| area.is_valid(cx).then(|| {
+                let p = area.rect(cx).pos;
+                [p.x as f32, p.y as f32]
+            }),
+            |_, bytes| { tree.apply(a11y_tree::wire::decode_update(&bytes).unwrap()); },
+        );
+        cx.a11y = a11y;
+        tree
+    }
+
+    #[test]
+    fn label_links_expose_a11y_link_parts_and_press_emits_index() {
+        let pressed = Rc::new(Cell::new(None));
+        let observed = pressed.clone();
+        let mut cx = Cx::new(Box::new(move |cx, event| {
+            if let Event::A11yAction(_) = event {
+                let root = cx.get_global::<WidgetRef>().clone();
+                let actions = send(cx, &root, event);
+                observed.set(root.label(cx, ids!(note)).link_pressed(&actions));
+            }
+        }));
+        let (root, note) = link_scene(&mut cx);
+        cx.set_global(root.clone());
+        let mut target = Target::new(&mut cx);
+        let tree = draw_link_tree(&mut cx, &mut target, &root);
+        let owner = tree.node(a11y_tree::NodeId::widget(note.widget_uid().0)).expect("the label is in the tree");
+        let parts: Vec<_> = tree.children(owner.id).collect();
+        assert_eq!(parts.len(), 2, "the label exposes both links as children");
+        for (part, name) in parts.iter().zip(["#12", "#34"]) {
+            assert_eq!(part.role, a11y_tree::Role::Link, "the span is a link");
+            assert_eq!(part.name, name, "the link is named by its text");
+            assert!(part.actions.contains(a11y_tree::Actions::PRESS), "the link offers a press");
+            let b = part.bounds;
+            let label = owner.bounds;
+            assert!(!b.is_empty(), "{name} has a non-empty hit target");
+            assert!(b.x >= label.x && b.y >= label.y && b.x + b.w <= label.x + label.w && b.y + b.h <= label.y + label.h,
+                "{name} bounds {b:?} must be inside the label {label:?}");
+        }
+        assert_ne!(parts[0].bounds, parts[1].bounds, "the links have distinct hit targets");
+        cx.dispatch_a11y_action(WINDOW, a11y_tree::ActionRequest {
+            req: 1, node: parts[1].id, action: a11y_tree::Actions::PRESS, arg: a11y_tree::ActionArg::None,
+        });
+        assert!(cx.take_platform_ops().iter().any(|op| matches!(op,
+            CxOsOp::A11yActionDone { req: 1, result } if *result == a11y_tree::ActionResult::Handled as u8)),
+            "the label handled the accessibility press");
+        assert_eq!(pressed.get(), Some(1), "pressing the second link emits its zero-based span index");
+    }
+
+    #[test]
+    fn label_link_part_bounds_follow_parent_turtle_shift() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, note) = link_scene(&mut cx);
+        note.borrow_mut().unwrap().padding = Inset::default();
+        let mut target = Target::new(&mut cx);
+        let tree = draw_link_tree(&mut cx, &mut target, &root);
+        let label = tree.node(a11y_tree::NodeId::widget(note.widget_uid().0)).expect("the shifted label is in the tree");
+        let drawn_y = note.borrow().unwrap().drawn_pos.y as f32;
+        assert!(label.bounds.y > drawn_y + 2.0, "the parent moved the label down after its draw");
+        let part = tree.children(label.id).next().expect("the shifted label has a link part");
+        assert!((part.bounds.y - label.bounds.y).abs() < 2.0,
+            "the link at {} must follow its label from {drawn_y} to {}", part.bounds.y, label.bounds.y);
+    }
+
+    #[test]
+    fn label_with_links_still_never_captures_pointer() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, note) = link_scene(&mut cx);
+        let mut target = Target::new(&mut cx);
+        let tree = draw_link_tree(&mut cx, &mut target, &root);
+        let owner = a11y_tree::NodeId::widget(note.widget_uid().0);
+        let part = tree.children(owner).next().expect("the label has a link to press");
+        let (x, y) = part.bounds.center();
+        assert!(!note.borrow().unwrap().is_interactive(), "links alone do not make a label pointer-interactive");
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        let event = press(dvec2(x as f64, y as f64));
+        send(&mut cx, &root, &event);
+        assert!(!cx.fingers.any_areas_captured(), "a primary press on a linked label leaves the digit free");
     }
 
     /// The control. Without this the test below would pass on a label that

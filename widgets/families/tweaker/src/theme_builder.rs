@@ -2068,9 +2068,10 @@ const WRITTEN: &[Written] = {
             ink: "color_label_inner_hover",
             need: READABLE,
         },
-        // the recent-files list: a hovered row's name, in the page's text colour
+        // the recent-files list: a hovered row's name, in the page's text colour;
+        // the emoji picker: a hovered cell's emoji, whose monochrome glyphs take it
         Written {
-            widgets: &["recent_list.rs"],
+            widgets: &["recent_list.rs", "emoji_picker.rs"],
             grounds: &["color_outset_hover"],
             ink: "color_text",
             need: READABLE,

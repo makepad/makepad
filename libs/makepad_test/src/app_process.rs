@@ -47,7 +47,7 @@ pub enum ShutdownOutcome {
     Graceful,
     /// The process had already exited before shutdown was asked for.
     AlreadyExited,
-    /// The process outlived both graceful requests; the owned pid was killed.
+    /// The process outlived graceful shutdown and the owned child was killed.
     Killed,
 }
 
@@ -90,22 +90,31 @@ impl OwnedApp {
         }
     }
 
-    /// Ask the app to quit and confirm this exact process exits. Only the owned
-    /// pid is ever killed, and only when the graceful path fails.
+    /// Capture a final frame and shut down the owned process.
     pub fn shutdown(&mut self, poll: Duration) -> ShutdownOutcome {
+        self.shutdown_with_grab(poll, true)
+    }
+
+    /// Ask the app to quit and confirm this exact process exits. Failures, drops
+    /// and passes keeping artifacts capture a final frame with `gq`. A passing
+    /// test can send `/quit` directly to skip GPU readback and PNG encoding.
+    /// Only the owned child is killed, and only when graceful shutdown fails.
+    pub fn shutdown_with_grab(&mut self, poll: Duration, grab_frame: bool) -> ShutdownOutcome {
         if self.poll_exit().is_some() {
             return ShutdownOutcome::AlreadyExited;
         }
-        let grabbed = self.client.grab_and_quit().is_ok();
-        // A remote can close its connection while exiting. Always give the
-        // child time to exit before treating a failed response as failure.
-        let wait = if grabbed {
-            GRACEFUL_EXIT_TIMEOUT
-        } else {
-            LOST_RESPONSE_EXIT_TIMEOUT
-        };
-        if self.wait_exit(wait, poll).is_some() {
-            return ShutdownOutcome::Graceful;
+        if grab_frame {
+            let grabbed = self.client.grab_and_quit().is_ok();
+            // A remote can close its connection while exiting. Always give the
+            // child time to exit before treating a failed response as failure.
+            let wait = if grabbed {
+                GRACEFUL_EXIT_TIMEOUT
+            } else {
+                LOST_RESPONSE_EXIT_TIMEOUT
+            };
+            if self.wait_exit(wait, poll).is_some() {
+                return ShutdownOutcome::Graceful;
+            }
         }
         let _ = self.client.quit();
         if self.wait_exit(GRACEFUL_EXIT_TIMEOUT, poll).is_some() {
@@ -353,6 +362,10 @@ fn launch_command(
     } else {
         command.env("MAKEPAD_HIDE_WINDOWS", "1");
     }
+    command.env(
+        "MAKEPAD_LOOKUP_CLASHES",
+        std::path::absolute(spec.artifacts_dir.join("lookup-clashes.txt"))?,
+    );
     let mut child = command.spawn().map_err(|err| {
         TestError::new(format!(
             "failed to launch {}: {err}",
@@ -376,7 +389,7 @@ fn launch_command(
         .map(PathBuf::from)
         .filter(|dir| dir.is_absolute())
         .unwrap_or_else(makepad_remote::discovery::registry_dir);
-    let mut startup = jit.then(|| Startup::new(pid, spec.startup_idle));
+    let mut startup = jit.then(|| Startup::new(pid, spec.startup_idle, registry.clone()));
     let mut pending = Vec::new();
     let listening = loop {
         match listening_on_stderr(&mut stderr, &mut pending, pid, jit) {
@@ -588,8 +601,9 @@ fn unannounced_in(registry: &Path, pid: u32, tree: &[u32]) -> String {
 struct Startup {
     root: u32,
     idle: Duration,
+    registry: PathBuf,
     since: Instant,
-    at: Option<(Vec<u32>, u64)>,
+    at: Option<Look>,
     /// the tree's threads seen in an uninterruptible kernel wait this window
     held: Vec<makepad_remote::procs::Blocked>,
     /// when its threads are looked at next for such waits
@@ -602,25 +616,37 @@ struct Startup {
 /// tenth of it apart, so a wait the disk holds for a part of the window is seen.
 const HELD_LOOKS: u32 = 10;
 
+/// The launched process's tree at a look: its processes, root first, the CPU they ran and the
+/// time their threads waited on a run queue (None where the platform cannot say), in ns.
+#[derive(Clone, Debug)]
+struct Look {
+    tree: Vec<u32>,
+    cpu_ns: u64,
+    wait_ns: Option<u64>,
+}
+
 impl Startup {
-    fn new(root: u32, idle: Duration) -> Startup {
+    fn new(root: u32, idle: Duration, registry: PathBuf) -> Startup {
         let now = Instant::now();
-        Startup { root, idle, since: now, at: Self::look(root), held: Vec::new(), held_look: now, was_held: None }
+        Startup { root, idle, registry, since: now, at: Self::look(root), held: Vec::new(), held_look: now, was_held: None }
     }
 
-    /// The launched process's tree and the CPU it ran, None where the platform cannot say.
-    fn look(root: u32) -> Option<(Vec<u32>, u64)> {
+    /// The launched process's tree, the CPU it ran and its run-queue wait, None where the
+    /// platform cannot say what it ran.
+    fn look(root: u32) -> Option<Look> {
+        use makepad_remote::procs::{cpu_ns, run_wait_ns};
         let tree = makepad_remote::procs::tree(root);
-        let own = makepad_remote::procs::cpu_ns(root)?;
-        let rest: u64 = tree[1..].iter().filter_map(|&pid| makepad_remote::procs::cpu_ns(pid)).sum();
-        Some((tree, own + rest))
+        let own = cpu_ns(root)?;
+        let rest: u64 = tree[1..].iter().filter_map(|&pid| cpu_ns(pid)).sum();
+        let wait_ns = run_wait_ns(root).map(|own| own + tree[1..].iter().filter_map(|&pid| run_wait_ns(pid)).sum::<u64>());
+        Some(Look { tree, cpu_ns: own + rest, wait_ns })
     }
 
     /// Why the launch is idle, once a window ends without progress.
     fn idle(&mut self, now: Instant) -> Option<String> {
         if now >= self.held_look {
             self.held_look = now + self.idle / HELD_LOOKS;
-            for &pid in self.at.as_ref().map_or(&[][..], |(tree, _)| tree.as_slice()) {
+            for &pid in self.at.as_ref().map_or(&[][..], |at| at.tree.as_slice()) {
                 for b in makepad_remote::procs::blocked_threads(pid) {
                     if !self.held.iter().any(|h| h.tid == b.tid) {
                         self.held.push(b);
@@ -638,15 +664,30 @@ impl Startup {
         let held = std::mem::take(&mut self.held);
         match idle_over(span, &before?, &next?, &held) {
             Window::Works => None,
+            // (said, as a disk's hold is: a launch slowed this much is worth a line)
+            Window::Starved(said) => {
+                eprintln!("[makepad_test] the launch of pid {} waits for a CPU: {said}", self.root);
+                None
+            }
             Window::Held(said) => {
                 eprintln!("[makepad_test] the launch of pid {} waits on: {said}", self.root);
                 self.was_held = Some(said);
                 None
             }
-            Window::Idle(said) => Some(match &self.was_held {
-                Some(held) => format!("{said} (an earlier window: {held})"),
-                None => said,
-            }),
+            Window::Idle(said) => {
+                // (what each thread does at the verdict: a lock's or a channel's waiters, or
+                // threads that wait for a CPU, tell a hang from a box that starves it)
+                let tree = self.at.as_ref().map_or(Vec::new(), |at| at.tree.clone());
+                let threads = threads_said(&tree.iter().map(|&pid| (pid, makepad_remote::procs::threads(pid))).collect::<Vec<_>>());
+                let waits = makepad_remote::procs::lock_waits(&tree);
+                let locks = if waits.is_empty() { String::new() } else {
+                    lock_waits_said(&waits, &makepad_remote::discovery::apps_in(&self.registry))
+                };
+                Some(match &self.was_held {
+                    Some(held) => format!("{said}{threads}{locks} (an earlier window: {held})"),
+                    None => format!("{said}{threads}{locks}"),
+                })
+            }
         }
     }
 }
@@ -656,6 +697,9 @@ impl Startup {
 enum Window {
     /// it ran, or a process started or ended
     Works,
+    /// it ran next to nothing, but its threads waited for a CPU about as long as a working
+    /// launch runs: a saturated box's, not idle
+    Starved(String),
     /// it ran next to nothing, with threads in an uninterruptible kernel wait: held there
     Held(String),
     /// it sat idle: why
@@ -664,15 +708,25 @@ enum Window {
 
 /// How the tree went from `before` to `now` over `span`, its threads seen in an uninterruptible
 /// kernel wait meanwhile `held`, and how it read.
-fn idle_over(span: Duration, before: &(Vec<u32>, u64), now: &(Vec<u32>, u64), held: &[makepad_remote::procs::Blocked]) -> Window {
-    if before.0 != now.0 {
+fn idle_over(span: Duration, before: &Look, now: &Look, held: &[makepad_remote::procs::Blocked]) -> Window {
+    if before.tree != now.tree {
         return Window::Works;
     }
-    let cores = now.1.saturating_sub(before.1) as f64 / span.as_nanos().max(1) as f64;
+    let cores = now.cpu_ns.saturating_sub(before.cpu_ns) as f64 / span.as_nanos().max(1) as f64;
     if cores * crate::runtime::IDLE_SHARE as f64 >= 1.0 {
         return Window::Works;
     }
     let ran = format!("it and the processes under it ran {:.1}% of a core in the last {:.1} s", cores * 100.0, span.as_secs_f64());
+    // what it ran and what it waited on a run queue for, together a working launch's share: it
+    // wants the CPU a saturated box does not give it (a JIT run's start among four test jobs ran
+    // 2.4% of a core and was taken for idle, 11-26). Where the platform cannot say, the rule is
+    // the CPU it ran alone.
+    if let (Some(a), Some(b)) = (before.wait_ns, now.wait_ns) {
+        let waited = b.saturating_sub(a) as f64 / span.as_nanos().max(1) as f64;
+        if (cores + waited) * crate::runtime::IDLE_SHARE as f64 >= 1.0 {
+            return Window::Starved(format!("{ran} and waited {:.1}% of a core on a run queue", waited * 100.0));
+        }
+    }
     if held.is_empty() {
         return Window::Idle(format!("{ran}, with no process started or ended"));
     }
@@ -688,6 +742,70 @@ fn idle_over(span: Duration, before: &(Vec<u32>, u64), now: &(Vec<u32>, u64), he
     }
     let waits: Vec<String> = by_wait.iter().map(|(wait, who)| format!("{} in {wait} ({})", if who.len() == 1 { "thread".to_string() } else { format!("{} threads", who.len()) }, who.join(", "))).collect();
     Window::Held(format!("the disk or a filesystem lock holds it: {ran}, its threads in uninterruptible kernel waits: {}", waits.join("; ")))
+}
+
+/// Every thread of each process, by its state and the kernel function it sleeps in (a lock's
+/// waiters on one line): `; its threads: pid 2: 2 S in futex_wait_queue (7 main, 8 jit-1), 1 R
+/// (9 parse)`. Empty where the platform says nothing of its threads.
+fn threads_said(procs: &[(u32, Vec<makepad_remote::procs::Thread>)]) -> String {
+    let mut said = Vec::new();
+    for (pid, threads) in procs.iter().filter(|(_, threads)| !threads.is_empty()) {
+        said.push(format!("pid {pid}: {}", format_threads(threads)));
+    }
+    if said.is_empty() { String::new() } else { format!("; its threads: {}", said.join("; ")) }
+}
+
+/// Groups one process's threads by state and kernel wait channel.
+fn format_threads(threads: &[makepad_remote::procs::Thread]) -> String {
+    let mut by_wait: Vec<((char, &str), Vec<String>)> = Vec::new();
+    for t in threads {
+        let who = format!("{} {}", t.tid, t.name);
+        match by_wait.iter_mut().find(|(k, _)| *k == (t.state, t.wchan.as_str())) {
+            Some((_, who_all)) => who_all.push(who),
+            None => by_wait.push(((t.state, t.wchan.as_str()), vec![who])),
+        }
+    }
+    by_wait.iter()
+        .map(|((state, wchan), who)| format!("{} {state}{} ({})", who.len(), if wchan.is_empty() { String::new() } else { format!(" in {wchan}") }, who.join(", ")))
+        .collect::<Vec<_>>().join(", ")
+}
+
+/// Identifies a holder by its announced app or by the process details still readable.
+fn holder_said(holder: &makepad_remote::procs::LockHolder, apps: &[makepad_remote::discovery::App]) -> String {
+    let Some(pid) = holder.pid else { return format!("pid unknown ({} {})", holder.kind, holder.access) };
+    let identity = if let Some(app) = apps.iter().find(|a| a.answers_to(pid)) {
+        format!("app={}", app.app)
+    } else {
+        let mut command = holder.cmdline.join(" ");
+        if command.chars().nth(160).is_some() {
+            command = command.chars().take(157).collect();
+            command.push_str("...");
+        }
+        match (holder.name.as_deref(), command.is_empty()) {
+            (Some(name), false) => format!("{name}: {command}"),
+            (Some(name), true) => name.to_owned(),
+            (None, false) => command,
+            (None, true) => "gone or unreadable".into(),
+        }
+    };
+    let threads = if holder.threads.is_empty() { "unreadable".into() } else { format_threads(&holder.threads) };
+    format!("pid {pid} ({identity}; {}; threads: {threads})", holder.access)
+}
+
+/// Lock requests observed at the idle verdict, including inode identity when the path is unknown.
+fn lock_waits_said(waits: &[makepad_remote::procs::LockWait], apps: &[makepad_remote::discovery::App]) -> String {
+    let mut said = String::new();
+    for w in waits {
+        let path = w.path.as_deref().map_or_else(|| "unknown path".into(), |p| p.display().to_string());
+        let holders = if w.holders.is_empty() {
+            "holder gone before inspect".into()
+        } else {
+            format!("held by {}", w.holders.iter().map(|h| holder_said(h, apps)).collect::<Vec<_>>().join(", "))
+        };
+        said.push_str(&format!("; lock wait: pid {} waits for {} {} on {path} (dev {:02x}:{:02x} ino {}), {holders}",
+            w.waiter_pid, w.kind, w.want, w.dev_major, w.dev_minor, w.ino));
+    }
+    said
 }
 
 /// Read new stderr lines once. A file read can end in the middle of the socket path.
@@ -756,6 +874,41 @@ pub fn file_tail(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn lock_wait(holder: makepad_remote::procs::LockHolder) -> makepad_remote::procs::LockWait {
+        makepad_remote::procs::LockWait {
+            waiter_pid: 201, kind: "FLOCK".into(), want: "WRITE".into(),
+            dev_major: 0x103, dev_minor: 2, ino: 987654, path: Some("/cache/core.rcs".into()), holders: vec![holder],
+        }
+    }
+
+    #[test]
+    fn lock_waits_said_names_path_announced_app_and_holder_threads() {
+        use makepad_remote::procs::{LockHolder, Thread};
+        let wait = lock_wait(LockHolder {
+            pid: Some(42), kind: "FLOCK".into(), access: "WRITE".into(), name: None, cmdline: vec![],
+            threads: vec![
+                Thread { tid: 42, name: "main".into(), state: 'R', wchan: String::new() },
+                Thread { tid: 43, name: "writer".into(), state: 'D', wchan: "btrfs_commit".into() },
+            ],
+        });
+        let app = makepad_remote::discovery::parse(r#"{"pid":42,"app":"demo-app","socket":"/s","caps":[]}"#).unwrap();
+        assert_eq!(lock_waits_said(&[wait], &[app]),
+            "; lock wait: pid 201 waits for FLOCK WRITE on /cache/core.rcs (dev 103:02 ino 987654), held by pid 42 (app=demo-app; WRITE; threads: 1 R (42 main), 1 D in btrfs_commit (43 writer))");
+    }
+
+    #[test]
+    fn lock_waits_said_falls_back_to_cmdline_and_handles_unreadable_threads() {
+        let wait = lock_wait(makepad_remote::procs::LockHolder {
+            pid: Some(99), kind: "FLOCK".into(), access: "WRITE".into(), name: Some("tool".into()),
+            cmdline: vec!["tool".into(), "run".into(), "demo".into()], threads: vec![],
+        });
+        let gone = makepad_remote::procs::LockWait { path: None, holders: vec![], ino: 123, ..wait.clone() };
+        let said = lock_waits_said(&[wait, gone], &[]);
+        assert!(said.contains("pid 99 (tool: tool run demo; WRITE; threads: unreadable)"), "{said}");
+        assert!(said.contains("(dev 103:02 ino 123), holder gone before inspect"), "{said}");
+        assert_eq!(lock_waits_said(&[], &[]), "");
+    }
 
     #[test]
     fn listening_line_parses_every_field() {
@@ -980,13 +1133,29 @@ mod tests {
     #[test]
     fn a_launch_is_idle_only_when_its_processes_sat_still_and_says_what_the_registry_holds() {
         let span = Duration::from_secs(10);
-        let tree = |pids: &[u32], cpu_ms: u64| (pids.to_vec(), cpu_ms * 1_000_000);
+        let tree = |pids: &[u32], cpu_ms: u64| Look { tree: pids.to_vec(), cpu_ns: cpu_ms * 1_000_000, wait_ns: None };
+        let waited = |pids: &[u32], cpu_ms: u64, wait_ms: u64| Look { wait_ns: Some(wait_ms * 1_000_000), ..tree(pids, cpu_ms) };
         // a twentieth of a core and up is work, a process started or ended is progress
         assert_eq!(idle_over(span, &tree(&[1, 2], 0), &tree(&[1, 2], 500), &[]), Window::Works, "5% of a core works");
         assert_eq!(idle_over(span, &tree(&[1], 0), &tree(&[1, 2], 0), &[]), Window::Works, "a process started");
         assert_eq!(idle_over(span, &tree(&[1, 2], 0), &tree(&[1], 0), &[]), Window::Works, "a process ended");
         let Window::Idle(idle) = idle_over(span, &tree(&[1, 2], 100), &tree(&[1, 2], 400), &[]) else { panic!("3% of a core with the same processes is idle") };
         assert!(idle.contains("3.0% of a core in the last 10.0 s"), "{idle}");
+        // a launch that waited on a run queue for a CPU, with what it ran a working share, is a
+        // saturated box's, not idle; one that waited little is idle, as one whose platform cannot
+        // say how long it waited
+        let Window::Starved(starved) = idle_over(span, &waited(&[1, 2], 100, 1_000), &waited(&[1, 2], 340, 1_400), &[]) else { panic!("2.4% of a core run and 4% waited is starved") };
+        assert!(starved.contains("2.4% of a core in the last 10.0 s") && starved.contains("waited 4.0% of a core on a run queue"), "{starved}");
+        assert!(matches!(idle_over(span, &waited(&[1, 2], 100, 1_000), &waited(&[1, 2], 340, 1_100), &[]), Window::Idle(_)), "2.4% run and 1% waited is idle");
+        assert!(matches!(idle_over(span, &waited(&[1, 2], 100, 1_000), &tree(&[1, 2], 340), &[]), Window::Idle(_)), "no wait to compare: the CPU alone decides");
+        // the wait read from a schedstat line (ns on a CPU, ns waited, timeslices); this process's
+        // threads waited some time where the kernel keeps the statistics
+        assert_eq!(makepad_remote::procs::schedstat_wait_ns("8321554 120998 37\n"), Some(120_998));
+        assert_eq!(makepad_remote::procs::schedstat_wait_ns("8321554 120998"), None, "a short line says nothing");
+        assert_eq!(makepad_remote::procs::schedstat_wait_ns("cpu wait slices"), None);
+        if std::path::Path::new("/proc/self/task").exists() && std::path::Path::new(&format!("/proc/self/task/{}/schedstat", std::process::id())).exists() {
+            assert!(makepad_remote::procs::run_wait_ns(std::process::id()).is_some(), "this process's run-queue wait");
+        }
         // threads in an uninterruptible kernel wait run no CPU: the disk holds the launch, which
         // waits on, saying which threads sleep where (a lock's waiters on one line)
         let blocked = |tid: u32, name: &str, wchan: &str| makepad_remote::procs::Blocked { pid: 2, tid, name: name.into(), wchan: wchan.into() };
@@ -998,6 +1167,17 @@ mod tests {
         let stat = |state: &str| format!("4711 (relax parse (2)) {state} 4700 4700 0 -1 4194560 12 0 0 0 9 3 0 0 20 0 31 0");
         assert_eq!(makepad_remote::procs::blocked_of(4700, 4711, &stat("D"), "balance_dirty_pages\n"), Some(makepad_remote::procs::Blocked { pid: 4700, tid: 4711, name: "relax parse (2)".into(), wchan: "balance_dirty_pages".into() }));
         assert_eq!(makepad_remote::procs::blocked_of(4700, 4711, &stat("D"), "0").map(|b| b.wchan), Some(String::new()));
+        // an idle verdict says what every thread does, a lock's waiters on one line; read from a
+        // stat line whatever its state, so a thread that waits for a CPU (R) shows as one
+        let thread = |tid: u32, name: &str, state: char, wchan: &str| makepad_remote::procs::Thread { tid, name: name.into(), state, wchan: wchan.into() };
+        assert_eq!(makepad_remote::procs::thread_of(4711, &stat("R"), "0\n"), Some(thread(4711, "relax parse (2)", 'R', "")));
+        let said = threads_said(&[(2, vec![thread(7, "main", 'S', "futex_wait_queue"), thread(8, "jit-1", 'S', "futex_wait_queue"), thread(9, "parse", 'R', "")]), (3, Vec::new())]);
+        assert_eq!(said, "; its threads: pid 2: 2 S in futex_wait_queue (7 main, 8 jit-1), 1 R (9 parse)");
+        assert_eq!(threads_said(&[(3, Vec::new())]), "", "a platform that says nothing of its threads adds nothing");
+        if std::path::Path::new(&format!("/proc/self/task/{}/stat", std::process::id())).exists() {
+            let mine = makepad_remote::procs::threads(std::process::id());
+            assert!(mine.iter().any(|t| t.tid == std::process::id() && t.state != 'Z'), "this process's own threads: {mine:?}");
+        }
         assert!(["R", "S", "Z"].iter().all(|state| makepad_remote::procs::blocked_of(4700, 4711, &stat(state), "do_wait").is_none()));
 
         // a record of a process under the launched one that names another parent, or none at all
@@ -1065,6 +1245,70 @@ mod tests {
         assert!(requests.iter().any(|target| target.starts_with("frames ")));
         assert_eq!(requests.iter().filter(|target| *target == "quit").count(), 1);
         assert!(app.poll_exit().unwrap().success());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn passing_shutdown_skips_frame_grab_and_waits_for_graceful_exit() {
+        let dir = scratch_dir("passing-shutdown");
+        let server = fixture_with_window();
+        server.route("quit", r#"{"ok":1}"#);
+        let script = write_fake_app(&dir, server.socket(), &when_asked(&dir, &server, "quit"));
+        let spec = fake_app_spec(dir.clone());
+        let mut app = launch(&spec, &script).unwrap();
+
+        assert_eq!(app.shutdown_with_grab(spec.poll_interval, false), ShutdownOutcome::Graceful);
+        assert!(app.poll_exit().unwrap().success());
+        assert_eq!(app.shutdown_with_grab(spec.poll_interval, false), ShutdownOutcome::AlreadyExited);
+        let requests = server.requests();
+        assert!(!requests.iter().any(|r| r.starts_with("frames ")), "{requests:?}");
+        assert_eq!(requests.iter().filter(|r| *r == "quit").count(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn passing_shutdown_handles_lost_quit_response_and_kill_fallback() {
+        let dir = scratch_dir("passing-lost-quit");
+        let spec = fake_app_spec(dir.clone());
+        for expected in [ShutdownOutcome::Graceful, ShutdownOutcome::Killed] {
+            let server = fixture_with_window();
+            server.disconnect("quit");
+            let tail = if expected == ShutdownOutcome::Graceful {
+                when_asked(&dir, &server, "quit")
+            } else {
+                "exec sleep 60".to_string()
+            };
+            let script = write_fake_app(&dir, server.socket(), &tail);
+            let mut app = launch(&spec, &script).unwrap();
+            assert_eq!(app.shutdown_with_grab(spec.poll_interval, false), expected);
+            assert_eq!(app.poll_exit().unwrap().success(), expected == ShutdownOutcome::Graceful);
+            assert!(!makepad_remote::procs::is_alive(app.pid), "owned pid {} survived {expected:?}", app.pid);
+            let requests = server.requests();
+            assert!(!requests.iter().any(|r| r.starts_with("frames ")), "{requests:?}");
+            assert_eq!(requests.iter().filter(|r| *r == "quit").count(), 1);
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn drop_on_live_owned_app_grabs_frame_before_quit() {
+        let dir = scratch_dir("drop-live-app");
+        let server = fixture_with_window();
+        server.route("quit", r#"{"ok":1}"#);
+        let script = write_fake_app(&dir, server.socket(), &when_asked(&dir, &server, "quit"));
+        let mut app = launch(&fake_app_spec(dir.clone()), &script).unwrap();
+        assert!(app.poll_exit().is_none());
+        let pid = app.pid;
+        drop(app);
+
+        let requests = server.requests();
+        let frames = requests.iter().position(|r| r.starts_with("frames ")).expect("final frame request");
+        let quit = requests.iter().position(|r| r == "quit").expect("quit request");
+        assert!(frames < quit, "{requests:?}");
+        assert!(!makepad_remote::procs::is_alive(pid), "owned pid {pid} survived drop");
         let _ = fs::remove_dir_all(&dir);
     }
 

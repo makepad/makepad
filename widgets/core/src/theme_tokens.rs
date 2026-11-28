@@ -53,9 +53,9 @@
 //! what makes it the exception.
 
 use crate::desktop_style::SheetEntry;
-use crate::makepad_platform::{LiveId, ScriptMod, ScriptVm, ScriptVmCx};
+use crate::makepad_platform::{LiveId, ScriptMod, ScriptObject, ScriptVm, ScriptVmBase, ScriptVmCx, ScriptVmHost};
 use crate::script_eval;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 /// One of the three themes shipped with the library.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -1672,6 +1672,57 @@ pub fn theme_module_script(name: &str, base: &str, overrides: &[(String, TokenVa
     out
 }
 
+/// Font styles installed on the base after its source has been evaluated.
+pub const CARRIED_FONTS: [&str; 11] = [
+    "font_label",
+    "font_regular",
+    "font_bold",
+    "font_italic",
+    "font_bold_italic",
+    "font_regular_i18n",
+    "font_bold_i18n",
+    "font_italic_i18n",
+    "font_bold_italic_i18n",
+    "font_code",
+    "font_icons",
+];
+
+/// Globals that a data-only installation may substitute into the base source.
+pub const ALLOWED_INSTALL_GLOBALS: [&str; 10] = [
+    "color_contrast", "color_tint", "color_tint_amount",
+    "space_factor", "corner_radius", "beveling",
+    "font_size_base", "font_size_contrast", "color_bg_app", "color_fg_app",
+];
+
+pub fn is_token_key(key: &str) -> bool {
+    key.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Wear a theme assembled from validated scalar overrides. When a global
+/// changes, rebuild the base from source so its dependent tokens change too.
+pub fn theme_derived_script(
+    name: &str,
+    source_name: &str,
+    scheme: Scheme,
+    globals: &[(String, TokenValue)],
+    overrides: &[(String, TokenValue)],
+) -> String {
+    if globals.is_empty() {
+        return theme_module_script(name, scheme.theme_name(), overrides);
+    }
+    let source = theme_source_with_globals(source_name, scheme.source(), globals);
+    let mut out = theme_script_body(&source);
+    let mut carried = Vec::with_capacity(CARRIED_FONTS.len() + overrides.len());
+    for font in CARRIED_FONTS {
+        let from_base = format!("mod.themes.{}.{font}", scheme.theme_name());
+        carried.push((font.to_string(), TokenValue::Raw(from_base)));
+    }
+    carried.extend_from_slice(overrides);
+    out.push_str(&theme_module_script(name, source_name, &carried));
+    out
+}
+
 /// A copy of a theme file with some of its top-level keys replaced by
 /// literals and the theme renamed. Meant for the globals (`space_factor`,
 /// `color_contrast`, ...): every expression that derives from them stays an
@@ -2970,6 +3021,184 @@ pub fn assigned_keys(sheet_theme: &str) -> Vec<&str> {
     out
 }
 
+fn read_theme_values(vm: &mut ScriptVm, theme: BlendTheme, object: ScriptObject, sheet: Option<&str>) -> ThemeValues {
+    static BASE_KEYS: std::sync::OnceLock<Vec<&str>> = std::sync::OnceLock::new();
+    let base = BASE_KEYS.get_or_init(base_theme_keys);
+    let extra = sheet.map(assigned_keys).unwrap_or_default();
+    let mut values = BTreeMap::new();
+    for &key in base.iter().chain(&extra) {
+        let value = vm.value(object, LiveId::from_str(key));
+        if let Some(rgba) = value.as_color() {
+            values.insert(key.to_owned(), BlendValue::Color(rgba));
+        } else if let Some(number) = value.as_number() {
+            values.insert(key.to_owned(), BlendValue::Num(number));
+        }
+    }
+    ThemeValues { theme, values }
+}
+
+/// Resolve scalar tokens one theme per frame in a scratch VM with no application host.
+pub struct ThemeResolver {
+    vm: Option<Box<ScriptVmBase>>,
+    initialized: bool,
+    dirty_base: [bool; 3],
+    pending: VecDeque<BlendTheme>,
+    cache: BlendCache,
+    errors: Vec<String>,
+}
+
+impl ThemeResolver {
+    pub fn new(themes: Vec<BlendTheme>) -> Self {
+        Self {
+            vm: None,
+            initialized: false,
+            dirty_base: [false; 3],
+            pending: themes.into(),
+            cache: BlendCache::new(),
+            errors: Vec::new(),
+        }
+    }
+
+    pub fn is_done(&self) -> bool {
+        self.pending.is_empty()
+    }
+
+    /// Number of themes still to read. Initialization has a step of its own.
+    pub fn remaining(&self) -> usize {
+        self.pending.len()
+    }
+
+    pub fn cache(&self) -> &BlendCache {
+        &self.cache
+    }
+
+    /// Script errors from initialization and every theme resolved so far.
+    pub fn errors(&self) -> &[String] {
+        &self.errors
+    }
+
+    pub fn into_cache(self) -> BlendCache {
+        self.cache
+    }
+
+    // Sheets can refer to named font members while constructing their styles.
+    // Give the scratch VM the policy's names without registering font resources.
+    fn stub_theme_fonts(vm: &mut ScriptVm, scheme: Scheme) {
+        use crate::makepad_platform::id;
+        let policy = crate::font_policy::FontSet::Latin.policy();
+        let text = vm.module(id!(text));
+        let family_proto = vm.value(text, id!(FontFamily));
+        let member_proto = vm.value(text, id!(FontMember));
+        let themes = vm.module(id!(themes));
+        let base = vm.value(themes, LiveId::from_str(scheme.theme_name())).as_object().expect("registered base theme");
+        for (chain, styles) in [
+            (policy.regular, &[id!(font_regular), id!(font_label)][..]),
+            (policy.bold, &[id!(font_bold)]),
+            (policy.italic, &[id!(font_italic)]),
+            (policy.bold_italic, &[id!(font_bold_italic)]),
+            (policy.monospace, &[id!(font_code)]),
+            (policy.icons, &[id!(font_icons)]),
+        ] {
+            let family = vm.new_with_proto(family_proto);
+            let lazy = policy.lazy_chain(chain.role).iter().map(|lazy| &lazy.asset);
+            for asset in chain.members.iter().chain(lazy) {
+                let key = LiveId::from_str_with_lut(asset.id).unwrap_or_else(|_| LiveId::from_str(asset.id));
+                let member = vm.new_with_proto(member_proto);
+                vm.vec_push(family, key, member);
+            }
+            for &style in styles {
+                let style = vm.value(base, style).as_object().expect("base font style");
+                vm.set_value(style, id!(font_family), family);
+            }
+        }
+        for (alias, style) in [
+            (id!(font_regular_i18n), id!(font_regular)), (id!(font_bold_i18n), id!(font_bold)),
+            (id!(font_italic_i18n), id!(font_italic)), (id!(font_bold_italic_i18n), id!(font_bold_italic)),
+        ] {
+            let value = vm.value(base, style);
+            vm.set_value(base, alias, value);
+        }
+    }
+
+    fn load_base(vm: &mut ScriptVm, scheme: Scheme) {
+        match scheme {
+            Scheme::Dark => crate::theme_desktop_dark::script_mod(vm),
+            Scheme::Light => crate::theme_desktop_light::script_mod(vm),
+            Scheme::Skeleton => crate::theme_desktop_skeleton::script_mod(vm),
+        };
+        Self::stub_theme_fonts(vm, scheme);
+    }
+
+    fn initialize(vm: &mut ScriptVm) {
+        use crate::makepad_platform::{id, id_lut, script_args_def, NIL};
+        crate::makepad_draw::turtle::script_mod(vm);
+        crate::animator::script_mod(vm);
+        // Font objects need their prototypes during evaluation. Token resolution
+        // reads only scalar fields, so it never loads a font or creates a resource.
+        let res = vm.new_module(id!(res));
+        vm.add_method(res, id!(crate_resource), script_args_def!(path = NIL), |_vm, _args| NIL);
+        script_eval!(vm, { mod.text = { FontFamily: {} FontMember: {} TextStyle: {} } });
+        vm.new_module(id!(themes));
+        for scheme in Scheme::ALL {
+            Self::load_base(vm, scheme);
+        }
+        derive_base_property_inks(vm);
+    }
+
+    /// Initialize the VM or resolve one pending theme. Returns false once finished.
+    pub fn step(&mut self) -> bool {
+        if self.is_done() {
+            return false;
+        }
+        let mut host = ScriptVmHost::new((), ());
+        let bx = self.vm.take().unwrap_or_else(|| Box::new(ScriptVmBase::new()));
+        let mut vm = ScriptVm { host: host.host_context(), bx };
+        vm.capture_errors();
+        if !self.initialized {
+            Self::initialize(&mut vm);
+            self.initialized = true;
+        } else if let Some(theme) = self.pending.pop_front() {
+            let scheme = theme.base();
+            if self.dirty_base[scheme as usize] {
+                Self::load_base(&mut vm, scheme);
+                derive_base_property_inks(&mut vm);
+                self.dirty_base[scheme as usize] = false;
+            }
+            let sheet = match theme {
+                BlendTheme::Base(_) => None,
+                BlendTheme::Sheet(id) => crate::desktop_style::StyleSheet::named(id),
+            };
+            let object = if let Some(sheet) = &sheet {
+                let eval = |vm: &mut ScriptVm, phase: &str, code: &str| {
+                    vm.eval_transient(ScriptMod::new(&sheet.resources, "theme_resolver",
+                        &format!("themes/{}/{phase}.splash", sheet.name), 0, 0, code, &[]));
+                };
+                eval(&mut vm, "theme", &sheet.theme);
+                let object = vm.module(LiveId::from_str("theme"));
+                let roles = sheet_roles_script(&sheet.theme, &mut |key| vm.value(object, LiveId::from_str(key)).as_color());
+                eval(&mut vm, "roles", &roles);
+                self.dirty_base[scheme as usize] = true;
+                object
+            } else {
+                let themes = vm.module(LiveId::from_str("themes"));
+                vm.value(themes, LiveId::from_str(scheme.theme_name())).as_object().expect("registered base theme")
+            };
+            self.cache.insert(read_theme_values(&mut vm, theme, object, sheet.as_ref().map(|s| s.theme.as_str())));
+        }
+        let errors = vm.take_errors();
+        for err in &errors {
+            crate::makepad_platform::error!("ThemeResolver: {err}");
+        }
+        self.errors.extend(errors);
+        #[cfg(test)]
+        assert!(self.errors.is_empty(), "scratch theme VM errors: {:?}", self.errors);
+        if !self.is_done() {
+            self.vm = Some(vm.bx);
+        }
+        true
+    }
+}
+
 /// Resolve one theme's tokens in a script VM.
 ///
 /// Installs the sheet (or takes one off), reloads the widget module, and reads
@@ -2984,6 +3213,10 @@ pub fn resolve_theme(vm: &mut ScriptVm, theme: BlendTheme) -> ThemeValues {
     let mix = crate::theme_mix(vm.cx_mut());
     if mix.is_some() {
         crate::set_theme_mix(vm.cx_mut(), None);
+    }
+    let pins = crate::theme_pins(vm.cx_mut());
+    if pins.is_some() {
+        crate::set_theme_pins(vm.cx_mut(), None);
     }
     let sheet = match theme {
         BlendTheme::Base(_) => {
@@ -3032,31 +3265,18 @@ pub fn resolve_theme(vm: &mut ScriptVm, theme: BlendTheme) -> ThemeValues {
         // moving it again here would throw the sheet away.
         BlendTheme::Sheet(..) => {}
     }
-    let mut keys: Vec<String> = base_theme_keys().iter().map(|k| k.to_string()).collect();
-    if let Some(sheet) = &sheet {
-        for key in assigned_keys(&sheet.theme) {
-            if !keys.iter().any(|k| k == key) {
-                keys.push(key.to_string());
-            }
-        }
-    }
     let object = vm.module(LiveId::from_str("theme"));
-    let mut values = BTreeMap::new();
-    for key in keys {
-        let value = vm.value(object, LiveId::from_str(&key));
-        if let Some(rgba) = value.as_color() {
-            values.insert(key, BlendValue::Color(rgba));
-        } else if let Some(number) = value.as_number() {
-            values.insert(key, BlendValue::Num(number));
-        }
-    }
+    let values = read_theme_values(vm, theme, object, sheet.as_ref().map(|s| s.theme.as_str()));
     // The mix goes back on the Cx. Not evaluated again here: the caller
     // that filled a cache reloads once at the end, and that reload re-emits
     // it. See `BlendCache::fill`.
     if mix.is_some() {
         crate::set_theme_mix(vm.cx_mut(), mix);
     }
-    ThemeValues { theme, values }
+    if pins.is_some() {
+        crate::set_theme_pins(vm.cx_mut(), pins);
+    }
+    values
 }
 
 #[cfg(test)]
@@ -3685,10 +3905,6 @@ mod sheet_contrast_tests {
 
 #[cfg(test)]
 mod equalizer_tests {
-
-    fn test_cx() -> crate::PooledCx {
-        crate::checkout_test_cx()
-    }
     use super::*;
     use crate::desktop_style::StyleSheet;
     use std::collections::BTreeMap;
@@ -4012,16 +4228,66 @@ mod equalizer_tests {
     }
 
     /// Every theme the equalizer offers, resolved once. The reload per theme
-    /// is the expensive part, so the two tests that need real values share
+    /// is the expensive part, so the tests that need real values share
     /// one cache.
     fn resolved() -> &'static BlendCache {
         static CACHE: OnceLock<BlendCache> = OnceLock::new();
         CACHE.get_or_init(|| {
             let mut cache = BlendCache::new();
-            let mut cx = test_cx();
-            cx.with_vm(|vm| cache.fill(vm, &BlendTheme::all()));
+            let mut cx = crate::Cx::new(Box::new(|_, _| {}));
+            cx.with_vm(|vm| {
+                crate::desktop_style::uninstall(vm);
+                crate::script_mod(vm);
+                cache.fill(vm, &BlendTheme::all());
+            });
             cache
         })
+    }
+
+    #[test]
+    fn theme_resolver_matches_resolve_theme_without_mutating_host_vm() {
+        let mut cx = crate::Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::desktop_style::uninstall(vm);
+            crate::script_mod(vm);
+            crate::set_base_theme(vm.cx_mut(), crate::BaseTheme::Light);
+            crate::desktop_style::install(vm, StyleSheet::named("macos-dark").unwrap());
+            vm.with_reload(crate::script_mod);
+        });
+        let host_theme = |cx: &mut crate::Cx| {
+            cx.with_vm(|vm| {
+                let theme = vm.module(LiveId::from_str("theme"));
+                (theme, vm.value(theme, LiveId::from_str("color_bg_app")).as_color(), crate::desktop_style::current_name(vm))
+            })
+        };
+        let before = host_theme(&mut cx);
+        assert_eq!(before.2.as_deref(), Some("macos-dark"), "host starts with its chosen sheet");
+        let reference = resolved();
+        for themes in [BlendTheme::all(), vec![BlendTheme::Sheet("omarchy"), BlendTheme::Base(Scheme::Dark)]] {
+            let mut resolver = ThemeResolver::new(themes.clone());
+            assert!(resolver.step(), "initialization must do work");
+            assert!(resolver.cache().is_empty(), "initialization must leave every theme pending");
+            for (index, theme) in themes.iter().enumerate() {
+                assert_eq!(resolver.remaining(), themes.len() - index, "pending count before {theme:?}");
+                assert!(resolver.step(), "one step must resolve {theme:?}");
+                assert!(resolver.cache().get(*theme).is_some(), "missing cache entry for {theme:?}");
+            }
+            assert!(resolver.is_done() && !resolver.step(), "completed resolver must be idle");
+            assert!(resolver.vm.is_none(), "completed resolver must release its scratch heap");
+            let cache = resolver.into_cache();
+            assert_eq!(cache.len(), themes.len(), "cache covers the requested themes");
+            for theme in themes {
+                assert_eq!(cache.get(theme), reference.get(theme), "{theme:?} must match a full reload");
+            }
+        }
+        assert_eq!(host_theme(&mut cx), before, "host theme object, page and sheet must survive the resolve");
+        assert_eq!(crate::base_theme(&mut cx), crate::BaseTheme::Light, "host base must survive the resolve");
+        let pins = vec![("color_bg_app".to_string(), "#x112233FF".to_string())];
+        crate::set_theme_pins(&mut cx, Some(pins.clone()));
+        let theme = BlendTheme::Sheet("macos-dark");
+        let unpinned = cx.with_vm(|vm| resolve_theme(vm, theme));
+        assert_eq!(Some(&unpinned), reference.get(theme), "full resolver excludes installed pins");
+        assert_eq!(crate::theme_pins(&mut cx), Some(pins), "full resolver restores installed pins");
     }
 
     /// The same promise as `a_mix_at_full_weight_is_exactly_that_theme`, but

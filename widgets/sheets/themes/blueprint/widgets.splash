@@ -655,6 +655,7 @@ mod.widgets.ButtonFlat.draw_bg.pixel = fn() {
     let f = bp_button(p, self.rect_pos, self.rect_size, px, self.hover, self.down, self.focus, self.disabled, 5.0)
     return self.host_over(bp_wait(f, p, vec2(0.0, 0.0), self.rect_size, px, self.loading, self.anim_time), m)
 }
+mod.widgets.ButtonFlat.draw_bg.face = {mode: @host_over, rest: #00000000, hover: #1a4e8480, down: #0d3a68cc}
 mod.widgets.Button.draw_bg.pixel = fn() {
     let m = self.bp_room
     let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
@@ -727,6 +728,7 @@ mod.widgets.ButtonFlatter.draw_bg.pixel = fn() {
     let f = bp_button(p, self.rect_pos, self.rect_size, px, self.hover, self.down, self.focus, self.disabled, 6.0)
     return self.host_over(bp_wait(f, p, vec2(0.0, 0.0), self.rect_size, px, self.loading, self.anim_time), m)
 }
+mod.widgets.ButtonFlatter.draw_bg.face = {mode: @host_over, rest: #00000000, hover: #1a4e8480, down: #0d3a68cc}
 
 // Button inks: white on every face, the pale sky on the secondary, a pale
 // rose on danger (the red pencil is the line, never the word), the dim ink
@@ -2093,6 +2095,7 @@ mod.widgets.RadioButtonTabFlat.draw_bg.pixel = fn() {
     let live = 1.0 - self.disabled
     return bp_tab(p, self.rect_pos, self.rect_size, px, self.hover * live, self.focus * live, self.active * live, self.down * live, 0.0, 1.0)
 }
+mod.widgets.RadioButtonTabFlat.draw_bg.face = {mode: @own_face, rest: #00000000, hover: #2a679f66, down: #1a4e84cc, active: #27639a}
 mod.widgets.RadioButtonTabFlat.draw_text.color = #d6e8fb
 mod.widgets.RadioButtonTabFlat.draw_text.color_hover = #ffffff
 mod.widgets.RadioButtonTabFlat.draw_text.color_active = #ffffff
