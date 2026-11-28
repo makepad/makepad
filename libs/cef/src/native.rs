@@ -3635,40 +3635,38 @@ unsafe extern "system" fn render_on_accelerated_paint(
         return;
     };
     let started = std::time::Instant::now();
-    let fd = std::os::fd::BorrowedFd::borrow_raw(plane.fd);
-    let probes = match copy::copy(fd, layout, target.handle, &sink.probes()) {
-        Ok(probes) => probes,
-        Err(error) => {
-            sink.abandon(target.slot);
-            let mut stats = state.accel.lock().unwrap();
-            stats.dropped_no_target += 1;
-            if stats.dropped_no_target < 4 {
-                say!("[makepad-cef] accelerated paint into sink slot {}: {error}", target.slot);
-            }
-            return;
+    // the HAL's op: the copy's device and the registered slots are the loader's
+    let points: Vec<u32> = sink.probes().iter().flatten().copied().collect();
+    let mut read = vec![0u8; points.len() / 2 * 4];
+    if makepad_hal::dmabuf::hal_dmabuf_copy(plane.fd, &layout.to_words(), target.handle, &points, &mut read) < 0 {
+        sink.abandon(target.slot);
+        let mut stats = state.accel.lock().unwrap();
+        stats.dropped_no_target += 1;
+        if stats.dropped_no_target < 4 {
+            say!("[makepad-cef] accelerated paint into sink slot {}: {}", target.slot, dmabuf_error());
         }
-    };
+        return;
+    }
     let micros = started.elapsed().as_micros() as u64;
     let copied = (width.min(target.width), height.min(target.height));
-    sink.publish(target.slot, copied, timestamp, &probes.iter().map(|p| luminance(p[0], p[1], p[2])).collect::<Vec<_>>());
+    sink.publish(target.slot, copied, timestamp, &read.chunks_exact(4).map(|p| luminance(p[0], p[1], p[2])).collect::<Vec<_>>());
     sink_stats(state, width, height, copied, micros, target.slot);
 }
 
 /// Software paint into a sink (Linux): the CPU frame goes up into the slot.
 #[cfg(target_os = "linux")]
 fn sink_upload(state: &SharedBrowserState, sink: &dyn crate::FrameSink, pixels: &[u8], width: usize, height: usize, timestamp: CaptureTimestamp) {
-    use makepad_hal::dmabuf::copy;
     let Some(target) = sink.acquire(width, height) else {
         state.accel.lock().unwrap().dropped_no_target += 1;
         return;
     };
     let started = std::time::Instant::now();
-    if let Err(error) = copy::upload(target.handle, pixels, width as u32, height as u32, width * 4) {
+    if makepad_hal::dmabuf::hal_dmabuf_upload(target.handle, pixels, width as u32, height as u32, width as u64 * 4) < 0 {
         sink.abandon(target.slot);
         let mut stats = state.accel.lock().unwrap();
         stats.dropped_no_target += 1;
         if stats.dropped_no_target < 4 {
-            say!("[makepad-cef] software paint into sink slot {}: {error}", target.slot);
+            say!("[makepad-cef] software paint into sink slot {}: {}", target.slot, dmabuf_error());
         }
         return;
     }
@@ -3770,6 +3768,15 @@ fn sink_upload(state: &SharedBrowserState, sink: &dyn crate::FrameSink, pixels: 
     let copied = (width.min(target.width), height.min(target.height));
     sink.publish(target.slot, copied, timestamp, &probes);
     sink_stats(state, width, height, copied, micros, target.slot);
+}
+
+/// The HAL's text for this thread's last failed DMA-BUF op.
+#[cfg(target_os = "linux")]
+fn dmabuf_error() -> String {
+    let mut text = vec![0u8; 512];
+    let n = makepad_hal::dmabuf::hal_dmabuf_error(&mut text) as usize;
+    text.truncate(n);
+    String::from_utf8_lossy(&text).into_owned()
 }
 
 /// A BGRA pixel's luminance byte (the probes' measure).
