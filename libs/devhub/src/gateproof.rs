@@ -152,15 +152,18 @@ impl Store {
 
 /// Input keys do not need the proof ledger.
 pub(crate) fn keys(repo: &Path, pair: &Pair, units: &[String]) -> BTreeMap<String, Option<String>> {
-    blame_keys(repo, pair, units).into_iter().map(|(unit, k)| (unit, k.map(|(key, _)| key))).collect()
+    blame_keys(repo, &crate::bucket::pin_of(pair), units).into_iter().map(|(unit, k)| (unit, k.map(|(key, _)| key))).collect()
 }
 
 /// Each unit's key and its key without the gate's scripts ([`GATE_SCRIPTS`]): a landing that moved
 /// only the first changed the gate every unit runs under, not the unit's own inputs.
-pub(crate) fn blame_keys(repo: &Path, pair: &Pair, units: &[String]) -> BTreeMap<String, Option<(String, String)>> {
+/// At `pin`, each nested repository it names read where it is checked out ([`Tree::at_pin`]): a
+/// Fab unit's crates are in makepad/apps, which a pair's tree leaves out, so none had a key and
+/// each Fab red was laid to every landing of its range (11-27).
+pub(crate) fn blame_keys(repo: &Path, pin: &crate::lease::Pin, units: &[String]) -> BTreeMap<String, Option<(String, String)>> {
     let mut keys: BTreeMap<String, Option<(String, String)>> = units.iter().map(|u| (u.clone(), None)).collect();
     if units.is_empty() { return keys; }
-    let Ok(tree) = Tree::at(repo, pair) else { return keys };
+    let Ok(tree) = Tree::at_pin(repo, pin) else { return keys };
     let dirs = package_dirs(&tree);
     let Ok(digests) = digests(repo, &tree, &dirs, units, false) else { return keys };
     for (unit, key) in &mut keys {

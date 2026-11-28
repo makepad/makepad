@@ -673,8 +673,6 @@ pub fn probe_toolchain(dir: &std::path::Path) -> (Option<String>, bool) {
     (why, changed)
 }
 
-/// A sound every Mac has: the audio probe plays it at volume 0 ([`probe_audio`]).
-const AUDIO_PROBE_SOUND: &str = "/System/Library/Sounds/Tink.aiff";
 /// How long the probe's half-second silent playback may take before the box's output counts as
 /// not running.
 pub const AUDIO_PROBE_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -687,21 +685,42 @@ pub fn audio_out() -> Option<bool> {
     *AUDIO.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Whether this box measures its audio output ([`probe_audio`]): a Mac no person uses. A person's
-/// own Mac and the master's are left alone ([`crate::os::clamps_background`]): a playback, silent
-/// as it is, opens their output device. No Linux or Windows hub measures it yet.
+/// Whether this box measures its audio output ([`probe_audio`]): a Mac or a Linux box no person
+/// uses. A person's own box (its role, [`super::Role::users`]) and the master's are left alone: a
+/// playback, silent as it is, opens their output device. Only Macs were measured, and audio=1
+/// work queued for them alone while every Linux box's output ran (11-26). No Windows hub
+/// measures it yet, and no unit test: an exec test's probe loop played to its box's real output.
 pub fn measures_audio() -> bool {
-    cfg!(target_os = "macos") && !crate::os::clamps_background()
+    cfg!(any(target_os = "macos", target_os = "linux")) && !cfg!(test) && !crate::master::runs_here() && !LeaseConf::load().role.users()
 }
 
-/// Plays a half-second sound at volume 0 on the default output, the way a test's app plays to
-/// it, and notes whether it ended within [`AUDIO_PROBE_WAIT`]. On one Mac a lease's apps opened
-/// the output and started it with no error, and its callback never ran: the synth app's
-/// transport tests failed there at any revision and passed on another Mac (11-26); `afplay` hung
-/// there the same way. Returns (before, now).
+/// How the probe plays, for what it says ([`probe_audio`]).
+pub const AUDIO_PROBE_PLAYER: &str = if cfg!(target_os = "macos") { "afplay at volume 0" } else { "aplay of silence to ALSA's default" };
+
+/// The probe's half-second silent playback, through the output a test's app plays to: on a Mac
+/// the default output (a sound every Mac has, at volume 0), on Linux ALSA's `default` pcm, which
+/// an app's audio takes first.
+fn audio_probe_command() -> std::process::Command {
+    if cfg!(target_os = "macos") {
+        let mut c = makepad_remote::group::command("/usr/bin/afplay");
+        c.args(["-v", "0", "/System/Library/Sounds/Tink.aiff"]);
+        c
+    } else {
+        let mut c = makepad_remote::group::command("aplay");
+        c.args(["-q", "-D", "default", "-t", "raw", "-f", "S16_LE", "-c", "2", "-r", "48000", "-s", "24000", "/dev/zero"]);
+        c
+    }
+}
+
+/// Plays a half-second of silence on the default output, the way a test's app plays to it
+/// ([`audio_probe_command`]), and notes whether it ended within [`AUDIO_PROBE_WAIT`]. On one Mac
+/// a lease's apps opened the output and started it with no error, and its callback never ran: the
+/// synth app's transport tests failed there at any revision and passed on another Mac (11-26);
+/// `afplay` hung there the same way. A box without the player is not measured. Returns (before,
+/// now).
 pub fn probe_audio() -> (Option<bool>, Option<bool>) {
     let now = if measures_audio() {
-        match makepad_remote::group::command("/usr/bin/afplay").args(["-v", "0", AUDIO_PROBE_SOUND]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn() {
+        match audio_probe_command().stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn() {
             Err(_) => None,
             Ok(mut child) => {
                 let t = std::time::Instant::now();

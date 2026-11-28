@@ -557,7 +557,25 @@ impl Master {
                 s.emit(&r.to_json());
                 o(&r);
             }), run, crate::orch::ci::last_rolling, probe);
+            // `bucket stop {json}`: a unit main or the user stops, told to its shard's lease
+            // (its unit has spaces: JSON, not words)
+            let (stops, s, o, me) = (leases.clone(), sink.clone(), on_record.clone(), name.to_string());
             ep.register("bucket", 1, makepad_remote::lines::service("bucket", Arc::new(move |line, out| {
+                let asked = line.trim_start();
+                if let Some(json) = asked.strip_prefix("bucket ").unwrap_or(asked).strip_prefix("stop ") {
+                    let emit = |sev: Sev, said: String| {
+                        let r = hub_record(&me, "", 0, "bucket", sev, said, String::new());
+                        s.emit(&r.to_json());
+                        o(&r);
+                    };
+                    let ops = crate::bucket::StopOps {
+                        live_node: &|id| stops.node_of(id),
+                        tell: &|id, l| stops.tell(id, l),
+                        stop_lease: &|id, by, why| stops.stop_lease(id, by, why),
+                    };
+                    out.push(crate::bucket::stop(&home, json, &ops, &emit));
+                    return;
+                }
                 match line.split_whitespace().skip_while(|w| *w == "bucket").collect::<Vec<_>>()[..] {
                     ["run", name] => out.push(crate::bucket::kick(&home, name)),
                     ["clear", ref key @ ..] if !key.is_empty() => out.push(crate::bucket::clear_intermittent(&home, &key.join(" "))),
@@ -587,10 +605,14 @@ impl Master {
             s.emit(&r.to_json());
             o(&r);
         }));
+        #[cfg(feature = "checkout")]
+        let live_gate = crate::orch::live::StartupGate::arm();
         crate::node::listen_control(&ep)?;
         // only now: what these do asks for leases on the control socket
         #[cfg(feature = "checkout")]
         crate::orch::go();
+        #[cfg(feature = "checkout")]
+        drop(live_gate);
         let _ = std::fs::write(pid_file(), format!("{}\n", std::process::id()));
         *slot.lock().unwrap() = Some((sink.clone(), on_record.clone()));
         local.ready();

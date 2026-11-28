@@ -236,22 +236,68 @@ fn selected_targets(words: &[String]) -> BTreeSet<String> {
 pub fn matches_elsewhere(pkg_dir: &Path, chosen: &[String], filters: &[String], exact: bool) -> Vec<(String, usize)> {
     let selected = selected_targets(chosen);
     if selected.is_empty() || filters.is_empty() { return Vec::new(); }
+    let mut scan = TestScan { filters, exact, active: BTreeSet::new(), found: Vec::new() };
+    // a `harness = false` target's tests never run: no filter selects them
+    targets(pkg_dir).into_iter().filter(|t| t.harness && !selected.contains(&t.flag)).filter_map(|t| {
+        let count = scan.file(&t.path, "", true);
+        (count > 0).then_some((t.flag, count))
+    }).collect()
+}
+
+/// The `#[test]` functions of each `harness = false` target of the package (`--test pixels` and
+/// the names): cargo builds such a target without the test harness, so they are compiled out and
+/// never run, silently (a test merged into a target that had become one main's batch, 11-26).
+/// The same source scan as [`matches_elsewhere`].
+pub fn silent_tests(pkg_dir: &Path) -> Vec<(String, Vec<String>)> {
+    targets(pkg_dir).into_iter().filter(|t| !t.harness).filter_map(|t| {
+        let mut scan = TestScan { filters: &[], exact: false, active: BTreeSet::new(), found: Vec::new() };
+        scan.file(&t.path, "", true);
+        (!scan.found.is_empty()).then_some((t.flag, scan.found))
+    }).collect()
+}
+
+/// [`silent_tests`] of the packages `pkgs`, in the lane's worktree `repo` as its run at `pin`
+/// shipped it: one line per target that holds some, naming them and what to do.
+#[cfg(feature = "checkout")]
+pub fn silent_tests_at(repo: &Path, pin: &crate::lease::Pin, pkgs: &[String]) -> Result<Vec<String>, String> {
+    let dirs = crate::orch::ci::package_dirs(&crate::orch::ci::Tree::at_pin(repo, pin)?);
+    Ok(pkgs.iter().filter_map(|pkg| Some((pkg, dirs.get(pkg)?))).flat_map(|(pkg, dir)| {
+        silent_tests(&repo.join(dir)).into_iter().map(move |(flag, names)| format!(
+            "{pkg} {flag} is `harness = false`: cargo builds it without the test harness, so its #[test] fn {} never run{}; make them cases of its main, or move them to a target with the harness",
+            names.join(", "), if names.len() == 1 { "s" } else { "" }))
+    }).collect())
+}
+#[cfg(not(feature = "checkout"))]
+pub fn silent_tests_at(_: &Path, _: &crate::lease::Pin, _: &[String]) -> Result<Vec<String>, String> { Ok(Vec::new()) }
+
+/// One target of a package: its selecting flag, its root source and whether cargo builds it with
+/// the test harness.
+struct Target {
+    flag: String,
+    path: PathBuf,
+    harness: bool,
+}
+
+/// The package's lib, bins and test targets, as cargo finds them: the explicit tables and, unless
+/// `autobins`/`autotests` turn it off, the files of `src/bin` and `tests`.
+fn targets(pkg_dir: &Path) -> Vec<Target> {
     let Some(doc) = std::fs::read_to_string(pkg_dir.join("Cargo.toml")).ok().and_then(|s| parse_toml(&s).ok()) else { return Vec::new() };
     let Some(pkg) = doc.get_path(&["package", "name"]).and_then(Toml::as_str) else { return Vec::new() };
+    let harness = |table: Option<&BTreeMap<String, Toml>>| table.and_then(|t| t.get("harness")).and_then(Toml::as_bool) != Some(false);
     let lib = doc.get_path(&["lib", "path"]).and_then(Toml::as_str).unwrap_or("src/lib.rs");
-    let mut targets = vec![("--lib".to_string(), pkg_dir.join(lib))];
+    let mut targets = vec![Target { flag: "--lib".to_string(), path: pkg_dir.join(lib), harness: harness(doc.root.get("lib").and_then(Toml::as_table)) }];
     for (kind, dir, auto) in [("bin", "src/bin", "autobins"), ("test", "tests", "autotests")] {
         let mut paths = BTreeMap::new();
         // Keep defaults available for explicit targets whose path is omitted, even with auto
         // discovery disabled. Explicit names override an automatically discovered target.
-        if kind == "bin" && pkg_dir.join("src/main.rs").is_file() { paths.insert(pkg.to_string(), pkg_dir.join("src/main.rs")); }
+        if kind == "bin" && pkg_dir.join("src/main.rs").is_file() { paths.insert(pkg.to_string(), (pkg_dir.join("src/main.rs"), true)); }
         if let Ok(entries) = std::fs::read_dir(pkg_dir.join(dir)) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 let source = if path.is_dir() { path.join("main.rs") } else { path.clone() };
                 if !source.is_file() || source.extension().is_none_or(|e| e != "rs") { continue; }
                 let name = if path.is_dir() { path.file_name() } else { path.file_stem() };
-                if let Some(name) = name.and_then(|s| s.to_str()) { paths.insert(name.to_string(), source); }
+                if let Some(name) = name.and_then(|s| s.to_str()) { paths.insert(name.to_string(), (source, true)); }
             }
         }
         let defaults = paths.clone();
@@ -260,24 +306,23 @@ pub fn matches_elsewhere(pkg_dir: &Path, chosen: &[String], filters: &[String], 
         for target in doc.root.get(kind).and_then(Toml::as_array_of_tables).unwrap_or(&[]) {
             let Some(name) = target.get("name").and_then(Toml::as_str).or((kind == "bin").then_some(pkg)) else { continue };
             let path = target.get("path").and_then(Toml::as_str).map(|p| pkg_dir.join(p))
-                .or_else(|| defaults.get(name).cloned()).unwrap_or_else(|| pkg_dir.join(dir).join(format!("{name}.rs")));
-            paths.retain(|_, p| p != &path);
-            explicit.insert(name.to_string(), path);
+                .or_else(|| defaults.get(name).map(|(p, _)| p.clone())).unwrap_or_else(|| pkg_dir.join(dir).join(format!("{name}.rs")));
+            paths.retain(|_, (p, _)| p != &path);
+            explicit.insert(name.to_string(), (path, harness(Some(target))));
         }
         paths.extend(explicit);
-        targets.extend(paths.into_iter().map(|(name, path)| (format!("--{kind} {name}"), path)));
+        targets.extend(paths.into_iter().map(|(name, (path, harness))| Target { flag: format!("--{kind} {name}"), path, harness }));
     }
-    let mut scan = TestScan { filters, exact, active: BTreeSet::new() };
-    targets.into_iter().filter(|(flag, _)| !selected.contains(flag)).filter_map(|(flag, path)| {
-        let count = scan.file(&path, "", true);
-        (count > 0).then_some((flag, count))
-    }).collect()
+    targets
 }
 
+/// A walk of a target's modules for `#[test]` functions: the ones whose full names match
+/// `filters` (every one when there are none) are counted and named in `found`.
 struct TestScan<'a> {
     filters: &'a [String],
     exact: bool,
     active: BTreeSet<PathBuf>,
+    found: Vec<String>,
 }
 
 impl TestScan<'_> {
@@ -332,7 +377,10 @@ impl TestScan<'_> {
             if words[i] == "fn" {
                 if let Some(name) = words.get(i + 1).filter(|_| test) {
                     let full = format!("{prefix}{}", name.strip_prefix("r#").unwrap_or(name));
-                    count += usize::from(self.filters.iter().any(|f| if self.exact { full == *f } else { full.contains(f) }));
+                    if self.filters.is_empty() || self.filters.iter().any(|f| if self.exact { full == *f } else { full.contains(f) }) {
+                        count += 1;
+                        self.found.push(full);
+                    }
                 }
                 test = false;
                 path = None;
@@ -457,11 +505,12 @@ mod tests {
         assert_eq!(matches("--lib", "unmatched", false), vec![]);
         assert_eq!(matches("--tests", "the_lock_removes", false), vec![]);
         assert_eq!(matches("", "the_lock_removes", false), vec![]);
+        assert_eq!(silent_tests(&dir), vec![], "every target here has the test harness");
         // Explicit paths, default directory targets, nested file modules and inline modules
         // share the same naming rules. Comments and literals cannot introduce tests.
         for path in ["src/a", "src/bin/tool", "tests/suite", "src/c"] { std::fs::create_dir_all(dir.join(path)).unwrap(); }
         for (path, text) in [
-            ("Cargo.toml", "[package]\nname = \"pkg\"\nversion = \"0.1.0\"\n[lib]\npath = \"src/lib.rs\"\n[[bin]]\nname = \"renamed\"\npath = \"src/main.rs\"\n[[test]]\nname = \"custom\"\npath = \"check.rs\"\n"),
+            ("Cargo.toml", "[package]\nname = \"pkg\"\nversion = \"0.1.0\"\n[lib]\npath = \"src/lib.rs\"\n[[bin]]\nname = \"renamed\"\npath = \"src/main.rs\"\n[[test]]\nname = \"custom\"\npath = \"check.rs\"\n[[test]]\nname = \"it\"\nharness = false\n[[test]]\nname = \"batch\"\npath = \"batch.rs\"\nharness = false\n"),
             ("src/a.rs", "mod nested;\n#[path = \"other.rs\"]\nmod moved;\n"),
             ("src/a/nested.rs", "#[test] fn the_lock_removes_nested() {}"),
             ("src/other.rs", "#[test] fn the_lock_removes_moved() {}"),
@@ -471,10 +520,15 @@ mod tests {
             ("src/bin/tool/main.rs", "#[test] fn the_lock_removes_tool() {}"),
             ("tests/suite/main.rs", "#[test] fn the_lock_removes_suite() {}"),
             ("check.rs", "#[test] fn the_lock_removes_custom() {}"),
+            ("tests/it.rs", "mod inner { #[test] fn the_lock_removes_inner() {} }\n#[test]\nfn the_lock_removes_w() {}\nfn main() {}\n"),
+            ("batch.rs", "// #[test] fn the_lock_removes_fake() {}\nfn main() {}\n"),
         ] { std::fs::write(dir.join(path), text).unwrap(); }
-        assert_eq!(matches("--lib", "the_lock_removes", false), vec![("--bin extra".into(), 1), ("--bin renamed".into(), 1), ("--bin tool".into(), 1), ("--test custom".into(), 1), ("--test it".into(), 1), ("--test suite".into(), 1)]);
+        assert_eq!(matches("--lib", "the_lock_removes", false), vec![("--bin extra".into(), 1), ("--bin renamed".into(), 1), ("--bin tool".into(), 1), ("--test custom".into(), 1), ("--test suite".into(), 1)],
+            "`harness = false` (it, by its table without a path) leaves a target's tests out of the hint");
         assert_eq!(matches("--bin renamed", "a::", false), vec![("--lib".into(), 2)]);
         assert_eq!(matches("--lib", "c::child::the_lock_removes_child", true), vec![("--bin renamed".into(), 1)]);
+        assert_eq!(silent_tests(&dir), vec![("--test it".to_string(), vec!["inner::the_lock_removes_inner".to_string(), "the_lock_removes_w".to_string()])],
+            "a harness = false target's #[test] fns are named, nested ones by path; one with only a main (and a commented test) is not");
         std::fs::remove_dir_all(dir).unwrap();
     }
 

@@ -37,7 +37,7 @@ use super::verify::Verdict;
 use super::{stamp, Ctx};
 use crate::lease::Kind;
 use crate::proto::{wall_ms, Sev};
-use crate::state::{Ci, CiRun, CiShard, CiSpan, Pair};
+use crate::state::{Ci, CiRun, CiShard, CiSpan, Pair, Store};
 use makepad_strict_json::{obj, s, Value};
 use makepad_toml_parser::{parse_toml, Toml};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -82,6 +82,28 @@ const OVERDUE: &str = "overdue: ";
 /// Whether shard `s` still runs past its overdue verdict (its lease holds its box).
 fn runs_overdue(s: &CiShard) -> bool {
     s.state == "fail" && s.summary.starts_with(OVERDUE) && !s.lease.is_empty()
+}
+
+#[cfg(test)]
+pub(crate) fn active_shards_for_stop(store: &Store, live: &dyn Fn(&str) -> Option<String>) -> Vec<crate::bucket::CiActiveShard> {
+    let candidates = store.read(|d| {
+        let mut seen = BTreeSet::new();
+        let mut candidates = Vec::new();
+        let current = d.ci.slot(false).iter().map(|r| (r, true));
+        for (run, current) in current.chain(d.ci.runs.iter().rev().take(8).map(|r| (r, false))) {
+            for s in &run.shards {
+                let overdue = runs_overdue(s);
+                if (overdue || (current && s.state == "run")) && seen.insert((&s.id, &s.lease)) {
+                    candidates.push((s.id.clone(), s.lease.clone(), overdue));
+                }
+            }
+        }
+        candidates
+    });
+    candidates.into_iter().filter_map(|(id, lease, overdue)| {
+        let node = live(&lease)?;
+        Some(crate::bucket::CiActiveShard { id, lease, node, overdue })
+    }).collect()
 }
 
 /// A run no shard of which ended for [`STALLED`]: what runs (an overdue one too: it holds its box)
@@ -1010,6 +1032,93 @@ fn declares_est(shard: &Shard) -> bool {
 /// The live replay's shard id.
 const REPLAY: &str = "live:replay";
 
+/// Land records shipped into the replay's lease tree.
+const REPLAY_LANDINGS: &str = "target/live_replay/landings.jsonl";
+/// Recent non-empty lands to ship, about 390 KB for a 40-landing replay.
+const REPLAY_LANDINGS_LIMIT: usize = 2000;
+
+fn parse_land_pair(text: &str) -> Option<(String, String)> {
+    match text.split_whitespace().collect::<Vec<_>>()[..] {
+        ["work", w, "main", m] => Some((w.to_string(), m.to_string())),
+        ["work", w, "main"] => Some((w.to_string(), String::new())),
+        _ => None,
+    }
+}
+
+/// The rows a replay window left out: `older` before it and `newer` after it, of `total`
+/// non-empty landed rows; `oldest_kept` is the first shipped row's land id.
+#[derive(Debug, PartialEq, Eq)]
+struct ReplayTrim {
+    older: usize,
+    newer: usize,
+    total: usize,
+    oldest_kept: u64,
+}
+
+/// Compact JSONL in landing order. An older bisect gets the history up to its pair and the
+/// following 64 lands, so the driver can bound nested repositories that did not move at the pair.
+fn replay_landings_jsonl(entries: &[crate::land::Entry], pair: &Pair, limit: usize) -> (String, Option<ReplayTrim>) {
+    let mut landed: Vec<_> = entries.iter().filter(|e| e.state == crate::land::St::Landed).collect();
+    landed.sort_unstable_by_key(|e| (e.changed_ms, e.id));
+    let mut last_nested: BTreeMap<&str, &str> = BTreeMap::new();
+    let mut rows = Vec::new();
+    for e in landed {
+        let pre = parse_land_pair(&e.pre);
+        let (work, main) = parse_land_pair(&e.landed).unwrap_or_default();
+        let mut commits = Vec::new();
+        if !work.is_empty() && pre.as_ref().map_or(e.branch != "-", |(w, _)| w != &work) {
+            commits.push(("makepad".into(), s(work.as_str())));
+        }
+        if !main.is_empty() && pre.as_ref().is_none_or(|(_, m)| m != &main) {
+            commits.push(("apps/commercial".into(), s(main.as_str())));
+        }
+        for side in &e.nested {
+            if !side.landed.is_empty() && last_nested.insert(&side.name, &side.landed) != Some(side.landed.as_str()) {
+                commits.push((format!("apps/{}", side.name), s(side.landed.as_str())));
+            }
+        }
+        if !commits.is_empty() {
+            rows.push((e, work, main, pre, commits));
+        }
+    }
+
+    let len = rows.len();
+    let at = rows.iter().rposition(|(_, w, m, _, _)| w == &pair.work && (pair.main.is_empty() || m == &pair.main));
+    let window = if len <= limit {
+        0..len
+    } else if let Some(k) = at.filter(|k| k + 64 < len) {
+        (k + 1).saturating_sub(limit)..(k + 65).min(len)
+    } else {
+        len - limit..len
+    };
+    let sides = |work: &str, main: &str| {
+        let mut fields = Vec::new();
+        if !work.is_empty() { fields.push(("makepad", s(work))); }
+        if !main.is_empty() { fields.push(("apps/commercial", s(main))); }
+        obj(fields)
+    };
+    let mut jsonl = String::new();
+    let (older, newer) = (window.start, len - window.end);
+    let mut trim = None;
+    for (i, (e, work, main, pre, commits)) in rows.drain(window).enumerate() {
+        let (w, m) = pre.unwrap_or_default();
+        let mut fields = vec![
+            ("id", Value::Int(e.id as i64)), ("t", Value::Int((e.changed_ms / 1000) as i64)),
+            ("commits", Value::Obj(commits)), ("pre", sides(&w, &m)), ("post", sides(&work, &main)),
+        ];
+        if i == 0 && (older > 0 || newer > 0) {
+            trim = Some(ReplayTrim { older, newer, total: len, oldest_kept: e.id });
+            fields.push(("trimmed", obj(vec![
+                ("window", Value::Int(limit as i64)), ("older", Value::Int(older as i64)),
+                ("newer", Value::Int(newer as i64)), ("total", Value::Int(len as i64)),
+            ])));
+        }
+        obj(fields).write_into(&mut jsonl);
+        jsonl.push('\n');
+    }
+    (jsonl, trim)
+}
+
 /// What a finished replay's log measures: its app's timing key and its seconds per landing (the
 /// run's `secs` over the landings it judged, each a line that starts with the landing's short
 /// hash and its result). None for another shard or a replay that judged none.
@@ -1665,6 +1774,10 @@ fn live_replays(tree: &Tree, timing: &dyn Fn(&str) -> Option<f64>, rotation: u64
     let app = REPLAY_APPS[rotation as usize % REPLAY_APPS.len()];
     let count = REPLAY_COUNT.to_string();
     let replay_est = timing(&replay_key(app)).unwrap_or(REPLAY_LANDING_GUESS) * REPLAY_COUNT as f64;
+    let mut replay_cmd = vec!["python3", "tools/run/fixture/live_replay.py", "--app", app, "--count", count.as_str()];
+    if tree.read("tools/run/fixture/live_replay.py").is_some_and(|s| s.contains("--landings")) {
+        replay_cmd.extend(["--landings", REPLAY_LANDINGS]);
+    }
     let mut rebuild = vec!["python3", "tools/run/fixture/live_replay.py", "--host", "--app", app];
     if rotation % 2 == 0 {
         rebuild.push("--wm");
@@ -1784,7 +1897,7 @@ fn live_replays(tree: &Tree, timing: &dyn Fn(&str) -> Option<f64>, rotation: u64
         // the apps in turn: the newest landings as live edits, measured (old landings' bugs are no
         // new landing's to clear, so a miss reports and does not fail the run), and a landing into
         // what makepad is built from (offer, click, back), under a WM every other run, which gates
-        (REPLAY, screen, linux, true, Judge::Report, vec!["python3", "tools/run/fixture/live_replay.py", "--app", app, "--count", count.as_str()], replay_est),
+        (REPLAY, screen, linux, true, Judge::Report, replay_cmd, replay_est),
         ("live:rebuild", screen, linux, true, exit, rebuild, 336.0),
     ];
     // a live shard on Linux builds the JIT its script runs first, in its own step: on a box whose
@@ -2256,6 +2369,16 @@ pub struct BoxInfo {
 }
 
 impl BoxInfo {
+    /// This box as it takes shards now (`shows`: the scheduler would take a screen lease there,
+    /// [`ci_shows`]): its display counts only while it shows one. Its capability (`gui`, a WM of
+    /// ours there) stays as the run planned it: a dark display ends none of the run's screen
+    /// shards, which wait for a box that shows one. A box whose WM had no output connected took
+    /// the run's screen shards one after another, each ask 5 min in "no display": 31
+    /// box-minutes of one run, and the WM smoke asked 9 times ungranted (11-27).
+    fn shown(&self, shows: bool) -> BoxInfo {
+        BoxInfo { gui: self.gui && shows, ..self.clone() }
+    }
+
     fn needs_gui(s: &Shard) -> bool {
         s.gui || s.id.starts_with("smoke:")
     }
@@ -2363,6 +2486,9 @@ struct Pool {
     leg: Option<Arc<LegTree>>,
     /// per box, what its JIT build before its shards did ([`tool_first`])
     tools: Vec<(String, String)>,
+    /// per box and lease kind, until when (wall ms) its worker asks for no shard of that kind
+    /// ([`Self::past_wait`])
+    rests: Vec<(String, Kind, u64)>,
 }
 
 impl Pool {
@@ -2441,6 +2567,7 @@ impl Pool {
     }
 
     fn second_box(&mut self, i: usize, node: &str, boxes: &[BoxInfo], why: &str, errors: Vec<String>) -> bool {
+        if why.starts_with(crate::bucket::STOPPED_BY) { return false; }
         let Some(os) = boxes.iter().find(|b| b.node == node).map(|b| b.os.as_str()) else { return false };
         if !self.state[i].failed_on.is_empty() {
             return false;
@@ -2480,9 +2607,43 @@ impl Pool {
         // 31 shards that fit beside lane work waiting for 97 min (11-04)
         let gave_up = |i: usize| self.state[i].spans.iter().filter(|x| x.node == b.node && x.granted_ms == 0).count();
         let beside = |i: usize| held_back && self.shards[i].kind == Kind::Ci;
+        let now = wall_ms();
+        let rests = |i: usize| self.rests.iter().any(|(n, k, until)| *n == b.node && *k == self.shards[i].kind && *until > now);
         (0..self.shards.len())
-            .filter(|&i| self.state[i].state == "wait" && self.reserved[i].is_none() && self.can(b, i))
+            .filter(|&i| self.state[i].state == "wait" && self.reserved[i].is_none() && self.can(b, i) && !rests(i))
             .max_by(|&a, &c| beside(a).cmp(&beside(c)).then_with(|| gave_up(c).cmp(&gave_up(a))).then_with(|| (self.urgency[a], self.shards[a].est).partial_cmp(&(self.urgency[c], self.shards[c].est)).unwrap_or(std::cmp::Ordering::Equal)))
+    }
+
+    /// Shard `i`'s lease ask on `node` (asked at `asked_ms`) left the queue ungranted at `now_ms`: the
+    /// shard goes back to the pool, and its summary says it waits for its turn
+    /// ([`Self::refresh_waits`] names the boxes), or that its box went down; never the queue's reason
+    /// for that ask, which no lease holds any more. One read as a live block after its lease had
+    /// gone: "queued on <box>: L1905832 queued leaves its tree to L1905826 (gate of landq-fast, queued)" (11-27).
+    fn ask_ended(&mut self, i: usize, node: &str, asked_ms: u64, now_ms: u64, down: bool) {
+        self.reserved[i] = None;
+        self.state[i].spans.push(CiSpan { node: node.into(), asked_ms, granted_ms: 0, ended_ms: now_ms });
+        // its box went down: the ask goes, and the box is asked nothing until it is back
+        self.state[i].summary = if down {
+            format!("box down: {node}")
+        } else {
+            format!("waits for a box's turn (its ask on {node} left the queue after {} s)", now_ms.saturating_sub(asked_ms) / 1000)
+        };
+    }
+
+    /// Shard `i`'s ask on `node` went back at once (after [`Self::ask_ended`]): what holds it there
+    /// ends in `ms` at the soonest ([`crate::lease::sched::Sched::soonest_start`]; `u64::MAX`: no
+    /// end of its own), past what is left of its [`QUEUE_WAIT`]. Another box takes it; this one
+    /// asks for no shard of its kind until then, at most that wait (an estimate that ends sooner
+    /// costs no more than the wait did), and takes one of another kind meanwhile. Shards sat
+    /// their 5 min behind a box's live session or a gate's whole run and gave up 142 times in a
+    /// day (11-27).
+    fn past_wait(&mut self, i: usize, node: &str, ms: u64, now_ms: u64) {
+        let kind = self.shards[i].kind;
+        let wait = QUEUE_WAIT.as_millis() as u64;
+        self.rests.retain(|(n, k, _)| !(n == node && *k == kind));
+        self.rests.push((node.to_string(), kind, now_ms.saturating_add(ms.min(wait))));
+        let ends = if ms == u64::MAX { "has no end of its own".to_string() } else { format!("ends in ~{} s by measure", ms.div_ceil(1000)) };
+        self.state[i].summary = format!("waits for a box's turn (its ask on {node} went back at once: what holds it there {ends}, past its {} s wait)", QUEUE_WAIT.as_secs());
     }
 
     /// A waiting shard a box of `bs` can take now says it waits for its turn there, not what it
@@ -2910,7 +3071,7 @@ pub fn ci(repo: PathBuf) -> crate::bucket::Run {
         // CI runs work and main
         let tip = &tip_pin.pair();
         let Some(ctx) = super::ctx() else {
-            return crate::bucket::Outcome { ok: false, failing: Vec::new(), log: String::new(), summary: "CI incomplete: master not started".into(), no_verdict: Some("the master has not started".into()) };
+            return crate::bucket::Outcome { tip: None, ok: false, failing: Vec::new(), log: String::new(), summary: "CI incomplete: master not started".into(), no_verdict: Some("the master has not started".into()) };
         };
         let ctx = calling_ctx(ctx, repo.clone());
         while !RESUMED.load(std::sync::atomic::Ordering::Acquire) { std::thread::sleep(Duration::from_millis(200)); }
@@ -2945,19 +3106,23 @@ fn bucket_log(tip: &Pair, verdict: Verdict, legs: &[crate::state::Leg], log: &Pa
     let mut outcome = bucket_outcome(verdict, legs, log);
     let summary = &mut outcome.summary;
     let mut text = format!("CI {}: {summary}\n", tip.short());
+    let mut kept_units = BTreeMap::new();
     for leg in legs {
         text.push_str(&format!("{} {}: {} ({})\n", leg.state, leg.name, leg.summary, leg.log));
         for error in &leg.errors { text.push_str(&format!("{error}\n")); }
         if leg.state == "fail" && !leg.log.is_empty() {
             match keep_leg_log(log, Path::new(&leg.log)) {
-                Ok(kept) => text.push_str(&format!("GATEKEPT {} :: {}\n", leg.name, kept.display())),
+                Ok(kept) => {
+                    kept_units.insert(leg.name.clone(), kept.display().to_string());
+                    text.push_str(&format!("GATEKEPT {} :: {}\n", leg.name, kept.display()));
+                }
                 Err(e) => text.push_str(&format!("its log is not kept: {e}\n")),
             }
         }
         let ran = leg.state == "fail" || (leg.state == "ok" && !leg.summary.starts_with(ARM_SKIPPED));
         if ran { text.push_str(&format!("GATEUNIT {} {}\n", leg.state, leg.name)); }
     }
-    if let Err(e) = std::fs::write(log, text) {
+    if let Err(e) = crate::bucket::write_unit_kept_index(log, kept_units).and_then(|_| std::fs::write(log, text)) {
         summary.push_str(&format!("; log: {e}"));
     }
     outcome
@@ -2991,10 +3156,10 @@ const PROBE_WHY: &str = "probe: once more at the tip it failed at";
 /// tip has gets no verdict. The bucket asks it once per new red: a red the leg does not repeat goes
 /// to its owner as flaky, never to a landing (the smoke reds went to nobody, 11-17).
 pub fn leg_probe(repo: PathBuf) -> crate::bucket::Probe {
-    Arc::new(move |leg, _base, tip_pin, log| {
+    Arc::new(move |leg, _base, tip_pin, log, _needed| {
         let tip = tip_pin.pair();
         let Some(ctx) = super::ctx() else {
-            return crate::bucket::Outcome { ok: false, failing: Vec::new(), log: log.display().to_string(), summary: "CI incomplete: master not started".into(), no_verdict: Some("the master has not started".into()) };
+            return crate::bucket::Outcome { tip: None, ok: false, failing: Vec::new(), log: log.display().to_string(), summary: "CI incomplete: master not started".into(), no_verdict: Some("the master has not started".into()) };
         };
         let ctx = calling_ctx(ctx, repo.clone());
         while !RESUMED.load(std::sync::atomic::Ordering::Acquire) { std::thread::sleep(Duration::from_millis(200)); }
@@ -3055,7 +3220,7 @@ fn bucket_outcome(verdict: Verdict, legs: &[crate::state::Leg], log: &Path) -> c
         Some(l) => format!("{} of {} shards have no verdict, {}: {}", legs.len() - ok, legs.len(), l.name, l.summary),
         None => "the run ended before its shards: see ci events".to_string(),
     });
-    crate::bucket::Outcome { ok: verdict == Verdict::Ok, failing, log: log.display().to_string(), summary, no_verdict }
+    crate::bucket::Outcome { tip: None, ok: verdict == Verdict::Ok, failing, log: log.display().to_string(), summary, no_verdict }
 }
 
 fn gate_for(ctx: &Arc<Ctx>, pair: &Pair, dry: bool, sweep: bool, calling: bool) -> (Verdict, Vec<crate::state::Leg>) {
@@ -3134,6 +3299,80 @@ fn prune_runs(ctx: &Ctx) {
     for id in old {
         let _ = std::fs::remove_dir_all(ctx.logs("ci").join(id));
     }
+}
+
+const STOP_RECORD_ERR: &str = "could not read stop record for ";
+
+#[derive(Debug, PartialEq, Eq)]
+enum ShardRecovery { Done, Attach, StopRecordError(String) }
+
+fn stop_error(desc: &str, lease: &str) -> String {
+    if lease.is_empty() { format!("HUNG: {desc}") }
+    else { format!("HUNG: {desc}; its stacks: devhub job result {lease}") }
+}
+
+fn first_error(errors: &mut Vec<String>, line: &str) {
+    if errors.first().is_some_and(|e| e == line) { return; }
+    errors.retain(|e| e != line);
+    errors.insert(0, line.to_string());
+}
+
+fn append_recovery(log: &str, marker: &str, lines: &str) {
+    if log.is_empty() || std::fs::read_to_string(log).is_ok_and(|s| s.lines().any(|l| l == marker)) { return; }
+    if let Ok(mut f) = std::fs::OpenOptions::new().append(true).create(true).open(log) { let _ = writeln!(f, "{lines}"); }
+}
+
+fn recover_going_shard(s: &mut CiShard, p: &CiShard, held: bool, stopped_in_store: &dyn Fn(&str) -> Result<Option<String>, String>) -> ShardRecovery {
+    if matches!(p.state.as_str(), "ok" | "fail") {
+        *s = p.clone();
+        return ShardRecovery::Done;
+    }
+    if p.state == "run" && held {
+        *s = p.clone();
+        return ShardRecovery::Attach;
+    }
+    let log = std::mem::take(&mut s.log);
+    *s = p.clone();
+    s.log = log;
+    if s.state == "run" {
+        let node = s.node.clone();
+        close_span(s, &node);
+    }
+    if !held && (p.state == "run" || (p.state == "incomplete" && p.summary.starts_with(STOP_RECORD_ERR))) {
+        let stopped = p.failed.iter().rev().find(|f| f.starts_with(crate::bucket::STOPPED_BY))
+            .map_or_else(|| stopped_in_store(&p.lease), |desc| Ok(Some(desc.clone())));
+        if !matches!(stopped, Ok(None)) && s.secs == 0.0 {
+            if let Some(x) = s.spans.last().filter(|x| x.granted_ms > 0) {
+                s.secs = x.ended_ms.saturating_sub(x.granted_ms) as f64 / 1000.0;
+            }
+        }
+        match stopped {
+            Ok(Some(desc)) => {
+                s.state = "fail".into();
+                s.run_n = 0;
+                s.summary = if s.failed_on.is_empty() { desc.clone() } else { format!("failed on {} and on {}: {desc}", s.failed_on, s.node) };
+                let hung = stop_error(&desc, &s.lease);
+                first_error(&mut s.errors, &hung);
+                append_recovery(&s.log, &hung, &format!("== stopped: {} ended (stopped): {desc}\n{hung}", s.lease));
+                return ShardRecovery::Done;
+            }
+            Err(e) => {
+                s.state = "incomplete".into();
+                s.run_n = 0;
+                s.summary = format!("{STOP_RECORD_ERR}{}: {e}; shard not requeued (fix or remove the record, or stop/rerun the shard)", s.lease);
+                let line = format!("== stop record unreadable: {}", s.summary);
+                append_recovery(&s.log, &line, &line);
+                return ShardRecovery::StopRecordError(format!("ci shard {} ({}): {}", s.id, s.lease, s.summary));
+            }
+            Ok(None) => {}
+        }
+    }
+    s.state = "wait".into();
+    s.lease.clear();
+    s.step = 0;
+    s.run_n = 0;
+    s.failed.clear();
+    ShardRecovery::Done
 }
 
 /// Runs the shards of `pair` with its slot held through proof publication.
@@ -3328,33 +3567,13 @@ fn gate_held(_one: std::sync::MutexGuard<'static, ()>, ctx: &Arc<Ctx>, pair: &Pa
     if let Some(r) = &going {
         for (i, s) in state.iter_mut().enumerate() {
             if s.kept.starts_with("arm64: skipped (") { continue; }
-            match r.shards.iter().find(|p| p.id == s.id && p.sig == s.sig) {
-                Some(p) if matches!(p.state.as_str(), "ok" | "fail") => *s = p.clone(),
-                // (also with no run noted: the node may have started the step's run as the
-                // master died, and it is followed then, not started twice; see `run_steps`)
-                // (its held lease is the proof it is on a CI box: a restarted master knows the
-                // boxes' lease.conf only once they report in)
-                Some(p) if p.state == "run" && super::leg::lease_held(ctx, &p.lease) => {
-                    *s = p.clone();
-                    back.push(i);
+            if let Some(p) = r.shards.iter().find(|p| p.id == s.id && p.sig == s.sig) {
+                let held = p.state == "run" && super::leg::lease_held(ctx, &p.lease);
+                match recover_going_shard(s, p, held, &|id| crate::lease::master::stopped_lease_reason(&ctx.home, id)) {
+                    ShardRecovery::Done => {}
+                    ShardRecovery::Attach => back.push(i),
+                    ShardRecovery::StopRecordError(line) => { ctx.store.event("ci", Sev::Err, format!("ci {}: {line}", pair.short()), None); }
                 }
-                // not on a box now: it waits again, and keeps what it knows (a first failure, the
-                // boxes it was lost on, its time so far)
-                Some(p) => {
-                    let log = std::mem::take(&mut s.log);
-                    *s = p.clone();
-                    s.log = log;
-                    if s.state == "run" {
-                        let node = s.node.clone();
-                        close_span(s, &node);
-                    }
-                    s.state = "wait".into();
-                    s.lease.clear();
-                    s.step = 0;
-                    s.run_n = 0;
-                    s.failed.clear();
-                }
-                None => {}
             }
         }
         stray = r.shards.iter().filter(|p| super::leg::lease_held(ctx, &p.lease) && !back.iter().any(|&i| state[i].lease == p.lease)).map(|p| p.lease.clone()).collect();
@@ -3381,7 +3600,7 @@ fn gate_held(_one: std::sync::MutexGuard<'static, ()>, ctx: &Arc<Ctx>, pair: &Pa
     let word = if going.is_some() { "goes on" } else { "started" };
     ctx.store.event("ci", Sev::Info, format!("ci {} {word}: {n} shards, {kept} kept, {} on their boxes (run {id})", pair.short(), back.len()), None);
     let urgency = shards.iter().map(|s| urgency.get(&s.id).copied().unwrap_or_default()).collect();
-    let pool = Arc::new((Mutex::new(Pool { tools: Vec::new(), proofs_collected: false, reserved: vec![None; n], shards, state, waits_turn: Vec::new(), stopped: false, prio: PRIO, urgency, overdue: vec![false; n], run_id: id.clone(), sweep, leg: None }), Condvar::new()));
+    let pool = Arc::new((Mutex::new(Pool { rests: Vec::new(), tools: Vec::new(), proofs_collected: false, reserved: vec![None; n], shards, state, waits_turn: Vec::new(), stopped: false, prio: PRIO, urgency, overdue: vec![false; n], run_id: id.clone(), sweep, leg: None }), Condvar::new()));
     let master_t0 = Instant::now();
     let mut nothing_left: Option<Instant> = None;
     let mut last_ran = Instant::now();
@@ -3462,7 +3681,9 @@ fn gate_held(_one: std::sync::MutexGuard<'static, ()>, ctx: &Arc<Ctx>, pair: &Pa
                 cv.notify_all();
                 break;
             }
-            g.refresh_waits(&bs);
+            // (a waiting shard's turn names the boxes that would take it now: [`BoxInfo::shown`])
+            let shown: Vec<BoxInfo> = bs.iter().map(|b| b.shown(ci_shows(ctx, &b.node))).collect();
+            g.refresh_waits(&shown);
             let takeable = |g: &Pool, i: usize| bs.iter().any(|b| g.can(b, i));
             let stuck: Vec<usize> = (0..g.shards.len()).filter(|&i| g.state[i].state == "wait" && g.reserved[i].is_none() && !takeable(&g, i)).collect();
             let others = (0..g.shards.len()).any(|i| g.state[i].state == "wait" && takeable(&g, i));
@@ -3666,6 +3887,13 @@ fn safe(id: &str) -> String {
     id.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '_' }).collect()
 }
 
+/// Whether box `node` shows a display for the run's screen shards now: the scheduler's own rule
+/// for a screen lease ([`crate::lease::sched::Sched::screen_refusal`]), read at each pick, as an
+/// output lights and darkens while a run goes.
+fn ci_shows(ctx: &Ctx, node: &str) -> bool {
+    ctx.leases.screen_refusal(node).is_none()
+}
+
 /// One box: pull the longest shard it can run, take a lease on it, run its steps, again.
 fn worker(ctx: &Arc<Ctx>, pool: &Arc<(Mutex<Pool>, Condvar)>, pair: &Pair, dir: &Path, b: BoxInfo) {
     let (p, cv) = &**pool;
@@ -3678,17 +3906,19 @@ fn worker(ctx: &Arc<Ctx>, pool: &Arc<(Mutex<Pool>, Condvar)>, pair: &Pair, dir: 
             let lanes_first = sweep && lane_queued_for(&ctx.leases.view(), ctx.leases.nodes().iter().find(|n| n.name == b.node).and_then(|n| n.hold.as_deref()), &b.node);
             // what holds a background ask of this box back now holds the run's test and screen shards
             let held_back = super::leg::background_block(&ctx.leases, None, &crate::lease::sched::parse_needs(&format!("os={},arch={}", b.os.as_str(), b.arch)), Some(&b.node)).is_some();
+            // (a screen shard only while its display shows: [`BoxInfo::shown`])
+            let shown_now = b.shown(ci_shows(ctx, &b.node));
             let mut g = p.lock().unwrap();
             if g.all_done() || g.stopped {
                 return;
             }
-            let waits = lanes_first && box_up(ctx, &b.node) && g.next_for(&b, held_back).is_some();
+            let waits = lanes_first && box_up(ctx, &b.node) && g.next_for(&shown_now, held_back).is_some();
             g.waits_turn.retain(|node| *node != b.node);
             if waits {
                 g.waits_turn.push(b.node.clone());
             }
             if !lanes_first && idle_until.is_none_or(|t| Instant::now() >= t) && box_up(ctx, &b.node) {
-                if let Some(i) = g.next_for(&b, held_back) {
+                if let Some(i) = g.next_for(&shown_now, held_back) {
                     g.reserved[i] = Some(b.node.clone());
                     break i;
                 }
@@ -3716,11 +3946,18 @@ fn worker(ctx: &Arc<Ctx>, pool: &Arc<(Mutex<Pool>, Condvar)>, pair: &Pair, dir: 
         let asked = Instant::now();
         let asked_ms = wall_ms();
         let down = std::cell::Cell::new(false);
+        // the ask's id, from its first answer, and the soonest its box can start it there once
+        // that is past what is left of its wait: it goes back at once ([`Pool::past_wait`])
+        let ask = std::cell::RefCell::new(String::new());
+        let past = std::cell::Cell::new(None::<u64>);
         let stop = || {
             down.set(!box_up(ctx, &b.node));
-            asked.elapsed() > QUEUE_WAIT || down.get() || p.lock().map(|g| g.stopped).unwrap_or(true)
+            let left = QUEUE_WAIT.saturating_sub(asked.elapsed()).as_millis() as u64;
+            past.set(Some(ask.borrow().clone()).filter(|id| !id.is_empty()).and_then(|id| ctx.leases.soonest_start(&id)).filter(|ms| *ms > left));
+            asked.elapsed() > QUEUE_WAIT || down.get() || past.get().is_some() || p.lock().map(|g| g.stopped).unwrap_or(true)
         };
         let mut queued = |line: &str| {
+            if let Some(id) = super::leg::asked_lease(line) { *ask.borrow_mut() = id.to_string(); }
             if let Ok(mut g) = p.lock() {
                 g.state[i].summary = format!("{QUEUED}{}: {line}", b.node);
             }
@@ -3734,22 +3971,24 @@ fn worker(ctx: &Arc<Ctx>, pool: &Arc<(Mutex<Pool>, Condvar)>, pair: &Pair, dir: 
                 // waited its turn asks again at once (resting, its box went to the next lane
                 // lease in the queue while verify's work was owed it, 11-01)
                 let mut g = p.lock().unwrap();
-                g.reserved[i] = None;
-                g.state[i].spans.push(CiSpan { node: b.node.clone(), asked_ms, granted_ms: 0, ended_ms: wall_ms() });
-                // its box went down: the ask goes, and the box is asked nothing until it is back
-                if down.get() {
-                    g.state[i].summary = format!("box down: {}", b.node);
-                }
+                g.ask_ended(i, &b.node, asked_ms, wall_ms(), down.get());
+                if let (Some(ms), false) = (past.get(), down.get()) { g.past_wait(i, &b.node, ms, wall_ms()); }
                 idle_until = (!e.ends_with("given up")).then(|| Instant::now() + BACKOFF);
                 cv.notify_all();
                 continue;
             }
         };
-        if let Err(e) = ship_lock(&held, &lock_dir, false) {
+        let shipped = ship_lock(&held, &lock_dir, false).map_err(|e| format!("lock shipment failed: {e}")).and_then(|_| {
+            if shard.id == REPLAY && shard.steps.last().is_some_and(|s| s.iter().any(|w| w == "--landings")) {
+                ship_replay_landings(ctx, &held, &lock_dir, &at).map_err(|e| format!("land records shipment failed: {e}"))?;
+            }
+            Ok(())
+        });
+        if let Err(e) = shipped {
             held.release(None);
             let mut g = p.lock().unwrap();
             g.reserved[i] = None;
-            g.state[i].summary = format!("lock shipment failed: {e}; retries");
+            g.state[i].summary = format!("{e}; retries");
             ctx.store.event("ci", Sev::Warn, g.state[i].summary.clone(), None);
             idle_until = Some(Instant::now() + BACKOFF);
             cv.notify_all();
@@ -3884,6 +4123,74 @@ pub(crate) fn ship_lock(held: &Held, dir: &Path, overlay: bool) -> Result<(), St
     Ok(())
 }
 
+fn ship_replay_landings(ctx: &Ctx, held: &Held, dir: &Path, pair: &Pair) -> Result<(), String> {
+    let entries: Vec<_> = ctx.store.history("land")?.iter().filter_map(|v| crate::land::Entry::parse(&v.to_json())).collect();
+    let (jsonl, trim) = replay_landings_jsonl(&entries, pair, REPLAY_LANDINGS_LIMIT);
+    let dst = dir.join(REPLAY_LANDINGS);
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    }
+    let tmp = dst.with_extension("jsonl.new");
+    std::fs::write(&tmp, jsonl.as_bytes()).map_err(|e| format!("{}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, &dst).map_err(|e| format!("{}: {e}", dst.display()))?;
+    let mut manifest = Vec::new();
+    crate::lease::ship::entries(dir, REPLAY_LANDINGS, &mut manifest)?;
+    crate::lease::ship::send(held.client(), &held.node, &held.id, dir, &manifest, false)?;
+    if let Some(ReplayTrim { older, newer, total, oldest_kept }) = trim {
+        let kept = total - older - newer;
+        ctx.store.event("ci", Sev::Info, format!("live replay land records: shipped {kept} of {total}; the {REPLAY_LANDINGS_LIMIT}-row window left out {older} older and {newer} newer; the oldest kept is #{oldest_kept}"), None);
+    }
+    Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum PostReleaseStop {
+    None,
+    Stopped(String),
+    Corrupt(String),
+}
+
+fn reconcile_post_release_stop(
+    state: &mut &'static str,
+    summary: &mut String,
+    drop_grabs: &mut bool,
+    lease: &str,
+    log_path: &str,
+    overdue: bool,
+    stopped_in_store: &dyn Fn(&str) -> Result<Option<String>, String>,
+) -> PostReleaseStop {
+    if *state == "fail" && summary.starts_with(crate::bucket::STOPPED_BY) {
+        return PostReleaseStop::Stopped(summary.clone());
+    }
+    match stopped_in_store(lease) {
+        Ok(None) => PostReleaseStop::None,
+        Ok(Some(desc)) => {
+            *drop_grabs = true;
+            *state = "fail";
+            *summary = desc.clone();
+            let hung = stop_error(&desc, lease);
+            append_recovery(log_path, &hung, &format!("== stopped: {lease} ended (stopped): {desc}\n{hung}"));
+            PostReleaseStop::Stopped(desc)
+        }
+        Err(e) => {
+            *drop_grabs = true;
+            let tail = if overdue {
+                "keeping overdue fail (fix or remove the record to recover stop attribution)"
+            } else {
+                "shard not requeued (fix or remove the record, or stop/rerun the shard)"
+            };
+            let msg = format!("{STOP_RECORD_ERR}{lease}: {e}; {tail}");
+            let line = format!("== stop record unreadable: {msg}");
+            append_recovery(log_path, &line, &line);
+            if !overdue {
+                *state = "incomplete";
+                *summary = msg.clone();
+            }
+            PostReleaseStop::Corrupt(msg)
+        }
+    }
+}
+
 fn run_shard(ctx: &Ctx, pool: &(Mutex<Pool>, Condvar), i: usize, held: Held) -> bool {
     let (p, cv) = pool;
     let (shard, log_path, node, run_id) = {
@@ -3907,7 +4214,7 @@ fn run_shard(ctx: &Ctx, pool: &(Mutex<Pool>, Condvar), i: usize, held: Held) -> 
     // a crate's own time, for the batches of the next plan
     // and whether it failed: a failing crate runs in a batch of its own (its old failure must not
     // hide a new one in its batch)
-    for (k, secs, ok) in took {
+    for &(k, secs, ok) in &took {
         if secs == 0.0 { continue; } // followed steps have a verdict but no whole time
         if let [.., t, pkg] = shard.steps[k].as_slice() {
             if t == "test" && shard.steps[k].iter().rev().nth(2).is_some_and(|w| w == "--") {
@@ -3920,7 +4227,7 @@ fn run_shard(ctx: &Ctx, pool: &(Mutex<Pool>, Condvar), i: usize, held: Held) -> 
     }
     // Copy while the lease still resolves its target. Nothing on the node uses the LAN;
     // the master does all model work after release, on this box's worker without the pool lock.
-    let grabs = if state == "ok" && saves_grabs(&shard) {
+    let mut grabs = if state == "ok" && saves_grabs(&shard) {
         let dst = ctx.logs("ci").join(&run_id).join(safe(&shard.id));
         match copy_deferred(&held, Path::new(&log_path), &dst) {
             Ok(grabs) => grabs,
@@ -3935,7 +4242,7 @@ fn run_shard(ctx: &Ctx, pool: &(Mutex<Pool>, Condvar), i: usize, held: Held) -> 
     };
     let lease = held.id.clone();
     held.release(Some(if state == "ok" { 0 } else { 1 }));
-    let mut secs = {
+    let (mut secs, is_overdue) = {
         let mut g = p.lock().unwrap();
         let s = &mut g.state[i];
         // a run a previous master left on the box may have been granted before this state knew
@@ -3944,8 +4251,21 @@ fn run_shard(ctx: &Ctx, pool: &(Mutex<Pool>, Condvar), i: usize, held: Held) -> 
         }
         let secs = wall_ms().saturating_sub(s.granted_ms) as f64 / 1000.0;
         close_span(s, &node);
-        secs
+        (secs, g.overdue[i])
     };
+    let was_stopped_in_steps = state == "fail" && summary.starts_with(crate::bucket::STOPPED_BY);
+    let mut drop_grabs = false;
+    let post_stop = reconcile_post_release_stop(&mut state, &mut summary, &mut drop_grabs, &lease, &log_path, is_overdue,
+        &|id| crate::lease::master::stopped_lease_reason(&ctx.home, id));
+    if drop_grabs { grabs.clear(); }
+    if let PostReleaseStop::Corrupt(msg) = &post_stop {
+        Store::event(&ctx.store, "ci", Sev::Err, format!("ci shard {} ({lease}): {msg}", shard.id), None);
+    }
+    if post_stop != PostReleaseStop::None && !was_stopped_in_steps {
+        if let Some(&(k, _, true)) = took.last() {
+            p.lock().unwrap().state[i].steps_ok.retain(|&x| x != k as u64);
+        }
+    }
     if !grabs.is_empty() {
         {
             let mut g = p.lock().unwrap();
@@ -3978,7 +4298,7 @@ fn run_shard(ctx: &Ctx, pool: &(Mutex<Pool>, Condvar), i: usize, held: Held) -> 
         }
     }
     // lane work took the box back (the master preempts background work): the shard waits again
-    if state == "incomplete" && super::leg::was_preempted(&lease) {
+    if post_stop == PostReleaseStop::None && state == "incomplete" && super::leg::was_preempted(&lease) {
         let mut g = p.lock().unwrap();
         g.reserved[i] = None;
         g.state[i].state = "wait".into();
@@ -3988,26 +4308,35 @@ fn run_shard(ctx: &Ctx, pool: &(Mutex<Pool>, Condvar), i: usize, held: Held) -> 
         return true;
     }
     let log = std::fs::read_to_string(&log_path).unwrap_or_default();
-    if let Some((key, per)) = replay_measure(&shard, &log, secs).filter(|_| state != "incomplete") {
+    if let Some((key, per)) = (post_stop == PostReleaseStop::None && state != "incomplete").then(|| replay_measure(&shard, &log, secs)).flatten() {
         ctx.store.update(|d| d.ci.measured(&key, per)).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() });
     }
-    let errors = if state == "fail" { super::ci_status::error_lines(&log) } else { Vec::new() };
+    let mut errors = if state == "fail" { super::ci_status::error_lines(&log) } else { Vec::new() };
+    if state == "fail" && summary.starts_with(crate::bucket::STOPPED_BY) {
+        first_error(&mut errors, &stop_error(&summary, &lease));
+    }
     let bs = boxes(ctx);
     let mut g = p.lock().unwrap();
     g.reserved[i] = None;
     // overdue: its real end, as it came (the run went on without it)
     if g.overdue[i] {
+        if matches!(post_stop, PostReleaseStop::Corrupt(_)) {
+            g.state[i].secs = secs;
+            publish_changed(ctx, &g);
+            cv.notify_all();
+            return false;
+        }
         let was = std::mem::take(&mut g.state[i].summary);
         g.state[i].state = state.into();
         g.state[i].summary = format!("{summary} (after {:.0} s; {was})", secs);
         g.state[i].errors = errors;
         let id = g.state[i].id.clone();
-        if state != "incomplete" {
+        if state != "incomplete" && post_stop == PostReleaseStop::None {
             ctx.store.update(|d| d.ci.measured(&id, secs)).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() });
         }
         publish_changed(ctx, &g);
         cv.notify_all();
-        let late = g.proofs_collected && units_of(&shard).iter().enumerate().any(|(k, _)| unit_passed(&shard, &g.state[i], k));
+        let late = post_stop == PostReleaseStop::None && g.proofs_collected && units_of(&shard).iter().enumerate().any(|(k, _)| unit_passed(&shard, &g.state[i], k));
         let (shards, states, run_id, sweep) = (g.shards.clone(), g.state.clone(), g.run_id.clone(), g.sweep);
         drop(g);
         if late {
@@ -4041,7 +4370,7 @@ fn run_shard(ctx: &Ctx, pool: &(Mutex<Pool>, Condvar), i: usize, held: Held) -> 
     let devhub = g.ended_by_devhub(i, &node, state, &summary);
     let by_devhub = devhub.is_some();
     let (state, summary) = devhub.unwrap_or((state, summary));
-    if state == "incomplete" && !judge_fault && !by_devhub && g.state[i].lost.iter().map(|(_, k)| *k).sum::<u32>() < 2 * LOST_TRIES {
+    if state == "incomplete" && !matches!(post_stop, PostReleaseStop::Corrupt(_)) && !judge_fault && !by_devhub && g.state[i].lost.iter().map(|(_, k)| *k).sum::<u32>() < 2 * LOST_TRIES {
         // a lost lease: the shard is asked again (twice on one box, then elsewhere)
         // an unfit box is not asked again; a lost lease is, once
         let n = if summary.starts_with("unfit:") { LOST_TRIES } else { 1 };
@@ -4076,7 +4405,7 @@ fn run_shard(ctx: &Ctx, pool: &(Mutex<Pool>, Condvar), i: usize, held: Held) -> 
             g.state[i].summary = format!("failed on {first} and on {node}: {summary}");
             g.state[i].errors = errors;
         }
-        if state != "incomplete" {
+        if state != "incomplete" && post_stop == PostReleaseStop::None {
             let id = g.state[i].id.clone();
             ctx.store.update(|d| d.ci.measured(&id, secs)).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() });
         }
@@ -4373,6 +4702,15 @@ fn run_steps(held: &Held, shard: &Shard, log: &Path, at: &CiShard, note: &mut dy
                     failed.push(why);
                 }
                 note(k + 1, 0, &failed, took);
+            }
+            Err(e) if e.split_once(" ended (stopped): ").is_some_and(|(_, d)| d.starts_with(crate::bucket::STOPPED_BY)) => {
+                let (before, desc) = e.split_once(" ended (stopped): ").unwrap();
+                let lease = before.split_whitespace().next().unwrap_or(&held.id);
+                let _ = writeln!(f, "== stopped: {e}\n{}", stop_error(desc, lease));
+                took.push((k, 0.0, false));
+                failed.push(desc.to_string());
+                note(k + 1, 0, &failed, took);
+                return ("fail", desc.to_string());
             }
             // devhub's verdict, not the code's: a second box runs it ([`Pool::ended_by_devhub`])
             Err(e) if e.contains(" ended (hung)") => {
@@ -5268,6 +5606,7 @@ mod tests {
             assert_eq!(ci, doc.ci);
         }
         let mut pool = Pool {
+            rests: Vec::new(),
             tools: Vec::new(), proofs_collected: false, shards: Vec::new(), state: vec![CiShard { id: "gate".into(), state: "ok".into(), ..Default::default() }],
             reserved: Vec::new(), waits_turn: Vec::new(), stopped: false, prio: PRIO, urgency: Vec::new(), overdue: Vec::new(), run_id: "gate".into(), sweep: false, leg: None,
         };
@@ -5545,6 +5884,88 @@ shared = { workspace = true }
         }
     }
 
+    #[test]
+    fn replay_landings_jsonl_orders_by_changed_ms_and_handles_multi_repo_and_noops() {
+        use crate::land::{Entry, Side, St};
+        let entry = |id, changed_ms, state, pre: &str, landed: &str, apps: &str| Entry {
+            id, changed_ms, state, pre: pre.into(), landed: landed.into(),
+            nested: vec![Side { name: "apps".into(), branch: "lane".into(), sha: "branch-tip".into(), landed: apps.into() }],
+            ..Entry::parse(r#"{"branch":"lane"}"#).unwrap()
+        };
+        let mut entries = vec![
+            entry(10, 3000, St::Landed, "work w1 main c1", "work w2 main c1", "a2"),
+            entry(11, 2000, St::Landed, "work w0 main c0", "work w1 main c1", "a1"),
+            entry(12, 2500, St::Failed, "work w1 main c1", "work w2 main c2", "a2"),
+            entry(13, 3500, St::Landed, "work w2 main c1", "work w2 main c1", "a2"),
+        ];
+        let rows = |jsonl: String| -> Vec<Value> {
+            jsonl.lines().map(|line| makepad_strict_json::parse(line.as_bytes()).expect("each line must be a JSON object")).collect()
+        };
+        let at = Pair::new("w1", "c1");
+        let (jsonl, trim) = replay_landings_jsonl(&entries, &at, 2000);
+        let output = rows(jsonl);
+        assert_eq!(trim, None, "a full window must report no omitted rows");
+        assert!(output.iter().all(|row| row.get("trimmed").is_none()), "full exports must carry no trim marker");
+        assert_eq!(output.len(), 2, "a failed entry and an unchanged nested tip must emit no rows");
+        let fields = |row: &Value, field: &str, expected: &[(&str, &str)]| {
+            let Some(Value::Obj(pairs)) = row.get(field) else { panic!("missing map {field}") };
+            assert_eq!(pairs.len(), expected.len(), "extra or missing repository in {field}");
+            for &(repo, sha) in expected {
+                assert_eq!(row.get(field).unwrap().get(repo).and_then(Value::as_str), Some(sha), "wrong {field} for {repo}");
+            }
+        };
+        for (row, id, t) in [(&output[0], 11, 2), (&output[1], 10, 3)] {
+            assert_eq!(row.get("id").and_then(Value::as_u64), Some(id), "the earlier landing must come first");
+            assert_eq!(row.get("t").and_then(Value::as_u64), Some(t), "landing time must be in seconds");
+        }
+        fields(&output[0], "commits", &[("makepad", "w1"), ("apps/commercial", "c1"), ("apps/apps", "a1")]);
+        fields(&output[0], "pre", &[("makepad", "w0"), ("apps/commercial", "c0")]);
+        fields(&output[0], "post", &[("makepad", "w1"), ("apps/commercial", "c1")]);
+        fields(&output[1], "commits", &[("makepad", "w2"), ("apps/apps", "a2")]);
+        fields(&output[1], "pre", &[("makepad", "w1"), ("apps/commercial", "c1")]);
+        fields(&output[1], "post", &[("makepad", "w2"), ("apps/commercial", "c1")]);
+
+        // Put the bisect pair before the entire 64-row tail, with more recent nested-only lands.
+        for id in 14..78 {
+            entries.push(entry(id, 4000 + id, St::Landed, "work w2 main c1", "work w2 main c1", &format!("a{id}")));
+        }
+        let (jsonl, trim) = replay_landings_jsonl(&entries, &at, 1);
+        let window = rows(jsonl);
+        assert_eq!(trim, Some(ReplayTrim { older: 0, newer: 1, total: 66, oldest_kept: 11 }), "bisect must report the row after its tail");
+        assert_eq!(window.len(), 65, "a one-row bisect window must retain the 64 following lands");
+        for field in ["id", "t", "commits", "pre", "post"] {
+            assert_eq!(window[0].get(field), output[0].get(field), "the bisect window must preserve the requested pair's {field}");
+        }
+        assert_eq!(window.last().unwrap().get("id").and_then(Value::as_u64), Some(76), "the tail must stop after 64 later lands");
+        let check_marker = |rows: &[Value], limit, older, newer| {
+            let marker = rows[0].get("trimmed").expect("the first kept row must carry the trim marker");
+            assert!(matches!(marker, Value::Obj(pairs) if pairs.len() == 4), "the marker must carry exactly four counts");
+            for (key, count) in [("window", limit), ("older", older), ("newer", newer), ("total", 66)] {
+                assert_eq!(marker.get(key).and_then(Value::as_u64), Some(count), "wrong trim marker count for {key}");
+            }
+            assert!(rows[1..].iter().all(|row| row.get("trimmed").is_none()), "only the first row may carry the trim marker");
+        };
+        check_marker(&window, 1, 0, 1);
+        let (jsonl, trim) = replay_landings_jsonl(&entries, &Pair::new("w9", "c9"), 2);
+        let newest = rows(jsonl);
+        assert_eq!(newest.len(), 2, "the newest window must keep the last two lands");
+        assert_eq!(newest[0].get("id").and_then(Value::as_u64), Some(76), "the newest window must start at land 76");
+        assert_eq!(trim, Some(ReplayTrim { older: 64, newer: 0, total: 66, oldest_kept: 76 }), "the newest window must report older omitted rows");
+        check_marker(&newest, 2, 64, 0);
+    }
+
+    #[test]
+    fn live_replays_passes_landings_only_when_script_supports_it() {
+        let base = argv(&["python3", "tools/run/fixture/live_replay.py", "--app", "makepad-app-storybook", "--count", "40"]);
+        for script in ["", "--landings"] {
+            let tree = Tree::mem(vec![("tools/run/fixture/live_replay.py", script)]);
+            let replay = live_replays(&tree, &|_| None, 0).into_iter().find(|s| s.id == REPLAY).unwrap();
+            let mut expected = base.clone();
+            if !script.is_empty() { expected.extend(argv(&["--landings", "target/live_replay/landings.jsonl"])); }
+            assert_eq!(replay.steps.last(), Some(&expected), "the replay command must match the script at the leased revision");
+        }
+    }
+
     /// The live replay is estimated at its app's measured time per landing times the landings it
     /// takes, and its lease declares that, so a 40-landing replay of 3 min landings is not stalled
     /// at 15 min against the live shards' shared class measure (L1402816, 11-19); its finished log
@@ -5729,7 +6150,7 @@ shared = { workspace = true }
         let shards = vec![shard("wtest:a", Os::Windows, 60.0), shard("test:deps", Os::Linux, 300.0), shard("test:own", Os::Linux, 20.0), shard("test:new", Os::Linux, 10.0)];
         let n = shards.len();
         let state = shards.iter().map(|s| CiShard { id: s.id.clone(), state: "wait".into(), ..Default::default() }).collect();
-        let mut p = Pool { tools: Vec::new(), proofs_collected: false, shards, state, reserved: vec![None; n], waits_turn: Vec::new(), stopped: false, prio: 0, urgency: vec![Urgency::Deps, Urgency::Deps, Urgency::Own, Urgency::New], overdue: vec![false; n], run_id: "S".into(), sweep: true, leg: None };
+        let mut p = Pool { rests: Vec::new(), tools: Vec::new(), proofs_collected: false, shards, state, reserved: vec![None; n], waits_turn: Vec::new(), stopped: false, prio: 0, urgency: vec![Urgency::Deps, Urgency::Deps, Urgency::Own, Urgency::New], overdue: vec![false; n], run_id: "S".into(), sweep: true, leg: None };
         assert!(!p.getting_on(), "nothing runs or asks yet");
         // the Windows shard is stuck in its box's queue
         assert_eq!(p.next_for(&win, false), Some(0));
@@ -5812,20 +6233,57 @@ shared = { workspace = true }
         let smoke = Shard { kind: Kind::Ci, gui: true, judge: Judge::Exit, ..shard("smoke:linux:apps/a", 10.0) };
         let shards = vec![shard("whole", 300.0), shard("small", 20.0), smoke];
         let state = shards.iter().map(|s| CiShard { id: s.id.clone(), state: "wait".into(), ..Default::default() }).collect();
-        let mut p = Pool { tools: Vec::new(), proofs_collected: false, shards, state, reserved: vec![None; 3], waits_turn: Vec::new(), stopped: false, prio: 0, urgency: vec![Urgency::Deps; 3], overdue: vec![false; 3], run_id: "r".into(), sweep: false, leg: None };
+        let mut p = Pool { rests: Vec::new(), tools: Vec::new(), proofs_collected: false, shards, state, reserved: vec![None; 3], waits_turn: Vec::new(), stopped: false, prio: 0, urgency: vec![Urgency::Deps; 3], overdue: vec![false; 3], run_id: "r".into(), sweep: false, leg: None };
         assert_eq!(p.next_for(&lin, false), Some(0), "the longest first");
         assert_eq!(p.next_for(&lin, true), Some(2), "while lane work holds the box's background asks back, a shard on its own CI slot goes first");
+        // a box whose display shows nothing now takes no screen shard, and its turn names no
+        // such box; showing one again, it takes them (a Linux box's WM had no output connected, 11-27)
+        let dark = lin.shown(false);
+        assert_eq!(p.next_for(&dark, true), Some(0), "dark, it takes the longest other shard, not the smoke");
+        assert!(p.can(&lin, 2) && !p.can(&dark, 2) && p.can(&lin.shown(true), 2), "the run's box keeps its display; only its pick reads it dark");
         // a line from when no box could take it gives way to its turn
         p.state[2].summary = "waits for a box of linux (0 s)".into();
         p.refresh_waits(std::slice::from_ref(&lin));
         assert_eq!(p.state[2].summary, "waits for a box's turn on l: each runs or asks for one shard of the run at a time");
         p.refresh_waits(&[]);
         assert!(p.state[2].summary.starts_with("waits for a box's turn on l"), "no box now: the line stays until the run says why");
+        // an ask that left the queue ungranted leaves no queue reason behind: the shard waits for its turn
+        p.state[2].summary = format!("{QUEUED}l: L9 queued leaves its tree to L8 (gate of landq-fast, queued)");
+        p.reserved[2] = Some("l".into());
+        p.ask_ended(2, "l", 1_000, 301_000, false);
+        assert_eq!((p.reserved[2].as_deref(), p.state[2].summary.as_str()), (None, "waits for a box's turn (its ask on l left the queue after 300 s)"), "back in the pool, no stale reason");
+        p.refresh_waits(std::slice::from_ref(&lin));
+        assert!(p.state[2].summary.starts_with("waits for a box's turn on l"), "and its turn names the boxes: {}", p.state[2].summary);
+        p.ask_ended(2, "l", 1_000, 2_000, true);
+        assert_eq!(p.state[2].summary, "box down: l");
+        p.state[2].spans.clear();
         p.state[2].state = "ok".into();
         p.state[0].spans.push(CiSpan { node: "l".into(), asked_ms: 1, granted_ms: 0, ended_ms: 2 });
         assert_eq!(p.next_for(&lin, false), Some(1), "its ask gave up: the other goes");
         p.state[1].state = "ok".into();
         assert_eq!(p.next_for(&lin, false), Some(0), "and it asks again when nothing else can run");
+        // an ask that went back at once, its box held past its wait (Sched::soonest_start): another
+        // box takes the shard, and its own takes one of another kind meanwhile, none of its kind
+        // until what holds it ends, at most its wait (shards sat their 5 min behind a box's live
+        // session or a gate's whole run, 142 times in a day, 11-27)
+        (p.state[1].state, p.state[2].state) = ("wait".into(), "wait".into());
+        p.state[0].spans.clear();
+        let now = wall_ms();
+        p.reserved[0] = Some("l".into());
+        p.ask_ended(0, "l", now, now, false);
+        p.past_wait(0, "l", 20 * 60_000, now);
+        assert!(p.state[0].summary.contains("its ask on l went back at once: what holds it there ends in ~1200 s by measure, past its 300 s wait"), "{}", p.state[0].summary);
+        assert_eq!(p.rests, vec![("l".to_string(), Kind::Test, now + QUEUE_WAIT.as_millis() as u64)], "it rests at most its wait");
+        assert_eq!(p.next_for(&lin, false), Some(2), "its box takes a shard of another kind");
+        let m = BoxInfo { node: "m".into(), ..lin.clone() };
+        assert_eq!(p.next_for(&m, false), Some(0), "another box takes it");
+        p.state[2].state = "ok".into();
+        assert_eq!(p.next_for(&lin, false), None, "none of its kind on its box meanwhile");
+        p.past_wait(1, "l", u64::MAX, now);
+        assert!(p.state[1].summary.contains("what holds it there has no end of its own"), "{}", p.state[1].summary);
+        assert_eq!(p.rests.len(), 1, "one rest per box and kind");
+        p.rests[0].2 = now;
+        assert_eq!(p.next_for(&lin, false), Some(1), "once it ends, its kind again (the one that went back there last)");
     }
 
     #[test]
@@ -5900,12 +6358,138 @@ shared = { workspace = true }
     }
 
     #[test]
+    fn post_release_stop_gate_prevents_pass_or_lease_clear_when_stop_won_release() {
+        use crate::lease::master::{stopped_lease_reason, write_stopped_lease};
+        let home = std::env::temp_dir().join(format!("devhub-ci-post-release-{}", std::process::id()));
+        write_stopped_lease(&home, "L30", "stopped by main: late").unwrap();
+        std::fs::write(home.join("stopped-leases/L31"), "bad").unwrap();
+        for (lease, overdue) in [("L30", false), ("L31", false), ("L31", true), ("L32", false)] {
+            let log = home.join(format!("{lease}-{overdue}.log"));
+            let mut state = if overdue { "fail" } else { "ok" };
+            let mut summary = if overdue { "overdue: smoke" } else { "1 step ok" }.to_string();
+            let mut drop_grabs = false;
+            for _ in 0..2 {
+                let result = reconcile_post_release_stop(&mut state, &mut summary, &mut drop_grabs, lease, log.to_str().unwrap(), overdue, &|id| stopped_lease_reason(&home, id));
+                match lease {
+                    "L30" => {
+                        assert_eq!(result, PostReleaseStop::Stopped("stopped by main: late".into()));
+                        assert!(drop_grabs && state == "fail" && summary == "stopped by main: late");
+                    }
+                    "L31" => {
+                        assert!(matches!(result, PostReleaseStop::Corrupt(_)) && drop_grabs);
+                        if overdue { assert!(state == "fail" && summary == "overdue: smoke"); }
+                        else { assert!(state == "incomplete" && summary.starts_with(STOP_RECORD_ERR)); }
+                    }
+                    _ => assert!(result == PostReleaseStop::None && !drop_grabs && state == "ok" && summary == "1 step ok"),
+                }
+            }
+            let log = std::fs::read_to_string(log).unwrap_or_default();
+            if lease == "L30" {
+                assert_eq!(log.matches("== stopped:").count(), 1);
+                assert_eq!(log.matches("HUNG: stopped by main: late; its stacks: devhub job result L30").count(), 1);
+            }
+            if lease == "L31" { assert_eq!(log.matches("== stop record unreadable:").count(), 1); }
+        }
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn ci_shard_stopped_by_hand_fails_red_without_second_box_retry() {
+        let dir = std::env::temp_dir().join(format!("devhub-ci-stop-red-{}", std::process::id()));
+        let store = Store::open_quiet(&dir, "").unwrap();
+        let id = "smoke:linux:apps/a";
+        let desc = "stopped by main: hung smoke";
+        let hung = "HUNG: stopped by main: hung smoke; its stacks: devhub job result L7";
+        let shard = Shard { id: id.into(), os: Os::Linux, kind: Kind::Test, gui: false, gpu: false, steps: Vec::new(), judge: Judge::Exit, est: 1.0, dirs: None, whole: false, cores: None };
+        let bx = |n: &str| BoxInfo { node: n.into(), os: Os::Linux, arch: "x86_64".into(), gui: true, gpu: true, ci: true, work: BoxWork::All };
+        let boxes = [bx("box-a"), bx("box-b")];
+        let running = CiShard { id: id.into(), state: "run".into(), lease: "L7".into(), ..Default::default() };
+        let late = CiShard { state: "fail".into(), id: "prior".into(), lease: "L8".into(), summary: format!("{OVERDUE}busy"), ..Default::default() };
+        store.update(|d| {
+            let dead = CiShard { id: "ended".into(), lease: "L9".into(), ..late.clone() };
+            d.ci.run = Some(CiRun { shards: vec![running.clone(), dead.clone()], ..Default::default() });
+            d.ci.runs.push(CiRun { shards: vec![late.clone(), dead, late], ..Default::default() });
+        }).unwrap();
+        let active = active_shards_for_stop(&store, &|l| (l == "L7" || l == "L8").then(|| "box-a".into()));
+        assert_eq!(active.iter().map(|a| (a.id.as_str(), a.lease.as_str(), a.node.as_str(), a.overdue)).collect::<Vec<_>>(),
+                   [(id, "L7", "box-a", false), ("prior", "L8", "box-a", true)]);
+
+        let mut pool = Pool { shards: vec![shard], state: vec![running], reserved: vec![None], waits_turn: Vec::new(),
+            stopped: false, prio: 0, urgency: vec![Urgency::Own], overdue: vec![false], run_id: "run".into(), sweep: false,
+            leg: None, tools: Vec::new(), proofs_collected: false, rests: Vec::new() };
+        assert!(!pool.second_box(0, "box-a", &boxes, desc, vec![]));
+        assert!(pool.state[0].failed_on.is_empty());
+        assert_eq!(pool.ended_by_devhub(0, "box-a", "fail", desc), None);
+        let s = &mut pool.state[0];
+        s.state = "fail".into();
+        s.summary = desc.into();
+        first_error(&mut s.errors, &stop_error(desc, &s.lease));
+        assert_eq!(s.errors, [hung]);
+        let log = dir.join("bucket.log");
+        bucket_log(&Pair::default(), Verdict::Fail, &[s.leg()], &log);
+        assert!(std::fs::read_to_string(log).unwrap().contains(&format!("{hung}\nGATEUNIT fail {id}\n")));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn ci_shard_stopped_by_hand_stays_fail_across_master_restart() {
+        use crate::lease::master::{stopped_lease_reason, write_stopped_lease};
+        let home = std::env::temp_dir().join(format!("devhub-ci-stop-restart-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        let record = |id: &str| stopped_lease_reason(&home, id);
+        let prior = |lease: &str| CiShard { id: "smoke:linux:apps/a".into(), lease: lease.into(), node: "box-a".into(),
+            state: "run".into(), granted_ms: 1_000, run_n: 1, ..Default::default() };
+        let mut s = CiShard { log: home.join("shard.log").display().to_string(), ..Default::default() };
+        let hung = "HUNG: stopped by main: hung smoke; its stacks: devhub job result L7";
+        std::fs::write(&s.log, format!("{hung}\n")).unwrap();
+        let mut p = prior("L7");
+        p.failed = vec!["step0: exit 1".into(), "stopped by main: hung smoke".into()];
+        assert_eq!(recover_going_shard(&mut s, &p, false, &|_| Ok(None)), ShardRecovery::Done);
+        assert_eq!((s.state.as_str(), s.lease.as_str(), s.spans.len(), s.errors[0].as_str()), ("fail", "L7", 1, hung));
+        assert_eq!(std::fs::read_to_string(&s.log).unwrap().matches(hung).count(), 1);
+        let bucket = home.join("bucket.log");
+        bucket_log(&Pair::default(), Verdict::Fail, &[s.leg()], &bucket);
+        let out = std::fs::read_to_string(bucket).unwrap();
+        assert!(out.find(hung).unwrap() < out.find("GATEUNIT fail smoke:linux:apps/a").unwrap());
+
+        write_stopped_lease(&home, "L8", "stopped by user: wedged").unwrap();
+        assert!(!home.join("leases.jsonl").exists());
+        std::fs::write(&s.log, "$ ci-leg\n").unwrap();
+        assert_eq!(recover_going_shard(&mut s, &prior("L8"), false, &record), ShardRecovery::Done);
+        assert_eq!((s.state.as_str(), s.lease.as_str(), s.summary.as_str(), s.spans.len()), ("fail", "L8", "stopped by user: wedged", 1));
+        let hung = "HUNG: stopped by user: wedged; its stacks: devhub job result L8";
+        assert_eq!(s.errors, [hung]);
+        assert!(std::fs::read_to_string(&s.log).unwrap().contains(&format!("== stopped: L8 ended (stopped): stopped by user: wedged\n{hung}\n")));
+
+        std::fs::write(home.join("stopped-leases/L11"), "not-a-stop\n").unwrap();
+        std::fs::write(&s.log, "$ ci-leg\n").unwrap();
+        let mut p = prior("L11");
+        for _ in 0..2 {
+            let ShardRecovery::StopRecordError(line) = recover_going_shard(&mut s, &p, false, &record) else { panic!("corrupt record requeued") };
+            assert!(line.contains("could not read stop record for L11") && line.contains("shard not requeued"), "{line}");
+            assert_eq!((s.state.as_str(), s.lease.as_str(), s.spans.len()), ("incomplete", "L11", 1));
+            p = s.clone();
+        }
+        assert_eq!(std::fs::read_to_string(&s.log).unwrap().matches("== stop record unreadable:").count(), 1);
+        write_stopped_lease(&home, "L11", "stopped by main: fixed").unwrap();
+        assert_eq!(recover_going_shard(&mut s, &p, false, &record), ShardRecovery::Done);
+        assert_eq!(s.state, "fail");
+        for id in ["L9", "L10"] {
+            let mut p = prior(id);
+            if id == "L10" { p.failed.push("ended by devhub: hung".into()); }
+            assert_eq!(recover_going_shard(&mut s, &p, false, &record), ShardRecovery::Done);
+            assert!(s.state == "wait" && s.lease.is_empty() && s.failed.is_empty());
+        }
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
     fn a_failure_asks_a_second_box_and_a_box_failing_several_is_out() {
         let bx = |n: &str, os: Os| BoxInfo { node: n.into(), os, arch: "x86_64".into(), gui: true, gpu: true, ci: true, work: BoxWork::All };
         let boxes = [bx("a", Os::Linux), bx("b", Os::Linux), bx("m", Os::Macos)];
         let shard = |id: &str| Shard { id: id.into(), kind: Kind::Test, os: Os::Any, gui: false, gpu: false, steps: Vec::new(), judge: Judge::Exit, est: 1.0, dirs: None, whole: false, cores: None };
         let n = BOX_OUT + 1;
-        let mut p = Pool { tools: Vec::new(), proofs_collected: false, shards: (0..n).map(|i| shard(&format!("s{i}"))).collect(), state: (0..n).map(|i| CiShard { id: format!("s{i}"), state: "wait".into(), ..Default::default() }).collect(), reserved: vec![None; n], waits_turn: Vec::new(), stopped: false, prio: 0, urgency: vec![Urgency::Deps; n], overdue: vec![false; n], run_id: String::new(), sweep: false, leg: None };
+        let mut p = Pool { rests: Vec::new(), tools: Vec::new(), proofs_collected: false, shards: (0..n).map(|i| shard(&format!("s{i}"))).collect(), state: (0..n).map(|i| CiShard { id: format!("s{i}"), state: "wait".into(), ..Default::default() }).collect(), reserved: vec![None; n], waits_turn: Vec::new(), stopped: false, prio: 0, urgency: vec![Urgency::Deps; n], overdue: vec![false; n], run_id: String::new(), sweep: false, leg: None };
         // the same OS only, never the box that failed it (an `Any` shard failing on Linux says
         // nothing about a Mac)
         assert!(p.second_box(0, "a", &boxes, "exit 1", vec!["error: x".into()]));
@@ -6003,6 +6587,76 @@ shared = { workspace = true }
         let shard = |id: &str, granted: u64, ended: u64| CiShard { id: id.into(), node: "n".into(), log: "/nonexistent/x.log".into(), spans: vec![CiSpan { granted_ms: granted, ended_ms: ended, ..Default::default() }], ..Default::default() };
         let slow = slowest(&[shard("a", 1000, 2000), shard("b", 1000, 61_000), shard("never", 0, 5000)], 5);
         assert_eq!(slow, vec!["b 60 s on n: no step times in its log".to_string(), "a 1 s on n: no step times in its log".to_string()]);
+    }
+
+    /// A test hub's quiet look must report a display CI accepts on Linux (`wm:makepad-wm-<n>`),
+    /// with no WM diagnostic blocking screen leases: `wm:test` made every smoke shard go `not run`
+    /// and hung the master-restart test (11-28).
+    #[test]
+    fn a_quiet_box_counts_as_a_ci_display_box() {
+        use crate::lease::{exec::BoxLook, Caps, Role};
+        let home = std::env::temp_dir().join(format!("devhub-ci-quiet-display-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        // Exercise the Linux WM-name gate on every host OS.
+        let quiet = Caps {
+            node: "c1".into(),
+            os: "linux".into(),
+            arch: "x86_64".into(),
+            role: Some(Role::Pool),
+            cores: 2,
+            ram_gb: 4.0,
+            ram_avail_gb: 4.0,
+            display: (BoxLook::quiet().display)().flatten(),
+            ..Default::default()
+        };
+        let bogus = Caps { node: "c2".into(), display: Some("wm:test".into()), ..quiet.clone() };
+        let (c1_json, c2_json) = (quiet.to_json(), bogus.to_json());
+        let ask: crate::lease::master::Ask = Arc::new(move |node: &str, service: &str, _: &str| match (node, service) {
+            ("c1", "caps") => Ok(vec![c1_json.clone()]),
+            ("c2", "caps") => Ok(vec![c2_json.clone()]),
+            (_, "policy") => Ok(vec!["{}".into()]),
+            _ => Err(format!("unexpected {node} {service}")),
+        });
+        let leases = Arc::new(crate::lease::master::LeaseMaster::new(
+            "mac", home.clone(), ask, Arc::new(|_| {}), Arc::new(|| 1), None, true,
+        ));
+        let ctx = Ctx {
+            store: crate::state::Store::open(&home, "mac", Arc::new(|_| 0)).unwrap(),
+            leases,
+            machine: "mac".into(),
+            monitor: crate::monitor::Monitor::start(&[]),
+            repo: home.clone(),
+            home: home.clone(),
+        };
+        ctx.leases.refresh(&[("c1".into(), "192.0.2.1:8797".into()), ("c2".into(), "192.0.2.2:8797".into())]);
+        let bs = boxes(&ctx);
+        let c1 = bs.iter().find(|b| b.node == "c1").expect("quiet box in CI boxes");
+        let c2 = bs.iter().find(|b| b.node == "c2").expect("control box in CI boxes");
+        let smoke = Shard {
+            id: "smoke:linux:apps/a".into(),
+            kind: Kind::Ci,
+            os: Os::Linux,
+            gui: true,
+            gpu: false,
+            steps: Vec::new(),
+            judge: Judge::Exit,
+            est: 1.0,
+            dirs: None,
+            whole: false,
+            cores: None,
+        };
+        assert!(
+            c1.gui && ci_shows(&ctx, "c1") && c1.shown(ci_shows(&ctx, "c1")).fits(&smoke),
+            "quiet box must take Linux smoke shards: {c1:?}, display={:?}",
+            quiet.display,
+        );
+        assert!(
+            !c2.gui && !c2.shown(ci_shows(&ctx, "c2")).fits(&smoke),
+            "a non-makepad-wm Linux display must not count as gui: {c2:?}",
+        );
+        drop(ctx);
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     /// A bench box takes only cross-target checks, its OS's shards no pool box can;
@@ -6314,7 +6968,7 @@ shared = { workspace = true }
         let shard = |id: &str, dir: &str| Shard { id: id.into(), kind: Kind::Test, os: Os::Linux, gui: false, gpu: false, steps: Vec::new(), judge: Judge::Tests, est: 1.0, dirs: Some(vec![dir.into()]), whole: false, cores: None };
         let (a, gone) = (shard("wtest:a", "libs/a"), shard("wtest:gone", "libs/gone"));
         // (a sweep's pool: its legs share the leg tree it found)
-        let sweep = || Mutex::new(Pool { tools: Vec::new(), proofs_collected: false, shards: Vec::new(), state: Vec::new(), reserved: Vec::new(), waits_turn: Vec::new(), stopped: false, prio: 0, urgency: Vec::new(), overdue: Vec::new(), run_id: "S".into(), sweep: true, leg: None });
+        let sweep = || Mutex::new(Pool { rests: Vec::new(), tools: Vec::new(), proofs_collected: false, shards: Vec::new(), state: Vec::new(), reserved: Vec::new(), waits_turn: Vec::new(), stopped: false, prio: 0, urgency: Vec::new(), overdue: Vec::new(), run_id: "S".into(), sweep: true, leg: None });
         let pool = sweep();
         let leg = sweep_leg(&ctx, &old, &dir, &a, &pool).expect("a leg of a sweep behind the rolling run takes its pair");
         assert_eq!(leg.pair, new);

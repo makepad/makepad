@@ -16,7 +16,7 @@ use super::{age, git, snapshot, stamp, Ctx};
 use crate::lease::Kind;
 use crate::proto::{wall_ms, Sev};
 use crate::state::{Asked, Blame, Failure, Leg, Pair, Run, Tip};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -505,7 +505,7 @@ impl Verifier {
                     None => def.needs.clone(),
                 };
                 let spec = Spec { since_ms: None, lane: format!("verify-{}", def.name), agent: "devhub-verify".into(), kind: def.kind, needs, prio: leg_prio, rev: pair.rev(), repo_dir: ctx.repo.to_string_lossy().into_owned(), node: def.node.clone() };
-                let v = run_leg(&ctx, &spec, &pair, &def, &env, &log, Some(leg));
+                let v = run_leg(&ctx, &spec, &pair, &def, &env, &log, Some(leg), None);
                 results.lock().unwrap().push(v);
             }));
         }
@@ -645,7 +645,16 @@ fn active_leg<'a>(d: &'a mut crate::state::Doc, job: &str, pair: &Pair, name: &s
 /// One leg: lease, check the tree is at the pair, run, verdict; its state as it goes. `back`: a
 /// previous master's run of it, on the lease this master took back, is followed instead. A run
 /// whose exit was lost ([`super::leg::exit_lost`]) is no verdict: the leg runs again.
-pub(crate) fn run_leg(ctx: &Ctx, spec: &Spec, pair: &Pair, def: &LegDef, env: &[String], log: &Path, mut back: Option<Leg>) -> Verdict {
+/// `then_timed`: the needs of a timed leg its run asks as this one ends (`Req::then_timed`).
+pub(crate) fn run_leg(ctx: &Ctx, spec: &Spec, pair: &Pair, def: &LegDef, env: &[String], log: &Path, back: Option<Leg>, then_timed: Option<&str>) -> Verdict {
+    run_leg_with(ctx, spec, pair, def, env, log, back, then_timed, Held::acquire_with, super::job::pause_again)
+}
+
+fn run_leg_with(
+    ctx: &Ctx, spec: &Spec, pair: &Pair, def: &LegDef, env: &[String], log: &Path, mut back: Option<Leg>, then_timed: Option<&str>,
+    mut acquire: impl FnMut(&Spec, &dyn Fn(&mut crate::lease::sched::Req), &mut dyn FnMut(&str), &dyn Fn() -> bool) -> Result<Held, String>,
+    mut pause_again: impl FnMut(u32, &dyn Fn() -> bool) -> bool,
+) -> Verdict {
     let (name, marker) = (def.name.as_str(), def.marker.as_str());
     let job = if spec.agent == "devhub-jitlegs" { "jitlegs" } else { "verify" };
     back = back.and_then(|mut l| {
@@ -688,7 +697,7 @@ pub(crate) fn run_leg(ctx: &Ctx, spec: &Spec, pair: &Pair, def: &LegDef, env: &[
         let pause = super::job::again_after(lost.len() as u32).as_secs();
         ctx.store.event(job, Sev::Info, format!("{job} leg {name} of {}: its exit was lost ({e}); it runs again in {pause} s", pair.short()), None);
         set("wait", "", "", &format!("its exit was lost ({e}); asks again in {pause} s"));
-        super::job::pause_again(lost.len() as u32, &|| job == "verify" && SKIP.load(std::sync::atomic::Ordering::Acquire))
+        pause_again(lost.len() as u32, &|| job == "verify" && SKIP.load(std::sync::atomic::Ordering::Acquire))
     };
     let (r, exit) = loop {
         if let Some(l) = back.take() {
@@ -719,8 +728,15 @@ pub(crate) fn run_leg(ctx: &Ctx, spec: &Spec, pair: &Pair, def: &LegDef, env: &[
                 return Verdict::Incomplete;
             }
         };
-        let held = match Held::acquire(spec, &mut |l| set("wait", "", "", l), &|| job == "verify" && SKIP.load(std::sync::atomic::Ordering::Acquire)) {
+        let configure = |r: &mut crate::lease::sched::Req| {
+            r.class = format!("leg:{}", spec.lane);
+            r.then_timed = then_timed.map(crate::lease::sched::parse_needs);
+            let abs = crate::lease::client::abs_keep_path(&log.with_extension("keep"), &std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")));
+            if let Some(s) = abs.to_str().filter(|p| !p.chars().any(char::is_control)) { r.keep_dir = Some(s.to_owned()); }
+        };
+        let held = match acquire(spec, &configure, &mut |l| set("wait", "", "", l), &|| job == "verify" && SKIP.load(std::sync::atomic::Ordering::Acquire)) {
             Ok(h) => h,
+            Err(e) if again(&Err(e.clone())) => continue,
             Err(e) => {
                 set("incomplete", "", "", &e);
                 return Verdict::Incomplete;
@@ -884,6 +900,44 @@ pub fn render(v: &makepad_strict_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn verify_run_leg_retries_acquire_exit_lost_and_stops_on_denied() {
+        let dir = makepad_git::test_support::tempdir().unwrap();
+        let home = dir.path();
+        let ctx = Ctx {
+            store: crate::state::Store::open(home, "test", Arc::new(|_| 0)).unwrap(),
+            leases: Arc::new(crate::lease::master::LeaseMaster::new("test", home.into(), Arc::new(|_, _, _| panic!("unexpected node call")), Arc::new(|_| {}), Arc::new(|| 1), None, true)),
+            monitor: crate::monitor::Monitor::start(&[]), machine: "test".into(), repo: home.into(), home: home.into(),
+        };
+        let pair = Pair::new("work", "main");
+        let def = LegDef::new("leg", Kind::Test, "", "TEST", &[]);
+        let spec = Spec {
+            lane: "verify-leg".into(), agent: "devhub-verify".into(), kind: def.kind, needs: String::new(),
+            prio: PRIO, rev: pair.rev(), repo_dir: home.display().to_string(), node: None, since_ms: None,
+        };
+        for (errors, pauses) in [
+            (&["beat: no answer", "L1 ended (denied): denied"][..], &[1][..]),
+            (&["L2 ended (cancelled): cancelled"][..], &[][..]),
+        ] {
+            let leg = Leg { name: def.name.clone(), ..Leg::default() };
+            ctx.store.update(|d| d.verify.run = Some(Run { pair: pair.clone(), legs: vec![leg], ..Run::default() })).unwrap();
+            let mut answers = errors.iter();
+            let mut waited = Vec::new();
+            let verdict = run_leg_with(&ctx, &spec, &pair, &def, &[], &home.join("leg.log"), None, None,
+                |_, _, _, _| Err(answers.next().expect("retried a terminal acquire error").to_string()),
+                |losses, _| { waited.push(losses); true },
+            );
+            assert_eq!(answers.len(), 0, "stopped before acquiring again after a loss");
+            assert_eq!(waited, pauses, "only a lost acquire pauses");
+            assert_eq!(verdict, Verdict::Incomplete);
+            ctx.store.read(|d| {
+                let leg = &d.verify.run.as_ref().unwrap().legs[0];
+                assert_eq!(leg.state, "incomplete");
+                assert_eq!(leg.summary, *errors.last().unwrap());
+            });
+        }
+    }
 
     /// A leg whose verdict is a time runs where nothing else does: a timed lease (a bench box,
     /// exclusive); the shared legs take none of its steps, and the three halves are full's steps.

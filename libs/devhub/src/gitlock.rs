@@ -3,7 +3,7 @@
 //! `config.worktree.lock` in a lane tree's git dir, and every later lease start in that tree was
 //! refused on it ("ci merge config: ... is locked", 11-13). A lease start clears such a lock and
 //! says so in one line; a lock a live process holds open is waited out, never taken from it.
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 /// Between two looks at a held lock.
@@ -67,7 +67,13 @@ pub fn settle(lock: &Path) -> Option<String> {
         };
         let known = holders(lock);
         if let Some(pids) = known.as_ref().filter(|p| !p.is_empty()) {
-            if waited.is_empty() { eprintln!("{}: held by pid {}: waiting for it", lock.display(), pids.iter().map(u32::to_string).collect::<Vec<_>>().join(" ")); }
+            if waited.is_empty() {
+                eprintln!("{}: held by pid {}: waiting for it", lock.display(), pids.iter().map(u32::to_string).collect::<Vec<_>>().join(" "));
+                #[cfg(test)]
+                tests::SAW_HOLDER.with(|tx| {
+                    if let Some(tx) = tx.borrow().as_ref() { let _ = tx.send(()); }
+                });
+            }
             for p in pids { if !waited.contains(p) { waited.push(*p); } }
             std::thread::sleep(LOOK);
             continue;
@@ -135,6 +141,32 @@ fn gits() -> Option<Vec<(u32, SystemTime)>> {
 /// self-update too, for 9 h (11-19).
 pub fn clear_left_index(git_dir: &Path) -> Result<Option<String>, String> {
     clear_left(&git_dir.join("index.lock"), &gits)
+}
+
+/// A lease tree's `index.lock` that its writer left when it died, cleared as its lease starts
+/// ([`clear_left`]): no process holds it open, and no git that runs in the tree, its git dir or
+/// its store ([`in_tree`]) started before it was written. A git elsewhere on the box writes no
+/// index of this tree's. A git killed in its `add` left one in a tree's nested checkout, and every
+/// lease start there was refused on it (`git add: ... index.lock: File exists`, 11-26). Ok(None):
+/// no lock, or no checkout. Err: one a writer may still hold, kept, and why.
+pub fn clear_left_index_in(tree: &Path) -> Result<Option<String>, String> {
+    let Ok(Some(paths)) = makepad_git::repository_paths(tree) else { return Ok(None) };
+    let roots: Vec<PathBuf> = [tree, &paths.git_dir, &paths.common_dir].iter().map(|r| r.canonicalize().unwrap_or_else(|_| r.to_path_buf())).collect();
+    clear_left(&paths.git_dir.join("index.lock"), &|| gits().map(|g| in_tree(g, &roots, &cwd)))
+}
+
+/// Of `gits`, those that may run in one of `roots`: their working directory is in one, or this
+/// platform cannot tell it.
+fn in_tree(gits: Vec<(u32, SystemTime)>, roots: &[PathBuf], cwd: &dyn Fn(u32) -> Option<PathBuf>) -> Vec<(u32, SystemTime)> {
+    gits.into_iter().filter(|(pid, _)| cwd(*pid).is_none_or(|c| roots.iter().any(|r| c.starts_with(r)))).collect()
+}
+
+/// A process's working directory (Linux: `/proc/<pid>/cwd`); None where this platform cannot tell.
+fn cwd(pid: u32) -> Option<PathBuf> {
+    #[cfg(target_os = "linux")]
+    { std::fs::read_link(format!("/proc/{pid}/cwd")).ok() }
+    #[cfg(not(target_os = "linux"))]
+    { let _ = pid; None }
 }
 
 fn clear_left(lock: &Path, gits: &dyn Fn() -> Option<Vec<(u32, SystemTime)>>) -> Result<Option<String>, String> {
@@ -220,6 +252,11 @@ pub fn maintain(repo: &Path) {
 mod tests {
     use super::*;
 
+    thread_local! {
+        /// Told once when `settle`, on this thread, first finds the lock held.
+        pub(super) static SAW_HOLDER: std::cell::RefCell<Option<std::sync::mpsc::Sender<()>>> = const { std::cell::RefCell::new(None) };
+    }
+
     /// [`own_maintenance`] writes `maintenance.auto false` into the shared config once and keeps
     /// it; a commit in a linked worktree then leaves the other lanes' branches loose as they are
     /// (git's own auto maintenance packed and pruned them all, a lost race said in the committer's
@@ -281,13 +318,34 @@ mod tests {
         assert!(!lock.exists() && said.contains("cleared a stale lock") && said.contains("no process held it"), "{said}");
         #[cfg(unix)]
         {
+            use std::io::{BufRead, BufReader};
+            use std::process::{Command, Stdio};
+
             left(&lock, "x");
-            let mut child = std::process::Command::new("sh").arg("-c").arg("exec 3<\"$1\"; sleep 0.3").arg("sh").arg(&lock).spawn().unwrap();
+            let mut child = Command::new("sh")
+                .args(["-c", "exec 3<\"$1\"; echo held; read _ || :", "sh"]).arg(&lock)
+                .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null())
+                .spawn().unwrap();
             let pid = child.id();
-            let t = Instant::now();
-            while holders(&lock).is_some_and(|p| !p.contains(&pid)) && t.elapsed() < Duration::from_secs(5) { std::thread::sleep(Duration::from_millis(10)); }
-            let said = settle(&lock).expect("a held lock is said");
-            let _ = child.wait();
+            let mut ready = String::new();
+            BufReader::new(child.stdout.take().unwrap()).read_line(&mut ready).unwrap();
+            assert_eq!(ready, "held\n", "pid {pid} never opened the lock");
+
+            let (tx, saw) = std::sync::mpsc::channel();
+            let settler = std::thread::spawn({
+                let lock = lock.clone();
+                move || {
+                    SAW_HOLDER.with(|s| *s.borrow_mut() = Some(tx));
+                    settle(&lock)
+                }
+            });
+            let saw_holder = saw.recv();
+            drop(child.stdin.take());
+            assert!(child.wait().unwrap().success(), "holder pid {pid} did not exit successfully");
+            if saw_holder.is_err() {
+                panic!("settle returned without seeing pid {pid} hold the lock: {:?}", settler.join());
+            }
+            let said = settler.join().unwrap().expect("a held lock is said");
             assert!(!lock.exists() && said.contains(&format!("pid {pid}")) && said.contains("cleared a stale lock"), "its holder waited for and named, then the lock cleared once it was gone: {said}");
         }
         // a commit running its hooks holds `index.lock` closed: a sweep leaves it, and `HEAD.lock`;
@@ -321,6 +379,24 @@ mod tests {
         assert!(lock.exists() && kept.contains("cannot tell which gits run"), "{kept}");
         let said = clear_left(&lock, &|| Some(vec![(42, at + Duration::from_secs(60))])).unwrap().expect("a left lock is said");
         assert!(!lock.exists() && said.contains("cleared a stale lock (4 bytes"), "only a younger git runs: the lock goes: {said}");
+        // in a lease's tree, only a git that may run there counts: one in the tree, its git dir or
+        // its store, or one whose directory this platform cannot tell (11-26)
+        let roots = [dir.join("tree"), dir.join("store.git")];
+        let cwd = |pid: u32| match pid { 41 => Some(dir.join("tree/apps")), 43 => Some(dir.join("store.git/worktrees/t1")), 44 => Some(PathBuf::from("/elsewhere")), _ => None };
+        let gits = vec![(41, at), (42, at), (43, at), (44, at)];
+        assert_eq!(in_tree(gits, &roots, &cwd).iter().map(|g| g.0).collect::<Vec<_>>(), vec![41, 42, 43], "a git elsewhere on the box writes no index of the tree's");
+        // a real checkout's left lock goes as its lease starts, and the line says so
+        let tree = dir.join("checkout");
+        std::fs::create_dir_all(&tree).unwrap();
+        assert!(crate::git_exec::command().arg("-C").arg(&tree).args(["init", "-q", "--template="]).status().unwrap().success());
+        assert_eq!(clear_left_index_in(&dir.join("none")), Ok(None), "no checkout: nothing to say");
+        let lock = tree.join(".git").join("index.lock");
+        std::fs::write(&lock, "").unwrap();
+        std::fs::File::options().write(true).open(&lock).unwrap().set_modified(at).unwrap();
+        if cfg!(target_os = "linux") {
+            let said = clear_left_index_in(&tree).unwrap().expect("a left lock is said");
+            assert!(!lock.exists() && said.contains("cleared a stale lock (0 bytes"), "{said}");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

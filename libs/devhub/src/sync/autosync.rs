@@ -277,7 +277,8 @@ impl Waits {
 
 /// The nodes' last successful applies (`autosync.state`, read by `devhub autosync status`): a
 /// `<node> <pin>` line each ([`Pin::key`]), `<node> <pin> prebuild-deferred` for a catch-up that
-/// moved the tree alone ([`DEFERRED`]): a master restart keeps that box's build to do.
+/// moved the tree alone ([`DEFERRED`]). A busy box with a build due before its first
+/// recorded apply has a `<node> prebuild-deferred` line until the build succeeds.
 struct Applied {
     path: PathBuf,
     revs: BTreeMap<String, Pin>,
@@ -297,6 +298,10 @@ impl Applied {
             Ok(text) => for line in text.lines() {
                 let words: Vec<_> = line.split_whitespace().collect();
                 let (node, key, deferred) = match words.as_slice() {
+                    [node, word] if *word == DEFERRED => {
+                        deferred_nodes.insert((*node).to_string());
+                        continue;
+                    }
                     [node, key] => (node, key, false),
                     [node, key, word] if *word == DEFERRED => (node, key, true),
                     _ => continue,
@@ -315,7 +320,10 @@ impl Applied {
     }
 
     fn save(&mut self) -> std::io::Result<()> {
-        let text: String = self.revs.iter().map(|(n, pin)| format!("{n} {}{}\n", pin.key(), if self.deferred.contains(n) { format!(" {DEFERRED}") } else { String::new() })).collect();
+        let mut text: String = self.revs.iter().map(|(n, pin)| format!("{n} {}{}\n", pin.key(), if self.deferred.contains(n) { format!(" {DEFERRED}") } else { String::new() })).collect();
+        for n in self.deferred.iter().filter(|n| !self.revs.contains_key(*n)) {
+            text.push_str(&format!("{n} {DEFERRED}\n"));
+        }
         let tmp = self.path.with_extension("state.tmp");
         std::fs::create_dir_all(self.path.parent().unwrap_or(Path::new("."))).and_then(|_| std::fs::write(&tmp, text)).and_then(|_| std::fs::rename(&tmp, &self.path))?;
         self.dirty = false;
@@ -405,6 +413,12 @@ impl Follow {
                 if build && e.contains("{\"built\":") {
                     let mut applied = self.applied.lock().unwrap_or_else(|e| e.into_inner());
                     applied.dirty |= applied.deferred.remove(node);
+                } else if build && e.contains("an apply is running on this node") {
+                    let mut applied = self.applied.lock().unwrap_or_else(|e| e.into_inner());
+                    if applied.deferred.insert(node.to_string()) {
+                        applied.dirty = true;
+                        let _ = applied.save();
+                    }
                 }
                 if waits {
                     self.waits().wait(node, format!("its deployment moves to {}", to.short()));
@@ -484,6 +498,7 @@ fn room_now(follow: &Arc<Follow>, socket: &Path, repo: &Path, node: &str, waits:
     if follow.rooms().contains(node) {
         return Ok(if bench { RoomNow::InLine } else { RoomNow::Tree });
     }
+    if crate::orch::roll::deploy_room_active(node) { return Ok(RoomNow::Waits); }
     enum First {
         Queued,
         Room(Result<Option<crate::orch::roll::DeployRoom>, String>),
@@ -576,11 +591,12 @@ fn room_target(newest: Pin, deploy: Option<&str>, follows: &[(String, String)], 
 }
 
 /// A room's turn ([`room_target`]), applied by `apply`. A box that runs an apply already (a
-/// round's move of its tree) is asked again after it. One that refuses its target as no
+/// round's move of its tree) is asked once more, then its build is deferred. One that refuses its target as no
 /// fast-forward moved past it before its deployment said so: asked again once the box says where
 /// it is, its refusal stands only for a target that stayed the same.
 fn room_turn(follow: &Follow, report: &mut Report, turn: &RoomTurn, apply: &mut dyn FnMut(&Pin) -> (i32, Vec<String>)) {
     let mut refused: Option<(Pin, i32, Vec<String>)> = None;
+    let mut busy_retried = false;
     let (to, result) = loop {
         let to = match (turn.newest)() {
             Ok(newest) => room_target(newest, (turn.deploy)().as_deref(), turn.follows, turn.has),
@@ -590,11 +606,14 @@ fn room_turn(follow: &Follow, report: &mut Report, turn: &RoomTurn, apply: &mut 
             break (to, apply_result(code, &lines, &was));
         }
         let (code, lines) = apply(&to);
-        if lines.iter().any(|l| l.contains("an apply is running on this node")) {
+        if let Some(busy) = lines.iter().find(|l| l.contains("an apply is running on this node")) {
+            if busy_retried { break (to, Err(busy.clone())); }
+            busy_retried = true;
             (turn.retry)();
             continue;
         }
         if lines.iter().any(|l| l.contains("is not a fast-forward")) {
+            busy_retried = false;
             refused = Some((to, code, lines));
             (turn.retry)();
             continue;
@@ -733,7 +752,8 @@ pub fn start(control_socket: PathBuf, say_waits: SayWaits, pin_of: PinOf) {
                 let deferred = {
                     let applied = follow.applied.lock().unwrap_or_else(|e| e.into_inner());
                     // (a box whose room waits in line builds on that room's thread)
-                    deferred_builds(&applied.deferred, &nodes, &todo, &deploys, &follows, |n| pin_of(n).is_some() || follow.rooms().contains(n))
+                    deferred_builds(&applied.deferred, &nodes, &todo, &deploys, &follows, |n|
+                        pin_of(n).is_some() || follow.rooms().contains(n) || crate::orch::roll::deploy_room_active(n))
                 };
                 // at the tips with its prebuild done, held at a pin, or no longer followed: its
                 // apply waits for nothing. A prebuild a catch-up left to do is asked again this
@@ -1011,12 +1031,67 @@ mod tests {
         let mut busy = true;
         assert_eq!(turn(&[p('5').key()], &mut |to| if std::mem::take(&mut busy) { order('7'); (1, vec!["{\"err\":\"an apply is running on this node\"}".into()]) } else { applied(to) }), vec!["6", "7"]);
         assert_eq!(at().as_deref(), Some("7"));
+        follow.applied.lock().unwrap().deferred.insert("node-a".into());
+        let mut attempts = 0;
+        assert_eq!(turn(&[p('7').key()], &mut |_| {
+            attempts += 1;
+            assert!(attempts <= 2, "a busy apply only gets one retry in this room");
+            (1, vec![r#"{"err":"an apply is running on this node"}"#.into()])
+        }), ["7", "7"]);
+        assert!(follow.applied.lock().unwrap().deferred.contains("node-a"));
         // a box on another history: its refusal stands, said once
         order('9');
         assert_eq!(turn(&[p('8').key()], &mut |to| refused(to)), vec!["9"]);
         assert_eq!(at().as_deref(), Some("7"));
         assert!(report.0.get("node-a").is_some_and(|l| l.contains("is not a fast-forward")), "{:?}", report.0);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn room_turn_double_busy_records_deferred_without_existing_marker_and_next_round_retries() {
+        let dir = std::env::temp_dir().join(format!("devhub-autosync-double-busy-{}", std::process::id()));
+        let path = dir.join("autosync.state");
+        let node = "box-b";
+        let nodes = vec![node.to_string()];
+        let tip = Pin::at(&"2".repeat(40));
+        let follows = [("makepad".into(), "work".into())];
+        let status = [format!(r#"{{"node":"{node}","caps":{{"deploy":"{}"}}}}"#, tip.key())];
+        for prior in [None, Some(Pin::at(&"1".repeat(40)))] {
+            let revs: BTreeMap<_, _> = prior.iter().map(|pin| (node.to_string(), pin.clone())).collect();
+            let mut initial = Applied { path: path.clone(), revs: revs.clone(), deferred: BTreeSet::new(), dirty: true };
+            initial.save().unwrap();
+            let follow = Follow {
+                waits: Mutex::new(Waits { on: BTreeSet::new(), say: Box::new(|_, _| {}) }),
+                applied: Mutex::new(initial),
+                rooms: Mutex::default(),
+                orders: Mutex::new(BTreeMap::from([(node.to_string(), Some(tip.key()))])),
+            };
+            let turn = RoomTurn {
+                node, follows: &follows, newest: &|| follow.newest_order(node, || Err("no tips here".into())),
+                deploy: &|| Some(tip.key()), has: &|_, _| false, retry: &|| {},
+            };
+            let mut attempts = Vec::new();
+            room_turn(&follow, &mut Report::default(), &turn, &mut |to| {
+                attempts.push(to.clone());
+                assert!(attempts.len() <= 2, "the granted room must yield on the second busy reply");
+                (1, vec![r#"{"err":"an apply is running on this node"}"#.into()])
+            });
+            assert_eq!(attempts, [tip.clone(), tip.clone()]);
+            let deferred = BTreeSet::from([node.to_string()]);
+            {
+                let applied = follow.applied.lock().unwrap();
+                assert_eq!(applied.deferred, deferred);
+                assert_eq!(applied.revs, revs, "busy builds cannot record a successful apply");
+            }
+            let saved = Applied::load(path.clone());
+            assert_eq!(saved.deferred, deferred, "the retry survives a master restart");
+            assert_eq!(saved.revs, revs, "the previous successful pin survives exactly as recorded");
+            let (todo, _, deploys) = nodes_to_apply(&nodes, &status, &tip.key());
+            assert!(todo.is_empty(), "the separate apply already moved the tree to the tips");
+            assert_eq!(deferred_builds(&saved.deferred, &nodes, &todo, &deploys, &follows, |_| false),
+                BTreeMap::from([(tip.key(), nodes.clone())]), "the next round retries the build at the live pin");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

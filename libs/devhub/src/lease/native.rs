@@ -97,7 +97,8 @@ fn runs_jit(w: &[String]) -> bool {
 /// The command calls the bare `makepad` a run gets on its PATH (`exec.rs` job_makepad) with a word
 /// after it: in its words, or a shell's or Python's `-c` text (a script file it names is not
 /// read). A path to a binary of its own (`target/host/makepad`), or the word alone (`command -v
-/// makepad`), is no such call.
+/// makepad`), is no such call. The master reads a run's class the same way
+/// ([`super::sched`]'s `jit_class`): such a run builds its tree's JIT where its box has none.
 #[cfg(feature = "checkout")]
 pub(super) fn calls_makepad(cmd: &[String]) -> bool {
     words(&cmd.join(" ")).windows(2).any(|p| p[0] == "makepad" && p[1] != ";")
@@ -363,7 +364,7 @@ fn review(home: &Path, a: &Ask, gated: &[Built], not_over: &str) -> Option<Strin
         .filter(|v| v.get("closed_ms").and_then(Value::as_u64) == Some(0))
         .filter_map(|v| v.get("id")?.as_str().map(str::to_string)).collect();
     if words(a.reason).iter().any(|w| open.contains(w.trim_end_matches(['.', ':']))) { return None; }
-    Some("it is no timed or bench series, no native-vs-JIT baseline (the same command runs the JIT), no crate of the JIT binary, and its reason names no open JIT miss".into())
+    Some("it is no timed or bench series (a timed series is a `timed` lease, which drains its box, with `--needs gui=1` when it opens windows: its box's WM display), no native-vs-JIT baseline (the same command runs the JIT), no crate of the JIT binary, and its reason names no open JIT miss".into())
 }
 
 /// What a review that refuses says: where the run goes instead, the JIT's command and the
@@ -616,6 +617,7 @@ mod tests {
         let other = [built("demo-view", "test", "")];
         let warned = verdict(&home, &ask("verify the regressions natively", "", "linux"), &other, &[], "", "", 7).unwrap();
         assert!(warned.contains("Review, a warning for now (devhub will refuse this): it is no timed or bench series") && warned.contains("`devhub test l1 demo-view --live`")
+            && warned.contains("a timed series is a `timed` lease, which drains its box, with `--needs gui=1` when it opens windows")
             && warned.contains("[package.metadata.makepad.native-tests]"), "{warned}");
         std::fs::write(home.join("jit_misses.jsonl"), "{\"id\":\"M7\",\"pkg\":\"demo-model\",\"target\":\"--lib\",\"error\":[\"e\"],\"closed_ms\":0}\n{\"id\":\"M9\",\"pkg\":\"demo-core\",\"target\":\"--lib\",\"error\":[\"e\"],\"closed_ms\":0}\n").unwrap();
         let passed = [

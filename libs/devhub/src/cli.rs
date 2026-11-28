@@ -7,6 +7,10 @@ use makepad_remote::link::{Client, Target};
 use makepad_strict_json::Value;
 use std::io::Write;
 use std::time::Duration;
+// one ask of a lines service and its answer: devhub's client crate, which a crate that only asks
+// devhub depends on instead of all of devhub
+pub use makepad_devhub_client::ask::{agent_seen, ask, box_link, has, link_cut, said_line, RAN_NOTHING};
+use makepad_devhub_client::ask::older;
 
 const HELP: &str = "makepad devhub (or observe): the local devhub (start it with `cargo run --release -p makepad-app-devhub`)
 call $DH; a landing's CLI goes live when its rebuild finishes
@@ -80,6 +84,13 @@ call $DH; a landing's CLI goes live when its rebuild finishes
                                           a test red again at its red tip that a later run passed, said
                                           until cleared or green in its bucket's next 3 runs of it
   bucket clear <unit key>                 closes that key's INTERMITTENT line (`test <pkg>`)
+  bucket stop <run> <unit> [why]          main or the user can stop a stuck unit with a capture.
+                                          Name the run by its start (ms) or <bucket>-<ms>.
+                                          tests/full: quote the running unit or `step <name>`.
+                                          fast/hot/mac: name the unit or step, use current for the
+                                          only watched unit, or gate when none is watched.
+                                          windows/windows-tests: name the active leg, step <leg>,
+                                          current or gate. A manual stop records a red without a bisect.
   bucket run <fast|tests|hot|mac|ci|full> that bucket's run now, of the tip then (full: every package's tests;
                                           mac: the test targets only a Mac can fail, a package's
                                           [package.metadata.makepad.macos-tests])
@@ -122,6 +133,31 @@ pub fn user_at(mut names: impl Iterator<Item = String>, terminal: bool) -> Resul
     Ok(())
 }
 
+/// Who runs `devhub bucket stop` ([`crate::bucket::stop`]): main (`DEVHUB_AGENT=main`) or the user,
+/// by the environment's variables, the working directory and whether stdin and stdout are a
+/// terminal. Another agent, a lane (`DEVHUB_LANE`, an agent CLI's variable) or a lane's worktree
+/// without a terminal is refused: a unit's stop is main's call or the user's.
+#[cfg(feature = "checkout")]
+pub(crate) fn stop_caller(vars: &[(String, String)], cwd: &std::path::Path, terminal: bool) -> Result<&'static str, String> {
+    const WHO: &str = "only main (DEVHUB_AGENT=main) or the user may stop a bucket unit";
+    let var = |k: &str| vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
+    if let Some(agent) = var("DEVHUB_AGENT") {
+        return if agent == "main" { Ok("main") } else { Err(format!("refused for agent `{agent}`: {WHO}")) };
+    }
+    if let Some(lane) = var("DEVHUB_LANE") {
+        return Err(format!("refused for lane `{lane}`: {WHO}"));
+    }
+    if let Some((k, _)) = vars.iter().find(|(k, _)| k == "CLAUDECODE" || ["CLAUDE_CODE_", "CODEX_", "GROK_", "GEMINI_", "ANTIGRAVITY_"].iter().any(|p| k.starts_with(p))) {
+        return Err(format!("refused in an agent's environment ({k} is set without DEVHUB_AGENT=main): {WHO}"));
+    }
+    let mut parts = cwd.components().map(|c| c.as_os_str().to_string_lossy().into_owned());
+    let lane = parts.by_ref().find(|p| p == "wt.noindex").and(parts.next()).map(|l| l.strip_suffix(".slots").map(str::to_string).unwrap_or(l));
+    match lane {
+        Some(lane) if !terminal => Err(format!("refused from lane worktree `{lane}` without a terminal: {WHO}")),
+        _ => Ok("user"),
+    }
+}
+
 pub(crate) fn control() -> Result<Client, String> {
     let c = Client::new(Target::Unix(proto::control_socket()), "observe");
     c.set_ping_limit(CONTROL_PING_LIMIT);
@@ -136,23 +172,6 @@ pub(crate) fn control() -> Result<Client, String> {
 /// serving it is silent so long: a run that inherited a command's connection kept it open past
 /// the master's exec into its next build, and a `live act` call waited on it for good (11-23).
 const CONTROL_PING_LIMIT: std::time::Duration = std::time::Duration::from_secs(6 * makepad_remote::conn::KEEPALIVE.as_secs());
-
-/// At most once a minute per process, including while a request waits for its answer.
-/// Only the agent's own CLI has `DEVHUB_AGENT`; the master's runners do not speak for it.
-fn agent_seen(c: &Client) {
-    static SAID: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
-    let Some(agent) = std::env::var("DEVHUB_AGENT").ok().filter(|a| makepad_devhub_conf::valid_name(a)) else { return };
-    let now = std::time::Instant::now();
-    let mut said = SAID.lock().unwrap();
-    if !agent_seen_due(*said, now) || !has(c, "agent-seen") { return; }
-    *said = Some(now);
-    drop(said);
-    let _ = ask_lines(c, None, "agent-seen", &format!("agent-seen {agent}"));
-}
-
-fn agent_seen_due(last: Option<std::time::Instant>, now: std::time::Instant) -> bool {
-    last.is_none_or(|last| now.saturating_duration_since(last) >= Duration::from_secs(60))
-}
 
 /// Submission waits out master restarts; application errors still stand.
 pub(crate) fn retry_master<T>(call: impl FnMut() -> Result<T, String>) -> Result<T, String> {
@@ -215,44 +234,6 @@ pub(crate) fn retry_master_wait<T>(mut call: impl FnMut() -> Result<T, String>, 
     }
 }
 
-/// Whether an ask's error says its link went while it was out: a master that restarts cuts what
-/// it was answering ([`retry_master`]). By how it starts: an answer that only quotes one is an
-/// answer. A session ended on a lost link says `W1 ended: box: link lost: ..`, and `live act` on it
-/// asked again for good (11-09).
-pub(crate) fn link_cut(e: &str) -> bool {
-    e.starts_with("link lost") || e.starts_with("the hub connection ended")
-}
-
-/// What a cut ask's error adds when the service had said it still waited: nothing of the request
-/// was done, so it can be asked again whatever it does.
-pub(crate) const RAN_NOTHING: &str = "it had done nothing yet";
-
-/// A `{"say":..}` line a service sends while it waits (`lines::say_waiting`): what it says, and
-/// whether the request still waits. An answer's lines are not one.
-pub(crate) fn said_line(l: &str) -> Option<(String, bool)> {
-    if !l.starts_with("{\"say\":") {
-        return None;
-    }
-    let v = makepad_strict_json::parse(l.as_bytes()).ok()?;
-    Some((v.get("say")?.as_str()?.to_string(), v.get("waiting")?.as_bool()?))
-}
-
-/// Sends one line to a lines service and collects the answer.
-pub fn ask(c: &Client, target: Option<&str>, service: &str, line: &str) -> Result<Vec<String>, String> {
-    if service != "agent-seen" { agent_seen(c); }
-    ask_lines(c, target, service, line).map_err(|e| older(target, service, box_link(target, e)))
-}
-
-/// A routed ask's error, saying whose link it was: an ask of another box goes over the master's
-/// socket and the master dials the box, never this process. A lane read the master's failed dial
-/// (`Network is unreachable`) as macOS's Local Network block on its own CLI (11-17).
-pub(crate) fn box_link(target: Option<&str>, e: String) -> String {
-    match target {
-        Some(t) if e.contains("cannot reach fleet hub") => format!("the master cannot reach {t}'s hub now (this command opens no connection of its own; `devhub nodes` shows the box): {e}"),
-        _ => e,
-    }
-}
-
 /// Asks of one node's service, one at a time, on one routed channel ([`ask`] routes each one:
 /// [`makepad_remote::hub::Asking`]), opened at the first ask and again after an error.
 pub struct NodeAsks {
@@ -278,76 +259,6 @@ impl NodeAsks {
         self.ch = Some(ch);
         Ok(got)
     }
-}
-
-/// A refusal of a service this client knows means the other side runs older code: say so, and
-/// what brings it up to date (a bare "unsupported service native" failed whole buckets, 11-02).
-fn older(target: Option<&str>, service: &str, e: String) -> String {
-    if !e.contains("unsupported service") {
-        return e;
-    }
-    match target {
-        None => format!("the master is older than this client (it has no `{service}` service): run `devhub master restart`"),
-        Some(t) => format!("{t}'s hub is older than this client (it has no `{service}` service): it updates itself once its deployment has the landing (`devhub nodes` says when)"),
-    }
-}
-
-fn ask_lines(c: &Client, target: Option<&str>, service: &str, line: &str) -> Result<Vec<String>, String> {
-    let mut got = Vec::new();
-    match target {
-        Some(t) => {
-            hub::ask(c, t, service, "", line, &mut |l| {
-                got.push(l.to_string());
-                true
-            })?;
-        }
-        None => {
-            let ch = c.open(service, "").map_err(|e| e.to_string())?;
-            ch.send(line.as_bytes().to_vec()).map_err(|e| format!("link lost: {e}"))?;
-            got = answer_of(|| loop {
-                if service != "agent-seen" { agent_seen(c); }
-                match ch.recv_timeout(Duration::from_secs(60)) {
-                    Ok(event) => break Some(event),
-                    Err(true) => continue,
-                    Err(false) => break None,
-                }
-            })?;
-        }
-    }
-    Ok(got)
-}
-
-/// The answer lines of one request, as its channel delivers them: what a service says while it
-/// waits goes to stderr (`lines::say_waiting`), and a cut while it still waited says it did nothing.
-fn answer_of(mut recv: impl FnMut() -> Option<makepad_remote::Event>) -> Result<Vec<String>, String> {
-    let mut got = Vec::new();
-    let mut waiting = false;
-    let cut = |e: String, waiting: bool| if waiting { format!("{e}: {RAN_NOTHING}") } else { e };
-    loop {
-        match recv() {
-            Some(makepad_remote::Event::Data(d)) => {
-                for l in String::from_utf8_lossy(&d).lines().filter(|l| !l.is_empty()) {
-                    if l.starts_with("{\"end\":") {
-                        return Ok(got);
-                    }
-                    if let Some((said, still)) = said_line(l) {
-                        if !said.is_empty() { eprintln!("{said}"); }
-                        waiting = still;
-                        continue;
-                    }
-                    got.push(l.to_string());
-                }
-            }
-            Some(makepad_remote::Event::Opened(_)) => {}
-            Some(makepad_remote::Event::Closed(makepad_remote::conn::CLOSE_LINK_LOST, why)) => return Err(cut(format!("link lost: {why}"), waiting)),
-            Some(makepad_remote::Event::Closed(_, why)) => return Err(why),
-            None => return Err(cut("the hub connection ended".into(), waiting)),
-        }
-    }
-}
-
-pub(crate) fn has(c: &Client, service: &str) -> bool {
-    c.caps().iter().any(|s| s.split('/').next() == Some(service))
 }
 
 fn num(v: &Value, k: &str) -> f64 {
@@ -602,6 +513,27 @@ pub(crate) fn answered_here(words: &[String]) -> bool {
     makepad_remote::app::app_request_of(&words.join(" ")).is_some() || makepad_remote::app::client_side(words)
 }
 
+/// A native app's refusal of the requested JIT thread command.
+pub(crate) fn unknown_thread_command(verb: &str, line: &str) -> bool {
+    if !line.starts_with("{\"err\":") || !matches!(verb, "why-hung" | "hang" | "stacks" | "threads") {
+        return false;
+    }
+    let Ok(v) = makepad_strict_json::parse(line.as_bytes()) else { return false };
+    v.get("err").and_then(|e| e.as_str()).and_then(|e| e.strip_prefix("unknown command `"))
+        .and_then(|s| s.split_once('`')).is_some_and(|(unknown, rest)| unknown == verb && (rest.is_empty() || rest.starts_with(':')))
+}
+
+/// The inspect reply when the app has no such command. An empty or failed OS view is an error.
+pub(crate) fn native_thread_view(app: &str, verb: &str, view: Result<Vec<String>, String>) -> Vec<String> {
+    let mut out = vec![format!("({app} answers no {verb}: a native build, not a JIT; its threads as the OS sees them)")];
+    match view {
+        Ok(lines) if !lines.is_empty() => out.extend(lines),
+        Ok(_) => out.push(r#"{"err":"procview gave no lines"}"#.into()),
+        Err(e) => out.push(format!("{{\"err\":{}}}", makepad_remote::json_str(&e))),
+    }
+    out
+}
+
 fn inspect(c: &Client, args: &[String]) -> i32 {
     let (target, _, read_only, at) = inspect_words(args);
     let words = &args[at..];
@@ -623,10 +555,17 @@ fn inspect(c: &Client, args: &[String]) -> i32 {
         }
     }
     let line = words.join(" ");
+    let verb = line.split_whitespace().next().unwrap_or("");
     let mut had_err = false;
+    let mut native = false;
+    let mut local_pid = None;
     let mut print = |l: &str| {
-        had_err |= l.starts_with("{\"err\":");
-        println!("{l}");
+        if unknown_thread_command(verb, l) {
+            native = true;
+        } else {
+            had_err |= l.starts_with("{\"err\":");
+            println!("{l}");
+        }
         true
     };
     let request = makepad_remote::app::app_request_of(&line);
@@ -638,6 +577,7 @@ fn inspect(c: &Client, args: &[String]) -> i32 {
         match Client::connect(app) {
             Ok(j) if here => makepad_remote::app::run_printed(&j, words, &mut print).map(|_| ()).map_err(|e| e.to_string()),
             Ok(j) => j.cmd(&line).map_err(|e| e.to_string()).map(|lines| {
+                local_pid = j.conn().ok().map(|c| c.peer().serving_pid).filter(|p| *p != 0);
                 for l in lines {
                     match l {
                         Ok(l) => {
@@ -660,6 +600,11 @@ fn inspect(c: &Client, args: &[String]) -> i32 {
         hub::ask(c, &format!("{machine}:{app}"), "cmd", "", &line, &mut print).map(|_| ())
     };
     match r {
+        Ok(()) if native => {
+            let who = local_pid.map(|p| p.to_string());
+            let view = ask(c, (!local).then_some(machine), "procview", &format!("procview {}", who.as_deref().unwrap_or(app)));
+            lines_out(Ok(native_thread_view(app, verb, view)), false) | i32::from(had_err)
+        }
         Ok(()) if had_err => 1,
         Ok(()) => 0,
         Err(e) => {
@@ -1026,7 +971,9 @@ fn serve(args: &[&str]) -> i32 {
     match args {
         ["--node", _] => {
             let conf = conf.expect("read above");
-            let t = trust(&conf.name);
+            // (a node's start says where its time went)
+            crate::node::start_timing();
+            let t = crate::node::start_step("its trust", || trust(&conf.name));
             match crate::node::Node::start(conf, t, log) {
                 Ok(n) => {
                     eprintln!("devhub: node {} up; {}", n.conf.name, crate::node::lan_said(&n.lan));
@@ -1187,6 +1134,15 @@ fn bucket(c: &Client, args: &[&str]) -> i32 {
         ["run", name] => Some(format!("run {name}")),
         // a human or a lane closes an intermittent red `devhub bucket` says
         ["clear", key @ ..] if !key.is_empty() => Some(format!("clear {}", key.join(" "))),
+        ["stop", run, unit, why @ ..] => {
+            use std::io::IsTerminal;
+            let terminal = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+            let by = match stop_caller(&std::env::vars().collect::<Vec<_>>(), &std::env::current_dir().unwrap_or_default(), terminal) {
+                Ok(by) => by,
+                Err(e) => { eprintln!("makepad devhub bucket stop: {e}"); return 2; }
+            };
+            Some(format!("stop {}", makepad_strict_json::obj(vec![("run", makepad_strict_json::s(*run)), ("unit", makepad_strict_json::s(*unit)), ("why", makepad_strict_json::s(why.join(" "))), ("by", makepad_strict_json::s(by))]).to_json()))
+        }
         _ => None,
     };
     if let Some(asked) = asked {
@@ -1201,7 +1157,7 @@ fn bucket(c: &Client, args: &[&str]) -> i32 {
         };
     }
     if !matches!(args, [] | ["status"]) {
-        eprintln!("makepad devhub bucket [status] | bucket run <bucket> | bucket clear <unit key>");
+        eprintln!("makepad devhub bucket [status] | bucket run <bucket> | bucket clear <unit key> | bucket stop <run> <unit> [why]");
         return 2;
     }
     let lines = match ask(c, None, "bucket", "status") {
@@ -1240,6 +1196,13 @@ fn bucket(c: &Client, args: &[&str]) -> i32 {
                 _ => String::new(),
             };
             println!("{name} STILL FAILING: {units}");
+            if let Some(Value::Obj(outputs)) = v.get("outputs") {
+                for file in outputs.iter().flat_map(|(_, files)| files.as_arr().unwrap_or_default()) {
+                    let test = text(file, "test");
+                    let named = if test.is_empty() { String::new() } else { format!(" :: {test}") };
+                    println!("    {}{named}: {}", text(file, "unit"), text(file, "path"));
+                }
+            }
             continue;
         }
         // a test red again at its red tip that a later run passed: until cleared or green again
@@ -1296,6 +1259,14 @@ fn bucket(c: &Client, args: &[&str]) -> i32 {
                     println!("    {unit}: {l}");
                 }
                 if let Some(cmd) = cmd.as_str() { println!("    {}", crate::bucket::repro_said(unit, cmd)); }
+            }
+        }
+        let keys: std::collections::BTreeSet<_> = v.get("failing").and_then(Value::as_arr).unwrap_or_default()
+            .iter().filter_map(Value::as_str).map(crate::bucket::unit_key).collect();
+        for key in keys {
+            for (unit, test, path) in crate::bucket::kept_for_key(&v, &key) {
+                let named = if test.is_empty() { String::new() } else { format!(" :: {test}") };
+                println!("    {unit}{named} full output: {path}");
             }
         }
         // its slowest part's slowest tests, and those at its highest look
@@ -1700,52 +1671,6 @@ pub fn own_argv(repo: &std::path::Path) -> Vec<String> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn an_agents_calls_say_it_is_there_once_a_minute() {
-        let now = std::time::Instant::now();
-        assert!(agent_seen_due(None, now));
-        assert!(!agent_seen_due(Some(now), now + Duration::from_millis(59_999)));
-        assert!(agent_seen_due(Some(now), now + Duration::from_secs(60)));
-        assert!(!agent_seen_due(Some(now + Duration::from_secs(60)), now + Duration::from_secs(61)));
-    }
-
-    /// What a service says while it waits is not its answer, and an answer is not said.
-    #[test]
-    fn a_said_line_is_told_apart_from_the_answer() {
-        assert_eq!(said_line("{\"say\":\"live call W1 waits for room\",\"waiting\":true}"), Some(("live call W1 waits for room".to_string(), true)));
-        assert_eq!(said_line("{\"say\":\"\",\"waiting\":false}"), Some((String::new(), false)));
-        assert_eq!(said_line("{\"lines\":[],\"say\":\"x\"}"), None);
-        assert_eq!(said_line("{\"say\":"), None);
-    }
-
-    /// An ask cut while its service still waited says it did nothing, which a caller may ask
-    /// again; one cut after the wait, or with no wait said, doesn't.
-    #[test]
-    fn an_ask_cut_while_it_waited_says_it_did_nothing() {
-        use makepad_remote::{conn::CLOSE_LINK_LOST, Event};
-        let waits = "{\"say\":\"no room\",\"waiting\":true}\n";
-        let over = "{\"say\":\"\",\"waiting\":false}\n";
-        let answer = |lines: &[&str], end: Option<Event>| {
-            let mut events: Vec<Option<Event>> = lines.iter().map(|l| Some(Event::Data(l.as_bytes().to_vec()))).collect();
-            events.push(end);
-            let mut events = events.into_iter();
-            answer_of(|| events.next().flatten())
-        };
-        let lost = || Some(Event::Closed(CLOSE_LINK_LOST, "peer closed".to_string()));
-        for end in [lost(), None] {
-            let e = answer(&[waits], end).unwrap_err();
-            assert!(link_cut(&e) && e.contains(RAN_NOTHING), "{e}");
-        }
-        for (lines, end) in [(&[waits, over][..], lost()), (&[waits, over], None), (&[], lost()), (&[], None)] {
-            let e = answer(lines, end).unwrap_err();
-            assert!(link_cut(&e) && !e.contains(RAN_NOTHING), "{lines:?}: {e}");
-        }
-        // an answer that quotes a cut is an answer: asked again, it would say the same for good
-        assert!(!link_cut("W1 ended: boxa: link lost: cannot reach fleet hub `boxa`"));
-        // what it said is not its answer
-        let done = answer(&[waits, over, "{\"lines\":[]}\n{\"end\":\"live\",\"ms\":1}\n"], None);
-        assert_eq!(done, Ok(vec!["{\"lines\":[]}".to_string()]));
-    }
 
     fn jit(pid: u32, app: &str, lease: &str) -> Whose {
         Whose { pid, app: app.to_string(), lease: lease.to_string() }
@@ -1819,8 +1744,14 @@ mod tests {
         for line in ["call vis.play {\"id\":\"leaf\"}", "tools", "grab out=a.png", "gseq n=4"] {
             assert!(answered_here(&words(line)), "{line}");
         }
-        for line in ["status", "why-hung", "quit", "ui tree"] {
+        for line in ["status", "why-hung", "hang", "stacks", "threads", "quit", "ui tree"] {
             assert!(!answered_here(&words(line)), "{line}");
+            let err = format!(r#"{{"err":"unknown command `{line}`: the commands are help, quit"}}"#);
+            assert_eq!(unknown_thread_command(line, &err), matches!(line, "why-hung" | "hang" | "stacks" | "threads"), "{line}");
+        }
+        for other in [r#"{"err":"unknown command `stack`: try stacks"}"#, r#"{"err":"stacks timed out"}"#,
+            r#"{"line":"unknown command `stacks`"}"#, r#"{"threads":[]}"#, r#"{"err":"unknown command `stacks`"#] {
+            assert!(!unknown_thread_command("stacks", other), "{other}");
         }
     }
 
@@ -1852,6 +1783,7 @@ mod tests {
             (&["nodes"], "  nodes "),
             (&["why-queued"], "  why-queued <lease>"),
             (&["ci", "status"], "  status [--json]"),
+            (&["bucket", "stop"], "  bucket stop <run> <unit>"),
             // arguments after the name fall away
             (&["test", "my-lane", "my-pkg"], "  test <lane> <pkg>"),
             (&["job", "result", "J1"], "  job wait <id..>"),
@@ -1866,6 +1798,27 @@ mod tests {
         assert!(lines(&["live", "start"]).iter().any(|l| l.starts_with("  live start <pkg> --test")));
         assert!(lines(&["job"]).iter().any(|l| l.starts_with("  job submit")) && lines(&["job"]).iter().any(|l| l.starts_with("  job cancel")));
         assert!(lines(&["no-such-command"]).is_empty());
+    }
+
+    /// `devhub bucket stop` is main's (DEVHUB_AGENT=main, whatever else its environment says) or
+    /// the user's at a terminal or outside a lane's worktree; another agent, a lane, an agent
+    /// CLI's environment or a lane's worktree without a terminal is refused, saying which.
+    #[cfg(feature = "checkout")]
+    #[test]
+    fn bucket_stop_caller_allows_only_main_or_user() {
+        let env = |kv: &[(&str, &str)]| kv.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<Vec<_>>();
+        let (home, lane) = (std::path::Path::new("/n/home"), std::path::Path::new("/n/wt.noindex/devhubcap/libs"));
+        assert_eq!(stop_caller(&env(&[("DEVHUB_AGENT", "main"), ("CLAUDECODE", "1")]), lane, false), Ok("main"));
+        assert_eq!(stop_caller(&env(&[]), lane, true), Ok("user"), "a terminal, even in a lane's worktree");
+        assert_eq!(stop_caller(&env(&[]), home, false), Ok("user"));
+        let refused = |vars: &[(&str, &str)], cwd: &std::path::Path| stop_caller(&env(vars), cwd, false).unwrap_err();
+        assert!(refused(&[("DEVHUB_AGENT", "DEVHUBCAP")], home).contains("`DEVHUBCAP`"));
+        assert!(refused(&[("DEVHUB_LANE", "devhubcap")], home).contains("`devhubcap`"));
+        for var in ["CODEX_THREAD_ID", "CLAUDECODE", "GROK_SESSION", "GEMINI_CLI"] {
+            assert!(refused(&[(var, "1")], home).contains(var), "{var}");
+        }
+        assert!(refused(&[], lane).contains("`devhubcap`"), "a lane's worktree without a terminal");
+        assert!(refused(&[], std::path::Path::new("/n/wt.noindex/gfxlean.slots/2")).contains("`gfxlean`"), "a lane's slot");
     }
 
     #[test]

@@ -173,6 +173,9 @@ pub fn serve(ctx: &Ctx, line: &str) -> Result<String, String> {
     if let Some(path) = st("remap") {
         return remap(ctx, &path);
     }
+    if let Some(last) = st("adopt") {
+        return adopt(ctx, &last);
+    }
     let dry = v.get("dry").and_then(|x| x.as_bool()).unwrap_or(false);
     let parents: Vec<String> = v.get("parents").and_then(|a| a.as_arr()).unwrap_or(&[]).iter().filter_map(|x| x.as_str().map(str::to_string)).collect();
     let repo = &ctx.repo;
@@ -208,8 +211,7 @@ pub fn serve(ctx: &Ctx, line: &str) -> Result<String, String> {
     let since = ctx.store.read(|d| d.pushes.iter().rev().find(|p| p.commit == origin).map(|p| p.pair.work.clone())).unwrap_or_else(|| origin.clone());
     groups.credit(repo, &since)?;
     let message = st("message");
-    let from = format!("work tip {} (with commercial {})", super::short(&sha), super::short(&tip.main));
-    let note = |n: usize, of: usize| Some(format!("Part {n} of {of} of {from}.{}", message.as_deref().map_or(String::new(), |m| format!("\n\n{m}"))));
+    let note = |n: usize, of: usize| Some(format!("{}{}", part_note(n, of, &sha, &tip.main), message.as_deref().map_or(String::new(), |m| format!("\n\n{m}"))));
     let set = groups.build(repo, &parents, &note, &|_| None)?;
     let commits = commit_rows(&groups, &set);
     let last = set.last().map(|(_, sha)| sha.clone()).ok_or("push: no commits")?;
@@ -221,11 +223,107 @@ pub fn serve(ctx: &Ctx, line: &str) -> Result<String, String> {
         let main = if commercial.is_dir() { json_str(&tip.main) } else { "null".into() };
         return Ok(format!("{{\"pushed\":false,\"dry\":true,\"tip\":{},\"origin\":{},\"files\":{files},\"scan\":\"clean\",\"commits\":[{commits}],\"new_crates\":[{new}],\"commercial\":{main},\"unread\":[{}]}}", json_str(&sha), json_str(&origin), unread.join(",")));
     }
-    git(repo, &["push", "-q", "origin", &format!("{last}:refs/heads/work")])?;
     let p = Pushed { pair: tip.clone(), commit: last.clone(), origin_was: origin.clone(), at_ms: wall_ms(), files };
-    ctx.store.update(|d| d.pushes.push(p))?;
+    send(
+        &|p| ctx.store.update(|d| match p {
+            Some(p) => d.pushes.push(p.clone()),
+            None => d.pushes.retain(|q| q.commit != last),
+        }),
+        &|| git(repo, &["push", "-q", "origin", &format!("{last}:refs/heads/work")]).map(drop),
+        &|| git(repo, &["fetch", "-q", "origin", "work"]).and_then(|_| git(repo, &["rev-parse", "refs/remotes/origin/work"])).is_ok_and(|o| o == last),
+        &p,
+    )?;
     ctx.store.event("push", Sev::Info, format!("push: origin/work {} -> {}, {} commits (tree of tip {}, {files} files)", super::short(&origin), super::short(&last), set.len(), tip.short()), None);
     Ok(format!("{{\"pushed\":true,\"commit\":{},\"origin_was\":{},\"tip\":{},\"files\":{files},\"commits\":[{commits}]}}", json_str(&last), json_str(&origin), json_str(&sha)))
+}
+
+/// What each commit of a push says it is, the line [`adopted`] reads back: `Part 2 of 14 of work
+/// tip <sha> (with commercial <sha>).`
+fn part_note(n: usize, of: usize, work: &str, main: &str) -> String {
+    format!("Part {n} of {of} of work tip {} (with commercial {}).", super::short(work), super::short(main))
+}
+
+/// A commit message's [`part_note`]: (n, of, work, commercial) as written (short shas).
+fn read_part(message: &str) -> Option<(usize, usize, String, String)> {
+    message.lines().find_map(|l| {
+        let (n, rest) = l.strip_prefix("Part ")?.split_once(" of ")?;
+        let (of, rest) = rest.split_once(" of work tip ")?;
+        let (work, main) = rest.strip_suffix(").")?.split_once(" (with commercial ")?;
+        Some((n.parse().ok()?, of.parse().ok()?, work.to_string(), main.to_string()))
+    })
+}
+
+/// Records push `p` in the ledger, then sends it (`push`), in that order: a master restart cut a
+/// push between its `git push` and its record (the master execs into its new build in place, and
+/// its git went on), and the ledger lost a push origin/work stands on (11-25), so every later
+/// lookup of what that push carried failed. A record whose commit never went out is never found
+/// (the ledger is read from origin/work by commit, [`carrier`]); a send that fails drops it again,
+/// unless its commit is on origin after all (`went_out`).
+fn send(record: &dyn Fn(Option<&Pushed>) -> Result<(), String>, push: &dyn Fn() -> Result<(), String>, went_out: &dyn Fn() -> bool, p: &Pushed) -> Result<(), String> {
+    record(Some(p))?;
+    if let Err(e) = push() {
+        if !went_out() {
+            record(None)?;
+        }
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// The push that ends at `last` on origin/work's first-parent line, read back from its own commits
+/// ([`part_note`]): the set's last says `Part n of n`, each commit before it the part before,
+/// all of one work tip, whose tree the last one has; it stands on the first part's parent. For a
+/// push the ledger lost (`push adopt`). `main_of`: the commercial tip's full sha from its short one.
+fn adopted(repo: &std::path::Path, last: &str, main_of: &dyn Fn(&str) -> Result<String, String>) -> Result<Pushed, String> {
+    let last = git(repo, &["rev-parse", "--verify", &format!("{last}^{{commit}}")])?;
+    let line = git(repo, &["rev-list", "--first-parent", "refs/remotes/origin/work"])?;
+    if !line.lines().any(|c| c == last) {
+        return Err(format!("push adopt: {} is not on origin/work's first-parent line", super::short(&last)));
+    }
+    let part = |c: &str| read_part(&git(repo, &["log", "-1", "--format=%B", c])?).ok_or_else(|| format!("push adopt: {} says no `Part n of m of work tip ..` line: no push of devhub's", super::short(c)));
+    let (n, of, work, main) = part(&last)?;
+    if n != of {
+        return Err(format!("push adopt: {} is part {n} of {of}: name the set's last commit", super::short(&last)));
+    }
+    let mut first = last.clone();
+    for k in (1..of).rev() {
+        first = git(repo, &["rev-parse", &format!("{first}^1")])?;
+        let (m, of2, w, c) = part(&first)?;
+        if (m, of2, w.as_str(), c.as_str()) != (k, of, work.as_str(), main.as_str()) {
+            return Err(format!("push adopt: {} is part {m} of {of2} of {w}, not part {k} of {of} of {work}: the set does not read back", super::short(&first)));
+        }
+    }
+    let origin_was = git(repo, &["rev-parse", &format!("{first}^1")])?;
+    let tip = git(repo, &["rev-parse", "--verify", &format!("{work}^{{commit}}")]).map_err(|e| format!("push adopt: its work tip {work} is not in this repository: {e}"))?;
+    let tree = |c: &str| git(repo, &["rev-parse", &format!("{c}^{{tree}}")]);
+    if tree(&last)? != tree(&tip)? {
+        return Err(format!("push adopt: {} has not the tree of the tip {work} it names", super::short(&last)));
+    }
+    let main = if main.is_empty() { String::new() } else { main_of(&main)? };
+    let files = git(repo, &["diff", "--name-only", "--no-renames", &origin_was, &last])?.lines().filter(|l| !l.is_empty()).count() as u32;
+    let at_ms = git(repo, &["log", "-1", "--format=%ct", &last])?.trim().parse::<u64>().map_err(|e| format!("push adopt: its commit time: {e}"))? * 1000;
+    Ok(Pushed { pair: Pair::new(&tip, &main), commit: last, origin_was, at_ms, files })
+}
+
+/// `push {"adopt":"<sha>"}`: the push ending at that commit of origin/work, which the ledger
+/// lacks, read back from its commits ([`adopted`]) and recorded in its place by time.
+fn adopt(ctx: &Ctx, last: &str) -> Result<String, String> {
+    let repo = &ctx.repo;
+    git(repo, &["fetch", "-q", "origin", "work"])?;
+    let commercial = ctx.commercial();
+    let p = adopted(repo, last, &|m| git(&commercial, &["rev-parse", "--verify", &format!("{m}^{{commit}}")]).map_err(|e| format!("push adopt: its commercial tip {m}: {e}")))?;
+    let said = format!("push adopt: origin/work {} -> {} (work tip {}, {} files) is in the ledger", super::short(&p.origin_was), super::short(&p.commit), super::short(&p.pair.work), p.files);
+    let row = format!("{{\"adopted\":{},\"origin_was\":{},\"tip\":{},\"files\":{}}}", json_str(&p.commit), json_str(&p.origin_was), json_str(&p.pair.work), p.files);
+    ctx.store.update(|d| {
+        if d.pushes.iter().any(|q| q.commit == p.commit) {
+            return Err(format!("push adopt: the ledger has the push ending at {} already", super::short(&p.commit)));
+        }
+        let at = d.pushes.iter().position(|q| q.at_ms > p.at_ms).unwrap_or(d.pushes.len());
+        d.pushes.insert(at, p);
+        Ok(())
+    })??;
+    ctx.store.event("push", Sev::Info, said, None);
+    Ok(row)
 }
 
 /// The pushed commit that carries local work commit `local` (a full sha not on origin/work
@@ -401,7 +499,7 @@ mod tests {
         let push = |since: &str, origin: &str, tip: &str| {
             let mut groups = Groups::between(&dir, origin, tip).unwrap();
             groups.credit(&dir, since).unwrap();
-            let set = groups.build(&dir, &[], &|_, _| None, &|_| None).unwrap();
+            let set = groups.build(&dir, &[], &|n, of| Some(part_note(n, of, tip, "")), &|_| None).unwrap();
             let last = set.last().unwrap().1.clone();
             git(&dir, &["update-ref", "refs/remotes/origin/work", &last]).unwrap();
             (commit_rows(&groups, &set), set.into_iter().map(|(_, sha)| sha).collect::<Vec<_>>(), Pushed { pair: Pair::new(tip, ""), commit: last, origin_was: origin.to_string(), at_ms: 0, files: 0 })
@@ -433,6 +531,17 @@ mod tests {
         pushes.push(p2);
         assert_eq!(carrier(&dir, &pushes, &port).unwrap().as_deref(), Some(first[1].as_str()), "the push that first sent it, not a later one");
         assert_eq!(carrier(&dir, &pushes, &later).unwrap().as_deref(), Some(second[0].as_str()));
+        // a push the ledger lost reads back from its commits, and what it carried is found again
+        // (a master restart cut a push's record after its git push, 11-25)
+        let back = adopted(&dir, &p1.commit, &|m| Ok(m.to_string())).unwrap();
+        assert_eq!((back.commit.as_str(), back.origin_was.as_str(), back.pair.work.as_str()), (p1.commit.as_str(), p1.origin_was.as_str(), p1.pair.work.as_str()));
+        assert_eq!(back.files as usize, git(&dir, &["diff", "--name-only", &base, &p1.commit]).unwrap().lines().count(), "its files");
+        assert!(adopted(&dir, &first[0], &|m| Ok(m.to_string())).unwrap_err().contains("is part 1 of 3"), "only the set's last names the set");
+        assert!(adopted(&dir, &later, &|m| Ok(m.to_string())).unwrap_err().contains("not on origin/work's first-parent line"));
+        let mut lost: Vec<Pushed> = pushes.iter().filter(|p| p.commit != p1.commit).cloned().collect();
+        assert!(carrier(&dir, &lost, &port).is_err(), "the lost push hides what it carried");
+        lost.push(back);
+        assert_eq!(carrier(&dir, &lost, &port).unwrap().as_deref(), Some(first[1].as_str()), "adopted, it is found");
         // a merge that brings in libs/a, a change of libs/b beside it, and one in Rest that came and went
         git(&dir, &["checkout", "-q", "-b", "lane"]).unwrap();
         commit(&[("libs/a/x.rs", "4\n")], "on the lane");
@@ -455,6 +564,23 @@ mod tests {
         assert_eq!(title_twice(&group::parse_blocks("block A\nx/*\nblock B\n*\n")), None);
         git(&dir, &["update-ref", "refs/remotes/origin/work", &ours]).unwrap();
         assert_eq!(carrier(&dir, &pushes, &port).unwrap(), None, "origin/work is no push of the ledger");
+        // a push is in the ledger before it goes out; a send that fails drops it, unless it went out
+        let ledger = std::cell::RefCell::new(Vec::<String>::new());
+        let record = |p: Option<&Pushed>| {
+            let mut l = ledger.borrow_mut();
+            match p {
+                Some(p) => l.push(p.commit.clone()),
+                None => drop(l.pop()),
+            }
+            Ok(())
+        };
+        let seen = std::cell::Cell::new(0);
+        send(&record, &|| Ok(seen.set(ledger.borrow().len())), &|| false, &p1).unwrap();
+        assert_eq!((seen.get(), ledger.borrow().len()), (1, 1), "recorded before it is sent");
+        assert!(send(&record, &|| Err("cut".into()), &|| false, &p1).is_err());
+        assert_eq!(ledger.borrow().len(), 1, "a send that did not go out leaves no record");
+        assert!(send(&record, &|| Err("cut".into()), &|| true, &p1).is_err());
+        assert_eq!(ledger.borrow().len(), 2, "one that went out keeps it");
         std::fs::remove_dir_all(dir).unwrap();
     }
 

@@ -33,6 +33,31 @@ pub fn never_ships(path: &str) -> bool {
     path == "local" || path.starts_with("local/") || rel == "local" || rel.starts_with("local/") || never_ships_named(path)
 }
 
+/// The first path that the command `cmd`, run in `cwd` (relative to the tree `root`), names that is
+/// here but that its box will not have: one under `local/` ([`never_ships`]) that no `also` path
+/// (`DEVHUB_ALSO`) covers. Its words are split as a shell's are, a `-c` text's and `--flag=path`
+/// included, and `\` reads as `/`. Such a run starts on its box and finds nothing there: a timed
+/// lease's PowerShell script in the lane's git-ignored `local/` never reached the Windows box, and
+/// the drained box was spent for nothing (L1864458, 11-26).
+pub fn named_unshipped(root: &Path, cwd: &str, cmd: &[String], also: &[String]) -> Option<String> {
+    let covered = |p: &str| also.iter().map(|a| a.trim_end_matches('/')).any(|a| p == a || p.strip_prefix(a).is_some_and(|r| r.starts_with('/')));
+    let words = cmd.iter().flat_map(|a| a.split(|c: char| c.is_whitespace() || "'\"`;|&()<>=,".contains(c)));
+    // (an absolute path into the tree reads as the same path in it)
+    let top = root.to_string_lossy().replace('\\', "/");
+    words.filter(|w| !w.is_empty() && !w.starts_with('-')).find_map(|w| {
+        let w = w.replace('\\', "/");
+        let (w, absolute) = match w.strip_prefix(top.trim_end_matches('/')).and_then(|r| r.strip_prefix('/')) { Some(r) => (r, true), None => (w.as_str(), false) };
+        let w = w.trim_start_matches("./").trim_end_matches('/');
+        let rel = match (absolute, cwd.trim_end_matches('/')) { (true, _) | (_, "" | ".") => w.to_string(), (_, dir) => format!("{dir}/{w}") };
+        (w.contains('/') && inside(&rel) && never_ships(&rel) && !never_ships_named(&rel) && !covered(&rel) && root.join(&rel).exists()).then_some(rel)
+    })
+}
+
+/// The refusal of a run whose command names `path` ([`named_unshipped`]).
+pub fn unshipped_refusal(path: &str) -> String {
+    format!("the command names {path}, which its box will not have: `local/` ships only when DEVHUB_ALSO names it (DEVHUB_ALSO={path}); nothing was asked")
+}
+
 /// Why a run at `rev` alone (`--rev`) refuses the `tracked` files its `DEVHUB_ALSO` paths hold: it
 /// runs exactly those commits. The worktree's copies of such files went on top of R, so a bench
 /// lease's tree held work's copy of one file beside the lane's copy of another (11-24), which
@@ -781,6 +806,32 @@ mod tests {
         for keep in ["src/a.tmp.rs", "src/tmp.1.ab", "src/a.rs.tmp.81511", "src/a.rs.tmp.x1.ab", "src/a.rs.tmp.1.xyz", "src/a.rs", "apps/source-library/src/local.rs", "apps/local.rs"] {
             assert!(!never_ships(keep), "{keep}");
         }
+    }
+
+    /// A command that names a file in the lane's `local/` is refused before it asks, unless
+    /// `DEVHUB_ALSO` ships it: its box would not have it (L1864458, 11-26). Tracked paths, build
+    /// output and paths that are not here are not refused.
+    #[test]
+    fn a_command_naming_a_local_file_that_does_not_ship_is_refused() {
+        let base = std::env::temp_dir().join(format!("devhub-unshipped-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        for f in ["local/x.ps1", "local/dir/a.sh", "src/a.rs", "target/host/x", "apps/demo/local/y.sh"] {
+            std::fs::create_dir_all(base.join(f).parent().unwrap()).unwrap();
+            std::fs::write(base.join(f), b"").unwrap();
+        }
+        let argv = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let named = |cwd: &str, cmd: &[&str], also: &[&str]| named_unshipped(&base, cwd, &argv(cmd), &argv(also));
+        assert_eq!(named("", &["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "local\\x.ps1"], &[]).as_deref(), Some("local/x.ps1"), "a Windows path's script");
+        assert_eq!(named("", &["sh", "-c", "cd src && bash ./local/dir/a.sh --x"], &[]).as_deref(), Some("local/dir/a.sh"), "a shell's -c text");
+        assert_eq!(named("", &["tool", "--input=local/x.ps1"], &[]).as_deref(), Some("local/x.ps1"), "a flag's value");
+        assert_eq!(named("apps/demo", &["bash", "local/y.sh"], &[]).as_deref(), Some("apps/demo/local/y.sh"), "relative to the run's cwd");
+        let inside_tree = format!("{}/local/x.ps1", base.display());
+        assert_eq!(named("apps/demo", &["bash", &inside_tree], &[]).as_deref(), Some("local/x.ps1"), "an absolute path into the tree");
+        assert_eq!(named("", &["sh", "-c", "bash local/dir/a.sh"], &["local/dir/"]), None, "DEVHUB_ALSO ships its dir");
+        assert_eq!(named("", &["bash", "local/x.ps1"], &["local/x.ps1"]), None, "DEVHUB_ALSO ships the file");
+        assert_eq!(named("", &["cat", "src/a.rs", "target/host/x", "local/missing.sh", "local"], &[]), None, "tracked, build output, not here, a bare dir name");
+        assert!(unshipped_refusal("local/x.ps1").contains("DEVHUB_ALSO=local/x.ps1"));
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

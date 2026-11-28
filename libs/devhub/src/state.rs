@@ -796,10 +796,15 @@ pub struct Live {
     /// paths the run names in `DEVHUB_ALSO`: they ship with every patch, `local/` included
     pub also: Vec<String>,
     /// `--home`: a tar archive on the master's machine whose files seed the app's own home on its
-    /// box (empty: the app reads the box user's home)
+    /// box; `box` (`orch::live::BOX_HOME`): the box user's home; empty: a fresh home for an app
+    /// session, the harness's own for a test session
     pub home: String,
     /// that home on its box, once placed: the app's `MAKEPAD_TEST_HOME`
     pub home_dir: String,
+    /// its lease's work dir on its box (where its app runs), and the box's home there (`HOME`), once
+    /// placed: a helper's look at a session's files cost it a lease's queue for each probe (11-26)
+    pub work_dir: String,
+    pub box_home: String,
     pub lane: String,
     pub src: String,
     pub cost: String,
@@ -828,6 +833,8 @@ pub struct Live {
     /// visible app joins through `MAKEPAD_WM_SOCKET`): it runs on that session's box, and that
     /// session is never parked or ended idle while this one is active
     pub joins: String,
+    /// `--set <name>/<n>`: the lane's n sessions placed and parked together, or empty for none.
+    pub set: String,
     pub visible: bool,
     /// `--timed`: its lease is a timed one ([`crate::orch::live::lease_kind`]): a drained box,
     /// held while it lives
@@ -860,6 +867,11 @@ pub struct Live {
     pub started_ms: u64,
     /// the last edit or action (the idle timeout counts from it)
     pub touched_ms: u64,
+    /// what its lane last did with it (`live act W1 activity`, a look, a wait, a sync, a routed
+    /// inspect, its lane's wait on another session) and when: the work a park interrupts, said by
+    /// a park for timed work while it is in use ([`crate::orch::live::park`])
+    pub last_act: String,
+    pub last_act_ms: u64,
     /// when the client of its last call went before that call's answer (0: its last call's client
     /// stayed): its starter has gone, and the session ends after [`crate::orch::live::LEFT_MS`]
     /// with no call or save
@@ -911,7 +923,7 @@ impl Live {
             Some(p) if matches!(p.outcome.as_str(), "none" | "failed") => 2,
             // (a run with none to rerun after this edit passes; one that has no test to run does
             // not; a session no longer running has no answer on what the caller has now)
-            Some(p) if x.state == "running" && p.tests.as_ref().is_some_and(|t| t.failed == 0 && (t.ran > 0 || t.skipped > 0)) => 0,
+            Some(p) if (x.state == "running" || p.outcome == "recovered") && p.tests.as_ref().is_some_and(|t| t.failed == 0 && (t.ran > 0 || t.skipped > 0)) => 0,
             _ => 1,
         }
     }
@@ -923,9 +935,10 @@ impl Live {
         let Some(p) = &x.patch else { return format!("devhub test: {} {}: {}\n", x.app, x.state, x.note) };
         if p.outcome == "jit_error" { return jit_error_verdict(p); }
         let Some(t) = &p.tests else { return format!("{}{}\n{}", p.jit_notice, if p.reason.is_empty() { &x.note } else { &p.reason }, p.output) };
-        if x.state != "running" { return format!("devhub test: {} {}: {}; no verdict on this source state\n", x.app, x.state, x.note); }
+        if x.state != "running" && p.outcome != "recovered" { return format!("devhub test: {} {}: {}; no verdict on this source state\n", x.app, x.state, x.note); }
         let queued = if p.queued_ms > 0 { format!("queued {} ms behind {}, ", p.queued_ms, p.behind) } else { String::new() };
         let mut out = format!("{}devhub test: {} {}/{} ran ({} skipped, selected {}) in {seconds:.3} s ({queued}ship {} ms, patch {:.0} ms, tests {:.0} ms) on {} [live {}]\n", p.jit_notice, x.app, t.fresh_passed(), t.ran, t.skipped, if t.selected == "affected" { "affected" } else { "all" }, p.shipped_ms.saturating_sub(p.edit_ms.max(p.called_ms) + p.queued_ms), t.compile_ms, t.ms, x.node, x.id);
+        if x.state != "running" && !p.reason.is_empty() { out.push_str(&format!("{}\n", p.reason)); }
         // an edit that reached no compiled code: a pass says little about it
         if let Some((items, 0)) = t.patch.filter(|p| p.0 > 0) {
             out.push_str(&format!("the JIT took {items} changed item(s) and replaced no code: nothing compiled so far used them\n"));
@@ -988,6 +1001,10 @@ pub struct LivePatch {
     /// what it waited behind (`queued_ms`): the previous edit, by when it was saved and its group
     pub behind: String,
     pub shipped_ms: u64,
+    /// When a call's reply carried this round's verdict to a caller still there (0: none has):
+    /// only then is a later call's same verdict cached ([`crate::orch::live`]'s `cached_reply`).
+    /// A call whose link was cut asked again and read its own round's verdict as cached (11-26).
+    pub answered_ms: u64,
     /// The JIT's installed patch count just before the ship (its `live` answer's `patches`): one
     /// more after it is this edit installed, whether or not its verdict event came.
     pub patches_at_ship: Option<u64>,
@@ -1828,7 +1845,7 @@ pub fn live_value(x: &Live) -> Value {
 
 fn live_state_value(x: &Live) -> Value {
     let patch = x.patch.as_ref().map_or(Value::Null, |p| {
-        obj(vec![("files", strs(&p.files)), ("edit", s(&p.edit)), ("group", p.group.map_or(Value::Null, int)), ("seq", int(p.seq)), ("cursor", s(&p.cursor)), ("edit_ms", int(p.edit_ms)), ("called_ms", int(p.called_ms)), ("queued_ms", int(p.queued_ms)), ("behind", s(&p.behind)), ("shipped_ms", int(p.shipped_ms)), ("patches_at_ship", p.patches_at_ship.map_or(Value::Null, int)), ("outcome", s(&p.outcome)), ("outcome_ms", int(p.outcome_ms)), ("frame_ms", int(p.frame_ms)), ("tests", p.tests.as_ref().map_or(Value::Null, live_tests_value)), ("verdict_ms", int(p.verdict_ms)),  ("log_start", int(p.log_start)), ("log_end", int(p.log_end)), ("output_ref", p.output_ref.to_value()), ("reason_ref", p.reason_ref.to_value()), ("retried", Value::Bool(p.retried)), ("jit_error", int(p.jit_error)), ("jit_notice", s(&p.jit_notice)), ("startup_outcome", p.startup_outcome.as_ref().map_or(Value::Null, |o| s(o)))])
+        obj(vec![("files", strs(&p.files)), ("edit", s(&p.edit)), ("group", p.group.map_or(Value::Null, int)), ("seq", int(p.seq)), ("cursor", s(&p.cursor)), ("edit_ms", int(p.edit_ms)), ("called_ms", int(p.called_ms)), ("answered_ms", int(p.answered_ms)), ("queued_ms", int(p.queued_ms)), ("behind", s(&p.behind)), ("shipped_ms", int(p.shipped_ms)), ("patches_at_ship", p.patches_at_ship.map_or(Value::Null, int)), ("outcome", s(&p.outcome)), ("outcome_ms", int(p.outcome_ms)), ("frame_ms", int(p.frame_ms)), ("tests", p.tests.as_ref().map_or(Value::Null, live_tests_value)), ("verdict_ms", int(p.verdict_ms)),  ("log_start", int(p.log_start)), ("log_end", int(p.log_end)), ("output_ref", p.output_ref.to_value()), ("reason_ref", p.reason_ref.to_value()), ("retried", Value::Bool(p.retried)), ("jit_error", int(p.jit_error)), ("jit_notice", s(&p.jit_notice)), ("startup_outcome", p.startup_outcome.as_ref().map_or(Value::Null, |o| s(o)))])
     });
     obj(vec![
         ("id", s(&x.id)),
@@ -1846,6 +1863,8 @@ fn live_state_value(x: &Live) -> Value {
         ("also", strs(&x.also)),
         ("home", s(&x.home)),
         ("home_dir", s(&x.home_dir)),
+        ("work_dir", s(&x.work_dir)),
+        ("box_home", s(&x.box_home)),
         ("lane", s(&x.lane)),
         ("src", s(&x.src)),
         ("cost", s(&x.cost)),
@@ -1864,6 +1883,7 @@ fn live_state_value(x: &Live) -> Value {
         ("series", s(&x.series)),
         ("pin_why", s(&x.pin_why)),
         ("joins", s(&x.joins)),
+        ("set", s(&x.set)),
         ("resume_after", s(&x.resume_after)),
         ("visible", Value::Bool(x.visible)),
         ("timed", Value::Bool(x.timed)),
@@ -1874,6 +1894,8 @@ fn live_state_value(x: &Live) -> Value {
         ("state", s(&x.state)),
         ("started_ms", int(x.started_ms)),
         ("touched_ms", int(x.touched_ms)),
+        ("last_act", s(&x.last_act)),
+        ("last_act_ms", int(x.last_act_ms)),
         ("left_ms", int(x.left_ms)),
         ("held", s(&x.held)),
         ("kept_by", s(&x.kept_by)),
@@ -1920,6 +1942,8 @@ fn live_state_from(v: &Value) -> Live {
         also: strs_from(o, "also"),
         home: text(o, "home"),
         home_dir: text(o, "home_dir"),
+        work_dir: text(o, "work_dir"),
+        box_home: text(o, "box_home"),
         lane: text(o, "lane"),
         src: text(o, "src"),
         cost: text(o, "cost"),
@@ -1938,6 +1962,7 @@ fn live_state_from(v: &Value) -> Live {
         series: text(o, "series"),
         pin_why: text(o, "pin_why"),
         joins: text(o, "joins"),
+        set: text(o, "set"),
         resume_after: text(o, "resume_after"),
         visible: flag(o, "visible", false),
         timed: flag(o, "timed", false),
@@ -1948,12 +1973,14 @@ fn live_state_from(v: &Value) -> Live {
         state: text(o, "state"),
         started_ms: uint(o, "started_ms"),
         touched_ms: uint(o, "touched_ms"),
+        last_act: text(o, "last_act"),
+        last_act_ms: uint(o, "last_act_ms"),
         left_ms: uint(o, "left_ms"),
         held: text(o, "held"),
         kept_by: text(o, "kept_by"),
         kept_ms: uint(o, "kept_ms"),
         ended_ms: uint(o, "ended_ms"),
-        patch: p.map(|p| LivePatch { files: strs_from(Some(p), "files"), edit: text(Some(p), "edit"), group: p.get("group").and_then(Value::as_u64), seq: uint(Some(p), "seq"), cursor: text(Some(p), "cursor"), edit_ms: uint(Some(p), "edit_ms"), called_ms: uint(Some(p), "called_ms"), queued_ms: uint(Some(p), "queued_ms"), behind: text(Some(p), "behind"), shipped_ms: uint(Some(p), "shipped_ms"), patches_at_ship: p.get("patches_at_ship").and_then(Value::as_u64), outcome: text(Some(p), "outcome"), outcome_ms: uint(Some(p), "outcome_ms"), frame_ms: uint(Some(p), "frame_ms"), tests: p.get("tests").and_then(live_tests_from), verdict_ms: uint(Some(p), "verdict_ms"), log_start: uint(Some(p), "log_start"), log_end: uint(Some(p), "log_end"), output: String::new(), output_ref: TextRef::from_value(p.get("output_ref")), reason_ref: TextRef::from_value(p.get("reason_ref")), retried: flag(Some(p), "retried", false), jit_error: uint(Some(p), "jit_error"), jit_notice: text(Some(p), "jit_notice"), startup_outcome: p.get("startup_outcome").and_then(Value::as_str).map(str::to_string), reason: String::new() }),
+        patch: p.map(|p| LivePatch { files: strs_from(Some(p), "files"), edit: text(Some(p), "edit"), group: p.get("group").and_then(Value::as_u64), seq: uint(Some(p), "seq"), cursor: text(Some(p), "cursor"), edit_ms: uint(Some(p), "edit_ms"), called_ms: uint(Some(p), "called_ms"), answered_ms: uint(Some(p), "answered_ms"), queued_ms: uint(Some(p), "queued_ms"), behind: text(Some(p), "behind"), shipped_ms: uint(Some(p), "shipped_ms"), patches_at_ship: p.get("patches_at_ship").and_then(Value::as_u64), outcome: text(Some(p), "outcome"), outcome_ms: uint(Some(p), "outcome_ms"), frame_ms: uint(Some(p), "frame_ms"), tests: p.get("tests").and_then(live_tests_from), verdict_ms: uint(Some(p), "verdict_ms"), log_start: uint(Some(p), "log_start"), log_end: uint(Some(p), "log_end"), output: String::new(), output_ref: TextRef::from_value(p.get("output_ref")), reason_ref: TextRef::from_value(p.get("reason_ref")), retried: flag(Some(p), "retried", false), jit_error: uint(Some(p), "jit_error"), jit_notice: text(Some(p), "jit_notice"), startup_outcome: p.get("startup_outcome").and_then(Value::as_str).map(str::to_string), reason: String::new() }),
         restart_since_ms: uint(o, "restart_since_ms"),
         restart_saves: uint(o, "restart_saves"),
         restart_why: text(o, "restart_why"),
@@ -2171,13 +2198,16 @@ fn pushed_value(p: &Pushed) -> Value {
     obj(vec![("pair", p.pair.to_value()), ("commit", s(&p.commit)), ("origin_was", s(&p.origin_was)), ("at_ms", int(p.at_ms)), ("files", int(p.files as u64))])
 }
 
-/// The master's state: one document behind one lock, saved on every change.
+/// The master's workflow state. Writers serialize commits and readers share the last committed document.
 pub struct Store {
     path: PathBuf,
     /// the machine its events name (the first open that knows it: the pre-warm board opens first
     /// and does not)
     machine: Mutex<String>,
     doc: Mutex<Versioned>,
+    published: Mutex<Arc<Doc>>,
+    #[cfg(test)]
+    before_persist: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     signals: Mutex<std::collections::HashMap<String, Vec<std::sync::Weak<Signal>>>>,
     /// where [`Store::event`] goes: the master's stream (set by the first [`Store::open`]; a
     /// [`Store::open_quiet`] module that writes its section publishes its own records)
@@ -2298,7 +2328,18 @@ impl Store {
             let len = std::fs::metadata(home.join("history.jsonl")).map_err(|e| format!("workflow history: {e}; state kept"))?.len();
             if len < history_len { return Err("truncated workflow history; state kept".into()); }
         }
-        let store = Arc::new(Store { path: path.clone(), machine: Mutex::new(machine.to_string()), doc: Mutex::new(Versioned { doc, revision, records, history_len, disk, journal_len }), signals: Mutex::new(Default::default()), publish: Mutex::new(publish), changed: Condvar::new(), generation: Mutex::new(0) });
+        let store = Arc::new(Store {
+            path: path.clone(),
+            machine: Mutex::new(machine.to_string()),
+            published: Mutex::new(Arc::new(doc.clone())),
+            doc: Mutex::new(Versioned { doc, revision, records, history_len, disk, journal_len }),
+            #[cfg(test)]
+            before_persist: Mutex::new(None),
+            signals: Mutex::new(Default::default()),
+            publish: Mutex::new(publish),
+            changed: Condvar::new(),
+            generation: Mutex::new(0),
+        });
         store.migrate(home)?;
         open.push((path, Arc::downgrade(&store)));
         Ok(store)
@@ -2354,7 +2395,8 @@ impl Store {
     }
 
     pub fn read<T>(&self, f: impl FnOnce(&Doc) -> T) -> T {
-        f(&self.doc.lock().unwrap().doc)
+        let doc = Arc::clone(&*self.published.lock().unwrap());
+        f(&doc)
     }
 
     /// The candidate is published only after persistence succeeds. Equality detects actual
@@ -2393,6 +2435,11 @@ impl Store {
         // the edit as one journal line; the whole document only as a checkpoint: the first
         // write, and once the journal would pass its bound
         let line = (state.disk != Value::Null).then(|| journal::line(revision, history_len, &journal::diff(&state.disk, &value)));
+        #[cfg(test)]
+        {
+            let hook = self.before_persist.lock().unwrap().clone();
+            if let Some(hook) = hook { hook(); }
+        }
         let journal_len = match line {
             Some(line) if state.journal_len + line.len() as u64 <= journal::CHECKPOINT_BYTES => {
                 journal::append(&self.path, state.journal_len, &line)?;
@@ -2410,6 +2457,8 @@ impl Store {
                 }
             }
         };
+        // A waiter woken below must be able to read this commit.
+        *self.published.lock().unwrap() = Arc::new(next.clone());
         let mut signals = self.signals.lock().unwrap();
         signals.retain(|_, subscribers| { subscribers.retain(|w| w.strong_count() > 0); !subscribers.is_empty() });
         for (key, subscribers) in signals.iter() {
@@ -2572,6 +2621,29 @@ mod tests {
         assert_eq!(store.doc.lock().unwrap().revision, 1, "equal assignment is not a revision");
         assert_eq!(old, std::fs::metadata(dir.0.join("state.json")).unwrap().modified().unwrap(), "no rewrite");
         assert!(!dir.0.join("state.new").exists(), "no temporary write");
+    }
+
+    #[test]
+    fn store_read_does_not_block_while_update_persists() {
+        let dir = Scratch::new("read-while-persisting");
+        let store = dir.store();
+        store.update(|d| d.jobs_next = 1).unwrap();
+
+        let (paused, wait_for_writer) = std::sync::mpsc::channel();
+        let (release, wait_for_reader) = std::sync::mpsc::channel();
+        let wait_for_reader = Mutex::new(wait_for_reader);
+        *store.before_persist.lock().unwrap() = Some(Arc::new(move || {
+            paused.send(()).unwrap();
+            wait_for_reader.lock().unwrap().recv().unwrap();
+        }));
+        let writer_store = Arc::clone(&store);
+        let writer = std::thread::spawn(move || writer_store.update(|d| d.jobs_next = 2));
+
+        wait_for_writer.recv().unwrap();
+        assert_eq!(store.read(|d| d.jobs_next), 1, "reader sees the previous commit while the writer is paused");
+        release.send(()).unwrap();
+        writer.join().unwrap().unwrap();
+        assert_eq!(store.read(|d| d.jobs_next), 2, "reader sees the new commit after persistence");
     }
 
     #[test]
@@ -2843,7 +2915,7 @@ mod tests {
     /// missing startup line failed keeps what it was pending as, for the line read late.
     #[test]
     fn a_live_session_keeps_its_asks_and_its_home() {
-        let x = Live { id: "W1".into(), cores: Some(4.0), ram_gb: Some(12.5), home: "/a/scan.tar".into(), home_dir: "/w/tmp/L1/app-home".into(), left_ms: 1_794_836_017_627, held: "error: missing item".into(), timed: true, ..Default::default() };
+        let x = Live { id: "W1".into(), cores: Some(4.0), ram_gb: Some(12.5), home: "/a/scan.tar".into(), home_dir: "/w/tmp/L1/app-home".into(), work_dir: "/w/run".into(), box_home: "/home/someone".into(), left_ms: 1_794_836_017_627, held: "error: missing item".into(), timed: true, ..Default::default() };
         let back = live_from(&live_value(&x));
         assert_eq!(back.held, x.held, "the session view keeps the confirmed diagnostic");
         assert_eq!(live_state_from(&live_state_value(&x)).held, x.held, "the persisted session keeps it across restart");
@@ -2855,6 +2927,7 @@ mod tests {
         assert_eq!(back.left_ms, 1_794_836_017_627, "when its starter left");
         assert_eq!((back.cores, back.ram_gb), (Some(4.0), Some(12.5)));
         assert_eq!((back.home.as_str(), back.home_dir.as_str()), ("/a/scan.tar", "/w/tmp/L1/app-home"));
+        assert_eq!((live_state_from(&live_state_value(&x)).work_dir.as_str(), back.box_home.as_str()), ("/w/run", "/home/someone"), "where it runs on its box, across a restart");
         assert_eq!(live_from(&live_value(&Live::default())).ram_gb, None);
     }
 

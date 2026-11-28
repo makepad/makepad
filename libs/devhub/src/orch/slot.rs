@@ -147,11 +147,23 @@ fn gone(s: &Slot) -> bool {
     std::fs::symlink_metadata(&s.path).is_err()
 }
 
-fn idle(s: &Slot, cwds: &[(u32, PathBuf)]) -> Result<(), String> {
+fn busy_reason(s: &Slot, cwds: &[(u32, PathBuf)]) -> Result<Option<String>, String> {
     let path = s.path.canonicalize().map_err(|e| format!("slot {} of {}: {e}", s.n, s.lane))?;
     let live = wt::live_in(cwds, &path);
-    if live.is_empty() { return Ok(()) }
-    Err(format!("slot {} of {}: pid {} runs in it; wait for it to end", s.n, s.lane, live.iter().map(u32::to_string).collect::<Vec<_>>().join(", ")))
+    if live.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(format!(
+        "slot {} of {}: pid {} runs in it; wait for it to end",
+        s.n, s.lane, live.iter().map(u32::to_string).collect::<Vec<_>>().join(", "),
+    )))
+}
+
+fn idle(s: &Slot, cwds: &[(u32, PathBuf)]) -> Result<(), String> {
+    match busy_reason(s, cwds)? {
+        None => Ok(()),
+        Some(why) => Err(why),
+    }
 }
 
 /// The bot only try-locks, so outer then commercial cannot deadlock (11-15).
@@ -205,10 +217,24 @@ fn staged_files(s: &Slot) -> Result<(), String> {
     Err(format!("slot {} of {}: {} are staged with content their files no longer have; stage or restore them, then take or drop", s.n, s.lane, names(&files)))
 }
 
-fn clean(s: &Slot) -> Result<(), String> {
+fn dirty_reason(s: &Slot) -> Result<Option<String>, String> {
     let files = changed(s)?;
-    if files.is_empty() { return Ok(()) }
-    Err(format!("slot {} of {} holds changes from job {}: {}; take them (`lane slot take`) or drop them (`lane slot drop`)", s.n, s.lane, if s.job.is_empty() { "(none recorded)" } else { &s.job }, names(&files)))
+    if files.is_empty() {
+        return Ok(None);
+    }
+    let job = s.job.trim();
+    let from = if job.is_empty() { String::new() } else { format!(" from job {job}") };
+    Ok(Some(format!(
+        "slot {} of {} holds changes{from}: {}; take them (`devhub lane slot take {} {}`) or drop them (`devhub lane slot drop {} {}`)",
+        s.n, s.lane, names(&files), s.lane, s.n, s.lane, s.n,
+    )))
+}
+
+fn clean(s: &Slot) -> Result<(), String> {
+    match dirty_reason(s)? {
+        None => Ok(()),
+        Some(why) => Err(why),
+    }
 }
 
 fn reset(s: &mut Slot, base: [String; 2], discard: bool) -> Result<(), String> {
@@ -550,6 +576,10 @@ fn save_local(l: &Lane, s: &Slot, files: &[String]) -> Result<Vec<String>, Strin
     Ok(notes)
 }
 
+fn ignored_work_reason(s: &Slot, files: &[String]) -> String {
+    format!("slot {} of {} holds ignored local work: {}; move or delete them first", s.n, s.lane, names(files))
+}
+
 fn remove_slots(l: &Lane, records: &mut Records, force: bool, cwds: &[(u32, PathBuf)]) -> Result<Vec<String>, String> {
     let slots: Vec<Slot> = records.slots.iter().filter(|s| s.lane == l.name).cloned().collect();
     // Check every slot before removing any of them.
@@ -561,7 +591,7 @@ fn remove_slots(l: &Lane, records: &mut Records, force: bool, cwds: &[(u32, Path
         let files = ignored_work(s)?;
         if !force {
             clean(s)?;
-            if !files.is_empty() { return Err(format!("slot {} of {} holds ignored local work: {}; move or delete them first", s.n, s.lane, names(&files))) }
+            if !files.is_empty() { return Err(ignored_work_reason(s, &files)) }
         }
         locals.push(files);
     }
@@ -598,6 +628,52 @@ pub(crate) fn check_clean(ctx: &Ctx, l: &LaneRec) -> Result<(), String> {
     let _lock = SLOTS.lock().unwrap_or_else(|e| e.into_inner());
     for s in Records::load(&ctx.home)?.slots.iter().filter(|s| s.lane == l.name && !gone(s)) { verify(&Lane::new(&ctx.repo, l), s)?; clean(s)?; }
     Ok(())
+}
+
+/// Result of checking a lane's slots before automatic landed cleanup removes it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum CleanupCheck {
+    /// Every slot is clean and idle (or its folder is already gone); removal may proceed.
+    Clean,
+    /// A slot holds owner work (tracked/untracked/committed changes or ignored `local/` work)
+    /// waiting for the owner to take, drop, move or delete it.
+    OwnerWork(String),
+    /// A process currently runs inside a slot; wait for it to end (no owner note).
+    Busy(String),
+}
+
+/// Checks a lane's slots before automatic cleanup removes it: structural/git errors stay `Err`,
+/// a running process returns `Busy`, and uncollected changes or ignored `local/` work return
+/// `OwnerWork` so cleanup can keep the lane and notify the owner once instead of warning every tick.
+pub(crate) fn check_for_cleanup(ctx: &Ctx, l: &LaneRec, cwds: &[(u32, PathBuf)]) -> Result<CleanupCheck, String> {
+    let _lock = SLOTS.lock().unwrap_or_else(|e| e.into_inner());
+    let records = Records::load(&ctx.home)?;
+    let mut slots: Vec<Slot> = records.slots.into_iter().filter(|s| s.lane == l.name && !gone(s)).collect();
+    if slots.is_empty() {
+        return Ok(CleanupCheck::Clean);
+    }
+    slots.sort_by_key(|s| s.n);
+    let lane = Lane::new(&ctx.repo, l);
+    for s in &slots {
+        verify(&lane, s)?;
+    }
+    for s in &slots {
+        if let Some(why) = busy_reason(s, cwds)? {
+            return Ok(CleanupCheck::Busy(why));
+        }
+    }
+    for s in &slots {
+        if let Some(why) = dirty_reason(s)? {
+            return Ok(CleanupCheck::OwnerWork(why));
+        }
+    }
+    for s in &slots {
+        let files = ignored_work(s)?;
+        if !files.is_empty() {
+            return Ok(CleanupCheck::OwnerWork(ignored_work_reason(s, &files)));
+        }
+    }
+    Ok(CleanupCheck::Clean)
 }
 
 /// A `lane offers` row's slot fields: the lane's slots dir and its slots' records, read from
@@ -731,6 +807,20 @@ mod tests {
         }
 
         fn slot(&mut self, n: u8) -> Slot { make(&self.lane, &mut self.records, n, "J1", &[]).unwrap() }
+
+        fn context(&self) -> (Ctx, LaneRec) {
+            use std::sync::Arc;
+            let home = self.dir.join("home");
+            let rec = LaneRec {
+                name: self.lane.name.clone(), path: self.lane.tree.to_string_lossy().into_owned(),
+                branch: self.lane.branch.clone(), cbranch: self.lane.cbranch.clone(), state: "live".into(),
+                ..Default::default()
+            };
+            let store = crate::state::Store::open_quiet(&home, "").unwrap();
+            store.update(|d| d.lanes.push(rec.clone())).unwrap();
+            let leases = Arc::new(crate::lease::master::LeaseMaster::new("", home.clone(), Arc::new(|_, _, _| Err("no nodes".into())), Arc::new(|_| {}), Arc::new(|| 1), None, true));
+            (Ctx { store, leases, machine: String::new(), repo: self.lane.repo.clone(), home, monitor: crate::monitor::Monitor::start(&[]) }, rec)
+        }
     }
 
     impl Drop for Pair {
@@ -757,9 +847,46 @@ mod tests {
         assert_eq!(loaded.slots[0].base, reused.base, "the base pair survives loading slots.json");
         std::fs::write(s.path.join(COMMERCIAL).join("draft"), "unfinished\n").unwrap();
         let err = make(&p.lane, &mut p.records, 1, "J3", &[]).unwrap_err();
-        assert!(err.contains("apps/commercial/draft") && err.contains("J2") && err.contains("lane slot take") && err.contains("lane slot drop"), "dirty refusal names its file, job and remedies: {err}");
+        assert!(err.contains("holds changes from job J2:") && err.contains("apps/commercial/draft") && !err.contains("(none recorded)"), "dirty refusal names its job and file: {err}");
+        assert!(err.contains("devhub lane slot take lane 1") && err.contains("devhub lane slot drop lane 1"), "dirty refusal gives both commands: {err}");
         for n in ["0", "5", "-1", "01", "x"] { assert!(request(&["slot", "lane", n]).is_err(), "{n} is not a slot number"); }
         assert!(request(&["slot", "lane", "4", "--job", "J4"]).is_ok(), "slot four is allowed");
+    }
+
+    #[test]
+    fn dirty_refusal_omits_job_clause_when_unlabeled_and_check_for_cleanup_classifies_blockers() {
+        let mut p = Pair::new("cleanup");
+        let mut first = make(&p.lane, &mut p.records, 1, "", &[]).unwrap();
+        let second = p.slot(2);
+        let (ctx, rec) = p.context();
+        let check = |cwds: &[(u32, PathBuf)]| check_for_cleanup(&ctx, &rec, cwds);
+        let refusal = "slot 1 of lane holds changes: \"one\"; take them (`devhub lane slot take lane 1`) or drop them (`devhub lane slot drop lane 1`)";
+        std::fs::write(first.path.join("one"), "work\n").unwrap();
+        for job in ["", "   "] {
+            first.job = job.into();
+            assert_eq!(clean(&first).unwrap_err(), refusal, "an unlabeled slot names its work and remedies");
+        }
+        first.job = "J9".into();
+        assert!(clean(&first).unwrap_err().contains("holds changes from job J9:"), "a labeled slot names its job");
+        assert_eq!(check(&[]), Ok(CleanupCheck::OwnerWork(refusal.into())), "uncollected work needs an owner");
+        assert_eq!(check(&[(999, second.path.canonicalize().unwrap())]), Ok(CleanupCheck::Busy(
+            "slot 2 of lane: pid 999 runs in it; wait for it to end".into()
+        )), "a process in the second slot takes precedence over work in the first");
+
+        std::fs::write(first.path.join("one"), "base\n").unwrap();
+        std::fs::remove_dir_all(&second.path).unwrap();
+        assert_eq!(check(&[]), Ok(CleanupCheck::Clean), "a clean slot and a missing slot allow cleanup");
+        for file in ["local/notes/wip.txt", "local/devhub-spool/x"] {
+            let path = first.path.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "work\n").unwrap();
+        }
+        assert_eq!(check(&[]), Ok(CleanupCheck::OwnerWork(
+            "slot 1 of lane holds ignored local work: \"local/notes/wip.txt\"; move or delete them first".into()
+        )), "only the owner's ignored work blocks cleanup");
+        p.records.slots[0].path = p.lane.tree.clone();
+        p.records.save().unwrap();
+        assert!(check(&[]).unwrap_err().contains("slot 1 of lane: makepad half: record names"), "a misplaced record is a structural error");
     }
 
     #[test]
@@ -961,23 +1088,19 @@ mod tests {
 
     #[test]
     fn lane_drop_saves_slots_before_its_first_commit() {
-        use std::sync::Arc;
         let mut p = Pair::new("drop-order");
         let s = p.slot(1);
         std::fs::write(s.path.join("one"), "slot work\n").unwrap();
         std::fs::write(p.lane.tree.join("one"), "lane work\n").unwrap();
         let before = p.lane.heads().unwrap();
-        let home = p.dir.join("home");
-        let store = crate::state::Store::open_quiet(&home, "").unwrap();
-        store.update(|d| d.lanes.push(LaneRec { name: p.lane.name.clone(), path: p.lane.tree.to_string_lossy().into_owned(), branch: p.lane.branch.clone(), cbranch: p.lane.cbranch.clone(), state: "live".into(), ..Default::default() })).unwrap();
-        let leases = Arc::new(crate::lease::master::LeaseMaster::new("", home.clone(), Arc::new(|_, _, _| Err("no nodes".into())), Arc::new(|_| {}), Arc::new(|| 1), None, true));
-        let ctx = Ctx { store, leases, machine: String::new(), repo: p.lane.repo.clone(), home: home.clone(), monitor: crate::monitor::Monitor::start(&[]) };
+        let (ctx, _) = p.context();
+        let home = &ctx.home;
         // Stop the first lane write, after slot removal but before any commit or bundle (11-15).
         let index = git(&p.lane.tree, None, &["rev-parse", "--path-format=absolute", "--git-path", "index.lock"]).unwrap();
         std::fs::write(index.trim(), "held\n").unwrap();
         let err = super::super::lane::serve(&ctx, "lane drop lane").unwrap_err();
         assert!(err.contains("index.lock"), "lane drop reaches its first commit preparation: {err}");
-        assert!(!s.path.exists() && Records::load(&home).unwrap().slots.is_empty(), "lane drop removed the slot before its first lane write");
+        assert!(!s.path.exists() && Records::load(home).unwrap().slots.is_empty(), "lane drop removed the slot before its first lane write");
         let saved: Vec<PathBuf> = std::fs::read_dir(p.lane.saved()).unwrap().map(|e| e.unwrap().path()).filter(|p| p.extension().is_some_and(|x| x == "diff")).collect();
         assert_eq!(saved.len(), 1, "lane drop saved the slot diff before its first lane write");
         assert!(std::fs::read_to_string(&saved[0]).unwrap().contains("+slot work"), "the saved diff holds the unbundled slot work");

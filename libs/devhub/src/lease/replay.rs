@@ -144,6 +144,46 @@ struct Ask {
     cores: Option<f64>,
     ram: Option<f64>,
     costs: Vec<Value>,
+    /// A live session's launch and calls as its box recorded them, in its lease's time.
+    calls: Vec<Call>,
+    /// The one of them running in the replay (its launch from its grant): its box measures it at
+    /// that one's mean, and the session at rest between them.
+    in_call: Option<usize>,
+    /// When its command began after its grant, as its box recorded it (its setup, sync and JIT
+    /// steps): its box says it runs then, and a JIT build it was charged for until then is done.
+    run_after: Option<u64>,
+}
+
+/// A live session's launch or call as its box recorded it (costs' `how: call`): when it began
+/// after its lease's grant, how long it ran, its mean cores.
+struct Call {
+    offset: u64,
+    ms: u64,
+    mean: f64,
+    launch: bool,
+}
+
+/// A call as the replay started it: in the window or not, its full charge or the cores free, the
+/// cores it started with, its recorded mean and time.
+struct CallRun {
+    counted: bool,
+    short: bool,
+    cores: f64,
+    mean: f64,
+    ms: u64,
+}
+
+/// A box's charges in the window's samples: all its work's, and that of its work that does not
+/// yield to a live call (every one's on a box that does not weigh CPU).
+#[derive(Default)]
+struct Charges {
+    samples: usize,
+    over: usize,
+    most: f64,
+    firm_over: usize,
+    firm_most: f64,
+    /// The work that held its most past its cores, and when: what each was charged, as what.
+    firm_at: String,
 }
 
 impl Ask {
@@ -164,6 +204,9 @@ enum Event {
     Release(usize),
     Clean(String, String, u64),
     Learn(Value),
+    CallBegin(usize, usize),
+    CallEnd(usize, usize),
+    Run(usize),
 }
 
 struct Simulation {
@@ -180,6 +223,12 @@ struct Simulation {
     queued: BTreeMap<String, usize>,
     deadline: bool,
     cancelled_grants: usize,
+    calls: Vec<CallRun>,
+    /// calls whose begin found their session in its launch or another call, and calls that
+    /// started past a RAM wait ([`Sched::live_room`]: the master holds them, the replay does not)
+    overlapped: usize,
+    ram_waits: usize,
+    charges: BTreeMap<String, Charges>,
 }
 
 fn live(l: &Lease) -> bool { matches!(l.state, State::Starting | State::Granted) }
@@ -191,6 +240,7 @@ fn simulate(dir: &Path, from: u64, to: u64) -> Result<Simulation, String> {
     let mut result = Simulation {
         asks: Vec::new(), skipped: BTreeMap::new(), lead_skipped: BTreeMap::new(), ends: BTreeMap::new(),
         overtakes: BTreeMap::new(), head: None, idle: 0.0, real_idle: 0.0, stuck: Vec::new(), queued: BTreeMap::new(), deadline: false, cancelled_grants: 0,
+        calls: Vec::new(), overlapped: 0, ram_waits: 0, charges: BTreeMap::new(),
     };
     let mut sched = Sched::new("replay", 1);
     let mut boxes = BTreeMap::new();
@@ -209,6 +259,9 @@ fn simulate(dir: &Path, from: u64, to: u64) -> Result<Simulation, String> {
             caps.trouble.clear();
             (caps.mem_pressure, caps.mem_stall) = (0, 0.0);
             (caps.gpu_busy, caps.mac_gpu) = (Vec::new(), None);
+            caps.outside_cores = 0.0;
+            // (each box runs this build's hub: what the replay's scheduler asks of it, it does)
+            caps.features = super::FEATURES.iter().map(|f| f.to_string()).collect();
             sched.add_node(name, "", Some(true));
             boxes.insert(name.to_string(), caps);
         }
@@ -229,9 +282,12 @@ fn simulate(dir: &Path, from: u64, to: u64) -> Result<Simulation, String> {
         let request = ms(v, "queued_ms").and_then(|q| real.unwrap_or(ended).checked_sub(q)).map_or(asked, |r| r.max(asked));
         let alloc_cores = v.get("alloc").and_then(|a| a.get("cores")).and_then(super::num).unwrap_or(0.0);
         let node = v.get("node").and_then(Value::as_str).map(str::to_string);
+        let steps: Vec<u64> = ["setup_ms", "sync_ms", "jit_ms"].iter().filter_map(|k| ms(v, k)).collect();
+        let run_after = (!steps.is_empty()).then(|| steps.iter().sum());
         result.asks.push(Ask {
             id, req, asked, request, node, alloc_cores, real, ended, teardown: ms(v, "teardown_ms").unwrap_or(0), counted,
             replay: None, grant: None, ended_replay: None, cancelled: false, cores: None, ram: None, costs: Vec::new(),
+            calls: Vec::new(), in_call: None, run_after,
         });
         Ok(())
     })?;
@@ -261,6 +317,16 @@ fn simulate(dir: &Path, from: u64, to: u64) -> Result<Simulation, String> {
         Ok(())
     })?;
     warm.apply(&mut sched);
+    // a live session's launch and calls, where its lease's grant places them
+    for ask in &mut result.asks {
+        let Some(granted) = ask.real else { continue };
+        ask.calls = ask.costs.iter().filter(|v| string(v, "how") == "call").filter_map(|v| {
+            let (ended, call_ms) = (ms(v, "ended_ms")?, ms(v, "call_ms")?);
+            let mean = v.get("mean_cores").and_then(super::num).filter(|n| n.is_finite() && *n >= 0.0)?;
+            Some(Call { offset: ended.saturating_sub(call_ms).saturating_sub(granted), ms: call_ms, mean, launch: v.get("launch").and_then(Value::as_bool) == Some(true) })
+        }).collect();
+        ask.calls.sort_by_key(|c| (!c.launch, c.offset));
+    }
     for (i, ask) in result.asks.iter().enumerate() {
         events.entry(ask.request).or_default().push(Event::Ask(i));
         if ask.real.is_none() { events.entry(ask.ended.max(ask.request)).or_default().push(Event::Cancel(i)); }
@@ -307,12 +373,54 @@ fn simulate(dir: &Path, from: u64, to: u64) -> Result<Simulation, String> {
                                 events.entry(now + a.teardown).or_default().push(Event::Clean(node, id.clone(), a.teardown));
                             }
                             a.ended_replay = Some(now);
+                            a.in_call = None;
                             let mut costs = CostRecords::default();
                             for v in &a.costs { costs.push(v); }
                             costs.apply(&mut sched);
                         }
                     }
                     Event::Clean(node, id, teardown) => sched.cleaned(&node, &id, teardown),
+                    // as the master's `live_admit`: an interactive call starts at once, with the
+                    // cores free beside the work that counts against it when its charge does not fit
+                    Event::CallBegin(i, k) => {
+                        let a = &mut result.asks[i];
+                        let id = a.replay.clone().expect("granted");
+                        if a.ended_replay.is_some() {
+                        } else if a.in_call.is_some() || !sched.live_idle.contains(&id) {
+                            result.overlapped += 1;
+                        } else {
+                            result.ram_waits += usize::from(sched.live_room(&id).is_err());
+                            let short = sched.call_start_cores(&id);
+                            if let Some((free, _, _)) = short { sched.live_call_charged(&id, free); }
+                            sched.live_idle.remove(&id);
+                            sched.live_waiting.remove(&id);
+                            sched.live_call_began(&id, now);
+                            a.in_call = Some(k);
+                            let cores = sched.get(&id).map_or(0.0, |l| sched.charged(l).cores);
+                            let call = &a.calls[k];
+                            result.calls.push(CallRun { counted: (from..to).contains(&now), short: short.is_some(), cores, mean: call.mean, ms: call.ms });
+                        }
+                    }
+                    // as the master's `live_idle`: the session rests until its next call
+                    Event::CallEnd(i, k) => {
+                        let a = &mut result.asks[i];
+                        if a.in_call == Some(k) && a.ended_replay.is_none() {
+                            let id = a.replay.clone().expect("granted");
+                            sched.live_called.insert(id.clone());
+                            sched.live_call_ended(&id, now);
+                            sched.live_idle.insert(id);
+                            a.in_call = None;
+                        }
+                    }
+                    // its box's phases: its JIT step done, its command runs (charged a JIT build
+                    // until then, a lease never told it ran was charged one all its life)
+                    Event::Run(i) => {
+                        let a = &result.asks[i];
+                        if let (Some(id), Some(granted), None) = (a.replay.clone(), a.grant, a.ended_replay) {
+                            let phases = format!(r#"{{"phases":[{{"phase":"jit","start_ms":{granted},"end_ms":{now}}},{{"phase":"run","start_ms":{now},"end_ms":{now}}}]}}"#);
+                            sched.set_info(&id, &phases, now);
+                        }
+                    }
                     Event::Learn(v) => {
                         let mut costs = CostRecords::default();
                         costs.push(&v);
@@ -328,15 +436,50 @@ fn simulate(dir: &Path, from: u64, to: u64) -> Result<Simulation, String> {
                 let mut ram = 0.0;
                 caps.busy_leases.clear();
                 caps.busy_outside.clear();
+                caps.outside_cores = 0.0;
                 for l in view.iter().filter(|l| live(l) && l.node.as_ref() == Some(name)) {
                     let a = &result.asks[replay_ids[&l.id]];
-                    caps.busy_leases.push((l.id.clone(), a.cores.unwrap_or(l.cost.cores)));
+                    let cores = match a.in_call {
+                        Some(k) => a.calls[k].mean,
+                        None if a.calls.is_empty() => a.cores.unwrap_or(l.cost.cores),
+                        None => 0.0,
+                    };
+                    caps.busy_leases.push((l.id.clone(), cores));
                     ram += a.ram.unwrap_or(l.cost.ram_gb);
                 }
                 let cores: f64 = caps.busy_leases.iter().map(|(_, c)| c).sum();
                 caps.cpu_pct = Some(if caps.cores == 0 { 0.0 } else { (100.0 * cores / caps.cores as f64).min(100.0) });
                 caps.ram_avail_gb = (caps.ram_gb - ram).max(0.0);
                 sched.set_caps(name, caps, now);
+            }
+            // each box's charges, as the scheduler has them now
+            if (from..to).contains(&now) {
+                let view = sched.view();
+                for (name, caps) in &boxes {
+                    let weighs = caps.os == "linux";
+                    let (mut all, mut firm, mut held) = (0.0, 0.0, Vec::new());
+                    for l in view.iter().filter(|l| live(l) && l.node.as_ref() == Some(name)) {
+                        let cores = sched.charged(l).cores;
+                        all += cores;
+                        if !(weighs && sched.yields_to_live(l)) {
+                            firm += cores;
+                            let what = if !sched.is_live_job(l) { format!("{} {}", l.priority.as_str(), l.req.kind.as_str()) }
+                                else if sched.live_idle.contains(&l.id) { "live at rest".into() }
+                                else {
+                                    let launch = result.asks.iter().find(|a| a.replay.as_deref() == Some(l.id.as_str())).and_then(|a| a.calls.get(a.in_call?)).map(|c| c.launch);
+                                    match launch { Some(true) => "live launch", Some(false) => "live call", None => "live, its calls unrecorded" }.into()
+                                };
+                            held.push(format!("{} {what} {cores:.1} (granted {:.1})", l.id, l.cost.cores));
+                        }
+                    }
+                    let c = result.charges.entry(name.clone()).or_default();
+                    let room = caps.cores as f64;
+                    c.samples += 1;
+                    c.over += usize::from(all > room);
+                    c.firm_over += usize::from(firm > room);
+                    if firm > c.firm_most && firm > room { c.firm_at = format!("at {}: {}", duration(now - from), held.join(", ")); }
+                    (c.most, c.firm_most) = (c.most.max(all), c.firm_most.max(firm));
+                }
             }
         }
         // Queued asks need heartbeats too: the live master beats their holders.
@@ -374,6 +517,17 @@ fn simulate(dir: &Path, from: u64, to: u64) -> Result<Simulation, String> {
                         None => { result.cancelled_grants += usize::from(a.counted); a.ended.saturating_sub(now).max(1000) }
                     };
                     events.entry(now + occupancy).or_default().push(Event::Release(i));
+                    if let Some(after) = a.run_after { events.entry(now + after.min(occupancy)).or_default().push(Event::Run(i)); }
+                    for (k, call) in a.calls.iter().enumerate() {
+                        let (begin, end) = (now + call.offset, (now + call.offset + call.ms).min(now + occupancy));
+                        if begin >= now + occupancy { continue; }
+                        if call.launch {
+                            if a.in_call.is_none() { a.in_call = Some(k); events.entry(end).or_default().push(Event::CallEnd(i, k)); }
+                        } else {
+                            events.entry(begin).or_default().push(Event::CallBegin(i, k));
+                            events.entry(end).or_default().push(Event::CallEnd(i, k));
+                        }
+                    }
                 }
                 Action::ParkLive { leases, .. } => {
                     // The master asks live sessions to release; here there is no call to drain.
@@ -459,6 +613,24 @@ fn quantiles(mut waits: Vec<u64>) -> String {
 }
 
 impl Simulation {
+    /// The live calls the window replayed, and each box's charges past its cores: what a call
+    /// would take at the pace of the cores it started with (its recorded time where those are its
+    /// mean or more), beside the time its box recorded.
+    fn calls_said(&self) -> String {
+        let calls: Vec<&CallRun> = self.calls.iter().filter(|c| c.counted).collect();
+        let short = calls.iter().filter(|c| c.short).count();
+        let slow: Vec<&&CallRun> = calls.iter().filter(|c| c.cores > 0.0 && c.cores < c.mean).collect();
+        let paced = calls.iter().map(|c| if c.cores > 0.0 && c.cores < c.mean { (c.ms as f64 * c.mean / c.cores) as u64 } else { c.ms }).collect();
+        let mut text = format!("live calls in the window: {} ({short} started on the cores free, short of their full charge; {} past a RAM wait; {} begun during their launch or another call)\n", calls.len(), self.ram_waits, self.overlapped);
+        text.push_str(&format!("calls started on fewer cores than their measured mean: {}; at the pace of the cores they started with: {}; recorded: {}\n", slow.len(), quantiles(paced), quantiles(calls.iter().map(|c| c.ms).collect())));
+        text.push_str("samples past a box's cores in the window (10 s each): all its charges / those of work that does not yield to a live call\n");
+        for (name, c) in self.charges.iter().filter(|(_, c)| c.most > 0.0) {
+            text.push_str(&format!("  {name}: {} of {} (most {:.1}) / {} (most {:.1})\n", c.over, c.samples, c.most, c.firm_over, c.firm_most));
+            if !c.firm_at.is_empty() { text.push_str(&format!("    its most {}\n", c.firm_at)); }
+        }
+        text
+    }
+
     fn note_head(&mut self, id: &str, wait: u64) {
         if self.head.as_ref().is_none_or(|(old, best)| wait > *best || wait == *best && id < old.as_str()) {
             self.head = Some((id.into(), wait));
@@ -489,6 +661,7 @@ impl Simulation {
         text.push_str(&format!("timed head (replay: longest first in a box's timed queue): {}\n", self.head.as_ref().map_or("none".into(), |(id, w)| format!("{id} {}", duration(*w)))));
         text.push_str(&format!("overtakes: {} ({})\n", self.overtakes.values().sum::<usize>(), counts(&self.overtakes)));
         text.push_str(&format!("idle core-minutes while an ask waited, in the window, at granted cores: replay {:.0}, real {:.0}\n", self.idle, self.real_idle));
+        text.push_str(&self.calls_said());
         if !self.lead_skipped.is_empty() { text.push_str(&format!("lead-in skipped: {}\n", counts(&self.lead_skipped))); }
         if self.cancelled_grants > 0 { text.push_str(&format!("{} never-granted real asks granted in replay: held until recorded cancellation, at least 1s; excluded from wait categories\n", self.cancelled_grants)); }
         if self.deadline {
@@ -525,7 +698,7 @@ mod tests {
         let from = timestamp("2026-01-02T12:00:00Z").unwrap();
         let to = from + 60_000;
         let mut nodes = String::new();
-        for (name, cores) in [("box-a", 16), ("box-b", 8)] {
+        for (name, cores) in [("box-a", 16), ("box-b", 8), ("box-c", 4)] {
             let mut caps = Caps {
                 node: name.into(), cores, os: "linux".into(), arch: "x86_64".into(), ram_gb: 64.0,
                 ram_avail_gb: 64.0, disk_free_gb: 500.0, disk_total_gb: 1000.0, timed: true,
@@ -533,7 +706,12 @@ mod tests {
                 features: super::super::FEATURES.iter().map(|f| f.to_string()).collect(), ..Default::default()
             };
             // (box-b was out of rotation when its state was taken: the replay holds none of that)
-            if name == "box-b" { caps.sick = "git fails on its stores".into(); }
+            if name == "box-b" {
+                caps.sick = "git fails on its stores".into();
+                caps.outside_cores = 7.0;
+            }
+            // (box-c holds no JIT: its live session builds its own first)
+            if name == "box-c" { caps.jit_store = Some(std::sync::Arc::new(super::super::jitstore::Snapshot { compiler: "rustc-x".into(), ..Default::default() })); }
             nodes.push_str(&format!("{{\"node\":\"{name}\",\"caps\":{}}}\n", caps.to_json()));
         }
         std::fs::write(dir.join("nodes.jsonl"), nodes).unwrap();
@@ -542,6 +720,7 @@ mod tests {
             let mut req = Req::new(&format!("lane-{i}"), if i == 2 { Kind::Timed } else { Kind::Test });
             req.node = Some(if i < 3 { "box-a" } else { "box-b" }.into());
             req.whole = i < 3;
+            if i >= 3 { req.rev = Some(format!("work@{}", "a".repeat(40))); }
             req.cores = Some(1.0);
             req.ram_gb = Some(1.0);
             let asked = from + if i == 2 { 1000 } else { 0 };
@@ -551,11 +730,28 @@ mod tests {
             let queued = if i == 8 { ",\"queued_ms\":10000" } else { "" };
             leases.push_str(&format!("{{\"id\":\"L{i}\",\"asked_ms\":{asked},\"granted_ms\":{granted},\"ended_ms\":{ended}{queued},\"node\":\"{}\",\"alloc\":{{\"cores\":1}},\"req\":{}}}\n", if i < 3 { "box-a" } else { "box-b" }, req.to_json()));
         }
+        // box-c: a background tests run, and a live test session whose call comes 30 s in, its
+        // launch 5 s (each of 3 of the box's 4 cores)
+        for (id, live) in [("L9", false), ("L10", true)] {
+            let mut req = Req::new(if live { "live-session" } else { "shard" }, Kind::Test);
+            (req.node, req.cores, req.ram_gb) = (Some("box-c".into()), Some(3.0), Some(1.0));
+            // (a live session runs on an overlay: it holds no work tree)
+            if live { (req.live, req.priority, req.class, req.src, req.own_jit) = (true, Priority::Interactive, "live:test:pkg:lib".into(), super::super::Src::Overlay, vec!["jit-a".into()]); req.rev = Some(format!("work@{}", "a".repeat(40))); }
+            // (its JIT built in its first 2 s, as its box recorded its steps)
+            let steps = if live { ",\"setup_ms\":500,\"sync_ms\":500,\"jit_ms\":1000" } else { "" };
+            leases.push_str(&format!("{{\"id\":\"{id}\",\"asked_ms\":{from},\"granted_ms\":{from},\"ended_ms\":{}{steps},\"node\":\"box-c\",\"alloc\":{{\"cores\":3}},\"req\":{}}}\n", from + 60_000, req.to_json()));
+        }
         std::fs::write(dir.join("leases.jsonl"), leases).unwrap();
-        std::fs::write(dir.join("costs.jsonl"), format!("{{\"lease\":\"L0\",\"ended_ms\":{},\"class\":\"test\",\"kind\":\"test\",\"node\":\"box-a\",\"how\":\"released\",\"wall_ms\":60000,\"cpu_seconds\":60,\"peak_ram_gb\":1}}\n", from + 60_000)).unwrap();
+        let call = |ended: u64, ms: u64, launch: bool| format!("{{\"lease\":\"L10\",\"ended_ms\":{ended},\"class\":\"live:test:pkg:lib\",\"kind\":\"test\",\"node\":\"box-c\",\"how\":\"call\",\"launch\":{launch},\"call_ms\":{ms},\"mean_cores\":3,\"peak_cores\":3}}\n");
+        // (a Linux JIT build measured at 10 cores before the replay: box-c's is charged its 4)
+        let built = format!("{{\"lease\":\"L-1\",\"ended_ms\":{},\"class\":\"test\",\"kind\":\"test\",\"node\":\"box-a\",\"os\":\"linux\",\"how\":\"released\",\"wall_ms\":60000,\"jit_ms\":50000,\"cpu_seconds\":600}}\n", from - 3 * 3_600_000);
+        std::fs::write(dir.join("costs.jsonl"), format!("{built}{{\"lease\":\"L0\",\"ended_ms\":{},\"class\":\"test\",\"kind\":\"test\",\"node\":\"box-a\",\"how\":\"released\",\"wall_ms\":60000,\"cpu_seconds\":60,\"peak_ram_gb\":1}}\n{}{}", from + 60_000, call(from + 5000, 5000, true), call(from + 40_000, 10_000, false))).unwrap();
         let first = simulate(&dir, from, to).unwrap();
         assert_eq!(first.asks.iter().find(|a| a.id == "L1").unwrap().wait(), Some(60_000), "whole box waits for the first occupancy");
         assert_eq!(first.asks.iter().find(|a| a.id == "L0").unwrap().cores, Some(1.0), "cost sample supplies measured use");
+        for id in ["L3", "L4", "L5"] {
+            assert_eq!(first.asks.iter().find(|a| a.id == id).unwrap().wait(), Some(0), "{id} starts immediately despite the outside load at snapshot time");
+        }
         let leg = first.asks.iter().find(|a| a.id == "L8").unwrap();
         // (its box runs its five other lanes' trees in turns: when it starts there is the box's)
         assert_eq!((leg.request, leg.real_wait()), (from + 40_000, Some(10_000)), "a leg enters at its grant less its queued time, its real wait counted from there");
@@ -565,6 +761,15 @@ mod tests {
         let report = first.report("2026-01-02T12:00:00Z", "2026-01-02T12:01:00Z");
         assert!(report.lines().find(|l| l.starts_with("timed ")).unwrap().split_whitespace().nth(1) == Some("0"), "cancelled ask has no category count");
         assert!(report.contains("idle core-minutes while an ask waited, in the window, at granted cores: replay "), "{report}");
+        // the session's call is replayed where its lease had it, on its full charge (the shard
+        // beside it yields to it), and box-c's charges go past its cores while the call runs, but
+        // never those of the work that does not yield to it: its JIT build's 4 cores end where its
+        // box recorded its run's start (a lease never told it ran was charged a build all its life)
+        assert!(report.contains("live calls in the window: 1 (0 started on the cores free"), "{report}");
+        let c = report.lines().find_map(|l| l.strip_prefix("  box-c: ")).unwrap_or_else(|| panic!("box-c's charges: {report}"));
+        let (all, firm) = c.split_once(" / ").unwrap();
+        assert!(all.split_whitespace().next().is_some_and(|n| n != "0") && all.ends_with("(most 6.0)"), "all its charges past its cores while the call runs: {c}\n{report}");
+        assert_eq!(firm, "0 (most 3.0)", "the call's own charge within them: {c}");
         assert_eq!(report, simulate(&dir, from, to).unwrap().report("2026-01-02T12:00:00Z", "2026-01-02T12:01:00Z"), "repeat replay is byte-identical");
         std::fs::remove_dir_all(dir).unwrap();
     }

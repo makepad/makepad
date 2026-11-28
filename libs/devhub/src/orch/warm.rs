@@ -214,6 +214,7 @@ struct Progress {
 /// One test listing of a prebuild: its unit (`suite <pkg>`), whether it listed, its output.
 #[derive(Clone)]
 struct Listed {
+    kept: Option<String>,
     unit: String,
     ok: bool,
     text: String,
@@ -1108,12 +1109,13 @@ fn run_leg(ctx: &Ctx, run: &Run) {
                         listed.insert(label.clone());
                         let unit = format!("suite {}", package.pkg);
                         let head = format!("{label} on {}: exit {code}", r.node);
+                        let mut kept = None;
                         let text = if code == 0 { format!("{head}\n") } else {
                             let output = String::from_utf8_lossy(&tee.1).into_owned();
-                            let kept = keep_listing(&ctx.logs(super::job::LEASE_LOGS), &held.id, &unit, &head, &output);
-                            failed_listing(&unit, &head, &output, code, kept.as_ref().ok().map(|_| held.id.as_str()))
+                            if keep_listing(&ctx.logs(super::job::LEASE_LOGS), &held.id, &unit, &head, &output).is_ok() { kept = Some(held.id.clone()); }
+                            failed_listing(&unit, &head, &output, code, kept.as_deref())
                         };
-                        set(&r, |p| p.listed.push(Listed { unit, ok: code == 0, text }));
+                        set(&r, |p| p.listed.push(Listed { unit, ok: code == 0, text, kept }));
                     }
                     let failure = match result {
                         Ok(0) => None,
@@ -1461,12 +1463,14 @@ fn judge(ctx: &Ctx, plan: &Plan, superseded: bool) {
     }
     let logs = ctx.home.join("bucket-logs");
     let log = logs.join(format!("prebuild-{}.log", plan.started_ms));
-    let written = std::fs::create_dir_all(&logs).and_then(|_| std::fs::write(&log, &text));
+    let units = listed.iter().filter_map(|l| Some((l.unit.clone(), format!("devhub job result {}", l.kept.as_ref()?)))).collect();
+    let written = std::fs::create_dir_all(&logs).and_then(|_| crate::bucket::write_unit_kept_index(&log, units))
+        .and_then(|_| std::fs::write(&log, &text));
     if let Err(e) = written {
         ctx.store.event("warm", Sev::Warn, format!("prebuild {}: its listings' log: {e}", plan.pair.short()), None);
         return;
     }
-    let outcome = crate::bucket::Outcome { ok: failing.is_empty(), failing, log: log.display().to_string(), summary, no_verdict: None };
+    let outcome = crate::bucket::Outcome { tip: None, ok: failing.is_empty(), failing, log: log.display().to_string(), summary, no_verdict: None };
     if let Err(e) = crate::bucket::prebuild(&ctx.home, &ctx.repo, &ctx.store, plan.started_ms, plan.base.clone(), &plan.pair, outcome) {
         ctx.store.event("warm", Sev::Warn, format!("prebuild {}: no verdict: {e}", plan.pair.short()), None);
     }
@@ -1671,11 +1675,11 @@ impl Key {
 
 impl Listed {
     fn value(&self) -> Value {
-        obj(vec![("unit", s(&self.unit)), ("ok", Value::Bool(self.ok)), ("text", s(&self.text))])
+        obj(vec![("unit", s(&self.unit)), ("ok", Value::Bool(self.ok)), ("text", s(&self.text)), ("kept", self.kept.as_ref().map_or(Value::Null, s))])
     }
 
     fn parse(v: &Value) -> Option<Self> {
-        Some(Self { unit: v.get("unit")?.as_str()?.to_string(), ok: v.get("ok")?.as_bool()?, text: v.get("text")?.as_str()?.to_string() })
+        Some(Self { kept: v.get("kept").and_then(Value::as_str).map(str::to_owned), unit: v.get("unit")?.as_str()?.to_string(), ok: v.get("ok")?.as_bool()?, text: v.get("text")?.as_str()?.to_string() })
     }
 }
 
@@ -1896,7 +1900,7 @@ mod tests {
         };
         let progress = Progress {
             state: "waiting".into(), note: "waiting for a box".into(), id: "jit".into(), lease: Some("L9".into()),
-            started_ms: 10, ended_ms: 0, listed: vec![Listed { unit: "suite package".into(), ok: true, text: "t: test\n".into() }],
+            started_ms: 10, ended_ms: 0, listed: vec![Listed { kept: None, unit: "suite package".into(), ok: true, text: "t: test\n".into() }],
         };
         let plan = Plan {
             generation: 3, pair: Pair::new("work", "main"), base: Some(Pair::new("base-work", "base-main")),
@@ -2090,7 +2094,7 @@ mod tests {
     /// waited for, nor is a plan of another generation judged.
     #[test]
     fn a_plan_is_judged_once_its_listing_boxes_ended() {
-        let listed = |ok| vec![Listed { unit: "suite x".into(), ok, text: "x on a: exit 0\n".into() }];
+        let listed = |ok| vec![Listed { kept: None, unit: "suite x".into(), ok, text: "x on a: exit 0\n".into() }];
         let mut p = plan(vec![node("a", &["x"], 5, listed(true)), node("b", &["y"], 0, Vec::new()), node("idle", &[], 0, Vec::new())]);
         assert!(super::listings_done(Some(&mut p), 7).is_none(), "b still lists");
         p.nodes[1].progress.ended_ms = 6;
@@ -2114,8 +2118,8 @@ mod tests {
         let leases = Arc::new(crate::lease::master::LeaseMaster::new("mac", home.clone(), Arc::new(|_: &str, _: &str, _: &str| Err("no nodes".to_string())), Arc::new(|_| {}), Arc::new(|| 1), None, true));
         let store = crate::state::Store::open(&home, "mac", Arc::new(move |r: Record| { feed.lock().unwrap().push(r); 0 })).unwrap();
         let ctx = super::Ctx { store, leases, machine: "mac".into(), monitor: crate::monitor::Monitor::start(&[]), repo: home.clone(), home: home.clone() };
-        let broken = Listed { unit: "suite x".into(), ok: false, text: "x:lib on a: exit 1\n/n/tree/libs/x/src/lib.rs:3:9: E0425: cannot find value `z`\n".into() };
-        let fine = Listed { unit: "suite y".into(), ok: true, text: "y on b: exit 0\n".into() };
+        let broken = Listed { kept: None, unit: "suite x".into(), ok: false, text: "x:lib on a: exit 1\n/n/tree/libs/x/src/lib.rs:3:9: E0425: cannot find value `z`\n".into() };
+        let fine = Listed { kept: None, unit: "suite y".into(), ok: true, text: "y on b: exit 0\n".into() };
         // a listing that ended on its tests' count and exited 101 without a word (L1348447, 11-18):
         // labelled, its whole stream kept once under its lease, and its red points there
         let stream = "L7 a: selecting\nrelax test: 0 warnings\n     Running tests/proofs.rs\nsolves: test\n\n1 tests, 0 benchmarks\n";
@@ -2124,7 +2128,7 @@ mod tests {
         let kept = std::fs::read_to_string(logs.join("L7.log")).unwrap();
         assert_eq!(kept.matches("== suite z failed: z on a: exit 101; its whole stream\n").count(), 1, "kept once, a master's second ask hearing the same run: {kept}");
         assert!(kept.ends_with("1 tests, 0 benchmarks\n"), "{kept}");
-        let silent = Listed { unit: "suite z".into(), ok: false, text: super::failed_listing("suite z", "z on a: exit 101", stream, 101, Some("L7")) };
+        let silent = Listed { kept: Some("L7".into()), unit: "suite z".into(), ok: false, text: super::failed_listing("suite z", "z on a: exit 101", stream, 101, Some("L7")) };
         assert!(silent.text.contains("EXIT: exit after listing: exit 101 with no error in its output once it had listed 1 target whole (tests/proofs.rs)") && silent.text.ends_with("GATEKEPT suite z :: L7\n"), "{}", silent.text);
         let said = |out: &str| super::exit_said(out, 101);
         assert_eq!(said("/n/tree/libs/x/src/lib.rs:3:9: E0425: cannot find value `z`\n"), None, "its errors say why");
@@ -2147,6 +2151,7 @@ mod tests {
         assert_eq!(rows.len(), 1);
         let row = &rows[0];
         assert_eq!(row.get("bucket").and_then(|v| v.as_str()), Some("prebuild"));
+        assert!(std::path::Path::new(row.get("log").unwrap().as_str().unwrap()).with_extension("kept.json").is_file());
         assert_eq!(row.get("ok").and_then(|v| v.as_bool()), Some(false));
         assert_eq!(row.get("failing").and_then(|v| v.as_arr()).map(|f| f.iter().filter_map(|u| u.as_str()).collect::<Vec<_>>()), Some(vec!["suite x", "suite z"]));
         assert_eq!(row.get("errors").and_then(|e| e.get("suite x")).and_then(|v| v.as_arr()).map(|e| e.len()), Some(1), "{}", row.to_json());

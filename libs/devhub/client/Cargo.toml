@@ -1,0 +1,13 @@
+[package]
+name = "makepad-devhub-client"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "devhub's client side: its shared names and records, and one ask of a devhub service"
+
+[dependencies]
+makepad-network = { path = "../../../platform/network" }
+makepad-devhub-conf = { path = "../../devhub_conf" }
+makepad-remote = { workspace = true }
+makepad-strict-json = { workspace = true }

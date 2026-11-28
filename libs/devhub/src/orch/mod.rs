@@ -128,13 +128,13 @@ pub fn go() {
             std::thread::sleep(std::time::Duration::from_secs(5));
         }
     });
+    live::start(ctx.clone());
     lane::start(ctx.clone());
     job::start(ctx.clone());
     show::start(ctx.clone());
     // the commit this master runs, read at its start (the checkout moves on)
     let _ = crate::lease::caps::hub_rev();
     roll::start(ctx.clone());
-    live::start(ctx.clone());
     ci::start(&ctx);
     verify::start(ctx.clone());
     jitlegs::start(ctx.clone());

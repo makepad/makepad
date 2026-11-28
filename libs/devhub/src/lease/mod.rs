@@ -25,6 +25,7 @@ pub mod relaxgit;
 pub mod argv;
 pub mod caps;
 pub mod client;
+pub(crate) mod costs;
 pub mod jit;
 pub mod disk;
 pub mod exec;
@@ -46,6 +47,12 @@ pub mod hand;
 pub mod wt;
 
 use makepad_remote::json_str;
+use std::time::Duration;
+
+/// A cached JIT resolve answers in milliseconds; flat 1 s waits cost each CI shard about 2 s (11-28).
+pub(crate) fn pending_poll_delay(previous: Duration) -> Duration {
+    (previous * 2).clamp(Duration::from_millis(100), Duration::from_secs(1))
+}
 
 /// Leases that warm a box's dev JIT store, code cache or native lane target using idle CPU.
 pub const WARM_LANE_PREFIX: &str = "warm-";
@@ -223,6 +230,31 @@ impl Priority {
         let per_core = match self { Self::Background => 1.0, Self::Interactive => 100.0 };
         (cores * per_core).round().clamp(1.0, 10_000.0) as u32
     }
+
+    /// A shared lease's scope CPU weight (Linux) for its `cores`, by who waits on it:
+    /// - 100 a core: attended interactive work, a live session in a call, and a person's visible
+    ///   interactive screen session between calls too (someone drives its window);
+    /// - 10 a core: the land queue's work that asks interactive (the fast gates, the hot bucket),
+    ///   which nobody attends ([`nobody_attends`]): ten times background work, a tenth of a person's;
+    /// - 1 a core: background work, and a headless live session between calls;
+    /// - 0 (the idle CPU class) for a live session at rest.
+    ///
+    /// The user's Town demo on a screen box, a visible 3-core session, dropped to background weight
+    /// once its launch's call ended, 3 against a fast gate's 800 and a tests shard's 12, and read
+    /// as stuck while the land queue held its box (11-27).
+    pub fn lease_cpu_weight(kind: Kind, priority: Priority, live: bool, idle: bool, rest: bool, lane: &str, cores: f64) -> u32 {
+        if live && idle && rest { return 0; }
+        let per_core = if live {
+            if !idle || kind == Kind::Screen && priority == Priority::Interactive { 100.0 } else { 1.0 }
+        } else {
+            match priority {
+                Priority::Background => 1.0,
+                Priority::Interactive if sched::land_queue_lane(lane) => 10.0,
+                Priority::Interactive => 100.0,
+            }
+        };
+        (cores * per_core).round().clamp(1.0, 10_000.0) as u32
+    }
 }
 
 /// Whether nobody attends a lease's runs as they go: a timed run, or background work, never a
@@ -324,11 +356,25 @@ pub fn class_command(class: &str) -> &str {
     class.rsplit_once(" @").map_or(class, |(command, _)| command)
 }
 
+/// A run class whose command is a script interpreter: its class names the driver script, not
+/// whichever workload ran inside it (a lane's `bash run.sh @lane`, or a land-queue driver like
+/// `land_gate.sh` / `mac_tests.sh`). A memory end of such a class gives no RAM peak for later runs
+/// ([`master::CostRecords`]).
+pub fn script_class(class: &str) -> bool {
+    matches!(
+        class_command(class).split(' ').nth(1),
+        Some("bash" | "sh" | "zsh" | "cmd" | "powershell" | "pwsh" | "python" | "python3" | "node")
+    )
+}
+
 /// A run class that is a lane's own script: its name says nothing of its work (one `bash sweep.sh`
 /// ran 9 s, the next 14 min), so its walls judge no run ([`sched::Sched::say_stalled`]). devhub's
-/// own scripts (a gate, a CI leg) do one job: their classes have no lane.
+/// own scripts (a gate, a CI leg, a land-queue run or probe) do one job and keep their measure.
 pub fn lane_script(class: &str) -> bool {
-    class.rsplit_once(" @").is_some_and(|(command, _)| matches!(command.split(' ').nth(1), Some("bash" | "sh" | "zsh" | "cmd" | "powershell" | "pwsh" | "python" | "python3" | "node")))
+    script_class(class)
+        && class.rsplit_once(" @").is_some_and(|(_, lane)| {
+            !sched::land_queue_lane(lane.strip_suffix(JIT_BUILD_RUN).unwrap_or(lane))
+        })
 }
 
 /// A test run's filter (libtest's words after `--`, without its output and thread flags) as one
@@ -366,7 +412,7 @@ pub(crate) fn app_args_key(args: &[&str]) -> String {
 /// would be a second copy of every crate in target/.
 pub const JIT_TEST_PROFILE: [&str; 2] = ["--profile", "release-checks"];
 
-const JIT_VALUE_FLAGS: &[&str] = &["--profile", "--report-to", "--run-dir", "--cfg", "--boundary", "--workspace-dir", "--features", "-F", "--target", "--logfile", "--agent", "--domain", "--idle-min", "--print", "--crate-name", "--crate-type", "--check-cfg", "--cap-lints", "--harness", "--manifest-path"];
+const JIT_VALUE_FLAGS: &[&str] = &["--profile", "--report-to", "--run-dir", "--cfg", "--boundary", "--known-refused", "--workspace-dir", "--features", "-F", "--target", "--logfile", "--agent", "--domain", "--idle-min", "--print", "--crate-name", "--crate-type", "--check-cfg", "--cap-lints", "--harness", "--manifest-path"];
 
 /// What a JIT command runs, from its arguments (before any `--`): its subcommand, its package (the
 /// first word that is no flag and no flag's value, or `-p`'s), and the test, bin or example it
@@ -564,6 +610,8 @@ pub struct Caps {
     /// busier than its leases' charges names a lease past its charge and these as what took the rest
     pub busy_leases: Vec<(String, f64)>,
     pub busy_outside: Vec<(String, u32, f64)>,
+    /// Total measured CPU in cores across processes outside leases, zero on older hubs.
+    pub outside_cores: f64,
     /// the compilers at work in each lease's tree ([`crate::top::CpuSplit::builds`]): (lease,
     /// cores, the crate the busiest builds). A live session's app's builds keep the session from
     /// its idle end (`orch::live`).
@@ -633,8 +681,8 @@ pub struct Caps {
     /// person uses ([`crate::os::clamps_background`])
     pub background_qos: bool,
     /// whether its default audio output runs, as its hub's last probe found
-    /// ([`caps::probe_audio`]): what an `audio` need reads. None where no probe ran (a Mac a
-    /// person uses, a Linux or Windows box, an older hub)
+    /// ([`caps::probe_audio`]): what an `audio` need reads. None where no probe ran (a box a
+    /// person uses, a Windows box, one without the player, an older hub)
     pub audio_out: Option<bool>,
     /// the hub's pre-warm runs now (sync/prewarm.rs): a lease start stops it, and the RAM it holds
     /// among the residents passes
@@ -774,6 +822,9 @@ pub const FEATURES: &[&str] = &[
     "serial", // its USB serial devices, their claims and sessions (`crate::serial`)
     "start-unquiet", // a timed start past its wait for a quiet box starts beside the work outside every lease, `unquiet`
     "kept-native", // a kept lane's native tree is never taken for room nor swept, `kept` in a lease start names them
+    "call-cores", // a live call that starts short runs on its cores, `lease-weight <id> call <cores>` (Linux: its scopes' CPUQuota)
+    "launch-cores", // a live launch that starts short runs on its cores, `cost.call_cores` in its lease-start, and so do the scopes a confined call starts
+    "grant-cores", // a shared lease that is no live session can be held to its grant, `lease-weight <id> grant [<cores>]` (Linux: its scopes' CPUQuota)
 ];
 
 /// Whether `t` can be a `-C target-cpu` a lease builds for (it goes into the build's flags):
@@ -870,9 +921,10 @@ impl Caps {
             self.hub_rss_mb,
             self.hub_heap_mb,
             self.features.iter().map(|f| json_str(f)).collect::<Vec<_>>().join(","),
-            format!(",\"rust_targets\":[{}],\"native\":[{}],\"native_trees\":{}{},\"hub_building\":{},\"background_qos\":{},\"audio_out\":{},\"prewarming\":{},\"busy_leases\":[{}],\"busy_outside\":[{}],\"wait_leases\":[{}],\"lease_builds\":[{}],\"mem_some\":{:.1},\"capped_leases\":[{}]", self.rust_targets.iter().map(|t| json_str(t)).collect::<Vec<_>>().join(","), self.native.iter().map(|l| json_str(l)).collect::<Vec<_>>().join(","), self.native_trees, self.jit_store.as_ref().map_or(String::new(), |v| format!(",\"jit_store\":{}", v.to_json())), self.hub_building, self.background_qos, self.audio_out.map_or("null".to_string(), |b| b.to_string()), self.prewarming,
+            format!(",\"rust_targets\":[{}],\"native\":[{}],\"native_trees\":{}{},\"hub_building\":{},\"background_qos\":{},\"audio_out\":{},\"prewarming\":{},\"busy_leases\":[{}],\"busy_outside\":[{}],\"outside_cores\":{:.2},\"wait_leases\":[{}],\"lease_builds\":[{}],\"mem_some\":{:.1},\"capped_leases\":[{}]", self.rust_targets.iter().map(|t| json_str(t)).collect::<Vec<_>>().join(","), self.native.iter().map(|l| json_str(l)).collect::<Vec<_>>().join(","), self.native_trees, self.jit_store.as_ref().map_or(String::new(), |v| format!(",\"jit_store\":{}", v.to_json())), self.hub_building, self.background_qos, self.audio_out.map_or("null".to_string(), |b| b.to_string()), self.prewarming,
                 self.busy_leases.iter().map(|(lease, cores)| format!("{{\"lease\":{},\"cores\":{cores:.2}}}", json_str(lease))).collect::<Vec<_>>().join(","),
                 self.busy_outside.iter().map(|(what, pid, cores)| format!("{{\"what\":{},\"pid\":{pid},\"cores\":{cores:.2}}}", json_str(what))).collect::<Vec<_>>().join(","),
+                self.outside_cores,
                 self.wait_leases.iter().map(|(lease, tasks)| format!("{{\"lease\":{},\"tasks\":{tasks:.2}}}", json_str(lease))).collect::<Vec<_>>().join(","),
                 self.lease_builds.iter().map(|(lease, cores, what)| format!("{{\"lease\":{},\"cores\":{cores:.2},\"what\":{}}}", json_str(lease), json_str(what))).collect::<Vec<_>>().join(","),
                 self.mem_some,
@@ -904,6 +956,7 @@ impl Caps {
             cpus_timed: f("cpus_timed") as u32,
             cpu_pct: v.get("cpu_pct").and_then(num),
             cpu_wait: v.get("cpu_wait").and_then(num),
+            outside_cores: f("outside_cores"),
             load1: f("load1"),
             ram_gb: f("ram_gb"),
             ram_avail_gb: f("ram_avail_gb"),
@@ -1252,6 +1305,27 @@ mod tests {
     }
 
     #[test]
+    fn land_queue_bisect_script_is_not_lane_script() {
+        for class in [
+            "test bash land_gate.sh fast @landq-bisect",
+            "test bash land_gate.sh testrun @landq-bisect",
+            "test bash land_gate.sh testrun @landq-bisect +jit-build",
+            "test bash land_gate.sh testrun 12 cores @landq-tests",
+            "test bash land_gate.sh hot @landq-hot",
+            "test bash mac_tests.sh @landq-mac",
+            "test bash land_gate.sh fast @landgate +jit-build",
+            "gate bash land_gate.sh fast",
+        ] {
+            assert!(!lane_script(class), "{class}: devhub's own script keeps its wall measure");
+            assert!(script_class(class), "{class}: script wrapper gives no memory-end RAM peak");
+        }
+        assert!(lane_script("long bash sweep.sh @sweep"));
+        assert!(script_class("long bash sweep.sh @sweep"));
+        assert!(!script_class("test makepad test makepad-baz"));
+        assert!(!script_class("build cargo check @landq-windows"));
+    }
+
+    #[test]
     fn a_runs_class_is_its_command_past_an_env_prefix() {
         let argv = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let gate = |proven: &str| run_class("lane", Kind::Gate, &argv(&["env", proven, "-u", "X", "bash", "tools/run/fixture/land_gate.sh", "fast", "a1"]));
@@ -1334,6 +1408,7 @@ mod tests {
             cpu_wait: Some(3.25),
             busy_leases: vec![("L7".into(), 11.5), ("L9".into(), 0.25)],
             busy_outside: vec![("indexer --all".into(), 4_000_021, 2.25), ("dumper".into(), 4_000_020, 0.75)],
+            outside_cores: 3.45,
             lease_builds: vec![("L7".into(), 9.5, "makepad_widgets".into())],
             wait_leases: vec![("L7".into(), 2.75)],
             capped_leases: vec![("L8".into(), 31.5, 18.0)],
@@ -1387,6 +1462,7 @@ mod tests {
         };
         assert_eq!(Caps::parse(&c.to_json()), Some(c.clone()));
         let old = Caps::parse(r#"{"node":"box-a"}"#).unwrap();
+        assert_eq!(old.outside_cores, 0.0);
         assert!(old.temps.is_empty() && old.hot.is_empty(), "an older hub reports no temperatures or alerts");
         let wire = c.to_json();
         let value = makepad_strict_json::parse(wire.as_bytes()).unwrap();

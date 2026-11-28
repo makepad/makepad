@@ -351,7 +351,7 @@ fn undo_move(store: &Store, dir: &Path, from: Option<&str>) {
         }
         None => {
             let _admin = store.admin();
-            let _ = run(None, Some(&store.git_dir), &[], &["worktree", "remove", "--force", &dir.to_string_lossy()]);
+            let _ = run(None, Some(&store.git_dir), &[], &["worktree", "remove", "--force", "--force", &dir.to_string_lossy()]);
             let _ = run(None, Some(&store.git_dir), &[], &["worktree", "prune"]);
         }
     }
@@ -374,6 +374,12 @@ fn prepare(id: &str, pin: &Pin, root: &Path, out: &Path, native: bool) -> Result
         let dir = side(root, &name);
         let store = Store::open(&name)?;
         if store.admin_of(&dir).is_none() { return Err(format!("{} is not this node's worktree", dir.display())); }
+        // (one with no index reads as all untracked: made whole first, [`Store::repair_worktree`])
+        taken.cleared.repaired.extend(store.repair_worktree(&dir)?.map(|said| format!("{}{said}", prefix(&name))));
+        if !dir.join(".git").exists() {
+            taken.cleared.removed.push(prefix(&name));
+            continue;
+        }
         let held = held_paths(&dir)?;
         if !held.is_empty() {
             let shown: Vec<&str> = held.iter().take(8).map(String::as_str).collect();
@@ -383,7 +389,7 @@ fn prepare(id: &str, pin: &Pin, root: &Path, out: &Path, native: bool) -> Result
         }
         // (--force for its build output, or a clean submodule's checkout: anything else held it above)
         let admin = store.admin();
-        run(None, Some(&store.git_dir), &[], &["worktree", "remove", "--force", &dir.to_string_lossy()])?;
+        run(None, Some(&store.git_dir), &[], &["worktree", "remove", "--force", "--force", &dir.to_string_lossy()])?;
         drop(admin);
         taken.cleared.removed.push(prefix(&name));
     }
@@ -398,6 +404,19 @@ fn prepare(id: &str, pin: &Pin, root: &Path, out: &Path, native: bool) -> Result
         // later start in that tree was refused on it (11-13). Only config locks: a commit's
         // `index.lock` sits closed while its hooks run ([`crate::gitlock::sweep`])
         taken.cleared.locks.extend(if dir.join(".git").exists() { crate::gitlock::sweep_worktree(&dir) } else { crate::gitlock::sweep(&store.git_dir) });
+        // ... and an `index.lock` a killed git left, which no git that may run in the tree can still
+        // write ([`crate::gitlock::clear_left_index_in`]): a git killed in its `add` left one in a
+        // nested checkout, and every start there was refused on it (11-26). One a writer may still
+        // hold is kept, and said.
+        if dir.join(".git").exists() {
+            match crate::gitlock::clear_left_index_in(&dir) {
+                Ok(said) => taken.cleared.locks.extend(said),
+                Err(kept) => taken.cleared.locks.push(kept),
+            }
+        }
+        // ... and a worktree a killed git left with no index is made whole before anything reads
+        // it, at its commit or not ([`Store::repair_worktree`])
+        taken.cleared.repaired.extend(store.repair_worktree(&dir)?.map(|said| format!("{}{said}", prefix(repo))));
         let from = head(&dir);
         if from.as_deref() == Some(to) {
             crate::ci_merge::install_merge_driver(&dir, root)?;
@@ -531,6 +550,7 @@ pub fn take_native(id: &str, pin: &Pin, work: &Path, lane: &str, limit: usize, f
         going.end(|_| {});
         cleared.bundles.extend(r.bundles);
         cleared.removed.extend(r.removed);
+        cleared.repaired.extend(r.repaired);
         cleared.evicted.push((old, bytes));
         super::disk::empty_trash_soon(work);
     }
@@ -540,6 +560,7 @@ pub fn take_native(id: &str, pin: &Pin, work: &Path, lane: &str, limit: usize, f
     drop(slot);
     t.cleared.bundles.extend(cleared.bundles);
     t.cleared.removed.extend(cleared.removed);
+    t.cleared.repaired.extend(cleared.repaired);
     t.cleared.evicted.extend(cleared.evicted);
     if super::caps::disk_space(work).map_or(0, |(free, _)| free) < floor { return Err("native trees busy: disk below its floor after checkout".into()); }
     let at = t.pin.clone();
@@ -653,6 +674,8 @@ fn scrub(repo: &str, root: &Path, at: Option<&str>, id: &str, out: &Path, tag: &
     if store.admin_of(&dir).is_none() {
         return Err(format!("{} is not this node's worktree", dir.display()));
     }
+    r.repaired.extend(store.repair_worktree(&dir)?.map(|said| format!("{prefix}{said}")));
+    if !dir.join(".git").exists() { return Ok(()); }
     if let Some(at) = at {
         if store.tree_dirty(&dir)? {
             let t = if repo == "makepad" { tag.to_string() } else { format!("{tag}-{repo}") };
@@ -665,17 +688,49 @@ fn scrub(repo: &str, root: &Path, at: Option<&str>, id: &str, out: &Path, tag: &
 
 /// Startup clears an unheld work tree without changing its pin.
 pub fn scrub_if_idle(root: &Path, out: &Path) -> Released {
-    let claim = {
-        let mut h = lock();
-        if h.get(root).is_some_and(Holders::taken) { return Released::default(); }
-        Claim::mark(&mut h, root, Busy::Upkeep("the startup scrub".into()), None)
-    };
-    let tag = if root.parent().and_then(Path::file_name).is_some_and(|n| n == "native") {
-        format!("startup-{}-{}", root.file_name().unwrap().to_string_lossy(), crate::proto::wall_ms())
-    } else { "startup".into() };
-    let r = scrub_tree(root, "startup", out, &tag, &Default::default());
-    claim.end(|_| {});
+    let mut r = Released::default();
+    claim_idle([root.to_path_buf()]).run(out, |found| r = found);
     r
+}
+
+/// The work trees a hub's start claimed for its scrub ([`claim_idle`]), scrubbed after it.
+pub struct StartupScrub(Vec<Claim>);
+
+/// Claims each of `roots` that no lease holds for the startup scrub, all at once: a take of one
+/// waits for its scrub ([`Busy::Upkeep`]). The scrubs then run off the hub's start
+/// ([`StartupScrub::run`]), and it answers its master meanwhile. Run within the start, they took
+/// 21.1 s of a Windows box's 23.3 s start, a work tree and its lanes' native trees, on every
+/// update of its hub (11-27).
+pub fn claim_idle(roots: impl IntoIterator<Item = PathBuf>) -> StartupScrub {
+    let mut h = lock();
+    let mut claims = Vec::new();
+    for root in roots {
+        if !h.get(&root).is_some_and(Holders::taken) {
+            claims.push(Claim::mark(&mut h, &root, Busy::Upkeep("the startup scrub".into()), None));
+        }
+    }
+    StartupScrub(claims)
+}
+
+impl StartupScrub {
+    /// How many trees it claimed.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Scrubs each claimed tree in turn, its claim ended once it is clean: `each` gets what was
+    /// found there.
+    pub fn run(self, out: &Path, mut each: impl FnMut(Released)) {
+        for claim in self.0 {
+            let root = claim.root.clone();
+            let tag = if root.parent().and_then(Path::file_name).is_some_and(|n| n == "native") {
+                format!("startup-{}-{}", root.file_name().unwrap().to_string_lossy(), crate::proto::wall_ms())
+            } else { "startup".into() };
+            let r = scrub_tree(&root, "startup", out, &tag, &Default::default());
+            claim.end(|_| {});
+            each(r);
+        }
+    }
 }
 
 /// Scrubs every repository of the tree but those `left` names (kept as someone left them).
@@ -765,6 +820,8 @@ pub struct Released {
     /// git lock files a writer that is gone left, cleared, or one a live writer held, waited for
     /// ([`crate::gitlock::settle`])
     pub locks: Vec<String>,
+    /// worktrees made whole again: a half-made one, a lost index ([`Store::repair_worktree`])
+    pub repaired: Vec<String>,
     /// the idle native trees taken for room (lane, bytes of its tree and target)
     pub evicted: Vec<(String, u64)>,
 }
@@ -935,12 +992,18 @@ mod tests {
         std::fs::write(root.join("a.rs"), "in flight").unwrap();
         assert!(take("L5", &at(&two), &root, &out).is_err());
         assert!(scrub_if_idle(&root, &out).bundles.is_empty());
+        assert_eq!(claim_idle([root.clone()]).len(), 0, "the start claims no tree a lease holds");
         assert_eq!(std::fs::read_to_string(root.join("a.rs")).unwrap(), "in flight");
         assert_eq!(release("L4", &root, &out, "x-L4").bundles.len(), 1);
         assert_eq!(current(&root), Some(at(&one)));
         std::fs::write(root.join("a.rs"), "interrupted lease").unwrap();
         std::fs::write(root.join("stray.txt"), "stray").unwrap();
-        let r = scrub_if_idle(&root, &out);
+        // the start claims it at once and scrubs it after, off the hub's start
+        let scrub = claim_idle([root.clone()]);
+        assert_eq!(scrub.len(), 1, "the start claims an unheld tree");
+        let mut found = Vec::new();
+        scrub.run(&out, |r| found.push(r));
+        let r = found.pop().expect("the claimed tree's scrub says what it found");
         assert_eq!(r.bundles.len(), 1);
         assert_eq!(r.removed, ["stray.txt"]);
         assert!(r.unclean.is_empty() && !root.join("stray.txt").exists());
@@ -1166,6 +1229,14 @@ mod tests {
         let why = take("N5", &with, &root, &out).unwrap_err();
         assert!(why.contains("is not this node's worktree"), "{why}");
         assert_eq!((std::fs::read_to_string(user.join("mine.rs")).unwrap(), std::fs::read_to_string(user.join("draft.txt")).unwrap()), ("mine".to_string(), "draft".to_string()));
+
+        let store = Store::open("side-app").unwrap();
+        let dir = root.join("apps/side-app");
+        let admin = store.admin_of(&dir).unwrap();
+        std::fs::write(admin.join("locked"), "initializing\n").unwrap();
+        undo_move(&store, &dir, None);
+        assert!(!admin.exists(), "undoing a locked add removes its admin directory");
+        assert!(!dir.join(".git").exists(), "undoing a locked add removes its worktree link");
         let _ = std::fs::remove_dir_all(&base);
     }
 }

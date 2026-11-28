@@ -75,16 +75,24 @@ pub(crate) fn rekey(now: &str) {
 
 /// The key of `inputs` with `blob` (path to its git blob); None when one is not tracked.
 fn key(compiler: &str, inputs: &[String], blob: &dyn Fn(&str) -> Option<String>) -> Option<String> {
-    let mut text = String::with_capacity(inputs.len() * 80);
-    text.push_str(compiler);
+    Some(hash_key(&key_text(compiler, inputs, blob)?))
+}
+
+fn key_text(prefix: &str, inputs: &[String], blob: &dyn Fn(&str) -> Option<String>) -> Option<String> {
+    let mut text = String::with_capacity(prefix.len() + inputs.len() * 80);
+    text.push_str(prefix);
     for p in inputs {
         text.push('\n');
         text.push_str(p);
         text.push(' ');
         text.push_str(&blob(p)?);
     }
+    Some(text)
+}
+
+fn hash_key(text: &str) -> String {
     let h = makepad_network::digest::sha256_hash(text.as_bytes());
-    Some(h[..12].iter().map(|b| format!("{b:02x}")).collect())
+    h[..12].iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// `git ls-files` with each blob's size, what [`on_disk`] checks a file against.
@@ -219,7 +227,11 @@ pub(crate) struct Inputs {
 impl Inputs {
     // Every dev JIT entry point substitutes the same normalized root manifest here.
     fn key(&self, compiler: &str, blob: &dyn Fn(&str) -> Option<String>) -> Option<String> {
-        key(compiler, &self.files, &|p| if p == "Cargo.toml" { Some(self.root_manifest.clone()) } else { blob(p) })
+        Some(hash_key(&self.text(compiler, blob)?))
+    }
+
+    fn text(&self, prefix: &str, blob: &dyn Fn(&str) -> Option<String>) -> Option<String> {
+        key_text(prefix, &self.files, &|p| if p == "Cargo.toml" { Some(self.root_manifest.clone()) } else { blob(p) })
     }
 }
 
@@ -395,16 +407,137 @@ pub(crate) fn inputs(index: &std::collections::BTreeMap<String, String>, bytes: 
     Ok(Inputs { files: files.into_iter().collect(), crate_dirs: dirs, extra_dirs, root_manifest })
 }
 
-/// The dev JIT ids a pinned makepad commit selects, in compiler order (its tree read in process).
+#[cfg(feature = "checkout")]
+mod commit_cache {
+    use super::{hash_key, inputs};
+    use crate::gitread;
+    use std::collections::{HashMap, VecDeque};
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Condvar, LazyLock, Mutex};
+
+    const COMMIT_CACHE_CAP: usize = 256;
+
+    #[derive(Clone, PartialEq, Eq, Hash)]
+    struct CommitKey {
+        common_dir: PathBuf,
+        sha: String,
+    }
+
+    pub(super) struct CommitMemo {
+        suffix: Arc<String>,
+        keys: Mutex<HashMap<String, String>>,
+    }
+
+    impl CommitMemo {
+        pub(super) fn ids(&self, compilers: &[String]) -> Vec<String> {
+            let mut keys = self.keys.lock().unwrap_or_else(|e| e.into_inner());
+            compilers.iter().filter(|c| !c.is_empty()).map(|c| {
+                if let Some(key) = keys.get(c) { return key.clone(); }
+                let key = hash_key(&format!("{}{}", c, self.suffix));
+                keys.insert(c.clone(), key.clone());
+                key
+            }).collect()
+        }
+    }
+
+    type CommitSlotState = Option<Result<Arc<CommitMemo>, String>>;
+
+    #[derive(Default)]
+    struct CommitSlot {
+        state: Mutex<CommitSlotState>,
+        ready: Condvar,
+    }
+
+    #[derive(Default)]
+    struct CommitCache {
+        slots: HashMap<CommitKey, Arc<CommitSlot>>,
+        // Completed entries in publication order. An in-flight slot always stays discoverable.
+        fifo: VecDeque<CommitKey>,
+    }
+
+    static COMMIT_CACHE: LazyLock<Mutex<CommitCache>> = LazyLock::new(Default::default);
+    static ROOM: Condvar = Condvar::new();
+
+    struct Loader {
+        key: CommitKey,
+        slot: Arc<CommitSlot>,
+        finished: bool,
+    }
+
+    impl Loader {
+        fn finish(&mut self, result: Result<Arc<CommitMemo>, String>) {
+            let mut cache = COMMIT_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+            if result.is_ok() {
+                cache.fifo.push_back(self.key.clone());
+            } else if cache.slots.get(&self.key).is_some_and(|s| Arc::ptr_eq(s, &self.slot)) {
+                cache.slots.remove(&self.key);
+            }
+            *self.slot.state.lock().unwrap_or_else(|e| e.into_inner()) = Some(result);
+            self.finished = true;
+            drop(cache);
+            self.slot.ready.notify_all();
+            ROOM.notify_all();
+        }
+    }
+
+    impl Drop for Loader {
+        fn drop(&mut self) {
+            if !self.finished { self.finish(Err("commit input lookup interrupted".into())); }
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) static COUNT_FOR: Mutex<Option<(PathBuf, Arc<std::sync::atomic::AtomicUsize>)>> = Mutex::new(None);
+
+    fn commit_suffix(repo: &Path, sha: &str) -> Result<Arc<CommitMemo>, String> {
+        #[cfg(test)]
+        {
+            let common = gitread::paths(repo).map(|p| p.common_dir);
+            if let Some((dir, count)) = &*COUNT_FOR.lock().unwrap() {
+                if common.as_ref() == Some(dir) { count.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
+            }
+        }
+        let index = gitread::files_at(repo, sha)?;
+        let read = gitread::blob_reader(repo).ok_or("cannot open pinned repository")?;
+        let inputs = inputs(&index, &|path| read(index.get(path).ok_or_else(|| format!("JIT manifest missing from pin: {path}"))?))?;
+        let suffix = inputs.text("", &|p| index.get(p).cloned()).ok_or("JIT input missing from pin")?;
+        Ok(Arc::new(CommitMemo { suffix: Arc::new(suffix), keys: Mutex::default() }))
+    }
+
+    pub(super) fn lookup(repo: &Path, sha: &str) -> Result<Arc<CommitMemo>, String> {
+        if sha.len() != 40 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) { return commit_suffix(repo, sha); }
+        let common_dir = gitread::paths(repo).ok_or_else(|| format!("{}: no repository", repo.display()))?.common_dir;
+        let key = CommitKey { common_dir, sha: sha.to_ascii_lowercase() };
+        let mut cache = COMMIT_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            if let Some(slot) = cache.slots.get(&key).cloned() {
+                drop(cache);
+                let state = slot.state.lock().unwrap_or_else(|e| e.into_inner());
+                let state = slot.ready.wait_while(state, |s| s.is_none()).unwrap_or_else(|e| e.into_inner());
+                return state.as_ref().unwrap().clone();
+            }
+            if cache.slots.len() < COMMIT_CACHE_CAP { break; }
+            if let Some(old) = cache.fifo.pop_front() {
+                cache.slots.remove(&old);
+                break;
+            }
+            cache = ROOM.wait(cache).unwrap_or_else(|e| e.into_inner());
+        }
+        let slot = Arc::new(CommitSlot::default());
+        cache.slots.insert(key.clone(), slot.clone());
+        let mut loader = Loader { key, slot, finished: false };
+        drop(cache);
+        let result = commit_suffix(repo, &loader.key.sha);
+        loader.finish(result.clone());
+        result
+    }
+}
+
+/// The dev JIT ids a pinned makepad commit selects, in compiler order.
 #[cfg(feature = "checkout")]
 pub(crate) fn commit_ids(repo: &Path, sha: &str, compilers: &[String]) -> Result<Vec<String>, String> {
     if compilers.iter().all(|c| c.is_empty()) { return Ok(Vec::new()); }
-    let index = crate::gitread::files_at(repo, sha)?;
-    let bytes = |path: &str| -> Result<Vec<u8>, String> {
-        crate::gitread::blob(repo, index.get(path).ok_or_else(|| format!("JIT manifest missing from pin: {path}"))?)
-    };
-    let inputs = inputs(&index, &bytes)?;
-    compilers.iter().filter(|c| !c.is_empty()).map(|c| inputs.key(c, &|p| index.get(p).cloned()).ok_or_else(|| "JIT input missing from pin".to_string())).collect()
+    Ok(commit_cache::lookup(repo, sha)?.ids(compilers))
 }
 
 /// A tree's key in the dev JIT store ([`tree_id`]).
@@ -571,8 +704,9 @@ pub(crate) fn shipped_ids(repo: &Path, sha: &str, compilers: &[String], edits: &
     use std::collections::BTreeMap;
     if compilers.iter().all(|c| c.is_empty()) { return Ok((Vec::new(), Vec::new())); }
     let index = crate::gitread::files_at(repo, sha)?;
+    let read = crate::gitread::blob_reader(repo).ok_or("cannot open pinned repository")?;
     let pinned = |path: &str| -> Result<Vec<u8>, String> {
-        crate::gitread::blob(repo, index.get(path).ok_or_else(|| format!("JIT input missing from pin: {path}"))?)
+        read(index.get(path).ok_or_else(|| format!("JIT input missing from pin: {path}"))?)
     };
     let keys = |inputs: &Inputs, tree: &BTreeMap<String, String>| -> Result<Vec<String>, String> {
         compilers.iter().filter(|c| !c.is_empty()).map(|c| inputs.key(c, &|p| tree.get(p).cloned()).ok_or_else(|| "JIT input missing from pin".to_string())).collect()
@@ -879,10 +1013,33 @@ fn build_tree(root: &Path, target: &Path, pin: &super::Pin, inputs: &[String], i
         compile()?;
         if let Some(p) = newer()? { return Err(format!("dev JIT: {p} changed after the build")); }
     }
+    provided_statics(root, target, &binary, id, build, active)?;
     publish_binary(&binary, dst, &|staged, dst| {
         active()?;
         std::fs::rename(staged, dst).map_err(|e| format!("{}: {e}", dst.display()))
     })
+}
+
+/// The loader build's provided-statics check (tools/run/fixture/loader_build.sh runs the same):
+/// every static of a provided crate that JIT-compiled code can reach is marked shared or per_side.
+/// A lane whose edit leaves one unmarked gets the runtime's refusal here, from its own JIT's build,
+/// not at every app's start on the tip once it lands. A tree from before the check has no program
+/// for it, and its binary no such check.
+#[cfg(feature = "checkout")]
+fn provided_statics(root: &Path, target: &Path, binary: &Path, id: &str, build: &OverlayBuild<'_>, active: &dyn Fn() -> Result<(), String>) -> Result<(), String> {
+    const PROGRAM: &str = "tools/run/fixture/provided_all/Cargo.toml";
+    const ALLOWED: &str = "tools/run/fixture/refused_statics.tsv";
+    if !root.join(PROGRAM).is_file() { return Ok(()); }
+    let mut cmd = super::caps::rust_command(&binary.to_string_lossy());
+    cmd.args(["check", "--boundary", "statics", "--known-refused", ALLOWED, "relax-provided-all"])
+        .current_dir(root).env("CARGO_TARGET_DIR", target).env("CARGO_NET_OFFLINE", "true");
+    for k in ["VFS", "EDITS", "WORKSPACE"].iter().map(|v| crate::run_names::var(v)) { cmd.env_remove(k); }
+    let (status, log) = (build.run)(id, &cmd, active)?;
+    if status.success() { return Ok(()); }
+    let text = std::fs::read_to_string(&log).unwrap_or_default();
+    let rows: Vec<&str> = text.lines().filter(|l| l.contains("\tFAIL\t") || l.starts_with("  reached\t")).take(40).collect();
+    let said = if rows.is_empty() { text.lines().rev().take(20).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n") } else { rows.join("\n") };
+    Err(format!("dev JIT {id}: its provided-statics check failed ({status}; `makepad check --boundary statics relax-provided-all`):\n{said}"))
 }
 
 /// Publish by rename; Cargo can replace its output without changing a held binary.
@@ -1139,6 +1296,56 @@ mod tests {
         assert_eq!(cargo_build_argv(&quiet).unwrap(), words("cargo build --profile host -q -p makepad-run --bin makepad"));
         assert_eq!(cargo_build_argv(&words("env K=V makepad test z")).unwrap(), words("cargo build --profile host -q -p makepad-run --bin makepad"));
         assert!(cargo_build_argv(&words("cargo test z")).is_none());
+    }
+
+    #[test]
+    fn commit_ids_memo_hits_across_compiler_changes_worktrees_and_singleflight() {
+        use std::sync::{atomic::{AtomicUsize, Ordering}, Arc, Barrier};
+
+        let dir = std::env::temp_dir().join(format!("devhub-commit-memo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let repo = dir.join("repo");
+        let linked = dir.join("linked");
+        std::fs::create_dir_all(repo.join("tools/run")).unwrap();
+        std::fs::write(repo.join("Cargo.toml"), "[workspace]\n").unwrap();
+        std::fs::write(repo.join("tools/run/Cargo.toml"), "[package]\nname = 'runner'\n").unwrap();
+        git(&repo, &["init", "-q"]).unwrap();
+        git(&repo, &["add", "-f", "Cargo.toml", "tools/run/Cargo.toml"]).unwrap();
+        git(&repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "pin"]).unwrap();
+        let pin = git(&repo, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        git(&repo, &["worktree", "add", "-q", "--detach", linked.to_str().unwrap(), &pin]).unwrap();
+        let counter = Arc::new(AtomicUsize::new(0));
+        *commit_cache::COUNT_FOR.lock().unwrap() = Some((crate::gitread::paths(&repo).unwrap().common_dir, counter.clone()));
+
+        let both = words("c1 c2");
+        let expected = shipped_ids(&repo, &pin, &both, &[]).unwrap().0;
+        let start = Barrier::new(8);
+        std::thread::scope(|scope| {
+            let mut workers = Vec::new();
+            for index in 0..8 {
+                let tree = if index % 2 == 0 { &repo } else { &linked };
+                let (start, pin, c1) = (&start, &pin, &both[..1]);
+                workers.push(scope.spawn(move || { start.wait(); commit_ids(tree, pin, c1).unwrap() }));
+            }
+            for worker in workers {
+                assert_eq!(worker.join().unwrap(), expected[..1]);
+            }
+        });
+        assert_eq!(counter.load(Ordering::Relaxed), 1, "one cold traversal across both worktrees");
+        assert_eq!(commit_ids(&repo, &pin, &both).unwrap(), expected);
+        let requested = vec![both[1].clone(), String::new(), both[0].clone(), both[1].clone()];
+        assert_eq!(commit_ids(&linked, &pin.to_uppercase(), &requested).unwrap(), [expected[1].clone(), expected[0].clone(), expected[1].clone()]);
+        assert_eq!(counter.load(Ordering::Relaxed), 1, "compiler changes reuse the suffix");
+        let missing = "1".repeat(40);
+        for tries in 1..=2 {
+            assert!(commit_ids(&repo, &missing, &both).is_err());
+            assert_eq!(counter.load(Ordering::Relaxed), 1 + tries, "failed traversal retried");
+        }
+        assert_eq!(commit_ids(&repo, "HEAD", &both).unwrap(), expected);
+        assert_eq!(commit_ids(&repo, "HEAD", &both).unwrap(), expected);
+        assert_eq!(counter.load(Ordering::Relaxed), 5, "symbolic refs always resolve again");
+        *commit_cache::COUNT_FOR.lock().unwrap() = None;
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// What a run ships on its pin selects the JIT that pin with those edits committed would: the

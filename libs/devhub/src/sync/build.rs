@@ -148,7 +148,7 @@ pub fn prebuild(conf: &SyncConf, jobs: Option<u32>, jit_built: &dyn Fn()) -> Bui
     let jobs = jobs.unwrap_or(conf.jobs);
     let background = |program: &std::ffi::OsStr| {
         let scope = crate::lease::exec::box_build_scope("deploybuild", jobs);
-        crate::os::background_scoped(program, scope.as_ref().map(|(unit, weight)| (unit.as_str(), *weight)))
+        crate::os::scoped_build(program, 10, scope.as_ref().map(|(unit, weight)| (unit.as_str(), *weight)))
     };
     let r = match conf.build {
         Build::Off => Ok(()),

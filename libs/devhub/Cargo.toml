@@ -32,6 +32,7 @@ makepad-ci-merge = { path = "../../tools/ci_merge", optional = true }
 makepad-git = { path = "../git" }
 makepad-network = { path = "../../platform/network" }
 makepad-devhub-conf = { path = "../devhub_conf" }
+makepad-devhub-client = { path = "client" }
 makepad-remote = { workspace = true }
 makepad-strict-json = { workspace = true }
 makepad-serial = { workspace = true }

@@ -1,10 +1,10 @@
 #!/bin/sh
 # Renders devhub icon previews (Dock size, tray size, light and dark menu bar) from the sources
 # apps/devhub/resources/icon_1024.png and tray.svg (macOS QuickLook, authoring only).
-#   sh tools/devhub/icon-preview.sh [out-dir]    (default local/agent_state/devhub/icon)
+#   sh tools/devhub/icon-preview.sh [out-dir]    (default $TMPDIR/devhub-icon)
 set -eu
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
-OUT=${1:-$REPO/local/agent_state/devhub/icon}
+OUT=${1:-${TMPDIR:-/tmp}/devhub-icon}
 RES=$REPO/apps/devhub/resources
 mkdir -p "$OUT"
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/devhub-icon.XXXXXX")

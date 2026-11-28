@@ -9,6 +9,8 @@ use std::path::PathBuf;
 pub const BEACON_PORT: u16 = 41832;
 /// A field of an event line is cut to this (the detail blob keeps the whole event).
 pub const MAX_FIELD: usize = 300;
+/// Bytes of preview text in a hub record, before its truncation marker.
+pub const MAX_LINE: usize = 2048;
 /// A record (with its detail) longer than this is cut: events are data from programs.
 pub const MAX_RECORD: usize = 64 << 10;
 /// The statuses a reply to an engine request may carry (the JIT checks them too).
@@ -168,7 +170,7 @@ impl Record {
             pid: v.get("pid").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
             kind: clean(&s("kind")?, 32),
             sev: Sev::parse(&s("sev").unwrap_or_default()),
-            line: clean(&s("line").unwrap_or_default(), MAX_FIELD * 2),
+            line: clean(&s("line").unwrap_or_default(), MAX_LINE),
             detail: v.get("detail").filter(|d| !d.is_null()).map(|d| d.to_json()).unwrap_or_default(),
             untrusted: v.get("untrusted").and_then(|x| x.as_bool()).unwrap_or(false),
         })
@@ -304,13 +306,28 @@ pub fn hub_record(machine: &str, app: &str, pid: u32, kind: &str, sev: Sev, line
     use std::sync::atomic::{AtomicU64, Ordering};
     static N: AtomicU64 = AtomicU64::new(0);
     let n = N.fetch_add(1, Ordering::Relaxed) + 1;
-    Record { id: format!("{machine}.hub.{}.{n}", wall_ms()), at_ms: wall_ms(), machine: machine.to_string(), app: app.to_string(), pid, kind: kind.to_string(), sev, line: clean(&line, MAX_FIELD * 2), detail, untrusted: false }
+    Record { id: format!("{machine}.hub.{}.{n}", wall_ms()), at_ms: wall_ms(), machine: machine.to_string(), app: app.to_string(), pid, kind: kind.to_string(), sev, line: clean(&line, MAX_LINE), detail, untrusted: false }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use makepad_devhub_conf::HITCH_MS;
+
+    #[test]
+    fn record_line_preserves_long_kept_paths_up_to_max_line() {
+        let path = format!("/tests.keep/{}.fail", "a".repeat(203));
+        let line = format!("{:width$} {} {}", "FAILED", path, path, width = 698 - 2 * path.len());
+        assert_eq!(line.len(), 700);
+        for (input, expected) in [(line.clone(), line), ("x".repeat(2200), format!("{}…", "x".repeat(MAX_LINE)))] {
+            let record = hub_record("hub", "gate", 1, "bucket", Sev::Err, input, String::new());
+            assert_eq!(Record::parse(&record.to_json()).unwrap().line, expected);
+        }
+        let message = "x".repeat(700);
+        let data = format!(r#"{{"event":"panic","message":"{message}"}}"#);
+        let event = from_jit_event("hub", "gate", 1, &data, 0.0).unwrap();
+        assert!(event.line.contains(&format!("{}…", "x".repeat(MAX_FIELD))));
+    }
 
     #[test]
     fn panic_event_becomes_an_answer_first_line() {

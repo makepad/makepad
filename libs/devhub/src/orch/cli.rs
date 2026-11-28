@@ -7,7 +7,8 @@ use crate::cli::{ask, control, has, jit_reads, link_cut, retry_master, RAN_NOTHI
 use crate::proto::{Record, Sev};
 use makepad_remote::json_str;
 use makepad_remote::link::Client;
-use makepad_strict_json::Value;
+use makepad_strict_json::{parse_depth, Value, TOOL_JSON_DEPTH};
+use std::borrow::Cow;
 use std::io::Write;
 use std::time::Duration;
 
@@ -40,8 +41,8 @@ pub const HELP: &str = "  job submit [--kind test] [--needs k=v,..] [--node N [-
                                           process ended with it (10 min with no action release it; a job no longer
                                           paused is refused: `job cancel` ends it)
   live start <app> [--node N|--needs k=v,..] [--avoid N,..] [--visible] [--timed] [--lane L] [--tree] [--cores N] [--ram-gb N] [--env K=V ..] [--bin B] [-- args...]
-        [--cost small|medium|large] [--est-min N] [--class name] [--priority interactive|background] [--jit key] [--home <archive>]
-        [--joins <W id>]
+        [--cost small|medium|large] [--est-min N] [--class name] [--priority interactive|background] [--jit key] [--home <archive>|box]
+        [--set <name>/<n>] [--joins <W id>]
                                           the app under the JIT on a box (headless, or visible on a screen box), held
                                           for this lane: every file saved in this worktree ships to it as it comes and
                                           hot-patches in; overlay by default (--tree opts out), small cost on a hot box. Returns its id at once.
@@ -50,9 +51,13 @@ pub const HELP: &str = "  job submit [--kind test] [--needs k=v,..] [--node N [-
                                           local/screencap/<lane>/<id>-<n>.png (a look, not a playtest)
                                           a save during an app's start applies once it is up
                                           --home: a tar archive of files the app finds in a home of its own on
-                                          its box (MAKEPAD_TEST_HOME, where an app keeps its per-user state), gone with the session
+                                          its box (MAKEPAD_TEST_HOME, where an app keeps its per-user state), gone with the session;
+                                          without it an app session's home is a fresh, empty one, gone the same way;
+                                          --home box: the box's own home, its real app data (a demo copy kept there)
                                           every session's app gets MAKEPAD_TEST_RUN=<lane> <id>: it is a test run (an app shows
                                           that to other devices, so it is never taken for the user's own)
+                                          --set <name>/<n>: one of the lane's n sessions placed and parked as one;
+                                          with --joins W<k> of the set, beside that member on its box
                                           --joins W<n>: its app joins that session's app (a hidden test WM it reaches
                                           through --env MAKEPAD_WM_SOCKET=<path>): it runs on that session's box, and
                                           that session is never parked or ended idle while this one runs
@@ -72,13 +77,20 @@ pub const HELP: &str = "  job submit [--kind test] [--needs k=v,..] [--node N [-
                                           `session relaunch` lets the app postpone it (unsaved work, a turn in
                                           flight: the reply names it); `session relaunch --anyway` restarts it now,
                                           its state carried over, as the window caption's restart does.
+                                          `session relaunch --fresh` quits the app for real (its exit checked),
+                                          then starts a new process on the same home and lease; the reply
+                                          names both pids. A cut one is not sent again.
                                           A grab's, gq's or gseq's frames come here, named as a look's:
                                           local/screencap/<lane>/<id>-<n>-f<frame>-p<patch>.png (it says where)
   live wait <id> patched|verdict|settled|frame [timeout_s]   the newest edit's patch or test verdict, the JIT idle,
                                           or a frame drawn; verdict gives save → shipped → patched → tests times; the
                                           timeout (default 120 s) counts from the first ask through restarts
   live sync <id> | live release <id> | live list [--all] | live <id>
-                                          ship changes since the last ship, including deletions; end it (10 min idle; tests 30 min)
+                                          ship changes since the last ship, including deletions; end it (10 min idle, a
+                                          visible one only when released; tests 30 min); the list; one, with where it runs
+                                          on its box: its work dir, its app's home and its pid
+  live get <id> <rel> <local-dir>         copy a running session's files back through its own lease (as `get --lease`:
+                                          rel in its work, `target/..`, `tmp/..`): no lease asked, no queue
   live again <id>                         an ended session (parked: an ask needed the RAM it held idle; a visible one
                                           parks only for timed or whole-box work) starts again
                                           as it was asked: same app or tests, box, env, home and source mode
@@ -173,6 +185,9 @@ pub const HELP: &str = "  job submit [--kind test] [--needs k=v,..] [--node N [-
   push remap <file>                       after a rewrite of origin's history: the push ledger's commits follow
                                           the rewrite's map (`<old sha> <new sha>` lines); refused unless the
                                           newest push then names origin/work, so the next push's credits hold
+  push adopt <sha>                        a push origin/work stands on that the ledger lacks (a restart cut its
+                                          record): read back from its commits' `Part n of m of work tip ..` lines,
+                                          <sha> the set's last, and recorded
   state [verify|jitlegs|allapps|after|pushes]   the master's workflow state as JSON
   watch [kind,..] [--once] [--until fail] [--match <text>] [--sev err|warn] [--json]
                                           block on events of those kinds (verify jitlegs after allapps push land lanes
@@ -700,11 +715,32 @@ fn job(c: &Client, words: &[&str], json: bool) -> i32 {
         // how far a lease something else ended got
         ["result", id, rest @ ..] if id.starts_with('L') => match one(c, "job", &format!("job lease-log {id}")) {
             Ok(v) => {
+                if json {
+                    println!("{}", v.to_json());
+                    return 1;
+                }
                 let lines = |k: &str| v.get(k).and_then(Value::as_arr).unwrap_or_default().iter().filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>();
                 let (errors, tail) = (lines("errors"), lines("tail"));
                 // its error lines, else (or with --tail) its last lines; the whole of it at its path
                 let shown = if rest.contains(&"--tail") || errors.is_empty() { &tail } else { &errors };
                 shown.iter().for_each(|l| println!("  {l}"));
+                let omitted = v.get("errors_omitted").and_then(Value::as_u64).unwrap_or(0);
+                if omitted > 0 {
+                    println!("  (+{omitted} more error lines in the kept files / whole log below)");
+                }
+                if let Some(kept) = v.get("kept").and_then(Value::as_arr).filter(|a| !a.is_empty()) {
+                    println!("  kept outputs (full, untruncated):");
+                    for item in kept {
+                        let field = |k| item.get(k).and_then(Value::as_str).unwrap_or("");
+                        let (unit, test, path, unit_log) = (field("unit"), field("test"), field("path"), field("unit_log"));
+                        if test.is_empty() { println!("    {unit}: {path}"); }
+                        else { println!("    {unit} :: {test}: {path}"); }
+                        if !unit_log.is_empty() { println!("      (unit log: {unit_log})"); }
+                    }
+                }
+                if let Some(dir) = v.get("keep_dir").and_then(Value::as_str).filter(|p| !p.is_empty()) {
+                    println!("  keep dir: {dir}");
+                }
                 println!("  whole log ({} bytes): {}", v.get("bytes").and_then(Value::as_u64).unwrap_or(0), v.get("path").and_then(Value::as_str).unwrap_or(""));
                 1
             }
@@ -791,6 +827,192 @@ fn act_once<T>(ask: &mut dyn FnMut(bool) -> Result<T, String>, observed: bool, r
     }
 }
 
+/// An explicit millisecond wait in a `live act` command. Capture commands take `timeout`,
+/// and other commands can specify `timeout_ms`. An omitted timeout stays with the app.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ActTimeout {
+    key: &'static str,
+    total_ms: u64,
+}
+
+impl ActTimeout {
+    fn parse(body: &str) -> Option<Self> {
+        let body = body.trim();
+        if body.starts_with('{') {
+            return Self::parse_json(body, None);
+        }
+        let mut words = body.split_whitespace();
+        let first = words.next()?;
+        if first == "call" {
+            let (head, json) = body.split_at(body.find('{')?);
+            let cap = head.split_whitespace().nth(1).is_some_and(|tool| tool.starts_with("inspect.cap_"));
+            return Self::parse_json(json, Some(cap));
+        }
+
+        let (mut timeout_ms, mut timeout) = (None, None);
+        for word in words {
+            match word.trim_start_matches("--").split_once('=') {
+                Some(("timeout_ms", value)) => timeout_ms = Some(("timeout_ms", value)),
+                Some(("timeout", value)) if first == "cap" => timeout = Some(("timeout", value)),
+                _ => {}
+            }
+        }
+        let (key, value) = timeout_ms.or(timeout)?;
+        Some(Self { key, total_ms: value.parse().ok()? })
+    }
+
+    fn parse_json(json: &str, cap_tool: Option<bool>) -> Option<Self> {
+        let obj = parse_depth(json.trim().as_bytes(), TOOL_JSON_DEPTH).ok()?;
+        let cap = cap_tool.unwrap_or_else(|| {
+            obj.get("cmd").and_then(Value::as_str).and_then(|cmd| cmd.split_whitespace().next()) == Some("cap")
+        });
+        let (key, value) = match obj.get("timeout_ms") {
+            Some(value) => ("timeout_ms", value),
+            None if cap => ("timeout", obj.get("timeout")?),
+            None => return None,
+        };
+        let total_ms = match value {
+            Value::Str(value) => value.parse().ok()?,
+            value => value.as_u64()?,
+        };
+        Some(Self { key, total_ms })
+    }
+
+    fn rewrite(self, body: &str, left_ms: u64) -> String {
+        let body = body.trim();
+        if body.starts_with('{') {
+            return self.rewrite_json(body, left_ms).expect("parsed live act timeout");
+        }
+        if body.split_whitespace().next() == Some("call") {
+            let (head, json) = body.split_at(body.find('{').expect("parsed call arguments"));
+            let json = self.rewrite_json(json, left_ms).expect("parsed live act timeout");
+            return format!("{head}{json}");
+        }
+
+        let mut words = body.split_whitespace();
+        let mut out = String::from(words.next().expect("parsed live act command"));
+        let left = left_ms.to_string();
+        for word in words {
+            out.push(' ');
+            if let Some((key, _)) = word.split_once('=') {
+                if key.trim_start_matches("--") == self.key {
+                    out.push_str(key);
+                    out.push('=');
+                    out.push_str(&left);
+                    continue;
+                }
+            }
+            out.push_str(word);
+        }
+        out
+    }
+
+    fn rewrite_json(self, json: &str, left_ms: u64) -> Option<String> {
+        let Value::Obj(mut pairs) = parse_depth(json.trim().as_bytes(), TOOL_JSON_DEPTH).ok()? else { return None };
+        let (_, value) = pairs.iter_mut().find(|(key, _)| key == self.key)?;
+        match value {
+            Value::Int(n) => *n = i64::try_from(left_ms).ok()?,
+            Value::Str(s) => *s = left_ms.to_string(),
+            _ => return None,
+        }
+        Some(Value::Obj(pairs).to_json())
+    }
+}
+
+/// Drives the app call and its manifest lookup through restarts on one clock. A re-ask
+/// gets the time left from the first ask. A cut call waits for proof that it can be repeated.
+fn act_retry<T>(
+    id: &str,
+    body: &str,
+    observed: bool,
+    start_ms: u64,
+    now_ms: impl Fn() -> u64,
+    mut ask: impl FnMut(&str, bool) -> Result<T, String>,
+    mut read: impl FnMut() -> Option<bool>,
+    mut beat: impl FnMut() -> bool,
+) -> Result<T, String> {
+    fn probe_read(cached: &mut Option<bool>, read: &mut impl FnMut() -> Option<bool>) -> Option<bool> {
+        if cached.is_none() { *cached = read(); }
+        *cached
+    }
+
+    let budget = ActTimeout::parse(body);
+    let (mut reads, mut pending_cut) = (None, None);
+    let (mut first, mut resent) = (true, false);
+    let up = std::cell::Cell::new(true);
+    let elapsed = || now_ms().saturating_sub(start_ms);
+    let spent = || {
+        let b = budget?;
+        let ms = elapsed();
+        (ms >= b.total_ms).then_some((b, ms))
+    };
+    let expired = |b: ActTimeout, ms: u64| {
+        let down = if up.get() { "" } else { " (the master was not reachable)" };
+        format!("{id}: {}={} ms passed across master/hub restarts ({ms} ms elapsed){down}", b.key, b.total_ms)
+    };
+
+    crate::cli::retry_master_wait(|| {
+        if !up.get() {
+            if let Some((b, ms)) = spent() {
+                return match pending_cut.take() {
+                    Some(cut) => cut_act(Err(cut), id, || false),
+                    None => Err(expired(b, ms)),
+                };
+            }
+            return Err("no devhub master at control socket".into());
+        }
+        if let Some(cut) = pending_cut.take() {
+            if spent().is_some() { return cut_act(Err(cut), id, || false); }
+            match probe_read(&mut reads, &mut read) {
+                Some(true) => {} // Re-ask immediately with the time left after the lookup.
+                Some(false) => return cut_act(Err(cut), id, || false),
+                None if spent().is_some() => return cut_act(Err(cut), id, || false),
+                None => {
+                    pending_cut = Some(cut.clone());
+                    return Err(cut);
+                }
+            }
+        }
+
+        let req = if first {
+            first = false;
+            Cow::Borrowed(body)
+        } else if let Some(b) = budget {
+            let ms = elapsed();
+            let left = b.total_ms.saturating_sub(ms);
+            if left == 0 { return Err(expired(b, ms)); }
+            Cow::Owned(b.rewrite(body, left))
+        } else {
+            Cow::Borrowed(body)
+        };
+        let mut defer_cut = false;
+        let cut = match act_once(&mut |again| ask(&req, again), observed, &mut resent, id, || {
+            match probe_read(&mut reads, &mut read) {
+                Some(known) => known,
+                None => {
+                    // Keep the original cut until a lookup can classify the call.
+                    defer_cut = true;
+                    true
+                }
+            }
+        }) {
+            Ok(value) => return Ok(value),
+            Err(e) => e,
+        };
+        if defer_cut {
+            if spent().is_some() { return cut_act(Err(cut), id, || false); }
+            pending_cut = Some(cut.clone());
+        } else if cut.starts_with("no devhub master at ") || link_cut(&cut) {
+            if let Some((b, ms)) = spent() { return Err(expired(b, ms)); }
+        }
+        Err(cut)
+    }, || {
+        let ok = beat();
+        up.set(ok);
+        ok
+    })
+}
+
 /// A command's exit for `r`: [`CUT_EXIT`] when a cut left unknown whether it was applied.
 fn cut_or_done(r: Result<Value, String>, json: bool, render: &dyn Fn(&Value) -> String) -> i32 {
     match r {
@@ -802,14 +1024,23 @@ fn cut_or_done(r: Result<Value, String>, json: bool, render: &dyn Fn(&Value) -> 
     }
 }
 
-/// Whether `cmd` only reads, by the JIT's own list or by the risk the app's manifest gives it (a
-/// tool's risk is the app's to say). What neither knows acts. It asks the app, on the way to asking
-/// again after a cut only: nothing else needs to know.
-fn only_reads(c: &Client, lv: &str, id: &str, cmd: &[&str]) -> bool {
-    if jit_reads(cmd) { return true; }
-    let Ok(v) = retry_master(|| one(c, "live", &format!("{lv} act {id} tools"))) else { return false };
-    let lines: Vec<&str> = v.get("lines").and_then(|a| a.as_arr()).unwrap_or(&[]).iter().filter_map(|l| l.as_str()).collect();
-    reads_by_manifest(&lines, cmd)
+/// Classifies one manifest answer. A cut lookup leaves the call's risk pending in [`act_retry`].
+fn read_of_tools(res: Result<Value, String>, cmd: &[&str]) -> Option<bool> {
+    match res {
+        Ok(v) => {
+            let lines: Vec<&str> = v.get("lines").and_then(|a| a.as_arr()).unwrap_or(&[]).iter().filter_map(|l| l.as_str()).collect();
+            Some(reads_by_manifest(&lines, cmd))
+        }
+        Err(e) if e.starts_with("no devhub master at ") || link_cut(&e) => None,
+        Err(_) => Some(false),
+    }
+}
+
+/// Whether the JIT's list or the app's manifest says the command only reads.
+/// Asks the app once. [`act_retry`] owns retries and the deadline if the lookup is cut.
+fn only_reads(c: &Client, lv: &str, id: &str, cmd: &[&str]) -> Option<bool> {
+    if jit_reads(cmd) { return Some(true); }
+    read_of_tools(one(c, "live", &format!("{lv} act {id} tools")), cmd)
 }
 
 /// Whether an `app` list (`tools`) gives `cmd` the risk `Read`: `call <service>.<tool>` is that
@@ -822,6 +1053,16 @@ fn reads_by_manifest(list: &[&str], cmd: &[&str]) -> bool {
             None => return false,
         },
         [a, b, ..] => (None, vec![format!("{a}_{b}"), a.to_string()]),
+        [json] if json.trim_start().starts_with('{') => {
+            let Ok(v) = parse_depth(json.trim().as_bytes(), TOOL_JSON_DEPTH) else { return false };
+            let Some(words) = v.get("cmd").and_then(Value::as_str) else { return false };
+            let mut parts = words.split_whitespace();
+            match (parts.next(), parts.next()) {
+                (Some(a), Some(b)) => (None, vec![format!("{a}_{b}"), a.to_string()]),
+                (Some(a), None) => (None, vec![a.to_string()]),
+                _ => return false,
+            }
+        }
         [a] => (None, vec![a.to_string()]),
         [] => return false,
     };
@@ -869,11 +1110,16 @@ fn live_as(c: &Client, words: &[&str], json: bool, me: Option<String>) -> i32 {
             let mut env = Vec::new();
             let mut home = String::new();
             let mut joins = String::new();
+            let mut set = String::new();
             let mut avoid = String::new();
             let mut i = 0;
             while i < rest.len() {
                 match (rest[i], rest.get(i + 1)) {
                     // files the app finds in a home of its own on its box (`MAKEPAD_TEST_HOME`)
+                    ("--home", Some(a)) if *a == crate::orch::live::BOX_HOME => {
+                        home = a.to_string();
+                        i += 1;
+                    }
                     ("--home", Some(a)) => {
                         let Some(a) = std::fs::canonicalize(a).ok().filter(|a| a.is_file()) else { eprintln!("makepad devhub live start: --home {a} is not a file (a tar archive of the files the app's home starts with)"); return 2 };
                         home = a.to_string_lossy().into_owned();
@@ -903,6 +1149,14 @@ fn live_as(c: &Client, words: &[&str], json: bool, me: Option<String>) -> i32 {
                     }
                     ("--lane", Some(l)) => {
                         lane = Some(l.to_string());
+                        i += 1;
+                    }
+                    ("--set", value) => {
+                        let Some(value) = value.filter(|s| crate::lease::sched::parse_set(s).is_some()) else {
+                            eprintln!("makepad devhub live start: {}", super::live::SET_USAGE);
+                            return 2;
+                        };
+                        set = value.to_string();
                         i += 1;
                     }
                     ("--joins", Some(w)) if w.len() > 1 && w.starts_with('W') && w[1..].bytes().all(|b| b.is_ascii_digit()) => {
@@ -951,7 +1205,7 @@ fn live_as(c: &Client, words: &[&str], json: bool, me: Option<String>) -> i32 {
                     }
                     ("--", _) => { test_args.extend_from_slice(&rest[i..]); break; }
                     (w, _) => {
-                        eprintln!("makepad devhub live start <app> [--node N|--needs k=v,..] [--avoid N,..] [--visible] [--timed] [--lane L] [--tree] [--cores N] [--ram-gb N] [--env K=V ..] [--home <archive>] [--joins W<n>] [--bin B] [--test [--lib|--bin B|--test T]] [-- args...]: invalid `{w}`");
+                        eprintln!("makepad devhub live start <app> [--node N|--needs k=v,..] [--avoid N,..] [--visible] [--timed] [--lane L] [--tree] [--cores N] [--ram-gb N] [--env K=V ..] [--home <archive>|box] [--set <name>/<n>] [--joins W<n>] [--bin B] [--test [--lib|--bin B|--test T]] [-- args...]: invalid `{w}`");
                         return 2;
                     }
                 }
@@ -967,15 +1221,26 @@ fn live_as(c: &Client, words: &[&str], json: bool, me: Option<String>) -> i32 {
             };
             let lane = lane.or_else(|| std::env::var("DEVHUB_LANE").ok().filter(|l| !l.is_empty())).unwrap_or_else(|| tree.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default());
             let loader = loader.unwrap_or_default();
-            let req = format!("{{\"loader\":{},\"priority\":{},\"cost\":{},\"class\":{},\"est_min\":{est_min},\"cores\":{cores},\"ram_gb\":{ram_gb},\"tree\":{use_tree},\"timed\":{timed},\"app\":{},\"repo_dir\":{},\"lane\":{},\"agent\":{},\"needs\":{},\"node\":{},\"avoid\":{},\"visible\":{visible},\"test\":{test},\"test_args\":[{}],\"env\":[{}],\"also\":[{}],\"home\":{},\"joins\":{}}}", json_str(&loader), json_str(priority), json_str(&cost), json_str(&class), json_str(app), json_str(&tree.to_string_lossy()), json_str(&lane), json_str(&std::env::var("DEVHUB_AGENT").unwrap_or_default()), json_str(&needs), json_str(&node), json_str(&avoid), test_args.iter().map(|a| json_str(a)).collect::<Vec<_>>().join(","), env.join(","), std::env::var("DEVHUB_ALSO").unwrap_or_default().split_whitespace().map(json_str).collect::<Vec<_>>().join(","), json_str(&home), json_str(&joins));
+            let req = format!("{{\"loader\":{},\"priority\":{},\"cost\":{},\"class\":{},\"est_min\":{est_min},\"cores\":{cores},\"ram_gb\":{ram_gb},\"tree\":{use_tree},\"timed\":{timed},\"app\":{},\"repo_dir\":{},\"lane\":{},\"agent\":{},\"needs\":{},\"node\":{},\"avoid\":{},\"visible\":{visible},\"test\":{test},\"test_args\":[{}],\"env\":[{}],\"also\":[{}],\"home\":{},\"joins\":{},\"set\":{}}}", json_str(&loader), json_str(priority), json_str(&cost), json_str(&class), json_str(app), json_str(&tree.to_string_lossy()), json_str(&lane), json_str(&std::env::var("DEVHUB_AGENT").unwrap_or_default()), json_str(&needs), json_str(&node), json_str(&avoid), test_args.iter().map(|a| json_str(a)).collect::<Vec<_>>().join(","), env.join(","), std::env::var("DEVHUB_ALSO").unwrap_or_default().split_whitespace().map(json_str).collect::<Vec<_>>().join(","), json_str(&home), json_str(&joins), json_str(&set));
             done(retry_master(|| one(c, "live", &format!("live start {req}"))), json, &flat)
         }
         // goes on through a master or hub restart when asking again does nothing twice ([`cut_act`])
         ["act", id, cmd @ ..] if !cmd.is_empty() => cut_or_done({
-            let line = format!("{lv} act {id} {}", makepad_remote::app::typed_line(&cmd.iter().map(|w| w.to_string()).collect::<Vec<_>>()));
+            let body = makepad_remote::app::typed_line(&cmd.iter().map(|w| w.to_string()).collect::<Vec<_>>());
             let observed = super::live::RESENT.iter().any(|c| *c == cmd);
-            let (mut reads, mut resent) = (None, false);
-            retry_master(|| act_once(&mut |again| one(c, "live", &if again { format!("{line} {}", super::live::RESEND) } else { line.clone() }), observed, &mut resent, id, || *reads.get_or_insert_with(|| only_reads(c, &lv, id, cmd))))
+            let started = std::time::Instant::now();
+            act_retry(id, &body, observed, 0,
+                || u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                |req, again| {
+                    let line = if again { format!("{lv} act {id} {req} {}", super::live::RESEND) } else { format!("{lv} act {id} {req}") };
+                    one(c, "live", &line)
+                },
+                || only_reads(c, &lv, id, cmd),
+                || {
+                    std::thread::sleep(Duration::from_secs(2));
+                    control().is_ok()
+                },
+            )
         }, json, &|v| {
             let mut out: String = v.get("lines").and_then(|a| a.as_arr()).unwrap_or(&[]).iter().map(|l| format!("{}\n", l.as_str().unwrap_or(""))).collect();
             out.push_str(&format!("({} ms)\n", v.get("ms").and_then(|m| m.as_u64()).unwrap_or(0)));
@@ -1013,8 +1278,20 @@ fn live_as(c: &Client, words: &[&str], json: bool, me: Option<String>) -> i32 {
             list.iter().map(|x| render(x)).collect()
         }),
         [id] if id.starts_with('W') => done(retry_master(|| one(c, "live", &format!("live get {id}"))), json, &render),
+        // its files, through its own lease: no lease, no queue
+        ["get", id, rel, dst] if id.starts_with('W') => match retry_master(|| one(c, "live", &format!("live get {id}"))) {
+            Ok(v) => {
+                let x = crate::state::live_from(&v);
+                if !x.active() || x.lease.is_empty() || x.node.is_empty() {
+                    eprintln!("makepad devhub live get: {id} is {} and holds no lease: its files went with it", x.state);
+                    return 1;
+                }
+                crate::lease::client::get(&x.lane, rel, dst, &["--node", &x.node, "--lease", &x.lease])
+            }
+            Err(e) => { eprintln!("makepad devhub live get: {e}"); 1 }
+        },
         _ => {
-            eprintln!("makepad devhub live start <app> [--env K=V ..] [--bin B] [--test [--lib|--bin B|--test T]] [-- args...] [..] | look <id> [timeout_s] | act <id> <cmd..> | wait <id> patched|verdict|settled|frame | sync <id> | release <id> | again <id> | list | <id>");
+            eprintln!("makepad devhub live start <app> [--env K=V ..] [--bin B] [--test [--lib|--bin B|--test T]] [-- args...] [..] | look <id> [timeout_s] | act <id> <cmd..> | wait <id> patched|verdict|settled|frame | sync <id> | release <id> | again <id> | list | <id> | get <id> <rel> <local-dir>");
             2
         }
     }
@@ -1166,6 +1443,9 @@ fn push(c: &Client, words: &[&str], json: bool) -> i32 {
             }
         };
         return done(one(c, "push", &format!("push {{\"remap\":{}}}", json_str(&path))), json, &flat);
+    }
+    if let ["adopt", sha] = words {
+        return done(one(c, "push", &format!("push {{\"adopt\":{}}}", json_str(sha))), json, &flat);
     }
     let (mut sha, mut msg, mut parents, mut dry) = (None, None, Vec::new(), false);
     let mut i = 0;
@@ -1671,13 +1951,162 @@ mod tests {
         assert_eq!(cut_or_done(Err("W1: parked".into()), false, &|_| String::new()), 1, "an answer's error stays 1");
     }
 
+    #[test]
+    fn a_live_act_cut_by_restarts_keeps_its_timeout_ms_deadline() {
+        use makepad_remote::Req;
+        use std::cell::Cell;
+
+        // An ask finishes at its absolute time. Lookups and beats add their own durations.
+        // Consuming each script exactly also checks the number of asks, lookups and beats.
+        fn run(
+            body: &str,
+            answers: &[(u64, Result<u32, &str>)],
+            lookups: &[(u64, Option<bool>)],
+            beats: &[(u64, bool)],
+        ) -> (Result<u32, String>, Vec<String>) {
+            let clock = Cell::new(0u64);
+            let mut sent = Vec::new();
+            let mut answers = answers.iter();
+            let mut lookups = lookups.iter();
+            let mut beats = beats.iter();
+            let result = act_retry("W27269", body, false, 0, || clock.get(), |req, _| {
+                let &(at, answer) = answers.next().expect("unexpected app ask");
+                assert!(at >= clock.get(), "{body}: ask started past its scripted finish");
+                sent.push(req.to_string());
+                clock.set(at);
+                answer.map_err(str::to_string)
+            }, || {
+                let &(ms, risk) = lookups.next().expect("unexpected manifest lookup");
+                clock.set(clock.get() + ms);
+                risk
+            }, || {
+                let &(ms, up) = beats.next().expect("unexpected beat");
+                clock.set(clock.get() + ms);
+                up
+            });
+            assert_eq!((answers.len(), lookups.len(), beats.len()), (0, 0, 0), "{body}: unused asks, lookups, beats");
+            assert_eq!(sent.first().map(String::as_str), Some(body), "first ask is verbatim");
+            (result, sent)
+        }
+
+        fn unknown(result: Result<u32, String>) {
+            let e = result.unwrap_err();
+            assert!(e.contains(UNKNOWN) && !link_cut(&e), "{e}");
+            assert_eq!(cut_or_done(Err(e), false, &|_| String::new()), CUT_EXIT);
+        }
+
+        fn timeout(result: Result<u32, String>, field: &str) -> String {
+            let e = result.unwrap_err();
+            assert!(e.contains("W27269") && e.contains(field) && e.contains("passed across master/hub restarts"), "{e}");
+            assert!(!link_cut(&e) && !e.contains(UNKNOWN), "{e}");
+            assert_eq!(cut_or_done(Err(e.clone()), false, &|_| String::new()), 1);
+            e
+        }
+
+        let cut = Err("link lost: hub restarted");
+        let read = (0, Some(true));
+        let lookup_cut = (0, None);
+        let up = (2_000, true);
+        let down = (2_000, false);
+        let body = makepad_remote::app::typed_line(&["ui", "wait", "q=Block architecture", "timeout_ms=1500000"].map(str::to_string));
+        let (result, sent) = run(&body, &[(400_000, cut), (820_000, cut), (1_250_000, cut), (1_500_000, cut)], &[read], &[up; 3]);
+        timeout(result, "timeout_ms=1500000");
+        assert_eq!(sent.len(), 4);
+        for (line, left) in sent.iter().zip(["1500000", "1098000", "678000", "248000"]) {
+            let req = Req::parse(line);
+            assert_eq!(req.get("timeout_ms"), Some(left));
+            assert_eq!(req.get("q"), Some("Block architecture"));
+            assert_eq!(parse_depth(line.as_bytes(), TOOL_JSON_DEPTH).unwrap().get("timeout_ms").and_then(Value::as_str), Some(left));
+        }
+
+        let wait = "ui wait q=Save timeout_ms=60000";
+        let (result, sent) = run(wait, &[(20_000, cut), (55_000, cut)], &[read], &[up, down, down, down]);
+        assert_eq!(sent, [wait, "ui wait q=Save timeout_ms=38000"]);
+        assert!(timeout(result, "timeout_ms=60000").contains("(the master was not reachable)"));
+
+        let json = r#"{"cmd":"ui wait","q":"\"timeout_ms\":5","timeout_ms":10000}"#;
+        let (result, sent) = run(json, &[(4_000, cut), (5_000, Ok(7))], &[read], &[(1_000, true)]);
+        assert_eq!(result, Ok(7));
+        assert_eq!(sent[1], r#"{"cmd":"ui wait","q":"\"timeout_ms\":5","timeout_ms":5000}"#);
+        let req = Req::parse(&sent[1]);
+        assert_eq!((req.get("timeout_ms"), req.get("q")), (Some("5000"), Some(r#""timeout_ms":5"#)));
+        let call = r#"call ui.ui_wait {"q":"Block architecture","timeout_ms":10000}"#;
+        let (result, sent) = run(call, &[(6_000, cut), (7_000, Ok(9))], &[read], &[(1_000, true)]);
+        assert_eq!(result, Ok(9));
+        assert_eq!(sent[1], r#"call ui.ui_wait {"q":"Block architecture","timeout_ms":3000}"#);
+
+        let zero = "ui wait count=0 timeout_ms=0";
+        assert_eq!(run(zero, &[(0, Ok(1))], &[], &[]).0, Ok(1));
+        timeout(run(zero, &[(0, cut)], &[read], &[]).0, "timeout_ms=0");
+        for default in ["ui wait q=Save", "ui find q=Save"] {
+            let (result, sent) = run(default, &[(10_000, cut), (12_000, Ok(1))], &[read], &[up]);
+            assert_eq!(result, Ok(1));
+            assert_eq!(sent, [default, default]);
+        }
+
+        let act = "ui act press q=Save timeout_ms=5000";
+        unknown(run(act, &[(6_000, cut)], &[(0, Some(false))], &[]).0);
+        let before_dispatch = format!("link lost: {RAN_NOTHING}");
+        let (result, sent) = run(act, &[(2_000, Err(&before_dispatch)), (2_500, Ok(1))], &[], &[(500, true)]);
+        assert_eq!(result, Ok(1));
+        assert_eq!(sent[1], "ui act press q=Save timeout_ms=2500");
+
+        let (result, sent) = run("cap grab timeout=10000", &[(3_000, cut), (4_000, Ok(1))], &[read], &[(1_000, true)]);
+        assert_eq!(result, Ok(1));
+        assert_eq!(sent[1], "cap grab timeout=6000");
+        for body in [
+            r#"{"cmd":"eval","expr":"let timeout_ms=5;"}"#, "ui wait q=timeout_ms=5",
+            r#"call demo.wait {"timeout":30}"#, "ui wait q=Save timeout=10000", "ui wait q=Save timeout_ms=-5",
+        ] {
+            assert_eq!(ActTimeout::parse(body), None, "{body}");
+        }
+        let repeated = "ui wait q=Save timeout_ms=1000 timeout_ms=9000";
+        let budget = ActTimeout::parse(repeated).unwrap();
+        assert_eq!(budget.total_ms, 9_000);
+        let line = budget.rewrite(repeated, 4_000);
+        assert_eq!(line, "ui wait q=Save timeout_ms=4000 timeout_ms=4000");
+        assert_eq!(Req::parse(&line).get("timeout_ms"), Some("4000"));
+        for (body, expected) in [
+            ("cap grab --timeout=9000", "cap grab --timeout=4000"),
+            (r#"{"cmd":"cap grab","timeout":9000}"#, r#"{"cmd":"cap grab","timeout":4000}"#),
+            (r#"call inspect.cap_grab view {"timeout":9000,"nested":{"timeout":9}}"#,
+             r#"call inspect.cap_grab view {"timeout":4000,"nested":{"timeout":9}}"#),
+        ] {
+            let budget = ActTimeout::parse(body).unwrap();
+            assert_eq!(budget.rewrite(body, 4_000), expected);
+        }
+
+        // A cut lookup cannot establish risk. Stop when a beat or the lookup itself
+        // crosses the deadline, including while the master still answers.
+        unknown(run(wait, &[(59_000, cut)], &[lookup_cut], &[up]).0);
+        unknown(run(wait, &[(58_000, cut)], &[lookup_cut, (2_000, None)], &[(1_000, true)]).0);
+        unknown(run(wait, &[(55_000, Err("link lost: master restarted"))], &[lookup_cut], &[down; 3]).0);
+
+        // A recovered lookup allows an immediate re-ask, then its verdict is cached.
+        let (result, sent) = run(wait, &[(20_000, cut), (50_000, cut), (52_000, Ok(11))], &[lookup_cut, read], &[up; 2]);
+        assert_eq!(result, Ok(11));
+        assert_eq!(sent, [wait, "ui wait q=Save timeout_ms=38000", "ui wait q=Save timeout_ms=8000"]);
+        unknown(run("ui act press q=Save timeout_ms=60000", &[(20_000, cut)], &[lookup_cut, (0, Some(false))], &[up]).0);
+        timeout(run(wait, &[(57_000, cut)], &[lookup_cut, (1_500, Some(true))], &[up]).0, "timeout_ms=60000");
+
+        for e in ["link lost: hub restarted", "the hub connection ended", "no devhub master at /x"] {
+            assert_eq!(read_of_tools(Err(e.into()), &["ui", "wait"]), None, "{e}");
+        }
+        assert_eq!(read_of_tools(Err("W1: parked".into()), &["ui", "wait"]), Some(false));
+        let ui = r#"{"Instance":{"manifest":{"id":"ui","tools":[{"name":"ui_wait","risk":{"Read":[]}},{"name":"ui_act","risk":{"Act":[]}}]}}}"#;
+        let tools = || Ok(Value::Obj(vec![("lines".into(), Value::Arr(vec![Value::Str(ui.into())]))]));
+        assert_eq!(read_of_tools(tools(), &["ui", "wait"]), Some(true));
+        assert_eq!(read_of_tools(tools(), &[json]), Some(true), "the manifest has an explicit ui_wait");
+        assert_eq!(read_of_tools(tools(), &["ui", "act"]), Some(false));
+    }
+
     /// The app's manifest says what reads; what it doesn't list or a word it can't find doesn't.
     #[test]
     fn a_commands_risk_is_read_off_the_apps_manifest() {
         let tool = |name: &str, risk: &str| format!("{{\"name\":\"{name}\",\"risk\":{{\"{risk}\":[]}}}}");
         let service = |id: &str, tools: &[String]| format!("{{\"Instance\":{{\"manifest\":{{\"id\":\"{id}\",\"tools\":[{}]}}}}}}", tools.join(","));
         let list = [
-            service("ui", &[tool("ui", "Read"), tool("ui_find", "Read"), tool("ui_act", "Act"), tool("close", "Destructive"), tool("status", "Read")]),
+            service("ui", &[tool("ui", "Read"), tool("ui_find", "Read"), tool("ui_wait", "Read"), tool("ui_act", "Act"), tool("close", "Destructive"), tool("status", "Read")]),
             service("os", &[tool("close", "Act"), tool("list", "Read")]),
             service("edit", &[tool("tweak", "Act"), tool("tweak_state", "Read")]),
             service("fab", &[tool("inspect", "Read"), tool("slice", "Act")]),
@@ -1685,6 +2114,9 @@ mod tests {
         ];
         let list: Vec<&str> = list.iter().map(String::as_str).collect();
         let reads = |cmd: &[&str]| reads_by_manifest(&list, cmd);
+        assert!(reads(&[r#"{"cmd":"ui wait","q":"Save","timeout_ms":1000}"#]), "ui_wait reads");
+        assert!(reads(&[r#"{"cmd":"ui present","timeout_ms":1000}"#]), "ui present falls back to ui");
+        assert!(!reads(&[r#"{"cmd":"ui act","q":"Save","action":"press","timeout_ms":1000}"#]), "ui_act acts");
         for cmd in [&["ui"][..], &["ui", "find", "q=Save"], &["ui", "q=Save"], &["status"], &["tweak", "state"], &["call", "fab.inspect", "{}"]] {
             assert!(reads(cmd), "{cmd:?}");
         }

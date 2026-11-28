@@ -10,7 +10,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, TryLockError, Weak
 use std::thread::ThreadId;
 use std::time::{Duration, Instant};
 
-/// A wait at least this long is written to the hub log when it ends, with its holder.
+/// A wait at least this long is written to the hub log with its holder.
 const SAY_WAIT: Duration = Duration::from_secs(1);
 
 #[derive(Clone)]
@@ -30,8 +30,13 @@ impl Who {
         Who { key: None, at: Location::caller(), thread: t.id(), name: t.name().unwrap_or("unnamed").to_string(), since: Instant::now() }
     }
 
+    /// `file:line [key] (thread)`; a gate entry's key in brackets: a lease start's is its lease. A
+    /// Windows box's start read "lease\exec.rs:3169 (makepad-remote-lease-start) waits on lease
+    /// start held by lease\exec.rs:3169 (makepad-remote-lease-start)", taken for a start waiting on
+    /// itself: it was one lease's start sent again, waiting out its first (11-26).
     fn line(&self) -> String {
-        format!("{}:{} ({})", self.at.file().rsplit_once("src/").or_else(|| self.at.file().rsplit_once("src\\")).map_or(self.at.file(), |(_, f)| f), self.at.line(), self.name)
+        let key = self.key.as_deref().map_or(String::new(), |k| format!(" [{k}]"));
+        format!("{}:{}{key} ({})", self.at.file().rsplit_once("src/").or_else(|| self.at.file().rsplit_once("src\\")).map_or(self.at.file(), |(_, f)| f), self.at.line(), self.name)
     }
 
     fn warn_own(&self, name: &str, holders: &[Who]) {
@@ -40,11 +45,20 @@ impl Who {
         }
     }
 
+    fn waited_line(&self, name: &str, holders: &[Who], waited: Duration) -> String {
+        let lines = if holders.is_empty() { "one gone by then".into() } else { holders.iter().map(Who::line).collect::<Vec<_>>().join(", ") };
+        format!("devhub: {} waited {:.1} s on {} held by {}", self.line(), waited.as_secs_f64(), name, lines)
+    }
+
+    fn say_waited(&self, name: &str, holders: &[Who], waited: Duration) {
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr(), "{}", self.waited_line(name, holders, waited));
+    }
+
     fn waited(&self, name: &str, holders: &[Who]) {
         let waited = self.since.elapsed();
         if waited >= SAY_WAIT {
-            let lines = if holders.is_empty() { "one gone by then".into() } else { holders.iter().map(Who::line).collect::<Vec<_>>().join(", ") };
-            eprintln!("devhub: {} waited {:.1} s on {} held by {}", self.line(), waited.as_secs_f64(), name, lines);
+            self.say_waited(name, holders, waited);
         }
     }
 }
@@ -97,9 +111,23 @@ pub struct Held<T> {
     seen: Arc<Mutex<Seen>>,
 }
 
+struct SayWait(Option<(Who, &'static str, Vec<Who>, Duration)>);
+
+impl Drop for SayWait {
+    fn drop(&mut self) {
+        if let Some((who, name, holders, waited)) = self.0.take() {
+            who.say_waited(name, &holders, waited);
+        }
+    }
+}
+
 pub struct HeldGuard<'a, T> {
-    guard: MutexGuard<'a, T>,
     seen: &'a Mutex<Seen>,
+    // Drop order is load-bearing: `HeldGuard::drop` clears `seen.holders` while `guard` still
+    // holds `mu`; then `guard` drops and releases `mu`; only then does `_say` drop to format and
+    // write any long wait to stderr outside both `seen` and `mu`.
+    guard: MutexGuard<'a, T>,
+    _say: SayWait,
 }
 
 impl<T> std::ops::Deref for HeldGuard<'_, T> {
@@ -134,29 +162,45 @@ impl<T> Held<T> {
 
     fn held<'a>(&'a self, guard: MutexGuard<'a, T>, me: Who) -> HeldGuard<'a, T> {
         seen_of(&self.seen).holders.push(me);
-        HeldGuard { guard, seen: &self.seen }
+        HeldGuard { seen: &self.seen, guard, _say: SayWait(None) }
     }
 
     /// Like [`Mutex::lock`]; a wait is seen by [`stalls`] while it lasts and said in the hub log
-    /// when it took a while.
+    /// when it took a while (written after the guard releases the mutex, never inside the
+    /// critical section).
     #[track_caller]
     pub fn lock(&self) -> HeldResult<'_, T> {
-        let me = Who::here();
-        let got = match self.mu.try_lock() {
-            Ok(g) => Ok(g),
-            Err(TryLockError::Poisoned(p)) => Err(p),
+        self.lock_inner(Who::here(), SAY_WAIT)
+    }
+
+    fn lock_inner(&self, mut me: Who, say_after: Duration) -> HeldResult<'_, T> {
+        match self.mu.try_lock() {
+            Ok(g) => Ok(self.held(g, me)),
+            Err(TryLockError::Poisoned(p)) => Err(PoisonError::new(self.held(p.into_inner(), me))),
             Err(TryLockError::WouldBlock) => {
                 let holders = seen_of(&self.seen).wait(&me);
                 me.warn_own(self.name, &holders);
                 let got = self.mu.lock();
-                seen_of(&self.seen).waited(&me);
-                me.waited(self.name, &holders);
-                got
+                let waited = me.since.elapsed();
+                let say = if waited >= say_after {
+                    let mut held = me.clone();
+                    held.since = Instant::now();
+                    let mut seen = seen_of(&self.seen);
+                    seen.waited(&me);
+                    seen.holders.push(held);
+                    SayWait(Some((me, self.name, holders, waited)))
+                } else {
+                    let mut seen = seen_of(&self.seen);
+                    seen.waited(&me);
+                    me.since = Instant::now();
+                    seen.holders.push(me);
+                    SayWait(None)
+                };
+                match got {
+                    Ok(guard) => Ok(HeldGuard { seen: &self.seen, guard, _say: say }),
+                    Err(p) => Err(PoisonError::new(HeldGuard { seen: &self.seen, guard: p.into_inner(), _say: say })),
+                }
             }
-        };
-        match got {
-            Ok(g) => Ok(self.held(g, me)),
-            Err(p) => Err(PoisonError::new(self.held(p.into_inner(), me))),
         }
     }
 
@@ -300,6 +344,8 @@ fn waits() -> Vec<Wait> {
                 for (i, h) in blockers.enumerate() {
                     line.push_str(if i == 0 { " held by " } else { ", " });
                     line.push_str(&h.line());
+                    // (a gate's entry of the same key: asked again, it waits that one out)
+                    if h.key.is_some() && h.key == w.key { line.push_str(": the same key entered again, waiting that entry out"); }
                     // what this holder waits on, if anything
                     if let Some((other, s, waiter)) = view.iter().find_map(|(n, s)| s.waiting.iter().find(|x| x.thread == h.thread).map(|x| (n, s, x))) {
                         line.push_str(&format!(", which waits on {other}"));
@@ -330,6 +376,43 @@ pub fn stall_key(line: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_contended_lock_registers_holder_before_returning_and_defers_wait_log() {
+        let a = Arc::new(Held::new("held-test-defer", 0u32));
+        let g = a.lock().unwrap();
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let b = a.clone();
+        let waiter = std::thread::Builder::new().name("held-defer-waiter".into()).spawn(move || {
+            let mut g2 = b.lock_inner(Who::here(), Duration::ZERO).unwrap();
+            let deferred = g2._say.0.take();
+            let (who, name, holders, waited) = deferred.expect("long wait is deferred to drop, never printed inside lock");
+            assert_eq!(name, "held-test-defer");
+            let line = who.waited_line(name, &holders, waited);
+            assert!(line.contains("(held-defer-waiter) waited ") && line.contains("on held-test-defer held by held.rs:"), "{line}");
+            assert!(b.holder().is_some_and(|h| h.contains("(held-defer-waiter)")), "holder registered atomically before return: {:?}", b.holder());
+            assert!(!stalls().iter().any(|l| l.contains("held-test-defer")), "waiter cleared atomically on acquire");
+            *g2 += 1;
+            locked_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            drop(g2);
+            assert!(b.holder().is_none(), "holder cleared on drop");
+        }).unwrap();
+        let limit = Duration::from_secs(10);
+        let end = Instant::now() + limit;
+        while !stalls().iter().any(|l| l.contains("(held-defer-waiter) waits on held-test-defer")) {
+            assert!(Instant::now() < end, "waiter appears in stalls");
+            std::thread::yield_now();
+        }
+        drop(g);
+        locked_rx.recv_timeout(limit).expect("waiter acquires after holder drops");
+        assert!(a.holder().is_some_and(|h| h.contains("(held-defer-waiter)")), "outside caller sees new holder: {:?}", a.holder());
+        release_tx.send(()).unwrap();
+        waiter.join().unwrap();
+        assert_eq!(*a.lock().unwrap(), 1);
+        assert!(a.holder().is_none() && !stalls().iter().any(|l| l.contains("held-test-defer")));
+    }
 
     #[test]
     fn a_wait_names_its_holder_and_a_lock_asked_again_on_its_thread_is_a_deadlock() {
@@ -407,6 +490,8 @@ mod tests {
         let g = gate.clone();
         let same = std::thread::Builder::new().name("same-key".into()).spawn(move || drop(g.enter("a"))).unwrap();
         wait_line("same-key");
+        let again = stalls().into_iter().find(|l| l.contains("(same-key) waits on held-test-gate")).expect("its wait");
+        assert!(again.contains(" [a] (same-key) waits on held-test-gate held by held.rs:") && again.contains(": the same key entered again, waiting that entry out"), "a wait on an entry of its own key says so, with the key: {again}");
         let (tx, rx) = std::sync::mpsc::channel();
         let g = gate.clone();
         let other = std::thread::spawn(move || {

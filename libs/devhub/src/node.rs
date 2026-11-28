@@ -23,6 +23,52 @@ use std::sync::{Arc, Mutex};
 
 use makepad_devhub_conf::NodeConf;
 
+/// A hub's start, timed step by step ([`start_step`]) on the thread that starts it, and said in
+/// one line once it listens ([`start_said`]): a Windows hub's restart took 91 s, 65 of them
+/// before it listened, and its log could not say where they went (11-26). Only a thread that
+/// begins a hub's start ([`start_timing`]) records: a test's `Exec` of its own records nothing.
+struct StartTimes {
+    began: std::time::Instant,
+    /// how long its process ran before its hub's start began, where a process's start is a time
+    /// (macOS, Windows: a new process each start; Linux's is in ticks since boot, and a self-update
+    /// starts its next image in the same process)
+    before: Option<std::time::Duration>,
+    steps: Vec<(&'static str, std::time::Duration)>,
+}
+
+thread_local! {
+    static START: std::cell::RefCell<Option<StartTimes>> = const { std::cell::RefCell::new(None) };
+}
+
+/// A hub's start begins on this thread: its steps are timed from here ([`start_step`]).
+pub fn start_timing() {
+    #[cfg(not(target_os = "linux"))]
+    let before = makepad_remote::group::start_time(std::process::id())
+        .map(|us| std::time::Duration::from_millis(proto::wall_ms().saturating_sub(us / 1000)));
+    #[cfg(target_os = "linux")]
+    let before = None;
+    START.with(|s| *s.borrow_mut() = Some(StartTimes { began: std::time::Instant::now(), before, steps: Vec::new() }));
+}
+
+/// Runs `f`, the step `what` of a hub's start: timed when this thread starts a hub.
+pub fn start_step<T>(what: &'static str, f: impl FnOnce() -> T) -> T {
+    let began = std::time::Instant::now();
+    let r = f();
+    START.with(|s| if let Some(t) = s.borrow_mut().as_mut() { t.steps.push((what, began.elapsed())); });
+    r
+}
+
+/// The start's line, once: what it took, each step's time in order, and the rest (what no step
+/// timed). None on a thread that started no hub.
+pub fn start_said() -> Option<String> {
+    let t = START.with(|s| s.borrow_mut().take())?;
+    let total = t.began.elapsed();
+    let rest = total.saturating_sub(t.steps.iter().map(|(_, d)| *d).sum());
+    let before = t.before.map(|d| format!(", {:.1} s after its process began", d.as_secs_f64())).unwrap_or_default();
+    let steps: Vec<String> = t.steps.iter().map(|(what, d)| format!("{what} {:.1} s", d.as_secs_f64())).collect();
+    Some(format!("devhub: its start took {:.1} s{before}: {}; the rest {:.1} s", total.as_secs_f64(), steps.join(", "), rest.as_secs_f64()))
+}
+
 /// A hub this node knows: name, address, its fleet identity (the credential name its signed
 /// announcement checked out under), when it was last heard.
 #[derive(Clone, Debug)]
@@ -182,11 +228,36 @@ pub fn master_endpoint(name: &str, launch: Vec<String>, local: &Arc<Local>, peer
     );
     let l = local.clone();
     ep.register("jitlog", 1, lines::service("jitlog", Arc::new(move |line, out| jit_log(&l, line, out))));
+    let l = local.clone();
+    register_procview(&ep, move |app| find_jit(&l.jits(), app).map(|j| j.pid));
     // the Desk Link endpoint of a JIT host that embeds one (`crate::embed`)
     ep.register("desk", 1, lines::service("desk", Arc::new(|line, out| out.push(crate::embed::desk_service(line)))));
     // this machine's USB serial devices: listed always, offered to the fleet as serial.conf says
     crate::serial::Node::of_this_machine(name).register(&ep);
     (ep, sink)
+}
+
+/// The named pid, or the newest JIT of that app.
+fn find_jit<'a>(jits: &'a [crate::local::Jit], who: &str) -> Option<&'a crate::local::Jit> {
+    jits.iter().find(|j| j.pid.to_string() == who).or_else(|| jits.iter().filter(|j| j.app == who).max_by_key(|j| j.started_ms))
+}
+
+/// `procview <pid|app>` on a machine's control endpoint. A numeric pid need not be a JIT.
+pub(crate) fn register_procview(ep: &Endpoint, named: impl Fn(&str) -> Option<u32> + Send + Sync + 'static) {
+    ep.register("procview", 1, lines::service("procview", Arc::new(move |line, out| {
+        let mut words = line.split_whitespace();
+        let (Some("procview"), Some(who), None) = (words.next(), words.next(), words.next()) else {
+            return out.push(r#"{"err":"procview <pid|app>"}"#.into());
+        };
+        let Some(pid) = who.parse::<u32>().ok().or_else(|| named(who)) else {
+            return out.push(format!("{{\"err\":{}}}", json_str(&format!("no app `{who}` here"))));
+        };
+        // Unix kill(pid, 0) treats zero and negative signed pids as process groups.
+        if pid == 0 || (cfg!(unix) && pid > i32::MAX as u32) || !crate::procinfo::exists(pid) {
+            return out.push(format!("{{\"err\":\"pid {pid} is not a live process\"}}"));
+        }
+        out.extend(crate::os::processes_view(&[pid]).lines().map(str::to_string));
+    })));
 }
 
 /// `jitlog <pid|app> [n]`: the last `n` lines of a JIT's log: its launch log when devhub launched
@@ -198,7 +269,7 @@ fn jit_log(local: &Local, line: &str, out: &mut Vec<String>) {
     let who = w.next().unwrap_or("");
     let n = w.next().and_then(|x| x.parse::<usize>().ok()).unwrap_or(40).min(2000);
     let jits = local.jits();
-    let jit = jits.iter().find(|j| j.pid.to_string() == who).or_else(|| jits.iter().filter(|j| j.app == who).max_by_key(|j| j.started_ms));
+    let jit = find_jit(&jits, who);
     let pid = jit.map(|j| j.pid).or_else(|| who.parse().ok());
     let path = pid.and_then(crate::sync::launch_log)
         .or_else(|| pid.and_then(|p| wm_client_log(&std::env::temp_dir(), p)))
@@ -470,15 +541,24 @@ pub fn listen_control(ep: &Endpoint) -> Result<PathBuf, String> {
 impl Node {
     /// Starts the node: local JITs, the control socket, and the LAN listener when `trust` allows it.
     pub fn start(conf: NodeConf, trust: Option<Arc<dyn Trust>>, log: crate::trust::Log) -> Result<Node, String> {
+        // (its caller's own steps, its conf and trust, are timed when it began the start)
+        if START.with(|s| s.borrow().is_none()) { start_timing(); }
+        let node = Self::start_steps(conf, trust, &log);
+        if let Some(line) = start_said() { log(&line); }
+        node
+    }
+
+    fn start_steps(conf: NodeConf, trust: Option<Arc<dyn Trust>>, log: &crate::trust::Log) -> Result<Node, String> {
+        let log = log.clone();
         // now, the commit it was built at: a lease this hub takes back moves the tree to its pin
-        let _ = crate::lease::caps::hub_rev();
+        let _ = start_step("its commit", crate::lease::caps::hub_rev);
         // what holds its memory, by call site (`devhub heap <node>`)
-        crate::heap::sample();
+        start_step("its heap sample", crate::heap::sample);
         crate::os::raise_fd_limit();
         let peers = Arc::new(Mutex::new(Peers::default()));
         let sink_slot: Arc<Mutex<Option<makepad_remote::watch::WatchSink>>> = Arc::new(Mutex::new(None));
         let s = sink_slot.clone();
-        let local = Local::start(
+        let local = start_step("its JITs' watch", || Local::start(
             &conf.name,
             conf.hitch_ms,
             conf.embedded,
@@ -487,13 +567,14 @@ impl Node {
                     sink.emit(&r.to_json());
                 }
             }),
-        );
-        let (master_ep, sink) = master_endpoint(&conf.name, conf.launch.clone(), &local, &peers);
+        ));
+        let (master_ep, sink) = start_step("its master endpoint", || master_endpoint(&conf.name, conf.launch.clone(), &local, &peers));
         *sink_slot.lock().unwrap() = Some(sink.clone());
         local.ready();
         let s2 = sink.clone();
         let sync_ctx = Arc::new(crate::sync::NodeCtx { machine: conf.name.clone(), publish: Arc::new(move |r| { s2.emit(&r.to_json()); }) });
-        crate::sync::register_master(&master_ep, &sync_ctx);
+        start_step("its sync", || crate::sync::register_master(&master_ep, &sync_ctx));
+        // (its steps are its own: `Exec::new`'s)
         crate::lease::exec::register(&master_ep, &sync_ctx);
         let (machine, s3) = (conf.name.clone(), sink.clone());
         master_ep.register(
@@ -501,12 +582,20 @@ impl Node {
             1,
             lines::service("jitcache", Arc::new(move |line, out| crate::jitcache::service(&machine, line, out, &|r| { s3.emit(&r.to_json()); }))),
         );
-        listen_control(&master_ep)?;
+        start_step("its control socket", || listen_control(&master_ep))?;
         let node = Node { conf, local, master_ep, peers, lan: Arc::new(Mutex::new(Err("local only".into()))) };
         let Some(trust) = trust else {
             *node.lan.lock().unwrap() = Err("no fleet trust on this machine: local only".into());
             return Ok(node);
         };
+        // a box the fleet manages is a developer computer: its apps open their remote endpoint as
+        // an ordinary launch (makepad_remote::ask's per-user setting), which devhub's sessions,
+        // the WM and agents reach them by. Asserted at each start: a box holds no state of its own.
+        match start_step("its apps' remote setting", makepad_remote::ask::turn_on) {
+            Ok(true) => log("devhub: this box's apps open their remote endpoint now (the per-user setting)"),
+            Ok(false) => {}
+            Err(e) => log(&format!("devhub: this box's apps' remote endpoint could not be turned on: {e}")),
+        }
         let peer_ep = peer_endpoint(&node.conf.name, &node.peers);
         crate::sync::register_peer(&peer_ep, &sync_ctx);
         let (mep, pep) = (node.master_ep.clone(), peer_ep);
@@ -545,7 +634,7 @@ impl Node {
         // once in its log and ran on, and the box stayed out of the fleet two days with nothing
         // reporting it (11-14).
         let lan_ip = || makepad_devhub_conf::lan_ipv4().map(IpAddr::V4);
-        if listener.tick(&lan_ip) {
+        if start_step("listening", || listener.tick(&lan_ip)) {
             if let Some(why) = refused(&node.lan) {
                 return Err(format!("{why}: the master cannot dial this node, so its hub ends"));
             }
@@ -570,6 +659,32 @@ impl Node {
 
 #[cfg(test)]
 mod tests {
+    /// A hub's start says in one line what it took and each step's time, in order, with what no
+    /// step timed: a Windows hub's 65 s before it listened could not be placed (11-26). The line
+    /// is said once, and a thread that began no hub's start (a test's own `Exec`) records nothing.
+    #[test]
+    fn a_hubs_start_says_where_its_time_went() {
+        use super::{start_said, start_step, start_timing};
+        assert_eq!(start_step("a step outside a start", || 7), 7, "a step runs alike");
+        assert_eq!(start_said(), None, "no start began on this thread");
+        start_timing();
+        start_step("its conf", || ());
+        start_step("its ledger", || std::thread::sleep(std::time::Duration::from_millis(120)));
+        let line = start_said().expect("its start's line");
+        let (head, steps) = line.split_once(": ").and_then(|(_, rest)| rest.split_once(": ")).expect(&line);
+        assert!(head.starts_with("its start took ") && line.starts_with("devhub: "), "{line}");
+        // (a process start is a time on macOS and Windows: how long it ran before is said there)
+        assert_eq!(head.contains(" after its process began"), cfg!(not(target_os = "linux")), "{line}");
+        let (steps, rest) = steps.split_once("; the rest ").expect(&line);
+        let named: Vec<&str> = steps.split(", ").map(|s| s.rsplit_once(' ').and_then(|(s, _)| s.rsplit_once(' ')).map_or(s, |(n, _)| n)).collect();
+        assert_eq!(named, ["its conf", "its ledger"], "each step in order: {line}");
+        assert!(!steps.contains("its ledger 0.0 s"), "a step's time is its own: {line}");
+        assert!(rest.ends_with(" s"), "{line}");
+        assert_eq!(start_said(), None, "the line is said once");
+        let other = std::thread::spawn(|| { start_step("another thread's step", || ()); start_said() }).join().unwrap();
+        assert_eq!(other, None, "a thread that began no start records nothing");
+    }
+
     /// A hub started before its machine has its LAN address listens once the address appears: a
     /// box's hub came up 4 s before DHCP gave the box its address and listened nowhere for 30 min
     /// (11-07). Each look before says why it waits, an address its conf names that is not on the

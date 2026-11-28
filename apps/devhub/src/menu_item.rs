@@ -13,7 +13,10 @@
 //! The new one shows the item once the old one let go of it (the item's lock): never two items, and
 //! the panel never leaves the screen.
 
-use makepad_strict_json::{obj, s, Value};
+use makepad_strict_json::Value;
+// (an answer is encoded where a helper answers its master: unix, and the tests)
+#[cfg(any(unix, test))]
+use makepad_strict_json::{obj, s};
 use makepad_widgets::*;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};

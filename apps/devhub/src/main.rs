@@ -429,12 +429,15 @@ fn start_master() -> Result<MasterCore, String> {
 }
 
 fn start_node(conf_path: PathBuf) -> Result<Option<NodeCore>, String> {
-    let conf = NodeConf::load(&conf_path);
+    use makepad_devhub::node::start_step;
+    // (a node's start says where its time went, and how long the app ran before it)
+    makepad_devhub::node::start_timing();
+    let conf = start_step("its conf", || NodeConf::load(&conf_path));
     if !conf.enabled {
         log_line("devhub: node is off in its conf");
         return Ok(None);
     }
-    let t = trust(&conf.name);
+    let t = start_step("its trust", || trust(&conf.name));
     let node = Node::start(conf, t, Arc::new(|l: &str| log_line(l)))?;
     log_line(&format!(
         "devhub: node {} up; control {}; {}",

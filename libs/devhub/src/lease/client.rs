@@ -64,7 +64,8 @@ pub const HELP: &str = "  lease <kind> [--node N [--series S|--pin-why R]|--need
         [--untimed] [--input NAME=<archive> ..] [--for <node>] [--exit-to <file>] [--run-since MS] [-- cmd...]
                                           hold a lease (kinds: build test screen long timed gpu inspect gate ci;
                                           ci: its own tree and target, beside ordinary work, never timed or user boxes;
-                                          --needs gui=1: a test that opens windows, only nodes that take screen leases;
+                                          --needs gui=1: a run that opens windows (a test, a timed GUI measurement),
+                                          on its box's WM display, only nodes that take screen leases;
                                           gpu=1: a box with a GPU, gpu=<name>: one with that in its name;
                                           gpu on a Mac is a GPU timing, which drains its box: pictures and counters
                                           that read no timing take --untimed, a test sharing its box);
@@ -156,6 +157,9 @@ pub const HELP: &str = "  lease <kind> [--node N [--series S|--pin-why R]|--need
                                           a changed file in a package of its graph that is none of its sources starts
                                           them again, so does one in no package the tests opened, probed or listed the
                                           folder of (a data file); any other in no package keeps the last verdict and says so.
+                                          With nothing changed since its last round, a call answers that round's verdict
+                                          and says it is cached (nothing ran); --fresh runs the tests again, in a warm
+                                          restart of the session's run on its box (a flake hunt's rerun).
                                           Once cargo confirms a compile error is the lane's, the session stays held under its lease
                                           and yields its RAM to queued work. `live list` and `leases` show `held: <first error>`,
                                           and the next `test --live` after the fix reattaches and answers with that run's verdict.
@@ -226,7 +230,9 @@ pub const HELP: &str = "  lease <kind> [--node N [--series S|--pin-why R]|--need
   nodes                                   capabilities, dev switch and leases per node
   node <n> dev on|off                     the node's dev switch (the user's decision)
   node <n> probe                          its toolchain probe now (a compile and a link): a box a toolchain move left
-                                          out of rotation comes back at once (it probes again as a lease there ends too)
+                                          out of rotation comes back at once (it probes again as a lease there ends too);
+                                          and its audio output where it measures it (a silent playback): audio=1 work
+                                          goes there again at once once its output runs
   node <n> [role pool|hot|suite|bench|user-wm|device] [set slots.screen=0 disk_floor_gb=40 ...]
                                           the node's role and budgets (its lease.conf, kept on the node);
                                           `key=` unsets a key, so the box's default applies
@@ -276,7 +282,7 @@ fn lost_how(how: &str) -> bool {
 /// to decide it read as `LEASE LOST ... the code is not to blame: run it again`, and its agent
 /// hunted a hub and master restart that had not touched it (L1382556, 11-18).
 fn verdict_how(how: &str) -> bool {
-    matches!(how, "hung" | "disk" | "memory" | "panicked")
+    matches!(how, "hung" | "disk" | "memory" | "panicked" | "stopped")
 }
 
 /// The master's answer to a release of a lease that has ended: what a release whose answer a
@@ -344,7 +350,9 @@ fn node_restarting(e: &str) -> bool {
 /// id. A live master's answer stands, except while its node links come back (`SETTLE_FOR`) or the
 /// lease's node hub restarts for its self-update ([`node_restarting`], up to `REATTACH_FOR`: the
 /// new hub takes the lease back from its ledger); "no lease" and the lease's end ([`Beat::check`])
-/// always stand. Said once each way on stderr.
+/// always stand. A node off the network ([`super::master::host_gone`]) counts no `REATTACH_FOR`:
+/// the master's outage rule ([`super::sched::Sched::caps_missed`]) keeps the lease or ends it, and
+/// each node call's `f` checks its end first. Said once each way on stderr.
 fn through_restarts<T>(id: &str, c: &mut Client, mut f: impl FnMut(&Client) -> Result<T, String>, up: &dyn Fn() -> Result<Client, String>) -> Result<T, String> {
     let mut down: Option<Instant> = None;
     let mut back: Option<Instant> = None;
@@ -384,7 +392,7 @@ fn through_restarts<T>(id: &str, c: &mut Client, mut f: impl FnMut(&Client) -> R
                     }
                     (None, _) if node_restarting(&e) => {
                         if super::master::host_gone(&e) {
-                            eprintln!("{id}: its node is off the network ({e}); the master ends its leases as lost after {} s unless it hears no box at all (its own network), re-attaching if it is back first", super::sched::HOST_GONE_MS / 1000);
+                            eprintln!("{id}: its node is off the network ({e}); the master keeps the lease through the outage (up to twice the box's longest recorded outage, or {} s with none on record; a timed lease ends at once) and its run goes on there; re-attaching when it is back", super::sched::HOST_GONE_MS / 1000);
                         } else {
                             eprintln!("{id}: its node does not answer ({e}); its hub restarts? re-attaching when it is back");
                         }
@@ -393,7 +401,7 @@ fn through_restarts<T>(id: &str, c: &mut Client, mut f: impl FnMut(&Client) -> R
                         back = Some(Instant::now());
                     }
                     (Some(t), _) if node_restarting(&e) => {
-                        if t.elapsed() > REATTACH_FOR {
+                        if t.elapsed() > REATTACH_FOR && !super::master::host_gone(&e) {
                             return Err(format!("{e} (the node stayed unreachable for {} s)", REATTACH_FOR.as_secs()));
                         }
                         back = Some(Instant::now());
@@ -615,13 +623,15 @@ struct Opts {
     start_within: Option<Duration>,
     /// `test --live --env K=V`: the live session's environment (`live start --env`)
     env: Vec<(String, String)>,
+    /// `test --live --fresh`: the session runs its tests again with nothing changed (a flake
+    /// hunt's rerun), where its last round's verdict would answer
+    fresh: bool,
 }
 
 /// Flags handled by the client instead of fields in the lease request.
 #[cfg(test)]
 const LOCAL_FLAGS: &[(&str, &str)] = &[
     ("--watch-pid", "The holder watches the process and ends its lease when it exits."),
-    ("--keep", "The client copies the command's kept output after the run, outside every checkout."),
     ("--exit-to", "The client writes its exit status for its watcher."),
     ("--tree", "The client selects how to ship the run's sources."),
     ("--native", "The client checks the reason for a native build."),
@@ -644,6 +654,10 @@ const FLAG_FIELDS: &[(&[&str], &str)] = &[
     (&["--est-min", "3"], "est_min"),
     (&["--rounds", "3"], "rounds"),
     (&["--jit", "x"], "loader"),
+    #[cfg(windows)]
+    (&["--keep", r"C:\devhub-flag-keep"], "keep_dir"),
+    #[cfg(not(windows))]
+    (&["--keep", "/devhub-flag-keep"], "keep_dir"),
     (&["--lane", "lane-b"], "lane"),
     (&["--needs", "os=linux"], "needs"),
     (&["--node", "box-a"], "node"),
@@ -727,8 +741,15 @@ fn parse(kind: &str, lane: Option<&str>, args: &[&str]) -> Result<Opts, String> 
             return Err(why);
         }
     }
-    if let Some(why) = keep.as_deref().and_then(|k| kept_into_checkout(k, &cwd(), &req.lane)) {
-        return Err(format!("--keep: {why}"));
+    if let Some(k) = &keep {
+        let cwd = cwd();
+        if k.as_os_str().is_empty() { return Err("--keep needs a directory".into()); }
+        refuse_symlink(&cwd.join(k))?;
+        if let Some(why) = kept_into_checkout(k, &cwd, &req.lane) { return Err(format!("--keep: {why}")); }
+        let abs = abs_keep_path(k, &cwd);
+        let path = abs.to_str().filter(|p| !p.chars().any(char::is_control)).ok_or("--keep needs a UTF-8 path without control characters")?;
+        req.keep_dir = Some(path.to_string());
+        keep = Some(abs);
     }
     // the lane's repo: revisions are looked up and recovered work lands there
     if req.repo_dir.is_none() {
@@ -742,7 +763,7 @@ fn parse(kind: &str, lane: Option<&str>, args: &[&str]) -> Result<Opts, String> 
     let commits_only = req.rev.is_some();
     if let Some(spec) = &req.rev {
         let dir = req.repo_dir.as_deref().ok_or("--rev needs a git repo (--repo-dir)")?;
-        req.rev = Some(pin_lane_rev(Path::new(dir), spec, &req.lane, Some(&master_paired))?);
+        req.rev = Some(pin_lane_rev(Path::new(dir), spec, &req.lane, Some(&master_paired), Some(&master_beside))?);
     }
     if req.class.is_empty() && !cmd.is_empty() { req.class = super::run_class(&req.lane, kind, &cmd); }
     req.exec_profile = super::argv::ExecProfile::of(&cmd);
@@ -759,7 +780,7 @@ fn parse(kind: &str, lane: Option<&str>, args: &[&str]) -> Result<Opts, String> 
     if req.untimed && kind == Kind::Timed {
         return Err("--untimed with a timed lease: a timed lease times; GPU work that reads no timing is `gpu --untimed`".into());
     }
-    Ok(Opts { req, watch, keep, cmd, tree, native, routed: String::new(), patches: Vec::new(), commits_only, inputs, for_node, exit_to, start_within: None, env: Vec::new() })
+    Ok(Opts { req, watch, keep, cmd, tree, native, routed: String::new(), patches: Vec::new(), commits_only, inputs, for_node, exit_to, start_within: None, env: Vec::new(), fresh: false })
 }
 
 /// Why a run's command would read its script from stdin, which a lease's run never gets (it runs
@@ -815,6 +836,10 @@ struct Held {
     /// why its run has no verdict ([`LOST_EXIT`]): the lease was lost under it, or the toolchain
     /// changed under it; [`finish`] says it, and a test's verdict line carries it
     lost: std::sync::Mutex<Option<String>>,
+    /// its run's own exit, once [`finish`] has it (not a cancel, a lost lease or a hand-over)
+    exit: std::sync::Mutex<Option<i32>>,
+    /// why its run's command never started, as its wrapper said ([`crate::os::never_started_said`])
+    never_started: std::sync::Mutex<Option<String>>,
 }
 
 /// The holder's beat: a thread of its own beats the master every [`BEAT`] while the lease is
@@ -830,6 +855,14 @@ struct Beat {
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
+fn beat_word(v: &Value, told: &mut String) -> Option<(String, bool)> {
+    let word = v.get("idle").and_then(Value::as_str).unwrap_or("");
+    if word == told { return None; }
+    told.clear();
+    told.push_str(word);
+    (!word.is_empty()).then(|| (word.to_string(), v.get("hung").and_then(Value::as_bool) == Some(true)))
+}
+
 impl Beat {
     fn start(id: &str) -> Beat {
         use std::sync::atomic::Ordering;
@@ -840,7 +873,7 @@ impl Beat {
         let thread = std::thread::Builder::new().name("devhub-beat".into()).spawn(move || {
             let mut client: Option<Client> = None;
             let mut lost = false;
-            let mut told = false;
+            let mut told = String::new();
             loop {
                 let t = Instant::now();
                 while t.elapsed() < BEAT {
@@ -859,10 +892,9 @@ impl Beat {
                     Ok(v) => {
                         if std::mem::take(&mut lost) { eprintln!("{id}: the master is back; still held"); }
                         // the lease runs on: only its owner can tell a wait from a hang
-                        if !told && v.get("idle").is_some() {
-                            told = true;
-                            eprintln!("{}", s(&v, "idle"));
-                            if v.get("hung").and_then(Value::as_bool) == Some(true) { *verdict.lock().unwrap() = Some(s(&v, "idle")); }
+                        if let Some((word, hung)) = beat_word(&v, &mut told) {
+                            eprintln!("{word}");
+                            if hung { *verdict.lock().unwrap() = Some(word); }
                         }
                     }
                     // a restarting master keeps its granted leases (leases.live): only "no lease" ends it
@@ -894,6 +926,7 @@ impl Beat {
     /// Err once the lease ended: what a node call loop returns then.
     fn check(&self, id: &str) -> Result<(), String> {
         match self.ended() {
+            Some((how, why)) if !why.is_empty() && verdict_how(&how) => Err(format!("{id} ended ({how}): {why}")),
             Some((how, _)) => Err(format!("{id} ended ({how})")),
             None => Ok(()),
         }
@@ -954,8 +987,8 @@ fn acquire_within(c: &Client, req: &Req, within: Option<Duration>) -> Result<Hel
         let note = s(&v, "class_note");
         let note = if class_notified || note.is_empty() { String::new() } else { format!("; {note}") };
         let line = match state.as_str() {
-            // not ranked yet (the master just took it back after a restart): no "0th in queue ()"
-            "queued" if n(&v, "pos") < 1.0 => format!("{id} {}: queued, not ranked yet", req.kind.as_str()),
+            // not ranked yet: no "0th in queue ()"
+            "queued" if n(&v, "pos") < 1.0 => format!("{id} {}: {}", req.kind.as_str(), unranked(&v)),
             "queued" => format!("{id} {}: {} in queue ({}){}", req.kind.as_str(), ordinal(n(&v, "pos") as usize), s(&v, "reason"), eta_of(&v)),
             "starting" => format!("{id} {}@{}: granted, setting up", req.kind.as_str(), s(&v, "node")),
             "granted" => {
@@ -980,7 +1013,7 @@ fn acquire_within(c: &Client, req: &Req, within: Option<Duration>) -> Result<Hel
                 eprintln!("{}", budget_said(&id, req.kind, &env));
                 if !s(&v, "reason").is_empty() { eprintln!("{id}: {}", s(&v, "reason")); }
                 let beat = Beat::start(&id);
-                return Ok(Held { id, node: s(&v, "node"), work: start.map(|st| s(st, "work")).unwrap_or_default(), env, beat, adopt: None, handed: Default::default(), lost: Default::default() });
+                return Ok(Held { id, node: s(&v, "node"), work: start.map(|st| s(st, "work")).unwrap_or_default(), env, beat, adopt: None, handed: Default::default(), lost: Default::default(), exit: Default::default(), never_started: Default::default() });
             }
             _ => {
                 let how = s(&v, "how");
@@ -1087,18 +1120,28 @@ fn run_there_into(c: &Client, held: &Held, rel: &str, cmd: &[String], inputs: &[
 /// Asks for the run while admission, resolution or a hub restart delays it (the lease's own
 /// thread beats meanwhile: [`Beat`]).
 fn start_there(c: &mut Client, held: &Held, service: &str, line: &str) -> Result<Value, String> {
-    let mut last = String::new();
-    loop {
-        let v = through_restarts(&held.id, c, |c| {
+    let ask = || {
+        through_restarts(&held.id, c, |c| {
             held.beat.check(&held.id)?;
             node_one(c, &held.node, service, line)
-        }, &master)?;
+        }, &master)
+    };
+    poll_start(&held.id, &held.node, ask, std::thread::sleep)
+}
+
+fn poll_start(id: &str, node: &str, mut ask: impl FnMut() -> Result<Value, String>, mut sleep: impl FnMut(Duration)) -> Result<Value, String> {
+    let mut last = String::new();
+    let mut wait = Duration::ZERO;
+    loop {
+        let v = ask()?;
         let Some(pending) = v.get("pending").and_then(Value::as_str) else { return Ok(v) };
         if pending != last {
-            eprintln!("{} {}: {pending}", held.id, held.node);
+            eprintln!("{id} {node}: {pending}");
             last = pending.to_string();
+            wait = Duration::ZERO;
         }
-        std::thread::sleep(Duration::from_secs(1));
+        wait = super::pending_poll_delay(wait);
+        sleep(wait);
     }
 }
 
@@ -1124,6 +1167,12 @@ fn follow_there(c: &Client, held: &Held, run: u64, out: &mut dyn Write) -> Resul
         let data = b64_decode(&s(&v, "data")).ok_or("lease-log: bad data")?;
         let _ = out.write_all(&data);
         let _ = out.flush();
+        // its first output says whether the command started at all
+        if off < 4096 && !data.is_empty() {
+            if let Some(why) = crate::os::never_started_said(&String::from_utf8_lossy(&data)) {
+                held.never_started.lock().unwrap().get_or_insert(why);
+            }
+        }
         if !data.is_empty() && data.len() < super::exec::LOG_CHUNK {
             std::thread::sleep(FOLLOW_PACE);
         }
@@ -1214,8 +1263,8 @@ fn lease(args: &[&str]) -> i32 {
             return 2;
         }
     };
-    let code = lease_with(&mut o);
-    write_exit(o.exit_to.as_deref(), code)
+    let (code, lease) = lease_with(&mut o);
+    write_exit(o.exit_to.as_deref(), code, lease.as_deref())
 }
 
 /// What a watcher that is not this client's parent knows of its end: `--exit-to`'s file, `<pid>
@@ -1224,10 +1273,11 @@ fn lease(args: &[&str]) -> i32 {
 /// cannot reap it, and a run that had ended before it adopted it is no process at all. Both read
 /// as "no exit status" and the run had no verdict (the tests bucket at 16:51Z, 11-08). One that
 /// ends by a signal writes nothing: its end is not known.
-fn write_exit(to: Option<&Path>, code: i32) -> i32 {
+fn write_exit(to: Option<&Path>, code: i32, lease: Option<&str>) -> i32 {
     if let Some(path) = to {
         let temp = path.with_extension("exit.tmp");
-        if let Err(e) = std::fs::write(&temp, format!("{} {code}\n", std::process::id())).and_then(|()| std::fs::rename(&temp, path)) {
+        let suffix = lease.filter(|id| !id.is_empty()).map_or(String::new(), |id| format!(" {id}"));
+        if let Err(e) = std::fs::write(&temp, format!("{} {code}{suffix}\n", std::process::id())).and_then(|()| std::fs::rename(&temp, path)) {
             eprintln!("makepad devhub: --exit-to {}: {e}", path.display());
         }
     }
@@ -1238,24 +1288,32 @@ fn write_exit(to: Option<&Path>, code: i32) -> i32 {
 /// client's. Read by the bucket's adopted runs (the checkout's).
 #[cfg(feature = "checkout")]
 pub(crate) fn read_exit(path: &Path, pid: u32) -> Option<i32> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let (who, code) = text.trim().split_once(' ')?;
-    (who.parse::<u32>().ok()? == pid).then(|| code.parse().ok()).flatten()
+    read_exit_lease(path, pid).map(|(code, _)| code)
 }
 
-fn lease_with(o: &mut Opts) -> i32 {
+#[cfg(feature = "checkout")]
+pub(crate) fn read_exit_lease(path: &Path, pid: u32) -> Option<(i32, Option<String>)> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut fields = text.split_whitespace();
+    if fields.next()?.parse::<u32>().ok()? != pid { return None; }
+    let code = fields.next()?.parse().ok()?;
+    let lease = fields.next().filter(|id| id.strip_prefix('L').is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())));
+    Some((code, lease.map(str::to_owned)))
+}
+
+fn lease_with(o: &mut Opts) -> (i32, Option<String>) {
     let c = match master() {
         Ok(c) => c,
-        Err(e) => return fail(e),
+        Err(e) => return (fail(e), None),
     };
     if let Err(e) = for_cpu(&c, o) {
         eprintln!("makepad devhub lease: {e}");
-        return 2;
+        return (2, None);
     }
-    if let Err(code) = native_gate(&c, o) { return code; }
+    if let Err(code) = native_gate(&c, o) { return (code, None); }
     let mut held = match acquire(&c, &o.req) {
         Ok(h) => h,
-        Err(code) => return code,
+        Err(code) => return (code, None),
     };
     held.adopt = adopt_body(o, ".");
     // a lease at a rev: the tree it holds, every repository's branch and commit
@@ -1270,13 +1328,16 @@ fn lease_with(o: &mut Opts) -> i32 {
         }
         let r = run_there(&c, &held, ".", &o.cmd, &o.inputs);
         // what the run put in $DEVHUB_KEEP, before the lease's end takes its tmp
-        if let (Ok(_), Some(dst)) = (&r, &o.keep) {
-            eprintln!("{}", keep_said(&held.id, dst, &kept(&c, &held.node, &o.req.lane, &held.id, dst)));
-        }
-        let code = finish(&c, &held, r);
+        let holder_kept = r.is_ok() && o.keep.as_deref().is_some_and(|dst| {
+            let got = kept(&c, &held.node, &o.req.lane, &held.id, dst);
+            eprintln!("{}", keep_said(&held.id, dst, &got));
+            got.is_ok()
+        });
+        let code = finish(&c, &held, r, o.keep.as_deref(), holder_kept);
+        if let Some(line) = run_failed_said(&held.id, &held.node, *held.exit.lock().unwrap(), held.never_started.lock().unwrap().as_deref()) { eprintln!("{line}"); }
         // the verdict goes last: a `| tail -1` reader sees it
         if let Some(said) = held.handed.lock().unwrap().as_deref() { println!("{said}"); }
-        return code;
+        return (code, Some(held.id));
     }
     println!("{} granted {}@{} work={}", held.id, o.req.kind.as_str(), held.node, held.work);
     println!("export DEVHUB_LEASE={}", held.id);
@@ -1289,56 +1350,85 @@ fn lease_with(o: &mut Opts) -> i32 {
         std::thread::sleep(Duration::from_millis(500));
         if o.watch.is_some_and(|p| !pid_alive(p)) {
             release(&c, &held.id, None);
+            if o.keep.is_some() { wait_keep_said(&c, &held.id); }
             eprintln!("{}: watched pid ended; released", held.id);
-            return 0;
+            return (0, Some(held.id));
         }
-        match held.beat.ended() {
+        let ended = held.beat.ended();
+        if ended.is_some() && o.keep.is_some() { wait_keep_said(&c, &held.id); }
+        match ended {
             Some((how, _)) if how == "cancelled" => {
                 eprintln!("{}", cancelled_notice(&held.id, CancelledAt::Ran(&held.node)));
-                return CANCELLED_EXIT;
+                return (CANCELLED_EXIT, Some(held.id));
             }
-            Some((how, why)) if how == "lost" && why.starts_with("no lease") => return fail(format!("beat {}: {why}", held.id)),
+            Some((how, why)) if how == "lost" && why.starts_with("no lease") => return (fail(format!("beat {}: {why}", held.id)), Some(held.id)),
             Some((how, why)) => {
                 eprintln!("{}: ended ({how}){}", held.id, if why.is_empty() { String::new() } else { format!(": {why}") });
-                return 0;
+                return (0, Some(held.id));
             }
             None => {}
         }
     }
 }
 
-fn finish(c: &Client, held: &Held, r: Result<i32, String>) -> i32 {
+fn wait_keep_said(c: &Client, id: &str) {
+    if let Ok(v) = one(c, "beat", &format!("{id} wait-keep")) {
+        if let Some(line) = v.get("keep").and_then(Value::as_str).filter(|s| !s.is_empty()) { eprintln!("{line}"); }
+    }
+}
+
+fn finish_ended(id: &str, node: &str, end: Option<&(String, String)>) -> Option<(i32, String)> {
+    let (how, why) = end?;
+    if how == "cancelled" {
+        return Some((CANCELLED_EXIT, cancelled_notice(id, CancelledAt::Ran(node))));
+    }
+    if verdict_how(how) {
+        let tail = if why.is_empty() { String::new() } else { format!(": {why}") };
+        return Some((1, format!("makepad devhub: {id} on {node} ended ({how}){tail}")));
+    }
+    None
+}
+
+fn finish(c: &Client, held: &Held, r: Result<i32, String>, keep: Option<&Path>, holder_kept: bool) -> i32 {
     // its run went on as a job: the lease is the job's, not this client's to release
     if held.handed.lock().unwrap().is_some() { return HUNG_EXIT; }
-    let end = one(c, "beat", &held.id).ok().filter(|v| s(v, "state") == "ended");
-    let ended = end.as_ref().map(|v| s(v, "how"));
-    // the user cancelled it: its processes were stopped, so the run's own result is just the fallout
-    if ended.as_deref() == Some("cancelled") {
-        eprintln!("{}", cancelled_notice(&held.id, CancelledAt::Ran(&held.node)));
-        return CANCELLED_EXIT;
+    let end = one(c, "beat", &held.id).ok().filter(|v| s(v, "state") == "ended")
+        .map(|v| (s(&v, "how"), s(&v, "reason")))
+        .or_else(|| held.beat.ended());
+    if let Some((code, line)) = finish_ended(&held.id, &held.node, end.as_ref()) {
+        if keep.is_some() && !holder_kept { wait_keep_said(c, &held.id); }
+        eprintln!("{line}");
+        return code;
     }
-    // a verdict on the command, not a lost box: run again, it hangs again
-    if let Some(how) = ended.as_deref().filter(|h| verdict_how(h)) {
-        return fail(format!("{} on {} ended ({how}): {}", held.id, held.node, end.as_ref().map_or(String::new(), |v| s(v, "reason"))));
-    }
+    let ended = end.as_ref().map(|(how, _)| how.as_str());
     let (exit, code) = match r {
         Ok(code) => (Some(code), code),
         // the lease went under the command (not a person, not the command): no verdict at all
-        Err(e) if ended.as_deref().is_some_and(lost_how) || lost_error(&e) => {
+        Err(e) if ended.is_some_and(lost_how) || lost_error(&e) => {
             eprintln!("LEASE LOST on {} ({}): {e}; the command has no verdict, the code is not to blame: run it again. Exit code {LOST_EXIT}.", held.node, held.id);
             *held.lost.lock().unwrap() = Some(format!("its lease {} was lost on {}: {e}; no verdict, run it again", held.id, held.node));
             (None, LOST_EXIT)
         }
         Err(e) => (None, fail(e)),
     };
+    *held.exit.lock().unwrap() = exit;
     let mut c = c.clone();
     let line = match exit {
-        Some(e) => format!("{} released exit={e}", held.id),
+        Some(e) => format!("{} released{} exit={e}", held.id, if holder_kept { " kept=1" } else { "" }),
         None => held.id.clone(),
     };
     match through_restarts(&held.id, &mut c, |c| one(c, "release", &line), &master) {
         Ok(v) => {
             eprintln!("{}", released_line(&v));
+            if let Some(dst) = keep.filter(|_| !holder_kept) {
+                if let Some(cleanup) = v.get("cleanup") {
+                    if let Some(line) = cleanup.get("kept").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                        eprintln!("{line}");
+                    } else if cleanup.get("cleanup").and_then(Value::as_str) == Some("still running") {
+                        eprintln!("{}: $DEVHUB_KEEP still landing in {} (cleanup still running)", held.id, dst.display());
+                    }
+                }
+            }
             // the toolchain changed under the run (a rustup update beside it): a failure is no verdict
             if let Some(t) = v.get("cleanup").and_then(|c| c.get("toolchain")).and_then(Value::as_str).filter(|_| code != 0) {
                 eprintln!("TOOLCHAIN CHANGED under {} on {} ({t}): toolchain changed under you: rerun. The command has no verdict, the code is not to blame. Exit code {LOST_EXIT}.", held.id, held.node);
@@ -1347,21 +1437,40 @@ fn finish(c: &Client, held: &Held, r: Result<i32, String>) -> i32 {
             }
         }
         // the run's end is in hand: the release only frees the box, and how it went is said
-        Err(e) if ended_already(&held.id, &e) => eprintln!("{} released: the master restarted while it answered the release, and the restarted master has it ended ({e})", held.id),
+        Err(e) if ended_already(&held.id, &e) => {
+            if keep.is_some() && !holder_kept { wait_keep_said(&c, &held.id); }
+            eprintln!("{} released: the master restarted while it answered the release, and the restarted master has it ended ({e})", held.id);
+        }
         Err(e) => eprintln!("{}: its release was not answered ({e}); the master ends the lease once its beats stop", held.id),
     }
     code
+}
+
+/// The last line of a `devhub run` whose command failed (`exit`, its own exit): that exit, and why
+/// it never started when its wrapper said so. A run's output that ended with its release line read
+/// as clean: four Windows checks whose `sh` was not on the box were read as 0 warnings (11-27).
+/// None: it passed, or it has no exit of its own (cancelled, lost, handed over: each says so).
+pub(super) fn run_failed_said(id: &str, node: &str, exit: Option<i32>, never_started: Option<&str>) -> Option<String> {
+    let code = exit.filter(|c| *c != 0)?;
+    Some(match never_started {
+        Some(why) => format!("{id} on {node}: FAILED, exit {code}: the command never started: {why}"),
+        None => format!("{id} on {node}: FAILED, exit {code}"),
+    })
 }
 
 /// `L3 screen@node-a (lane x) released; node-a cleaned up: 2 processes stopped, 120 MB freed`.
 fn released_line(v: &Value) -> String {
     let node = s(v, "node");
     let at = if node.is_empty() { String::new() } else { format!("@{node}") };
-    let head = format!("{} {}{at} (lane {}) {}", s(v, "id"), s(v, "kind"), s(v, "lane"), match s(v, "how").as_str() {
-        "released" | "" => "released".to_string(),
-        "cancelled" => { let why = s(v, "reason"); if why.is_empty() { "cancelled".to_string() } else { why } }
-        how => format!("ended ({how})"),
-    });
+    let head = if v.get("kind").is_none() {
+        format!("{} ended (outside recent lease history)", s(v, "id"))
+    } else {
+        format!("{} {}{at} (lane {}) {}", s(v, "id"), s(v, "kind"), s(v, "lane"), match s(v, "how").as_str() {
+            "released" | "" => "released".to_string(),
+            "cancelled" => { let why = s(v, "reason"); if why.is_empty() { "cancelled".to_string() } else { why } }
+            how => format!("ended ({how})"),
+        })
+    };
     let Some(c) = v.get("cleanup") else { return head };
     let ended = s(c, "ended");
     let ended = if ended.is_empty() { ended } else { format!("\n{ended}") };
@@ -1404,7 +1513,7 @@ fn head_side(dir: &Path, lane: &str) -> Result<String, String> {
 /// The worktree's revision for `run`: its HEAD (+ each nested repository's), as a pinned `--rev`
 /// (`<branch>@<sha>[,<name>=<branch>@<sha>]...`).
 fn head_rev(root: &Path, lane: &str) -> Result<String, String> {
-    pin_lane_rev(root, &head_side(root, lane)?, lane, None)
+    pin_lane_rev(root, &head_side(root, lane)?, lane, None, None)
 }
 
 /// A `--rev` given for a lane worktree, pinned whole: each nested repository checked out in it
@@ -1418,23 +1527,36 @@ fn head_rev(root: &Path, lane: &str) -> Result<String, String> {
 /// base died at cargo's "no matching package named `makepad-relax`" (11-12). Each followed nested
 /// repository the worktree lacks is pinned at its landed tip ([`crate::nested::absent`]); the
 /// master moves it to where it stood beside the pin's own halves ([`crate::land::beside_pin`]).
-pub fn pin_lane_rev(root: &Path, spec: &str, lane: &str, paired: Option<&dyn Fn(&str, Option<&str>) -> Result<String, String>>) -> Result<String, String> {
+pub fn pin_lane_rev(root: &Path, spec: &str, lane: &str, paired: Option<&dyn Fn(&str, Option<&str>) -> Result<String, String>>, beside: Option<&dyn Fn(&str, &str, &str) -> Result<String, String>>) -> Result<String, String> {
     let named: Vec<&str> = spec.split(',').skip(1).filter_map(|side| side.split_once('=').map(|(name, _)| name)).collect();
     let first = spec.split(',').next().unwrap_or("");
     let mut whole = spec.to_string();
+    // the rev as given pins first: a malformed one is refused before the master is asked
+    let makepad = || super::pin_revs(root, spec).map(|pinned| pinned.split(',').next().and_then(|side| side.rsplit('@').next()).unwrap_or("").to_string());
     for name in crate::nested::names(root).into_iter().filter(|n| !named.contains(&n.as_str())) {
         let head = || head_side(&root.join(crate::nested::dir(&name)), lane);
-        let side = match paired {
-            Some(paired) if name == crate::state::PAIRED => {
-                // the rev as given pins first: a malformed one is refused before the master is asked
-                let pinned = super::pin_revs(root, spec)?;
-                let makepad = pinned.split(',').next().and_then(|side| side.rsplit('@').next()).unwrap_or("");
+        let side = match (paired, beside) {
+            (Some(paired), _) if name == crate::state::PAIRED => {
+                let makepad = makepad()?;
+                let makepad = makepad.as_str();
                 if first.split('@').next() == Some("work") {
                     format!("main@{}", paired(makepad, None)?)
                 } else {
                     let head = head()?;
                     let main = paired(makepad, head.rsplit('@').next())?;
                     if head.ends_with(&format!("@{main}")) { head } else { format!("main@{main}") }
+                }
+            }
+            // each other nested half stands where it stood beside the makepad commit when the two
+            // split a landing in both: a run on a torn pair is made whole or refused, never built
+            // (a lane's old makepad/apps half beside a newer makepad: two E0277 in Synth, 11-27)
+            (_, Some(beside)) if name != crate::state::PAIRED => {
+                let head = head()?;
+                let (branch, sha) = head.rsplit_once('@').unwrap_or(("", head.as_str()));
+                let at = beside(&name, &makepad()?, sha)?;
+                if at == sha { head } else {
+                    let tip = crate::nested::tips(root).into_iter().find(|(n, _, _)| *n == name).map_or_else(|| branch.to_string(), |(_, b, _)| b);
+                    format!("{tip}@{at}")
                 }
             }
             _ => head()?,
@@ -1457,6 +1579,18 @@ fn master_paired(makepad: &str, head: Option<&str>) -> Result<String, String> {
         eprintln!("devhub: {note}");
     }
     Ok(s(&v, "main"))
+}
+
+/// The master's [`pin_lane_rev`] pairing of a nested half besides the paired one (`job landed-side`),
+/// its line said when it moved the half off the HEAD.
+fn master_beside(name: &str, makepad: &str, head: &str) -> Result<String, String> {
+    let line = format!("job landed-side {name} {makepad} {head}");
+    let v = crate::cli::retry_master(|| master().and_then(|c| one(&c, "job", &line)))?;
+    let note = s(&v, "note");
+    if !note.is_empty() {
+        eprintln!("devhub: {note}");
+    }
+    Ok(s(&v, "side"))
 }
 
 /// What a run ships on top of its pinned commits, read when it is asked and staged: a queued ask
@@ -1724,7 +1858,7 @@ fn run(lane: &str, kind: &str, rest: &[&str]) -> i32 {
         Ok(()) => run_worktree(o, uncommitted, None),
         Err(code) => code,
     };
-    write_exit(exit_to.as_deref(), code)
+    write_exit(exit_to.as_deref(), code, None)
 }
 
 /// Runs at HEAD with the same overlay as `run`.
@@ -1773,6 +1907,12 @@ fn run_worktree_into(o: &mut Opts, uncommitted: bool, test: Option<&str>, out: &
         }
     }
     o.req.src = Src::for_run(o.req.kind, &o.cmd, o.tree, o.req.look);
+    // a command that names a file of the lane's `local/` it does not ship would find nothing on
+    // its box: refused before it asks ([`super::ship::named_unshipped`])
+    if let Some(p) = super::ship::named_unshipped(&root, &rel, &o.cmd, &also_named()) {
+        eprintln!("makepad devhub {word}: {}", super::ship::unshipped_refusal(&p));
+        return (2, false);
+    }
     // what it ships, read now: the worktree as its grant finds it is not what was asked ([`Snap`])
     let snapped = match snap(&root, o.req.rev.as_deref().unwrap_or(""), uncommitted, o.commits_only, &also_named(), &o.patches) {
         Ok(s) => s,
@@ -1808,7 +1948,10 @@ fn run_worktree_into(o: &mut Opts, uncommitted: bool, test: Option<&str>, out: &
         let rev = o.req.rev.clone().unwrap_or_default();
         // a node hub restarting mid-ship keeps the lease (its new hub takes it back from the
         // ledger): the ship is made again once it answers
-        let shipped = through_restarts(&held.id, &mut c.clone(), |c| ship(c, &root, &held, &rev, o.commits_only, &snapped), &master);
+        let shipped = through_restarts(&held.id, &mut c.clone(), |c| {
+            held.beat.check(&held.id)?;
+            ship(c, &root, &held, &rev, o.commits_only, &snapped)
+        }, &master);
         let ship = shipping.elapsed();
         let running = Instant::now();
         let mut tally = crate::testlog::Tally::default();
@@ -1821,14 +1964,16 @@ fn run_worktree_into(o: &mut Opts, uncommitted: bool, test: Option<&str>, out: &
             }
         });
         let run = running.elapsed();
-        let completed = r.is_ok();
         // what the run put in $DEVHUB_KEEP, before the lease's end takes its tmp: `devhub run` and
         // `devhub test` took `--keep` and copied nothing back, three Source Library rig runs' grabs
         // in a row (11-07)
-        if let (Ok(_), Some(dst)) = (&r, &o.keep) {
-            eprintln!("{}", keep_said(&held.id, dst, &kept(&c, &held.node, &o.req.lane, &held.id, dst)));
-        }
-        let mut code = finish(&c, &held, r);
+        let holder_kept = r.is_ok() && o.keep.as_deref().is_some_and(|dst| {
+            let got = kept(&c, &held.node, &o.req.lane, &held.id, dst);
+            eprintln!("{}", keep_said(&held.id, dst, &got));
+            got.is_ok()
+        });
+        let mut code = finish(&c, &held, r, o.keep.as_deref(), holder_kept);
+        let completed = held.exit.lock().unwrap().is_some();
         // its run went on as a job: no verdict yet; what its owner hears goes last
         if let Some(said) = held.handed.lock().unwrap().as_deref() {
             let _ = writeln!(out, "{said}");
@@ -1867,6 +2012,8 @@ fn run_worktree_into(o: &mut Opts, uncommitted: bool, test: Option<&str>, out: &
             if none.is_none() && !matches!(code, 0 | CANCELLED_EXIT | LOST_EXIT) {
                 let _ = write!(out, "{}its whole output: `devhub job result {}`\n", tally.failed_said(), held.id);
             }
+        } else if let Some(line) = run_failed_said(&held.id, &held.node, *held.exit.lock().unwrap(), held.never_started.lock().unwrap().as_deref()) {
+            eprintln!("{line}");
         }
         break (code, completed);
     }
@@ -2193,12 +2340,17 @@ fn bucket_said(pkg: &str, select: &[&str]) -> Option<(String, bool)> {
 
 /// devhub's own `test` flags that the test binary never takes (libtest's `--test` is its own): one
 /// after `--` reached the binary, which refused it, and that read as a JIT miss (M98, 11-16).
-const TEST_FLAGS: [&str; 22] = ["--env", "--native", "--live", "--offline", "--rev", "--tree", "--needs", "--node", "--avoid", "--series", "--pin-why", "--priority", "--jit", "--cost", "--est-min", "--cores", "--class", "--features", "--no-default-features", "--lib", "--bin", "--tests"];
+const TEST_FLAGS: [&str; 23] = ["--env", "--native", "--live", "--offline", "--fresh", "--rev", "--tree", "--needs", "--node", "--avoid", "--series", "--pin-why", "--priority", "--jit", "--cost", "--est-min", "--cores", "--class", "--features", "--no-default-features", "--lib", "--bin", "--tests"];
 
 /// The refusal of a devhub flag among the test binary's arguments (the words after `--`).
 fn flag_after_separator(args: &[&str]) -> Option<String> {
     let flag = args.iter().skip_while(|a| **a != "--").skip(1).map(|a| a.split('=').next().unwrap_or(a)).find(|a| TEST_FLAGS.contains(a))?;
     Some(format!("`{flag}` after `--` goes to the test binary; put it before `--`"))
+}
+
+/// Whether the run compiled every test target under the package's default features.
+fn tested_in_full(target: Option<&str>, select: &[&str]) -> bool {
+    matches!((target, select), (None, []) | (Some(ALL_TESTS), ["--tests"]))
 }
 
 fn test(lane: &str, pkg: &str, rest: &[&str]) -> i32 {
@@ -2208,6 +2360,7 @@ fn test(lane: &str, pkg: &str, rest: &[&str]) -> i32 {
         }
         let (mut flags, mut select, mut args) = (Vec::new(), Vec::new(), Vec::new());
         let (mut native, mut live, mut offline, mut target, mut rev_spec) = (false, false, false, None::<String>, None::<&str>);
+        let mut fresh = false;
         let mut asked_native = false;
         let mut env: Vec<(String, String)> = Vec::new();
         let mut i = 0;
@@ -2230,6 +2383,7 @@ fn test(lane: &str, pkg: &str, rest: &[&str]) -> i32 {
                 }
                 "--live" => live = true,
                 "--offline" => offline = true,
+                "--fresh" => fresh = true,
                 "--rev" => { rev_spec = Some(val()?); i += 1; }
                 "--tree" => flags.push("--tree"),
                 "--needs" | "--node" | "--avoid" | "--series" | "--pin-why" | "--priority" | "--jit" | "--cost" | "--est-min" | "--cores" | "--class" => { flags.extend([rest[i], val()?]); i += 1; }
@@ -2250,6 +2404,7 @@ fn test(lane: &str, pkg: &str, rest: &[&str]) -> i32 {
             i += 1;
         }
         if offline && !live { return Err("--offline needs --live: it is a live session's sandbox".into()); }
+        if fresh && !live { return Err("--fresh needs --live: a run without it runs its tests anyway".into()); }
         if let Some(why) = flag_after_separator(&args) { return Err(why); }
         let words: Vec<String> = std::iter::once("test").chain(args.iter().skip(1).copied()).map(str::to_string).collect();
         if let Some(why) = crate::proto::joined_flags(&words) { return Err(why); }
@@ -2257,7 +2412,7 @@ fn test(lane: &str, pkg: &str, rest: &[&str]) -> i32 {
         let root = o.req.repo_dir.as_deref().map(PathBuf::from).unwrap_or_else(cwd);
         // `--rev`: the commits alone (a landed sha, say), under the same JIT, none of the lane's
         // uncommitted files with them (a lane reverted a file by hand to leave it out, 11-06)
-        let rev = match rev_spec { Some(spec) => pin_lane_rev(&root, spec, &o.req.lane, Some(&master_paired))?, None => head_rev(&root, &o.req.lane)? };
+        let rev = match rev_spec { Some(spec) => pin_lane_rev(&root, spec, &o.req.lane, Some(&master_paired), Some(&master_beside))?, None => head_rev(&root, &o.req.lane)? };
         let pin = super::Pin::of_rev(&rev).ok_or("test: missing commit pair")?;
         o.req.rev = Some(rev);
         o.commits_only = rev_spec.is_some();
@@ -2267,6 +2422,7 @@ fn test(lane: &str, pkg: &str, rest: &[&str]) -> i32 {
         if live && native { return Err("--native cannot be combined with --live".into()); }
         if !env.is_empty() && !live { return Err("--env sets a live session's environment: add --live".into()); }
         o.env = env;
+        o.fresh = fresh;
         // (--cost and --est-min are the live job's hints, as everywhere: refused, two lanes lost a
         // run each to a flag AGENTS.md asks of every run, 11-16)
         let mut suite = if live && matches!(target.as_deref(), None | Some(ALL_TESTS)) {
@@ -2341,7 +2497,7 @@ fn test(lane: &str, pkg: &str, rest: &[&str]) -> i32 {
                 eprintln!("devhub test: {pkg}: its tests open the app's windows (it depends on makepad-test): a box that shows them runs it (gui=1)");
             }
             // its tests play to the output device, whose callback clocks them: a box whose audio
-            // output runs takes it (`audio=1`, measured by each Mac's hub); `--needs audio=0`
+            // output runs takes it (`audio=1`, measured by each Mac's and Linux box's hub); `--needs audio=0`
             // says otherwise. On one Mac the output never ran under any app, and the synth
             // app's transport tests failed there at any revision (11-26).
             let audio: Vec<String> = crate::jit_misses::native_selected(&p.audio, &select).into_iter().map(|(t, why)| format!("{t}: {why}")).collect();
@@ -2379,15 +2535,16 @@ fn test(lane: &str, pkg: &str, rest: &[&str]) -> i32 {
         // the JIT: release with the checks ([`super::JIT_TEST_PROFILE`]); cargo: release, as every
         // other cargo build of the tree (a checked one would be a second copy of target/)
         let mut cmd = if native { vec!["cargo", "test", "--release", "-p", pkg] } else { ["cargo", "run", "--profile", "host", "-q", "-p", "makepad-run", "--bin", "makepad", "--", "test", pkg].into_iter().chain(super::JIT_TEST_PROFILE).collect() };
+        let full = tested_in_full(target.as_deref(), &select);
         cmd.extend(select);
         cmd.extend(args);
         o.cmd = cmd.into_iter().map(str::to_string).collect();
         if native { o.req.class = format!("native:{}", o.req.class); }
         o.tree |= native;
         let test_args: Vec<String> = test_args.into_iter().map(str::to_string).collect();
-        Ok((o, native, asked_native, live, whole, offline, if live { live_select(test_args) } else { test_args }, suite))
+        Ok((o, native, asked_native, live, whole, offline, if live { live_select(test_args) } else { test_args }, suite, full))
     })();
-    let (mut o, native, asked_native, live, whole, offline, mut test_args, suite) = match parsed {
+    let (mut o, native, asked_native, live, whole, offline, mut test_args, suite, full) = match parsed {
         Ok(v) => v,
         Err(e) => { eprintln!("test: {e}"); return 2; }
     };
@@ -2397,13 +2554,13 @@ fn test(lane: &str, pkg: &str, rest: &[&str]) -> i32 {
     }
     // a run that passed is the lane's pre-land check when devhub chose its route (a `--native` one
     // is a baseline, a whole package's live run an iteration): the packages its diff touches are
-    // checked without their tests too, placed as the run was
+    // checked in their shipping and test configurations, placed as the run was
     let (lane, commits_only, placed) = (o.req.lane.clone(), o.commits_only, o.req.clone());
     if native {
         if let Err(code) = retry_master(master).map_err(fail).and_then(|c| native_gate(&c, &mut o)) { return code; }
         let rev = o.req.rev.clone().unwrap_or_default();
         let code = run_worktree(o, false, Some(pkg));
-        return if code == 0 && !asked_native && !whole { pre_land_checks(&lane, &rev, commits_only, &placed) } else { code };
+        return if code == 0 && !asked_native && !whole { pre_land_checks(&lane, &rev, commits_only, &placed, full.then_some(pkg)) } else { code };
     }
     match test_miss(&o, pkg, &test_args, "lookup", &[], None) {
         Ok(miss) if !miss.is_null() => {
@@ -2438,7 +2595,7 @@ fn test(lane: &str, pkg: &str, rest: &[&str]) -> i32 {
     let (lines, code) = warnings_verdict(&run_warnings(&log), code);
     for l in lines { println!("{l}"); }
     if code != 0 || whole { return code; }
-    pre_land_checks(&lane, o.req.rev.as_deref().unwrap_or(""), commits_only, &placed)
+    pre_land_checks(&lane, o.req.rev.as_deref().unwrap_or(""), commits_only, &placed, full.then_some(pkg))
 }
 
 /// One check of the hand-in's feature-set gate: the package, a feature set a dependent builds it
@@ -2504,30 +2661,70 @@ fn red_note(what: &str, named: &str, n: usize) -> String {
     format!("{what}: {named}: {n} error and warning line(s) already red at the tips without the hand-in: not its own, the buckets say them")
 }
 
+/// Maximum diagnostic lines printed in a [`tests_gate`] refusal; every line is still checked
+/// against the tips and counted before capping the printed output.
+#[cfg(feature = "checkout")]
+const TESTS_GATE_MAX_SHOWN: usize = 40;
+
+/// Deduplicates identical diagnostic lines while preserving first-seen order: `cargo check
+/// --tests` builds both `lib` and `lib --test`, emitting the same `src/lib.rs` warning twice
+/// (compare `land_gate.sh` `cargo_units` `awk '!seen[$0]++'`).
+#[cfg(feature = "checkout")]
+fn dedup_lines(lines: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::with_capacity(lines.len());
+    lines.into_iter().filter(|l| seen.insert(l.clone())).collect()
+}
+
+/// Formats the refusal lines for [`tests_gate`] after [`brought`] removes lines already red at
+/// the tips. Caller guarantees `!errors.is_empty() || !warnings.is_empty()`.
+#[cfg(feature = "checkout")]
+fn tests_gate_refusal(named: &str, alone: &str, took: &str, errors: &[String], warnings: &[String]) -> Vec<String> {
+    let header = match (errors.len(), warnings.len()) {
+        (e, 0) => format!("test targets: rustc's check of {named} fails: {e} error line(s) in {took}; `{alone}` shows it alone"),
+        (0, w) => format!("test targets: rustc's check of {named} fails: {w} new warning line(s) in {took} (native rustc check; catches lints the JIT check doesn't run); `{alone}` shows it alone"),
+        (e, w) => format!("test targets: rustc's check of {named} fails: {e} error line(s) and {w} new warning line(s) in {took}; `{alone}` shows it alone"),
+    };
+    let mut refused = vec![header];
+    let total = errors.len() + warnings.len();
+    for line in errors.iter().chain(warnings).take(TESTS_GATE_MAX_SHOWN) {
+        refused.push(format!("  {line}"));
+    }
+    if total > TESTS_GATE_MAX_SHOWN {
+        refused.push(format!("  ... and {} more line(s); `{alone}` shows all", total - TESTS_GATE_MAX_SHOWN));
+    }
+    refused
+}
+
 /// The hand-in's check of the test targets of the packages it touches by rustc
-/// ([`crate::jit_misses::tests_run`]), as the fast bucket's testcheck checks them after the
-/// landing: an error line refuses the hand-in, a warning refuses nothing, and a run with no
-/// verdict leaves them to the bucket. The JIT runs a lane's tests with its own type checker, and
-/// one test it took and rustc rejects landed green (#5087, 11-15).
+/// ([`crate::jit_misses::tests_run`]), matching the fast bucket's `step_testcheck` after the
+/// landing: any new error or warning line refuses the hand-in (zero warnings), errors and
+/// warnings already red at the tips without the hand-in are excused per line via
+/// [`red_at_tips`] / [`brought`], and a run with no verdict (skipped past [`CHEAP_GATE_MS`],
+/// deferred past [`gate_start_bound`], or lost) leaves them to the fast bucket. The JIT runs
+/// a lane's tests with its own type checker and does not run every rustc late lint (#5087,
+/// 11-15; #10571, 11-27).
 #[cfg(feature = "checkout")]
 fn tests_gate(tested: &[String], check: &(dyn Fn(&crate::jit_misses::CheckRun) -> (i32, String) + Sync), red: &(dyn Fn(&crate::jit_misses::CheckRun) -> Red + Sync)) -> Result<Vec<String>, Vec<String>> {
     let t = Instant::now();
     let Some(run) = crate::jit_misses::tests_run(tested) else { return Ok(Vec::new()) };
     let named = run.packages.join(", ");
     let (code, log) = check(&run);
-    let mut errors = crate::jit_misses::compile_errors(&log);
+    let mut errors = dedup_lines(crate::jit_misses::compile_errors(&log));
+    let mut warnings = dedup_lines(crate::jit_misses::located_warnings(&log));
     let mut notes = Vec::new();
-    if !errors.is_empty() {
-        let (new, old) = brought(errors, &red(&run));
+    if !errors.is_empty() || !warnings.is_empty() {
+        let tip_red = red(&run);
+        let (new_errors, old_errors) = brought(errors, &tip_red);
+        let (new_warnings, old_warnings) = brought(warnings, &tip_red);
+        let old = old_errors + old_warnings;
         if old > 0 { notes.push(red_note("test targets", &named, old)); }
-        errors = new;
-        if errors.is_empty() { return Ok(notes); }
+        errors = new_errors;
+        warnings = new_warnings;
+        if errors.is_empty() && warnings.is_empty() { return Ok(notes); }
     }
     let took = format!("{:.1} s", t.elapsed().as_secs_f64());
-    if !errors.is_empty() {
-        let mut refused = vec![format!("test targets: rustc's check of {named} fails: {} error line(s) in {took}; `{}` shows it alone", errors.len(), run.alone)];
-        refused.extend(errors.into_iter().map(|l| format!("  {l}")));
-        return Err(refused);
+    if !errors.is_empty() || !warnings.is_empty() {
+        return Err(tests_gate_refusal(&named, &run.alone, &took, &errors, &warnings));
     }
     if code == 0 { return Ok(vec![format!("test targets: rustc checked {named} in {took}")]); }
     Ok(vec![format!("test targets: {named} not checked ({}); the fast bucket checks them after the landing", no_verdict(code, &log))])
@@ -2719,7 +2916,7 @@ fn gates(root: &Path, lane: &str, rev: &str, check: &(dyn Fn(&crate::jit_misses:
 /// The hand-in's feature-set gate (11-15): a module gated behind a default feature broke every
 /// dependent that builds the crate without it (#4787, makepad-devhub without `checkout`), and only
 /// the buckets said so, after the landing. Each package the pinned commits touch
-/// ([`crate::jit_misses::touched_packages`]) is checked with each feature set its dependents use,
+/// ([`crate::jit_misses::packages_touched`]) is checked with each feature set its dependents use,
 /// all at once, at the hand-in's merge onto the tips ([`Merged`]); read from git objects
 /// ([`crate::orch::ci::Tree`]), no checkout. The lane that touched the package waits; the landing
 /// train never does. Ok: the lines to print (none when nothing is owed); Err: the refusal.
@@ -2796,44 +2993,133 @@ fn dependents_gate(root: &Path, rev: &str, merged: &Merged, check: &(dyn Fn(&cra
     for (name, packages) in [("touched", &touched), ("wide", &wide), ("set", &set)] {
         words.push(format!("{name}={}", packages.iter().cloned().collect::<Vec<_>>().join(",")));
     }
-    let mut said = check_set(&tree, &merged.rev, &merged.tips, &set.iter().cloned().collect::<Vec<_>>(), check);
-    // Past the bound by its estimate, the set goes to the buckets, and the touched crates are
-    // checked alone, beside it: the hand-in's own errors and warnings refuse it, as when its whole
-    // set is checked. Two hand-ins' sets of 28 and 38 crates went unchecked whole, each with its
-    // own warning in a touched crate, and the fast bucket after them failed on it for every lane
-    // (#6704, #6712, 11-18). The set's crates in the other nested repositories go with them: a fix
-    // there is a landing of its own in another repository, and #7425's set of 338 broke Source
-    // Library's build unchecked, its fix-forward written without a compile (11-19).
     let dirs = crate::orch::ci::package_dirs(&tree);
-    let elsewhere = |p: &String| dirs.get(p).is_some_and(|d| merged.tree.nested.keys().any(|n| n != crate::state::PAIRED && format!("{d}/").starts_with(&crate::nested::prefix(n))));
-    let own: Vec<String> = said.past_bound.iter().filter(|p| touched.contains(*p) || elsewhere(p)).cloned().collect();
-    let mut alone_note = None;
-    if !own.is_empty() && own.len() < said.past_bound.len() {
-        let alone = check_set(&tree, &merged.rev, &merged.tips, &own, check);
-        let which = if own.iter().any(elsewhere) { "the crates the hand-in touches and its dependents in other repositories" } else { "the crates the hand-in touches" };
-        alone_note = Some(format!("dependents: {} of them checked alone, {which}{}", own.join(", "), if alone.skipped.is_empty() { String::new() } else { format!(" (not run: {})", alone.unchecked) }));
-        said.checked += alone.checked;
-        said.failed.extend(alone.failed);
-        said.red.extend(alone.red);
-        if said.node.is_empty() { said.node = alone.node; }
+    // the boundary audit of the app, when the hand-in reaches it, beside the set's check
+    // ([`boundary_gate`]): its lane waits for both at once
+    let audited = dirs.get(BOUNDARY_APP).filter(|_| set.contains(BOUNDARY_APP));
+    std::thread::scope(|scope| {
+        let audit = audited.map(|dir| scope.spawn(move || boundary_gate(BOUNDARY_APP, dir, &merged.rev, &merged.tips, w, check)));
+        let mut said = check_set(&tree, &merged.rev, &merged.tips, &set.iter().cloned().collect::<Vec<_>>(), check);
+        // Past the bound by its estimate, the set goes to the buckets, and the touched crates are
+        // checked alone, beside it: the hand-in's own errors and warnings refuse it, as when its whole
+        // set is checked. Two hand-ins' sets of 28 and 38 crates went unchecked whole, each with its
+        // own warning in a touched crate, and the fast bucket after them failed on it for every lane
+        // (#6704, #6712, 11-18). The set's crates in the other nested repositories go with them: a fix
+        // there is a landing of its own in another repository, and #7425's set of 338 broke Source
+        // Library's build unchecked, its fix-forward written without a compile (11-19).
+        let elsewhere = |p: &String| dirs.get(p).is_some_and(|d| merged.tree.nested.keys().any(|n| n != crate::state::PAIRED && format!("{d}/").starts_with(&crate::nested::prefix(n))));
+        let own: Vec<String> = said.past_bound.iter().filter(|p| touched.contains(*p) || elsewhere(p)).cloned().collect();
+        let mut alone_note = None;
+        if !own.is_empty() && own.len() < said.past_bound.len() {
+            let alone = check_set(&tree, &merged.rev, &merged.tips, &own, check);
+            let which = if own.iter().any(elsewhere) { "the crates the hand-in touches and its dependents in other repositories" } else { "the crates the hand-in touches" };
+            alone_note = Some(format!("dependents: {} of them checked alone, {which}{}", own.join(", "), if alone.skipped.is_empty() { String::new() } else { format!(" (not run: {})", alone.unchecked) }));
+            said.checked += alone.checked;
+            said.failed.extend(alone.failed);
+            said.red.extend(alone.red);
+            if said.node.is_empty() { said.node = alone.node; }
+        }
+        let mut refused = Vec::new();
+        for (named, alone, failures) in said.failed {
+            refused.push(format!("dependents: {named} fail at the merge with work {w:.10} / main {m:.10}: {} error and warning line(s); `{alone}` shows it alone", failures.len()));
+            refused.extend(failures.into_iter().map(|l| format!("  {l}")));
+        }
+        let mut notes: Vec<String> = said.skipped.into_iter().map(|(named, why)| format!("dependents: {named} not checked ({why}): the buckets check them after the landing")).collect();
+        notes.extend(alone_note);
+        notes.extend(said.red.into_iter().map(|(named, n)| red_note("dependents", &named, n)));
+        match audit.map(|h| h.join().unwrap_or_else(|_| Err(vec!["boundary: its audit's thread panicked".into()]))) {
+            Some(Ok(more)) => notes.extend(more),
+            Some(Err(more)) => refused.extend(more),
+            None => {}
+        }
+        let (unchecked, node, checked) = (said.unchecked, said.node, said.checked);
+        let took = format!("dependents: {checked} crate(s) checked at the merge with work {w:.10} in {:.1} s", t.elapsed().as_secs_f64());
+        if !refused.is_empty() { refused.push(took); return Err(refused); }
+        if !unchecked.is_empty() {
+            words[0] = format!("unchecked={}", unchecked.chars().map(|c| if c.is_whitespace() || c == '=' { '_' } else { c }).collect::<String>());
+        }
+        if !node.is_empty() { words.push(format!("node={node}")); }
+        notes.push(took);
+        Ok(Gate { words, notes })
+    })
+}
+
+/// The app whose boundary audit a hand-in that reaches it runs at its merge ([`boundary_gate`]):
+/// the fast bucket's audit of it after a landing takes about 10 s, and it said #10089 first.
+#[cfg(feature = "checkout")]
+const BOUNDARY_APP: &str = "makepad-app-calculator";
+
+/// The hand-in's boundary audit of `app` (in `dir`) at its merge (`rev`) onto the tips (`tips`,
+/// work's `work`), beside its dependents' check (11-27): `makepad check --boundary all <app>`
+/// lowers every body a run of the app compiles and fails on each provided crate's static or
+/// rustc-laid field that JIT-compiled code reaches, which the app meets at its first call there.
+/// #10089's derive reached a `ScriptHeap` field from JIT code: its crate's tests passed under the
+/// JIT, whose test harness builds the provided crates from source, and every app refused to start
+/// until a fix landed; the fast bucket's audit said so after the landing. Replayed at #10089's
+/// merge, the audit runs on that merge's own JIT, which devhub builds when a pin changes the
+/// JIT's inputs (a provided crate's source among them: 2m34s there), and its 18 rows in
+/// `ScriptHeap::field_type_from_type_check` refuse it: the lane waits for that build, the queue
+/// never does. A failing row the tips
+/// already show without the hand-in is not its own; a run without a verdict, or one let go at its
+/// start bound, leaves the audit to the buckets after the landing. Ok: its notes; Err: the
+/// refusal, with its rows and the line that runs it alone.
+#[cfg(feature = "checkout")]
+fn boundary_gate(app: &str, dir: &str, rev: &str, tips: &str, work: &str, check: &(dyn Fn(&crate::jit_misses::CheckRun, &str) -> (i32, String) + Sync)) -> Result<Vec<String>, Vec<String>> {
+    let t = Instant::now();
+    let alone = format!("cd {dir} && makepad check --boundary all {app}");
+    let run = crate::jit_misses::CheckRun {
+        own: false,
+        packages: vec![app.to_string()],
+        class: format!("boundary:{app}"),
+        cmd: ["cargo", "run", "--profile", "host", "-q", "-p", "makepad-run", "--bin", "makepad", "--", "check", "--boundary", "all", app].iter().map(|w| w.to_string()).collect(),
+        alone: alone.clone(),
+        tests: false,
+    };
+    let (code, log) = check(&run, rev);
+    let rows = boundary_rows(&log);
+    if rows.is_empty() {
+        return Ok(vec![if code == 0 {
+            format!("boundary: {app} audited at the merge with work {work:.10} in {:.1} s: no JIT-compiled body reaches a provided crate's rustc-laid field or static", t.elapsed().as_secs_f64())
+        } else {
+            format!("boundary: {app} not audited ({}): the buckets audit it after the landing", no_verdict(code, &log))
+        }]);
     }
-    let mut refused = Vec::new();
-    for (named, alone, failures) in said.failed {
-        refused.push(format!("dependents: {named} fail at the merge with work {w:.10} / main {m:.10}: {} error and warning line(s); `{alone}` shows it alone", failures.len()));
-        refused.extend(failures.into_iter().map(|l| format!("  {l}")));
+    let red: std::collections::HashSet<String> = boundary_rows(&check(&run, tips).1).into_iter().map(|(key, _)| key).collect();
+    let (old, new): (Vec<_>, Vec<_>) = rows.into_iter().partition(|(key, _)| red.contains(key));
+    if new.is_empty() {
+        return Ok(vec![format!("boundary: {app}: {} failing row(s) already at the tips without the hand-in: not its own, the buckets say them", old.len())]);
     }
-    let mut notes: Vec<String> = said.skipped.into_iter().map(|(named, why)| format!("dependents: {named} not checked ({why}): the buckets check them after the landing")).collect();
-    notes.extend(alone_note);
-    notes.extend(said.red.into_iter().map(|(named, n)| red_note("dependents", &named, n)));
-    let (unchecked, node, checked) = (said.unchecked, said.node, said.checked);
-    let took = format!("dependents: {checked} crate(s) checked at the merge with work {w:.10} in {:.1} s", t.elapsed().as_secs_f64());
-    if !refused.is_empty() { refused.push(took); return Err(refused); }
-    if !unchecked.is_empty() {
-        words[0] = format!("unchecked={}", unchecked.chars().map(|c| if c.is_whitespace() || c == '=' { '_' } else { c }).collect::<String>());
-    }
-    if !node.is_empty() { words.push(format!("node={node}")); }
-    notes.push(took);
-    Ok(Gate { words, notes })
+    let mut refused = vec![format!("boundary: {app} fails its audit at the merge with work {work:.10}: {} row(s) where JIT-compiled code reaches a provided crate's rustc-laid field or static, which every start of the app meets", new.len())];
+    refused.extend(new.into_iter().flat_map(|(_, shown)| shown));
+    refused.push(format!("GATEREPRO boundary {app} :: {alone}"));
+    Err(refused)
+}
+
+/// The failing rows of a boundary audit's output, as land_gate.sh's `BOUNDARY_ROWS` reads them
+/// (a `violation` or `option-entry` row marked FAIL): each keyed by what it says without its
+/// location (another box's tree, a line that moved), and shown with the line after it, a
+/// violation's way in (its `reached` line).
+#[cfg(feature = "checkout")]
+fn boundary_rows(log: &str) -> Vec<(String, Vec<String>)> {
+    // `path:line:col: what` says `what`
+    let unlocated = |col: &str| -> String {
+        let Some((at, what)) = col.split_once(": ") else { return col.to_string() };
+        let mut tail = at.rsplitn(3, ':');
+        let located = tail.next().is_some_and(|n| n.parse::<u32>().is_ok()) && tail.next().is_some_and(|n| n.parse::<u32>().is_ok());
+        if located { what.to_string() } else { col.to_string() }
+    };
+    let cut = |l: &str| l.chars().take(600).collect::<String>();
+    let lines: Vec<&str> = log.lines().map(|l| l.trim_end_matches('\r')).collect();
+    lines.iter().enumerate().filter_map(|(i, line)| {
+        let cols: Vec<&str> = line.split('\t').collect();
+        if cols.len() < 3 || !matches!(cols[0], "violation" | "option-entry") || cols[1] != "FAIL" { return None; }
+        let key = std::iter::once(cols[0].to_string()).chain(cols[2..].iter().map(|c| unlocated(c))).collect::<Vec<_>>().join("\t");
+        let mut shown = vec![format!("  {}", cut(line))];
+        if let Some(next) = lines.get(i + 1).filter(|n| n.starts_with([' ', '\t']) && !n.trim().is_empty()) {
+            shown.push(format!("    {}", cut(next.trim())));
+        }
+        Some((key, shown))
+    }).collect()
 }
 
 /// What a check of a set of crates said ([`check_set`]), run by run.
@@ -2865,7 +3151,8 @@ fn check_set(tree: &crate::orch::ci::Tree, rev: &str, tips: &str, set: &[String]
     // `test_package` does, took 0.5 s each: minutes for a platform's closure)
     let (dirs, own) = (crate::orch::ci::package_dirs(tree), crate::orch::ci::jit_own_dirs(tree));
     let sides: Vec<(String, bool)> = set.iter().map(|pkg| (pkg.clone(), dirs.get(pkg).is_some_and(|d| own.contains(d)))).collect();
-    // The --tests half waits for `makepad check -p .. -p .. --tests`, which relax does not take yet.
+    // Dependents stay plain-only here (CHEAP_GATE_MS). The fast bucket's step_testcheck
+    // checks the reached dependents' test targets after landing.
     let runs = crate::jit_misses::check_runs(&sides);
     let ran: Vec<(i32, String, Red)> = std::thread::scope(|scope| {
         let handles: Vec<_> = runs.iter().map(|run| scope.spawn(move || {
@@ -2900,62 +3187,85 @@ fn check_set(tree: &crate::orch::ci::Tree, rev: &str, tips: &str, set: &[String]
     said
 }
 
-/// The pre-land check's other half: a `devhub test` without --live that passed also checks each
-/// package the lane's diff touches without its tests ([`crate::jit_misses::touched_packages`]), in
-/// one run per checker ([`crate::jit_misses::check_runs`]) at the run's sources: one
-/// `makepad check -p .. -p ..` on the JIT, and one cargo check of the crates the JIT is built from
-/// (whose tests run under cargo too). A warning fails it as an error does, each one listed
-/// ([`crate::jit_misses::check_failures`]): a fn only tests called compiled under cfg(test) in the
-/// lane's tests, and twice the fast bucket after the landing was the first to say it was dead
-/// (#4005, #4024, 11-12).
-fn pre_land_checks(lane: &str, rev: &str, commits_only: bool, placed: &Req) -> i32 {
+/// A passing test also checks the plain builds touched by its diff (#4005, #4024: a function
+/// called only under cfg(test) is dead in the shipping build), and touched test targets
+/// ([`crate::jit_misses::touched_pre_land`]). Skip the latter only for the package whose full
+/// default-feature test set just ran. Both checks fail on a source warning or error.
+fn pre_land_checks(lane: &str, rev: &str, commits_only: bool, placed: &Req, tested_in_full: Option<&str>) -> i32 {
     let Some((root, _)) = lane_root() else { return 0 };
     let Some(pin) = super::Pin::of_rev(rev) else {
         eprintln!("devhub test: rev `{rev}` is not pinned: the packages it touches are not checked");
         return 2;
     };
-    let touched = match crate::jit_misses::touched_packages(&root, &pin, commits_only) {
+    pre_land_checks_at(&root, &pin, commits_only, tested_in_full, || {
+        let reply = retry_master(master).and_then(|c| one(&c, "overlay-shadow", "overlay-shadow enabled"))?;
+        let shadow = reply.get("on").and_then(Value::as_bool) == Some(true);
+        Ok(move |run: &crate::jit_misses::CheckRun| check_run(lane, rev, commits_only, run, shadow, false, None, Some(placed)))
+    }, |line| println!("{line}"))
+}
+
+/// Prepare the checker once, after discovering runnable targets. A package with only test
+/// edits may already have run in full and still needs the harness scan.
+fn pre_land_checks_at<C>(
+    root: &Path, pin: &super::Pin, commits_only: bool, tested_in_full: Option<&str>,
+    prepare: impl FnOnce() -> Result<C, String>, mut report: impl FnMut(&str),
+) -> i32 where C: Fn(&crate::jit_misses::CheckRun) -> (i32, String) + Sync {
+    let (plain, tests) = match crate::jit_misses::touched_pre_land(root, pin, commits_only) {
         Ok(t) => t,
         Err(e) => return fail(format!("devhub test: the packages the lane's diff touches: {e}")),
     };
-    if touched.is_empty() { return 0; }
-    let mut sides = Vec::new();
+    if plain.is_empty() && tests.is_empty() { return 0; }
+    let touched: Vec<_> = plain.iter().chain(&tests).collect::<std::collections::BTreeSet<_>>().into_iter().cloned().collect();
+    // a #[test] in a `harness = false` target compiles out: it never runs and nothing says so
+    let silent = match crate::testlog::silent_tests_at(root, pin, &touched) {
+        Ok(lines) => lines,
+        Err(e) => return fail(format!("devhub test: the touched packages' harness = false targets: {e}")),
+    };
+    for line in &silent { report(&format!("devhub test: {line}")); }
+    let (mut plain_sides, mut test_sides) = (Vec::new(), Vec::new());
     for pkg in touched {
-        match crate::jit_misses::test_package_at(&root, &pin, &pkg) {
-            Ok(p) => sides.push((pkg, p.own)),
+        let check_plain = plain.binary_search(&pkg).is_ok();
+        let check_tests = tested_in_full != Some(pkg.as_str()) && tests.binary_search(&pkg).is_ok();
+        if !check_plain && !check_tests { continue; }
+        let own = match crate::jit_misses::test_package_at(root, pin, &pkg) {
+            Ok(p) => p.own,
             Err(e) => return fail(format!("devhub test: check {pkg}: {e}")),
-        }
+        };
+        if check_plain { plain_sides.push((pkg.clone(), own)); }
+        if check_tests { test_sides.push((pkg, own)); }
     }
-    let runs = crate::jit_misses::check_runs(&sides);
-    let shadow = match retry_master(master).and_then(|c| one(&c, "overlay-shadow", "overlay-shadow enabled")) {
-        Ok(v) => v.get("on").and_then(Value::as_bool) == Some(true),
+    let mut runs = crate::jit_misses::check_runs(&plain_sides);
+    runs.extend(crate::jit_misses::check_tests_runs(&test_sides));
+    let mut worst = i32::from(!silent.is_empty());
+    if runs.is_empty() { return worst; }
+    let check = match prepare() {
+        Ok(check) => check,
         Err(e) => return fail(e),
     };
-    eprintln!("devhub test: the lane's diff touches {}: checked without their tests in {} run{}, and a warning fails it",
-        sides.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>().join(", "), runs.len(), if runs.len() == 1 { "" } else { "s" });
+    eprintln!("devhub test: checking the lane's touched packages in {} run{}; a warning fails the check", runs.len(), if runs.len() == 1 { "" } else { "s" });
     let ran: Vec<(i32, String)> = std::thread::scope(|scope| {
-        let handles: Vec<_> = runs.iter().map(|run| scope.spawn(move || check_run(lane, rev, commits_only, run, shadow, false, None, Some(placed)))).collect();
+        let check = &check;
+        let handles: Vec<_> = runs.iter().map(|run| scope.spawn(move || check(run))).collect();
         handles.into_iter().map(|h| h.join().unwrap_or_else(|_| (1, "its check's thread panicked".into()))).collect()
     });
-    let mut worst = 0;
     for (run, (code, log)) in runs.iter().zip(ran) {
         let failures = crate::jit_misses::check_failures(&log);
-        let named = run.packages.join(", ");
+        let label = format!("check of {} {}", run.packages.join(", "), if run.tests { "(--tests)" } else { "without their tests" });
         if code == 0 && failures.is_empty() {
-            println!("devhub test: check of {named} without their tests: ok, 0 warnings");
+            report(&format!("devhub test: {label}: ok, 0 warnings"));
             continue;
         }
         // its lease never started: no verdict on the crates, said as that
         if let Some(said) = not_run(&log).filter(|_| code != 0) {
-            println!("devhub test: check of {named} without their tests {NOT_RUN}{said} (exit {code}): no verdict on them; run it again");
+            report(&format!("devhub test: {label} {NOT_RUN}{said} (exit {code}): no verdict on them; run it again"));
             worst = 1;
             continue;
         }
         if failures.is_empty() {
-            for l in log.lines().rev().take(20).collect::<Vec<_>>().into_iter().rev() { println!("{l}"); }
+            for l in log.lines().rev().take(20).collect::<Vec<_>>().into_iter().rev() { report(l); }
         }
-        for l in &failures { println!("{l}"); }
-        println!("devhub test: check of {named} without their tests FAILED: {} (exit {code}); `{}` shows it alone", if failures.is_empty() { "no error line".to_string() } else { format!("{} error and warning line(s)", failures.len()) }, run.alone);
+        for l in &failures { report(l); }
+        report(&format!("devhub test: {label} FAILED: {} (exit {code}); `{}` shows it alone", if failures.is_empty() { "no error line".to_string() } else { format!("{} error and warning line(s)", failures.len()) }, run.alone));
         worst = 1;
     }
     worst
@@ -3132,7 +3442,7 @@ fn overlay_selftest(args: &[&str]) -> i32 {
     let r = start_there(&mut c, &held, "overlay-selftest", &format!("overlay-selftest {} {case}", held.id))
         .and_then(|v| v.get("n").and_then(Value::as_u64).ok_or("selftest: missing run".into()))
         .and_then(|n| follow_there(&c, &held, n, &mut std::io::stdout()));
-    finish(&c, &held, r)
+    finish(&c, &held, r, None, false)
 }
 
 /// A live test's arguments with its feature flags said one way (`--no-default-features`, then
@@ -3162,15 +3472,18 @@ fn live_select(args: Vec<String>) -> Vec<String> {
     out
 }
 
-/// Keep reconnect notices in the target's block as well as its live stream.
-fn live_retry<T>(out: &mut dyn Write, mut call: impl FnMut(&mut dyn Write) -> Result<T, String>) -> Result<T, String> {
+/// Keep reconnect notices in the target's block as well as its live stream. Each attempt asks on
+/// a client `dial` gives: after a cut, a new link to the master, never the cut one, whose every
+/// ask was cut again at once and went round with nothing said. Two of a lane's test reruns said
+/// "the link was cut" at a master's restart, then nothing for 15 min until their lane killed
+/// them (11-27). `beat` waits a while and says whether the master answers.
+fn live_retry<C, T>(out: &mut dyn Write, mut dial: impl FnMut() -> Result<C, String>, mut call: impl FnMut(&C, &mut dyn Write) -> Result<T, String>, mut beat: impl FnMut() -> bool) -> Result<(T, C), String> {
     let mut told = None;
     loop {
-        match call(out) {
+        match dial().and_then(|c| call(&c, out).map(|v| (v, c))) {
             Ok(v) => return Ok(v),
             Err(e) if e.starts_with("no devhub master at ") || crate::cli::link_cut(&e) => {
-                std::thread::sleep(Duration::from_secs(2));
-                let up = control().is_ok();
+                let up = beat();
                 if told != Some(up) {
                     let _ = writeln!(out, "{}", match (told, up) {
                         (_, false) => "master not reachable: waiting",
@@ -3185,33 +3498,40 @@ fn live_retry<T>(out: &mut dyn Write, mut call: impl FnMut(&mut dyn Write) -> Re
     }
 }
 
+/// [`live_retry`]'s wait between attempts: whether the master answers after it.
+fn master_beat() -> bool {
+    std::thread::sleep(Duration::from_secs(2));
+    control().is_ok()
+}
+
 /// One ordinary live request, buffering its notices; the caller renders the returned verdict.
-fn live_test(o: &Opts, pkg: &str, args: &[String], offline: bool, check: &str, out: &mut dyn Write) -> Result<(crate::state::Live, Client), String> {
+fn live_test(o: &Opts, pkg: &str, args: &[String], offline: bool, check: &str, out: &mut dyn Write) -> Result<(crate::state::Live, Client, Option<u64>), String> {
     let started = Instant::now();
 
     let (root, _) = lane_root().ok_or("test --live: run it inside the lane's worktree")?;
-    let c = live_retry(out, |_| master())?;
+    let mut dialed = Some(live_retry(out, master, |_, _| Ok(()), master_beat)?.1);
     let loader = o.req.loader.clone().unwrap_or_default();
     let needs = o.req.needs.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(",");
     let sandbox = if offline { ",\"offline\":true" } else { "" };
     // (`live start --env`'s pairs: a session asked with other env, or another JIT, is no
     // session of this call's, orch/live.rs `answers`)
     let env = o.env.iter().map(|(k, v)| format!("[{},{}]", makepad_remote::json_str(k), makepad_remote::json_str(v))).collect::<Vec<_>>().join(",");
-    let sandbox = format!("{sandbox},\"env\":[{env}],\"check\":{}", makepad_remote::json_str(check));
+    let sandbox = format!("{sandbox},\"env\":[{env}],\"check\":{}{}", makepad_remote::json_str(check), if o.fresh { ",\"fresh\":true" } else { "" });
     // placed as a lease is: --node (with --series/--pin-why), --needs, --avoid
     let placement = format!(",\"node\":{},\"avoid\":{},\"series\":{},\"pin_why\":{}", makepad_remote::json_str(o.req.node.as_deref().unwrap_or("")), makepad_remote::json_str(&o.req.avoid.join(",")), makepad_remote::json_str(o.req.series.as_deref().unwrap_or("")), makepad_remote::json_str(o.req.pin_why.as_deref().unwrap_or("")));
     let req = format!("{{\"app\":{},\"repo_dir\":{},\"tree\":{},\"lane\":{},\"agent\":{},\"needs\":{}{placement},\"priority\":{},\"loader\":{},\"cost\":{},\"est_min\":{},\"class\":{},\"also\":[{}],\"test_args\":[{}]{sandbox}}}", makepad_remote::json_str(pkg), makepad_remote::json_str(&root.to_string_lossy()), o.tree, makepad_remote::json_str(&o.req.lane), makepad_remote::json_str(o.req.agent.as_deref().unwrap_or("")), makepad_remote::json_str(&needs), makepad_remote::json_str(o.req.priority.as_str()), makepad_remote::json_str(&loader), makepad_remote::json_str(o.req.cost.as_str()), o.req.est_min.map_or("null".to_string(), |m| m.to_string()), makepad_remote::json_str(&o.req.class), std::env::var("DEVHUB_ALSO").unwrap_or_default().split_whitespace().map(makepad_remote::json_str).collect::<Vec<_>>().join(","), args.iter().map(|a| makepad_remote::json_str(a)).collect::<Vec<_>>().join(","));
     let selected = if args.last().is_some_and(|a| a == "--") { &args[..args.len() - 1] } else { args };
     // the session, and what devhub tells its owner of it (its call far past its measure)
     // (and how long its run has been silent)
-    let status = || -> Option<(crate::state::Live, Option<String>, Option<u64>)> {
-        let v = one(&c, "live", "live list").ok()?;
-        v.as_arr()?.iter().map(|v| (crate::state::live_from(v), v.get("word").and_then(Value::as_str).map(str::to_string), v.get("quiet_ms").and_then(Value::as_u64))).find(|(x, _, _)| x.test && x.offline == offline && x.lane == o.req.lane && x.app == pkg && x.test_args == selected)
+    let status = |c: &Client| -> Option<(crate::state::Live, Option<String>, Option<u64>, Option<String>)> {
+        let v = one(c, "live", "live list").ok()?;
+        v.as_arr()?.iter().map(|v| (crate::state::live_from(v), v.get("word").and_then(Value::as_str).map(str::to_string), v.get("quiet_ms").and_then(Value::as_u64), v.get("no_progress").and_then(Value::as_str).map(str::to_string))).find(|(x, _, _, _)| x.test && x.offline == offline && x.lane == o.req.lane && x.app == pkg && x.test_args == selected)
     };
-    let measured_ms = status().and_then(|(x, _, _)| x.patch).and_then(|p| p.tests).map_or(0, |t| t.ms.max(0.0) as u64);
+    let measured_ms = dialed.as_ref().and_then(|c| status(c)).and_then(|(x, _, _, _)| x.patch).and_then(|p| p.tests).map_or(0, |t| t.ms.max(0.0) as u64);
     let mut notice_after = Duration::from_millis(measured_ms.saturating_add(crate::state::STARTUP_MARGIN_MS));
     let mut told = String::new();
-    let v = live_retry(out, |out| {
+    // (the first attempt asks on the client dialed above; one after a cut on a new one)
+    let (v, c) = live_retry(out, || dialed.take().map_or_else(master, Ok), |c, out| {
         // Keep the request open without a deadline. A separate channel reads its phase
         // once it exceeds the previous test time plus two minutes.
         let ch = c.open("live", "").map_err(|e| e.to_string())?;
@@ -3230,7 +3550,7 @@ fn live_test(o: &Opts, pkg: &str, args: &[String], offline: bool, check: &str, o
                 Err(false) => return Err("the hub connection ended".into()),
             }
             if started.elapsed() > notice_after {
-                let (x, word, quiet) = status().map_or((None, None, None), |(x, w, q)| (Some(x), w, q));
+                let (x, word, quiet, stuck) = status(c).map_or((None, None, None, None), |(x, w, q, n)| (Some(x), w, q, n));
                 // (a session whose run has not started for this call waits for its JIT: selected,
                 // built, or another lease's build of it, however long that takes, live.rs startup_due)
                 let jit_wait = x.as_ref().filter(|x| x.state == "running" && x.pid == 0 && x.run_n <= x.ask_after)
@@ -3251,8 +3571,12 @@ fn live_test(o: &Opts, pkg: &str, args: &[String], offline: bool, check: &str, o
                 };
                 // a session placed again says so while it waits for its box
                 let note = x.as_ref().filter(|x| x.state == "starting" && !x.note.is_empty()).map_or(String::new(), |x| format!(": {}", x.note));
-                // a run silent past a minute says since when: a hung one is seen as one
-                let silent = quiet.filter(|ms| *ms >= crate::state::QUIET_SAID_MS).map_or(String::new(), |ms| format!("; last output {} ago", crate::state::ago(ms)));
+                // a run silent past a minute says since when: a hung one is seen as one, and a call
+                // whose edit makes no progress says that with its evidence (orch/live.rs no_progress)
+                let silent = match stuck {
+                    Some(why) => format!("; {why}"),
+                    None => quiet.filter(|ms| *ms >= crate::state::QUIET_SAID_MS).map_or(String::new(), |ms| format!("; last output {} ago", crate::state::ago(ms))),
+                };
                 let _ = writeln!(out, "still running: {phase}{note} ({} min{silent})", started.elapsed().as_secs() / 60);
                 if let Some(word) = word.filter(|w| *w != told) {
                     let _ = writeln!(out, "devhub: {word}");
@@ -3261,12 +3585,26 @@ fn live_test(o: &Opts, pkg: &str, args: &[String], offline: bool, check: &str, o
                 notice_after = started.elapsed() + STILL_RUNNING_EVERY;
             }
         }
-    })?;
+    }, master_beat)?;
     let x = crate::state::live_from(&v);
     // an answer that names no session printed `devhub test:  : ` and exit 1, unexplained
     // (11-13): what came instead is said
     if x.id.is_empty() { return Err(format!("test --live: the master answered with no session: {}", crate::proto::clean(&v.to_json(), 400))); }
-    Ok((x, c))
+    Ok((x, c, v.get("cached_ms").and_then(Value::as_u64)))
+}
+
+/// A live test's verdict as said: one its session answered from its last round, nothing having
+/// changed since (`cached`, that round's verdict time), says so on its first line, and how to run
+/// again. Four of a lane's five reruns in a flake hunt read their session's last pass as theirs
+/// (11-26).
+fn cached_said(result: &str, cached: Option<u64>) -> String {
+    let Some(ms) = cached else { return result.to_string() };
+    let at = ms / 1000 % 86_400;
+    let said = format!("devhub test (cached: the verdict of its round at {:02}:{:02}:{:02}Z, nothing changed since and nothing ran; --fresh runs the tests again): ", at / 3600, at / 60 % 60, at % 60);
+    match result.find("devhub test: ") {
+        Some(i) => format!("{}{said}{}", &result[..i], &result[i + "devhub test: ".len()..]),
+        None => format!("{}\n{result}", said.trim_end_matches(": ")),
+    }
 }
 
 /// Keep the test connection until cargo gives its verdict. Its loss tells the master that
@@ -3274,7 +3612,7 @@ fn live_test(o: &Opts, pkg: &str, args: &[String], offline: bool, check: &str, o
 fn single_live_test(mut o: Opts, pkg: &str, args: &[String], inputs: MissInputs, offline: bool) -> i32 {
     let started = Instant::now();
     let check = crate::proto::request_id();
-    let (x, client) = match live_test(&o, pkg, args, offline, &check, &mut std::io::stderr()) {
+    let (x, client, cached) = match live_test(&o, pkg, args, offline, &check, &mut std::io::stderr()) {
         Ok(result) => result,
         Err(e) => return fail(e),
     };
@@ -3307,7 +3645,7 @@ fn single_live_test(mut o: Opts, pkg: &str, args: &[String], inputs: MissInputs,
         }
         return code;
     }
-    print!("{}", x.test_result(started.elapsed().as_secs_f64()));
+    print!("{}", cached_said(&x.test_result(started.elapsed().as_secs_f64()), cached));
     let warned = x.patch.as_ref().and_then(|p| p.tests.as_ref()).map_or(&[][..], |t| &t.warnings[..]);
     let (lines, code) = warnings_verdict(warned, x.test_code());
     for l in lines.into_iter().filter(|l| l.contains("FAILED")) { println!("{l}"); }
@@ -3379,7 +3717,7 @@ pub(crate) fn fetch(c: &Client, node: &str, lane: &str, lease: &str, rel: &str, 
 /// tools/run/fixture/keep_logs.sh), copied into `dst` before the lease ends and its scratch goes:
 /// the files and their sizes, none when it kept nothing.
 pub(crate) fn kept(c: &Client, node: &str, lane: &str, lease: &str, dst: &Path) -> Result<Vec<(PathBuf, u64)>, String> {
-    fetch_under(c, node, lane, lease, &format!("tmp/{}", super::KEEP_DIR), dst, true)
+    fetch_keep_from(&|service, line| ask(c, Some(node), service, line), node, lane, lease, dst)
 }
 
 /// A line for a holder's log: what [`kept`] copied, or why it could not (nothing when nothing was kept).
@@ -3394,7 +3732,7 @@ pub(crate) fn kept_line(id: &str, dst: &Path, r: &Result<Vec<(PathBuf, u64)>, St
 
 /// What `--keep <dir>` brought back of a run's $DEVHUB_KEEP ([`kept`]), said even when it was
 /// nothing: an empty copy said nothing, and a lane read its missing grabs as a lost run.
-fn keep_said(id: &str, dst: &Path, r: &Result<Vec<(PathBuf, u64)>, String>) -> String {
+pub(super) fn keep_said(id: &str, dst: &Path, r: &Result<Vec<(PathBuf, u64)>, String>) -> String {
     match r {
         Ok(files) if files.is_empty() => format!("{id}: kept nothing in {}: the run put no file in $DEVHUB_KEEP", dst.display()),
         Ok(files) => format!("{id}: kept {} ({:.1} MB) in {}", super::master::plural(files.len(), "file", "files"), files.iter().map(|(_, n)| n).sum::<u64>() as f64 / 1048576.0, dst.display()),
@@ -3402,13 +3740,8 @@ fn keep_said(id: &str, dst: &Path, r: &Result<Vec<(PathBuf, u64)>, String>) -> S
     }
 }
 
-/// Why files kept for lane `lane` (`--keep <dir>`, `get .. <local-dir>`) may not go to `dst`
-/// (relative to `cwd`): it lies in a checkout, a lane's worktree or a repo's own, where a kept
-/// file can be committed or read as a build's input. Only the main checkout's `local/` takes them,
-/// and the refusal names the lane's `local/agent_state/<lane>/runs/` there. A lane's `run --keep
-/// apps/apps/fab/app/target/makepad_test/..`, relative in its worktree, left a `target/` in the
-/// app's folder (11-26).
-fn kept_into_checkout(dst: &Path, cwd: &Path, lane: &str) -> Option<String> {
+/// Resolve the destination once, including symlinks in its longest existing ancestor.
+pub(crate) fn abs_keep_path(dst: &Path, cwd: &Path) -> PathBuf {
     // `..` and `.` lexically, then symlinks in the part that exists (the rest is made by the copy)
     let mut abs = PathBuf::new();
     for c in cwd.join(dst).components() {
@@ -3418,7 +3751,23 @@ fn kept_into_checkout(dst: &Path, cwd: &Path, lane: &str) -> Option<String> {
             c => abs.push(c),
         }
     }
-    let real = abs.ancestors().find_map(|a| Some((a.canonicalize().ok()?, abs.strip_prefix(a).ok()?))).map_or(abs.clone(), |(a, rest)| a.join(rest));
+    for ancestor in abs.ancestors() {
+        if let Ok(real) = ancestor.canonicalize() {
+            let rest = abs.strip_prefix(ancestor).unwrap();
+            return if rest.as_os_str().is_empty() { real } else { real.join(rest) };
+        }
+    }
+    abs
+}
+
+/// Why files kept for lane `lane` (`--keep <dir>`, `get .. <local-dir>`) may not go to `dst`
+/// (relative to `cwd`): it lies in a checkout, a lane's worktree or a repo's own, where a kept
+/// file can be committed or read as a build's input. Only the main checkout's `local/` takes them,
+/// and the refusal names the lane's `local/agent_state/<lane>/runs/` there. A lane's `run --keep
+/// apps/apps/fab/app/target/makepad_test/..`, relative in its worktree, left a `target/` in the
+/// app's folder (11-26).
+pub(super) fn kept_into_checkout(dst: &Path, cwd: &Path, lane: &str) -> Option<String> {
+    let real = abs_keep_path(dst, cwd);
     let root = real.ancestors().find(|a| a.join(".git").exists())?;
     let dot = root.join(".git");
     if dot.is_dir() && real.strip_prefix(root).ok()?.starts_with("local") { return None; }
@@ -3439,43 +3788,116 @@ fn fetch_under(c: &Client, node: &str, lane: &str, lease: &str, rel: &str, dst: 
 
 /// The same lease-file protocol through either a client router or the master's node link.
 pub(super) fn fetch_from(ask: &dyn Fn(&str, &str) -> Result<Vec<String>, String>, node: &str, lane: &str, lease: &str, rel: &str, dst: &Path, inside: bool) -> Result<Vec<(PathBuf, u64)>, String> {
-    let list = ask("get-ls", &format!("get-ls {lane} {lease} {rel}")).map_err(|e| format!("{node}: {e}"))?;
-    let mut files = Vec::new();
-    for l in list {
-        let Some(v) = json(&l) else { continue };
-        if let Some(e) = v.get("err").and_then(|e| e.as_str()) {
-            return Err(format!("{node}: {e}"));
+    fetch_from_opts(ask, node, lane, lease, rel, dst, inside, false)
+}
+
+pub(super) fn fetch_keep_from(ask: &dyn Fn(&str, &str) -> Result<Vec<String>, String>, node: &str, lane: &str, lease: &str, dst: &Path) -> Result<Vec<(PathBuf, u64)>, String> {
+    fetch_from_opts(ask, node, lane, lease, &format!("tmp/{}", super::KEEP_DIR), dst, true, true)
+}
+
+fn refuse_symlink(path: &Path) -> Result<(), String> {
+    match std::fs::symlink_metadata(path.components().as_path()) {
+        Ok(m) if m.is_symlink() => Err(format!("refusing symlink destination {}", path.display())),
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(format!("{}: {e}", path.display())),
+        _ => Ok(()),
+    }
+}
+
+/// A sibling created exclusively by this copy. Its handle closes before either rename or unlink.
+struct GetTemp {
+    path: PathBuf,
+    renamed: bool,
+}
+
+impl Drop for GetTemp {
+    fn drop(&mut self) {
+        if self.renamed { return; }
+        if let Err(e) = std::fs::remove_file(&self.path) {
+            if e.kind() != std::io::ErrorKind::NotFound { eprintln!("devhub get: removing {}: {e}", self.path.display()); }
         }
-        let (p, r) = (s(&v, "p"), s(&v, "r"));
-        let p = if inside { p.split_once('/').map_or(p.clone(), |(_, under)| under.to_string()) } else { p };
-        let out = dst.join(&p);
-        if Path::new(&p).components().any(|c| !matches!(c, std::path::Component::Normal(_))) {
-            return Err(format!("{node}: bad path {p}"));
-        }
-        if let Some(dir) = out.parent() {
-            std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        }
-        let mut data = Vec::new();
+    }
+}
+
+impl GetTemp {
+    fn create(out: &Path) -> Result<(Self, std::fs::File), String> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
         loop {
-            let lines = ask("get-read", &format!("get-read {lane} {lease} {} {r}", data.len()))?;
-            let first = lines.first().ok_or_else(|| format!("{node} get-read: no answer"))?;
-            let v = json(first).ok_or_else(|| format!("{node} get-read: bad answer"))?;
-            if let Some(e) = v.get("err").and_then(Value::as_str) { return Err(format!("{node}: {e}")); }
-            let chunk = b64_decode(&s(&v, "data")).ok_or("get-read: bad data")?;
-            data.extend_from_slice(&chunk);
-            if v.get("eof").and_then(|e| e.as_bool()) != Some(false) || chunk.is_empty() {
-                break;
+            let path = out.with_file_name(format!(".devhub-get-{}-{}.tmp", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed)));
+            if path == out { continue; }
+            match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(file) => return Ok((Self { path, renamed: false }, file)),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(format!("{}: {e}", path.display())),
             }
         }
-        std::fs::write(&out, &data).map_err(|e| format!("{}: {e}", out.display()))?;
-        files.push((out, data.len() as u64));
+    }
+}
+
+fn fetch_from_opts(ask: &dyn Fn(&str, &str) -> Result<Vec<String>, String>, node: &str, lane: &str, lease: &str, rel: &str, dst: &Path, inside: bool, skip_missing: bool) -> Result<Vec<(PathBuf, u64)>, String> {
+    refuse_symlink(dst)?;
+    let list = ask("get-ls", &format!("get-ls {lane} {lease} {rel}")).map_err(|e| format!("{node}: {e}"))?;
+    let mut entries = Vec::with_capacity(list.len());
+    for line in list {
+        let v = json(&line).ok_or_else(|| format!("{node} get-ls: bad answer"))?;
+        if let Some(e) = v.get("err").and_then(Value::as_str) { return Err(format!("{node}: {e}")); }
+        let p = v.get("p").and_then(Value::as_str).ok_or("get-ls: missing path")?;
+        let r = v.get("r").and_then(Value::as_str).ok_or("get-ls: missing read path")?;
+        let normal = |p: &str| !p.is_empty() && Path::new(p).components().all(|c| matches!(c, std::path::Component::Normal(_)));
+        if !normal(p) { return Err(format!("{node}: bad path {p}")); }
+        let p = if inside { p.split_once('/').map_or(p, |(_, under)| under) } else { p };
+        if !normal(p) { return Err(format!("{node}: bad path {p}")); }
+        let priority = p.starts_with("gate-run.") || p == "gate-manifest.jsonl" || p.ends_with("/gate-manifest.jsonl");
+        let size = v.get("n").and_then(Value::as_u64).unwrap_or(u64::MAX);
+        entries.push((!priority, size, p.to_string(), r.to_string()));
+    }
+    entries.sort_unstable();
+    let mut files = Vec::new();
+    let vanished = |e: &str, marked: bool| {
+        skip_missing && !e.contains("no live lease") && !super::master::unreachable(e) && !e.contains("restarting: ")
+            && (marked || ["No such file or directory", "(os error 2)", "(os error 3)"].iter().any(|s| e.contains(s)))
+    };
+    'files: for (_, _, p, r) in entries {
+        let out = dst.join(&p);
+        let check_path = || {
+            for path in out.ancestors().take_while(|path| path.starts_with(dst)) { refuse_symlink(path)?; }
+            Ok::<_, String>(())
+        };
+        check_path()?;
+        let dir = out.parent().ok_or("get: missing destination directory")?;
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        let (mut temp, mut file) = GetTemp::create(&out)?;
+        let mut written = 0u64;
+        loop {
+            let lines = match ask("get-read", &format!("get-read {lane} {lease} {written} {r}")) {
+                Ok(lines) => lines,
+                Err(e) if vanished(&e, false) => continue 'files,
+                Err(e) => return Err(e),
+            };
+            let first = lines.first().ok_or_else(|| format!("{node} get-read: no answer"))?;
+            let v = json(first).ok_or_else(|| format!("{node} get-read: bad answer"))?;
+            if let Some(e) = v.get("err").and_then(Value::as_str) {
+                if vanished(e, v.get("missing").and_then(Value::as_bool) == Some(true)) { continue 'files; }
+                return Err(format!("{node}: {e}"));
+            }
+            let chunk = v.get("data").and_then(Value::as_str).and_then(b64_decode).ok_or("get-read: bad data")?;
+            file.write_all(&chunk).map_err(|e| format!("{}: {e}", temp.path.display()))?;
+            written += chunk.len() as u64;
+            if v.get("eof").and_then(Value::as_bool).ok_or("get-read: missing eof")? { break; }
+            if chunk.is_empty() { return Err(format!("{node} get-read: no progress reading {r} at {written}")); }
+        }
+        drop(file);
+        check_path()?;
+        std::fs::rename(&temp.path, &out).map_err(|e| format!("{}: {e}", out.display()))?;
+        temp.renamed = true;
+        files.push((out, written));
     }
     Ok(files)
 }
 
 /// `get <lane> <rel> <local-dir> [--node N] [--lease L]`: copies a file or folder from the lane's
 /// dir on its node (or a live lease's) into <local-dir>, over the devhub link (no ssh).
-fn get(lane: &str, rel: &str, dst: &str, rest: &[&str]) -> i32 {
+pub(crate) fn get(lane: &str, rel: &str, dst: &str, rest: &[&str]) -> i32 {
     let (mut node, mut lease) = (None, None);
     let mut i = 0;
     while i < rest.len() {
@@ -3565,12 +3987,25 @@ fn queue(c: &Client, all: bool, only: Option<&str>) -> i32 {
     0
 }
 
+/// A queued lease no look ranked yet: a new ask before the master's next look, or one a restarted
+/// master took back ([`super::sched::RESTART_REASON`]), whose place and held box are kept until
+/// its first look ranks it. 5 s into a master's restart the queue read "not ranked yet" for an ask
+/// that held its box and was granted a second later, and it read as parked where no look reached
+/// it (L1821072, 11-26).
+fn unranked(v: &Value) -> &'static str {
+    if s(v, "reason") == super::sched::RESTART_REASON {
+        "queued, not ranked yet: the master restarted, and its first look ranks it (its place and any box it held are kept)"
+    } else {
+        "queued, not ranked yet: the master's next look ranks it"
+    }
+}
+
 /// One lease's line of `queue`.
 fn queue_row(v: &Value, held: Option<&Value>) -> String {
     let node = s(&v, "node");
     let at = if node.is_empty() { String::new() } else { format!("@{node}") };
     let tail = match s(&v, "state").as_str() {
-        "queued" if n(&v, "pos") < 1.0 => format!("queued, not ranked yet, waiting {} s", n(&v, "wait_s")),
+        "queued" if n(&v, "pos") < 1.0 => format!("{}, waiting {} s", unranked(v), n(&v, "wait_s")),
         "queued" => format!("{} in queue ({}) waiting {} s{}", ordinal(n(&v, "pos") as usize), s(&v, "reason"), n(&v, "wait_s"), eta_of(&v)),
         "ended" => format!("ended ({}){}", s(&v, "how"), if s(&v, "reason").is_empty() { String::new() } else { format!(": {}", s(&v, "reason")) }),
         st => {
@@ -3601,7 +4036,8 @@ fn queue_row(v: &Value, held: Option<&Value>) -> String {
     let target = if loader.is_empty() { jit } else { loader };
     let diagnostic = held.and_then(|rows| rows.get(&s(v, "id"))).and_then(Value::as_str).filter(|d| !d.is_empty() && s(v, "state") == "granted")
         .map_or(String::new(), |d| format!(" held: {d}"));
-    format!("{:<6} {:<8} {:<10} {} {} ({}) {} {}{}: {tail}{diagnostic}", s(&v, "id"), s(&v, "lane"), format!("{}{at}", s(&v, "kind")), s(&v, "priority"), s(&v, "cost"), s(&v, "cost_source"), s(&v, "src"), if target.is_empty() { "" } else { "jit " }, target)
+    let wm_wait = v.get("wm_wait").and_then(Value::as_str).filter(|w| !w.is_empty()).map_or(String::new(), |w| format!(" [{w}]"));
+    format!("{:<6} {:<8} {:<10} {} {} ({}) {} {}{}: {tail}{diagnostic}{wm_wait}", s(&v, "id"), s(&v, "lane"), format!("{}{at}", s(&v, "kind")), s(&v, "priority"), s(&v, "cost"), s(&v, "cost_source"), s(&v, "src"), if target.is_empty() { "" } else { "jit " }, target)
 }
 
 /// `queue --long`: the leases queued 10 min or more, a check-in's starvation list. A lane's
@@ -4125,10 +4561,17 @@ pub fn cli(args: &[&str]) -> Option<i32> {
         },
         // the toolchain probe now (a box out of rotation after a toolchain move comes back at once)
         ["node", node, "probe"] => match node_one(&c, node, "toolchain-probe", "toolchain-probe") {
-            Ok(v) => match v.get("why").and_then(|w| w.as_str()) {
-                None => { println!("{node}: its toolchain links: in rotation"); 0 }
-                Some(why) => { println!("{node}: its toolchain cannot link, out of rotation: {why}"); 1 }
-            },
+            Ok(v) => {
+                match v.get("audio").and_then(|a| a.as_bool()) {
+                    Some(true) => println!("{node}: its audio output runs: audio=1 work may go there"),
+                    Some(false) => println!("{node}: its audio output does not run (a silent playback did not end in {} s): audio=1 work goes elsewhere", super::caps::AUDIO_PROBE_WAIT.as_secs()),
+                    None => {}
+                }
+                match v.get("why").and_then(|w| w.as_str()) {
+                    None => { println!("{node}: its toolchain links: in rotation"); 0 }
+                    Some(why) => { println!("{node}: its toolchain cannot link, out of rotation: {why}"); 1 }
+                }
+            }
             Err(e) if e.contains("unknown") || e.contains("unsupported") => fail(format!("{e} ({node}'s hub is older than `node probe`: it takes it from its next self-update)")),
             Err(e) => fail(e),
         },
@@ -4223,13 +4666,192 @@ mod restart_tests {
         assert!(ended_already("L1", ended) && !ended_already("L1", "L12 has already ended (`devhub leases --all`)"));
         assert!(lost_how("expired") && lost_how("lost") && !lost_how("cancelled") && lost_error("node-a: no lease L1 on a node") && !lost_error("node-a: lease-log: bad"));
         // the command's own end is said with its reason, never as lost
-        assert!(["hung", "disk", "memory", "panicked"].iter().all(|h| verdict_how(h) && !lost_how(h)) && !verdict_how("lost") && !verdict_how("cancelled"));
+        assert!(["hung", "disk", "memory", "panicked", "stopped"].iter().all(|h| verdict_how(h) && !lost_how(h)) && !verdict_how("lost") && !verdict_how("cancelled"));
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pending_run_backs_off_and_restarts_on_a_new_phase() {
+        let resolving = r#"{"pending":"resolving"}"#;
+        let building = r#"{"pending":"building"}"#;
+        let mut replies = [resolving, resolving, building, building, building, building, building, building, r#"{"n":7}"#].into_iter();
+        let mut waits = Vec::new();
+        let run = poll_start("L1", "box-a", || Ok(json(replies.next().unwrap()).unwrap()), |d| waits.push(d)).unwrap();
+        assert_eq!(n(&run, "n"), 7.0, "return the admitted run");
+        assert_eq!(waits, [100, 200, 100, 200, 400, 800, 1000, 1000].map(Duration::from_millis));
+    }
+
+    #[test]
+    fn finish_ended_treats_stopped_as_verdict_not_lost() {
+        let finish = |node: &str, how: &str, why: &str| finish_ended("L7", node, Some(&(how.into(), why.into())));
+        assert_eq!(finish("win-a", "stopped", "stopped by user: wedged"), Some((1, "makepad devhub: L7 on win-a ended (stopped): stopped by user: wedged".into())));
+        assert_eq!(finish("box-a", "stopped", ""), Some((1, "makepad devhub: L7 on box-a ended (stopped)".into())));
+        assert_eq!(finish("box-a", "cancelled", "cancelled by user").unwrap().0, CANCELLED_EXIT);
+        for how in ["lost", "expired"] { assert_eq!(finish("box-a", how, "no lease L7"), None); }
+        let beat = Beat { stop: Default::default(), ended: Default::default(), hung: Default::default(), thread: None };
+        for (how, why, message) in [
+            ("stopped", "stopped by main: hung", "L7 ended (stopped): stopped by main: hung"),
+            ("stopped", "", "L7 ended (stopped)"),
+            ("lost", "no lease L7", "L7 ended (lost)"),
+        ] {
+            *beat.ended.lock().unwrap() = Some((how.into(), why.into()));
+            assert_eq!(beat.check("L7"), Err(message.into()));
+        }
+    }
+
+    #[test]
+    fn beat_word_shows_distinct_words_and_never_masks_later_hung_verdict() {
+        let mut told = String::new();
+        for (word, hung) in [("a's WM update waits on you", false), ("every process idle", true)] {
+            let beat = json(&format!(r#"{{"idle":"{word}","hung":{hung}}}"#)).unwrap();
+            assert_eq!(beat_word(&beat, &mut told), Some((word.to_string(), hung)));
+            assert_eq!(beat_word(&beat, &mut told), None);
+        }
+    }
+
+    #[test]
+    fn queue_row_displays_wm_wait_tag_when_present_and_omits_when_absent() {
+        let row = queue_row(&json(r#"{"state":"granted"}"#).unwrap(), None);
+        assert!(!row.contains('['));
+        let tag = "a's WM update waits on this lease (6m00s)";
+        let held = json(&format!(r#"{{"state":"granted","wm_wait":"{tag}"}}"#)).unwrap();
+        assert_eq!(queue_row(&held, None), format!("{row} [{tag}]"));
+    }
+    #[cfg(feature = "checkout")]
+    use crate::jit_misses::{pre_land_fixture::Repo, CheckRun};
+    #[cfg(feature = "checkout")]
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[cfg(feature = "checkout")]
+    fn check_fixture(repo: &Repo, full: Option<&str>, check: impl Fn(&CheckRun) -> (i32, String) + Sync) -> (i32, String) {
+        let mut output = String::new();
+        let code = pre_land_checks_at(&repo.0, &repo.pin(), false, full, || Ok(check), |line| {
+            output.push_str(line);
+            output.push('\n');
+        });
+        (code, output)
+    }
+
+    #[cfg(feature = "checkout")]
+    #[test]
+    fn exit_to_round_trips_lease_id_and_stays_compatible_with_two_field_files() {
+        let pid = std::process::id();
+        let path = std::env::temp_dir().join(format!("devhub-exit-lease-{pid}.exit"));
+        super::write_exit(Some(&path), 101, Some("L42"));
+        assert_eq!(super::read_exit_lease(&path, pid), Some((101, Some("L42".into()))));
+        assert_eq!(super::read_exit(&path, pid), Some(101));
+        assert_eq!(super::read_exit_lease(&path, pid + 1), None);
+        super::write_exit(Some(&path), 0, None);
+        assert_eq!(super::read_exit_lease(&path, pid), Some((0, None)));
+        for suffix in ["", " bogus"] {
+            std::fs::write(&path, format!("{pid} 7{suffix}\n")).unwrap();
+            assert_eq!(super::read_exit_lease(&path, pid), Some((7, None)));
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(feature = "checkout")]
+    #[test]
+    fn pre_land_skips_tests_check_only_for_pkg_tested_in_full() {
+        let repo = Repo::new("full", &[
+            ("Cargo.toml", "[workspace]\nmembers = ['town', 'core']\n"),
+            ("town/Cargo.toml", "[package]\nname = 'makepad-town'\n"), ("town/src/lib.rs", ""),
+            ("core/Cargo.toml", "[package]\nname = 'makepad-town-core'\n"), ("core/src/lib.rs", ""),
+        ]);
+        repo.write("town/src/lib.rs", "pub fn town() {}\n");
+        repo.write("core/src/lib.rs", "pub fn core() {}\n");
+        let check = |full, plain: &[&str], tests: &[&str]| {
+            let seen = std::sync::Mutex::new(Vec::new());
+            let (code, log) = check_fixture(&repo, full, |run| {
+                seen.lock().unwrap().push((run.tests, run.packages.clone()));
+                (0, String::new())
+            });
+            assert_eq!(code, 0, "{log}");
+            let mut runs = seen.into_inner().unwrap();
+            runs.sort();
+            assert_eq!(runs.len(), 1 + usize::from(!tests.is_empty()));
+            assert!(!runs[0].0);
+            assert_eq!(runs[0].1, plain, "the plain check always covers the touched shipping packages");
+            if !tests.is_empty() {
+                assert!(runs[1].0);
+                assert_eq!(runs[1].1, tests, "the companion covers every touched package still needing tests");
+            }
+        };
+        let both = ["makepad-town", "makepad-town-core"];
+        check(tested_in_full(Some("lib"), &["--lib"]).then_some("makepad-town"), &both, &both);
+        check(Some("makepad-town"), &both, &["makepad-town-core"]);
+        repo.write("core/src/lib.rs", "");
+        check(Some("makepad-town"), &["makepad-town"], &[]);
+    }
+
+    #[cfg(feature = "checkout")]
+    #[test]
+    fn pre_land_catches_bin_test_error_under_lib_selector() {
+        let repo = Repo::new("bin-error", &[
+            ("Cargo.toml", "[workspace]\nmembers = ['app']\n"),
+            ("app/Cargo.toml", "[package]\nname = 'app'\n"), ("app/src/lib.rs", ""),
+            ("app/src/main.rs", "fn main() {}\n"),
+        ]);
+        repo.write("app/src/main.rs", "fn call(_: u8) {}\nfn main() { call(1); }\n#[test] fn broken() { call(); }\n");
+        let error = "app/src/main.rs:3:23: error[E0061]: this function takes 1 argument but 0 arguments were supplied";
+        let full = tested_in_full(Some("lib"), &["--lib"]).then_some("app");
+        let (code, log) = check_fixture(&repo, full, |run| if run.tests { (1, error.into()) } else { (0, String::new()) });
+        assert_eq!(code, 1, "{log}");
+        assert!(log.contains(error) && log.contains("check of app (--tests) FAILED") && log.contains("`makepad check -p app --tests` shows it alone"), "{log}");
+    }
+
+    #[cfg(feature = "checkout")]
+    #[test]
+    fn pre_land_preserves_dead_code_warning_in_plain_build() {
+        let repo = Repo::new("plain-warning", &[
+            ("Cargo.toml", "[workspace]\nmembers = ['a']\n"),
+            ("a/Cargo.toml", "[package]\nname = 'a'\n"), ("a/src/lib.rs", ""),
+        ]);
+        repo.write("a/src/lib.rs", "fn helper() {}\n#[test] fn uses_helper() { helper(); }\n");
+        let warning = "a/src/lib.rs:1:4: warning: function `helper` is never used";
+        let (code, log) = check_fixture(&repo, None, |run| (0, if run.tests { String::new() } else { warning.into() }));
+        assert_eq!(code, 1, "{log}");
+        assert!(log.contains(warning) && log.contains("check of a without their tests FAILED") && log.contains("`makepad check -p a` shows it alone"), "{log}");
+        assert!(log.contains("check of a (--tests): ok, 0 warnings"), "{log}");
+    }
+
+    #[cfg(feature = "checkout")]
+    #[test]
+    fn pre_land_retains_tests_check_when_feature_flags_are_passed() {
+        let cases: &[(Option<&str>, &[&str], bool)] = &[
+            (None, &[], true), (Some(ALL_TESTS), &["--tests"], true),
+            (None, &["--no-default-features"], false), (Some(ALL_TESTS), &["--tests", "--no-default-features"], false),
+            (None, &["--features", "kernel"], false), (Some(ALL_TESTS), &["--tests", "--features", "kernel"], false),
+            (None, &["--all-features"], false), (Some("lib"), &["--lib"], false),
+            (Some("bin:b"), &["--bin", "b"], false), (Some("t"), &["--test", "t"], false),
+        ];
+        for &(target, select, expected) in cases { assert_eq!(tested_in_full(target, select), expected, "{select:?}"); }
+        let repo = Repo::new("feature-flags", &[
+            ("Cargo.toml", "[workspace]\nmembers = ['hub']\n"),
+            ("hub/Cargo.toml", "[package]\nname = 'hub'\n[features]\ndefault = ['kernel']\nkernel = []\n[[test]]\nname = 'program_remote'\nrequired-features = ['kernel']\n"),
+            ("hub/src/lib.rs", ""), ("hub/tests/program_remote.rs", ""),
+        ]);
+        repo.write("hub/tests/program_remote.rs", "#[test] fn remote() { let _ = x; }\n");
+        repo.git(&["commit", "-qam", "edit integration test"]);
+        let runs = std::sync::atomic::AtomicUsize::new(0);
+        let error = "hub/tests/program_remote.rs:1:1: error[E0425]: cannot find value `x`";
+        let (code, log) = check_fixture(&repo, tested_in_full(None, &["--no-default-features"]).then_some("hub"), |run| {
+            runs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            assert!(run.tests && !run.own);
+            assert_eq!(run.packages, ["hub"]);
+            assert_eq!(run.alone, "makepad check -p hub --tests");
+            (1, error.into())
+        });
+        assert_eq!(runs.into_inner(), 1);
+        assert_eq!(code, 1, "{log}");
+        assert!(log.contains(error), "{log}");
+        let (code, log) = check_fixture(&repo, tested_in_full(None, &[]).then_some("hub"), |_| panic!("the default-feature suite already ran"));
+        assert_eq!(code, 0, "{log}");
+    }
 
     /// The long waits list starvation lease by lease; a lane's leases behind its own lease fold
     /// into one line with their soonest expected start, counted once; the prebuilds go on a line
@@ -4251,6 +4873,11 @@ mod tests {
         let held = json(r#"{"L1":"error: missing item","L2":"another session"}"#).unwrap();
         assert_eq!(queue_row(&grant, Some(&held)), format!("{plain} held: error: missing item"), "only the held lease's diagnostic is appended");
         assert_eq!(queue_row(&grant, Some(&Value::Null)), plain, "an unavailable lookup leaves the row intact");
+        // a lease no look ranked yet says why: a restarted master took it back (its place and its
+        // box's hold kept), or a new ask before the next look (a restart's read as parked, 11-26)
+        let taken_back = json(r#"{"id":"L2","state":"queued","pos":0,"reason":"master restart","wait_s":1419}"#).unwrap();
+        assert!(queue_row(&taken_back, None).ends_with(": queued, not ranked yet: the master restarted, and its first look ranks it (its place and any box it held are kept), waiting 1419 s"), "{}", queue_row(&taken_back, None));
+        assert!(queue_row(&json(r#"{"id":"L3","state":"queued","pos":0,"reason":"","wait_s":0}"#).unwrap(), None).ends_with(": queued, not ranked yet: the master's next look ranks it, waiting 0 s"));
     }
 
     /// A devhub flag among the test binary's words is refused before any run: `--rev` after `--`
@@ -4261,6 +4888,7 @@ mod tests {
         assert_eq!(flag_after_separator(&["--", "--cost=small"]).as_deref(), Some("`--cost` after `--` goes to the test binary; put it before `--`"));
         assert_eq!(flag_after_separator(&["--", "x", "--exact", "--nocapture", "--test-threads", "1", "--test"]), None, "the binary's own flags");
         assert_eq!(flag_after_separator(&[]), None);
+        assert_eq!(flag_after_separator(&["--", "--fresh"]).as_deref(), Some("`--fresh` after `--` goes to the test binary; put it before `--`"));
     }
 
     /// A master's refusal names both builds when the master runs another one than the CLI's, which
@@ -4401,8 +5029,22 @@ mod tests {
         let got = got.expect("the call's answer at its end");
         assert!(output.starts_with(b"the held session W0 was parked for L1 at 01:01Z; this run started cold\ndevhub: live call W1 waits"), "the cold notice precedes the wait and the fresh session's answer");
         assert_eq!(crate::state::live_from(&got).id, "W1", "{}", got.to_json());
+        // an answer from the session's last round, nothing changed since, says so on its verdict's
+        // line, and how to run the tests again (a flake hunt read four cached passes as its own, 11-26)
+        let result = "relax: notice\ndevhub test: a 1/1 ran (0 skipped, selected all) in 0.100 s\n";
+        assert_eq!(cached_said(result, Some(45_296_000)), "relax: notice\ndevhub test (cached: the verdict of its round at 12:34:56Z, nothing changed since and nothing ran; --fresh runs the tests again): a 1/1 ran (0 skipped, selected all) in 0.100 s\n");
+        assert_eq!(cached_said(result, None), result, "a round that ran reads as it did");
         assert_eq!(live_line(r#"{"err":"W1: the session ended"}"#, &mut None, &mut output), Err("W1: the session ended".to_string()));
         assert_eq!(live_line(r#"{"end":true}"#, &mut None, &mut output), Err("live: no answer".to_string()), "a wait alone is no answer");
+        // a cut link is asked again on a new one, once the master answers: the cut one's asks
+        // were cut again at once, round after round, and the call said nothing (11-27)
+        let mut out = Vec::new();
+        let (mut dials, mut beats) = (0, 0);
+        let got = live_retry(&mut out, || { dials += 1; Ok(dials) }, |c: &u32, _| if *c == 1 { Err("link lost: connection closed by the peer".to_string()) } else { Ok(*c * 10) }, || { beats += 1; true });
+        assert_eq!((got, dials, beats), (Ok((20, 2)), 2, 1), "asked again on the second link, after one wait");
+        assert_eq!(String::from_utf8_lossy(&out), "the link was cut: asking again\n", "said once");
+        let got: Result<(u32, u32), String> = live_retry(&mut Vec::new(), || Ok(1), |_: &u32, _| Err("W1: the session ended".to_string()), || true);
+        assert_eq!(got, Err("W1: the session ended".to_string()), "any other error ends the call");
     }
 
     /// A JIT miss's cargo check goes to a pool box, a macOS one to any Mac, a named box to itself.
@@ -4833,6 +5475,63 @@ mod tests {
     }
 
     #[test]
+    fn keep_flag_sets_abs_req_keep_dir_and_streaming_fetch_is_atomic() {
+        let base = std::env::temp_dir().join(format!("devhub-get-stream-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let base = base.canonicalize().unwrap();
+        let dst = base.join("result");
+        let arg = base.join("unused/../result");
+        let opts = parse("build", Some("keep"), &["--keep", arg.to_str().unwrap()]).unwrap();
+        assert_eq!(opts.keep.as_deref(), Some(dst.as_path()));
+        assert_eq!(Req::parse(&opts.req.to_json()).unwrap().keep_dir.as_deref(), dst.to_str());
+
+        let fetch = |ask: &dyn Fn(&str, &str) -> Result<Vec<String>, String>| fetch_keep_from(ask, "box-a", "keep", "L1", &dst);
+        assert!(fetch(&|_, _| Ok(vec![])).unwrap().is_empty() && !dst.exists());
+        std::fs::create_dir(&dst).unwrap();
+        let out = dst.join("report");
+        std::fs::write(&out, "old").unwrap();
+        let chunk = vec![b'x'; 256 << 10];
+        let listing = r#"{"p":"keep/report","r":"tmp/keep/report","n":262145}"#;
+        let copy = |last: &str| fetch(&|service, line| {
+            if service == "get-ls" { return Ok(vec![listing.into()]); }
+            assert_eq!(std::fs::read(&out).unwrap(), b"old", "the previous complete file stays readable during the copy");
+            if line == "get-read keep L1 0 tmp/keep/report" {
+                return Ok(vec![format!(r#"{{"data":"{}","eof":false}}"#, makepad_network::digest::base64_encode(&chunk))]);
+            }
+            assert_eq!(line, "get-read keep L1 262144 tmp/keep/report");
+            let temp = std::fs::read_dir(&dst).unwrap().flatten().find(|e| e.file_name().to_string_lossy().starts_with(".devhub-get-")).unwrap();
+            assert_eq!(temp.metadata().unwrap().len(), chunk.len() as u64, "the first chunk is already on disk");
+            Ok(vec![last.into()])
+        });
+        assert!(copy(r#"{"err":"read failed"}"#).unwrap_err().contains("read failed"));
+        for missing in [r#"{"err":"gone","missing":true}"#, r#"{"err":"No such file or directory"}"#, r#"{"err":"path (os error 3)"}"#] {
+            assert!(copy(missing).unwrap().is_empty());
+        }
+        assert!(copy(r#"{"err":"no live lease (os error 2)","missing":true}"#).is_err());
+        assert_eq!(std::fs::read_dir(&dst).unwrap().count(), 1, "failed and vanished reads remove their temp");
+        assert_eq!(copy(r#"{"data":"eg==","eof":true}"#).unwrap(), [(out.clone(), 262145)]);
+        assert_eq!(std::fs::read(&out).unwrap(), [chunk.as_slice(), b"z"].concat());
+        assert!(fetch(&|service, _| {
+            assert_eq!(service, "get-ls", "a listing error aborts before the first read");
+            Ok(vec![listing.into(), r#"{"err":"listing failed"}"#.into()])
+        }).is_err());
+        #[cfg(unix)]
+        {
+            let link = dst.join("link");
+            std::os::unix::fs::symlink(&base, &link).unwrap();
+            for path in ["link", "link/out", "../escape"] {
+                assert!(fetch(&|service, _| {
+                    assert_eq!(service, "get-ls");
+                    Ok(vec![format!(r#"{{"p":"keep/{path}","r":"tmp/keep/{path}"}}"#)])
+                }).is_err());
+            }
+            assert!(fetch_keep_from(&|_, _| panic!("symlink root"), "box-a", "keep", "L1", &link).is_err());
+        }
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
     fn the_timed_queue_reads_per_box_in_expected_order() {
         let leases: Vec<Value> = [
             r#"{"id":"L1","lane":"one","kind":"timed","state":"running","node":"a","granted_s":40}"#,
@@ -5034,6 +5733,33 @@ mod tests {
         }).expect("clean alone, it lands");
         assert_eq!(seen.into_inner().unwrap().last().map(String::as_str), Some("a,c"), "past the bound, the touched crate and the other repository's are checked alone");
         assert!(gate.notes.iter().any(|n| n == "dependents: a, c of them checked alone, the crates the hand-in touches and its dependents in other repositories"), "{:?}", gate.notes);
+        // the boundary audit of the app it reaches, at the merge: a row it brings refuses it, with
+        // the row, its way in and the line that runs it alone; a row the tips already show, a
+        // clean audit and one let go at its start bound refuse nothing (#10089, 11-27)
+        let (merge, tips) = ("rc-t@m", "work@w");
+        let row = |at: &str| format!("violation\tFAIL\tmakepad_s\tmakepad_s::Heap::field_type\t{at}/platform/s/src/heap.rs:108:1: a field of `Heap` (`objects: Vec<Obj>`) is reached from JIT-compiled code\n  reached from x::Widget::script_apply (a derive's expansion)\n");
+        let asked = std::sync::Mutex::new(Vec::new());
+        let audit = |on_merge: String, on_tips: String| {
+            asked.lock().unwrap().clear();
+            boundary_gate("makepad-app-x", "apps/x", merge, tips, "0123456789abc", &|run, rev| {
+                asked.lock().unwrap().push((run.class.clone(), run.cmd[run.cmd.len() - 4..].join(" "), rev.to_string()));
+                let log = if rev == merge { on_merge.clone() } else { on_tips.clone() };
+                (if log.contains("FAIL") { 1 } else { 0 }, format!("# lowered 912 bodies\n{log}"))
+            })
+        };
+        let refused = audit(row("/n/lane"), String::new()).expect_err("a violation the hand-in brings refuses it");
+        assert!(refused[0].starts_with("boundary: makepad-app-x fails its audit at the merge with work 0123456789: 1 row(s)"), "the refusal says what failed: {refused:?}");
+        assert!(refused[1].starts_with("  violation\tFAIL\tmakepad_s\tmakepad_s::Heap::field_type\t") && refused[2] == "    reached from x::Widget::script_apply (a derive's expansion)", "the row and its way in: {refused:?}");
+        assert_eq!(refused.last().unwrap(), "GATEREPRO boundary makepad-app-x :: cd apps/x && makepad check --boundary all makepad-app-x", "the line that runs it alone");
+        assert_eq!(asked.lock().unwrap().clone(), [("boundary:makepad-app-x".to_string(), "check --boundary all makepad-app-x".to_string(), merge.to_string()), ("boundary:makepad-app-x".into(), "check --boundary all makepad-app-x".into(), tips.into())], "audited at the merge, then at the tips for what was red before it");
+        let gate = audit(row("/n/lane"), row("/m/other").replace(":108:1:", ":97:5:")).expect("a row already red at the tips, on another tree and line, is not its own");
+        assert_eq!(gate, ["boundary: makepad-app-x: 1 failing row(s) already at the tips without the hand-in: not its own, the buckets say them"]);
+        let gate = audit(String::new(), String::new()).expect("a clean audit");
+        assert!(gate[0].starts_with("boundary: makepad-app-x audited at the merge with work 0123456789 in ") && asked.lock().unwrap().len() == 1, "said, and not asked at the tips: {gate:?}");
+        let deferred = boundary_gate("makepad-app-x", "apps/x", merge, tips, "0123456789abc", &|_, _| (DEFERRED_EXIT, not_run_line("check of makepad-app-x", &deferred_said("L7", Duration::from_secs(46), Duration::from_secs(44)))))
+            .expect("an audit that did not start in its start bound goes after the landing");
+        assert!(deferred[0].starts_with("boundary: makepad-app-x not audited (L7 had not started 46 s after it asked") && deferred[0].ends_with("): the buckets audit it after the landing"), "{deferred:?}");
+        assert_eq!(boundary_rows("option-entry\tFAIL\tmakepad_s\tOption<Obj>\tadd it to option_layouts!\nviolation\tok\tmakepad_s\ta::b\tfine\n").len(), 1, "a failed option entry is a failing row; a row that passed is none");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -5100,7 +5826,7 @@ mod tests {
 
     /// #5087: the JIT took a test rustc rejects (E0277 under rustc's integer fallback); it landed
     /// green, and the fast bucket's testcheck was the first to say so (11-15). The hand-in checks
-    /// the touched packages' test targets by rustc: an error refuses it, a warning does not.
+    /// the touched packages' test targets by rustc: a new error or warning refuses it.
     #[cfg(feature = "checkout")]
     #[test]
     fn a_hand_in_whose_one_rustc_error_is_in_a_test_target_is_refused() {
@@ -5124,8 +5850,13 @@ mod tests {
         }, &none).expect_err("rustc's error in a test target refuses the hand-in");
         assert!(refused[0].starts_with("test targets: rustc's check of a fails: 1 error line(s)") && refused[0].ends_with("`cargo check --release --tests -p a` shows it alone"), "the refusal names the package and the command: {refused:?}");
         assert!(refused.iter().any(|l| l.trim() == error), "and says rustc's error where it is: {refused:?}");
-        let warned = tests_gate(&tested, &|_| (0, "a/tests/t.rs:1:5: warning: unused import: `std::fmt`\n".into()), &none).expect("a test target's warning refuses nothing, as in the fast bucket");
-        assert!(warned[0].starts_with("test targets: rustc checked a in "), "{warned:?}");
+        let clean = tests_gate(&tested, &|_| (0, "warning: unused manifest key\n".into()), &|_| panic!("a clean check never checks the tips"))
+            .expect("an unlocated manifest warning passes");
+        assert!(clean[0].starts_with("test targets: rustc checked a in "), "{clean:?}");
+        let warning = "a/tests/t.rs:1:5: warning: unused import: `std::fmt`";
+        let warned = tests_gate(&tested, &|_| (0, format!("{warning}\n")), &none).expect_err("a located warning refuses the hand-in");
+        assert!(warned[0].ends_with("`cargo check --release --tests -p a` shows it alone"), "{warned:?}");
+        assert_eq!(warned[1].trim(), warning);
         let lost = tests_gate(&tested, &|_| (2, not_run_line("check of a", "no box took it")), &none).expect("a check that never ran does not refuse");
         assert!(lost[0].contains("a not checked (no box took it); the fast bucket checks them after the landing"), "{lost:?}");
         let gone = tests_gate(&tested, &|_| (LOST_EXIT, not_run_line("check of a", "its lease L1 was lost on node-a: no lease L1; no verdict, run it again")), &none).expect("a check whose lease was lost does not refuse");
@@ -5134,6 +5865,110 @@ mod tests {
         // rustc's same error already at the tips without the hand-in: the buckets', not the hand-in's
         let excused = tests_gate(&tested, &|_| (101, format!("{error}\n")), &|_| crate::jit_misses::check_failures(&format!("{error}\n")).iter().filter_map(|l| crate::bucket::error_key(l)).collect()).expect("an error already red at the tips refuses nothing");
         assert_eq!(excused, [red_note("test targets", "a", 1)], "{excused:?}");
+    }
+
+    #[cfg(feature = "checkout")]
+    #[test]
+    fn tests_gate_refuses_lanes_new_warning_with_repro_and_native_lint_note() {
+        let warning = "libs/relax/compiler/src/domain_tests.rs:2403:22: warning: `malloc` redeclared with a different signature";
+        let none = |_: &CheckRun| Red::new();
+        let refused = tests_gate(&["relax-compiler".into()], &|_| {
+            (0, format!("{warning}\n{warning}\nwarning: `relax-compiler` (lib test) generated 1 warning\n"))
+        }, &none).expect_err("a new warning refuses even when cargo exits successfully");
+        assert_eq!(refused.len(), 2, "the duplicate and the cargo summary add no lines");
+        assert!(refused[0].starts_with("test targets: rustc's check of relax-compiler fails: 1 new warning line(s) in "), "{refused:?}");
+        assert!(refused[0].contains("(native rustc check; catches lints the JIT check doesn't run)"), "{refused:?}");
+        assert!(refused[0].ends_with("; `cargo check --release --tests -p relax-compiler` shows it alone"), "{refused:?}");
+        assert_eq!(refused[1], format!("  {warning}"));
+
+        let refused = tests_gate(&["a".into(), "b".into()], &|_| (0, "b/tests/t.rs:1:5: warning: unused import\n".into()), &none)
+            .expect_err("a warning in the second package refuses the hand-in");
+        assert!(refused[0].starts_with("test targets: rustc's check of a, b fails: "), "{refused:?}");
+        assert!(refused[0].ends_with("`cargo check --release --tests -p a -p b` shows it alone"), "{refused:?}");
+    }
+
+    #[cfg(feature = "checkout")]
+    #[test]
+    fn tests_gate_excuses_tip_warning_but_refuses_new_warning_in_same_package() {
+        let tested = ["a".into()];
+        let tip = "/other-box/tree/a/tests/t.rs:1:5: warning: unused import: `std::fmt`";
+        let shifted = "a/tests/t.rs:11:5: warning: unused import: `std::fmt`";
+        let warning = "a/tests/t.rs:24:22: warning: `malloc` redeclared with a different signature";
+        let tip_red = Red::from([crate::bucket::error_key(tip).unwrap()]);
+        let calls = AtomicUsize::new(0);
+        let red = |_: &CheckRun| {
+            calls.fetch_add(1, Ordering::Relaxed);
+            tip_red.clone()
+        };
+        let excused = tests_gate(&tested, &|_| (0, format!("{shifted}\n{shifted}\n")), &red)
+            .expect("the same tip warning on a shifted line is excused");
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(excused, [red_note("test targets", "a", 1)]);
+
+        let refused = tests_gate(&tested, &|_| (0, format!("{shifted}\n{warning}\n")), &red)
+            .expect_err("a different warning in the same file still refuses");
+        assert_eq!(calls.load(Ordering::Relaxed), 2, "one tip check per gate invocation");
+        assert_eq!(refused.len(), 2);
+        assert!(refused[0].contains("1 new warning line(s)"), "{refused:?}");
+        assert!(refused[0].ends_with("`cargo check --release --tests -p a` shows it alone"), "{refused:?}");
+        assert_eq!(refused[1].trim(), warning);
+        assert!(!refused.iter().any(|line| line.contains("unused import")), "{refused:?}");
+    }
+
+    #[cfg(feature = "checkout")]
+    #[test]
+    fn tests_gate_keeps_error_behavior_mixed_diagnostics_and_print_cap() {
+        let tested = ["a".into()];
+        let none = |_: &CheckRun| Red::new();
+        let error = "a/tests/t.rs:3:24: error[E0277]: no implementation for `u8 & i32`";
+        let warning = "a/tests/t.rs:1:5: warning: unused import: `std::fmt`";
+        let refused = tests_gate(&tested, &|_| (101, format!("{error}\n")), &none).expect_err("a new error refuses");
+        assert!(refused[0].contains("1 error line(s) in "), "{refused:?}");
+        assert!(refused[0].ends_with("`cargo check --release --tests -p a` shows it alone"), "{refused:?}");
+        assert!(!refused[0].contains("native rustc check"), "{refused:?}");
+
+        let refused = tests_gate(&tested, &|_| (101, format!("{warning}\n{error}\n")), &none).expect_err("mixed diagnostics refuse");
+        assert!(refused[0].contains("1 error line(s) and 1 new warning line(s) in "), "{refused:?}");
+        assert!(!refused[0].contains("native rustc check"), "{refused:?}");
+        assert_eq!(refused[1].trim(), error, "errors are printed first");
+        assert_eq!(refused[2].trim(), warning);
+
+        let mut lines: Vec<String> = (1..=45).map(|i| format!("a/tests/t.rs:{i}:1: warning: old {i}")).collect();
+        let tip_red: Red = lines.iter().map(|line| crate::bucket::error_key(line).unwrap()).collect();
+        lines.extend((0..42).map(|i| format!("a/tests/t.rs:{}:1: warning: new {i}", 100 + i)));
+        let refused = tests_gate(&tested, &|_| (0, lines.join("\n")), &|_| tip_red.clone()).expect_err("new warnings past the print cap refuse");
+        assert!(refused[0].contains("42 new warning line(s)"), "{refused:?}");
+        assert_eq!(refused.len(), 1 + TESTS_GATE_MAX_SHOWN + 1);
+        assert!(!refused.iter().any(|line| line.contains("warning: old ")), "{refused:?}");
+        assert!(refused[1].ends_with("warning: new 0"), "{refused:?}");
+        assert!(refused[40].ends_with("warning: new 39"), "{refused:?}");
+        assert_eq!(refused[41], "  ... and 2 more line(s); `cargo check --release --tests -p a` shows all");
+    }
+
+    #[cfg(feature = "checkout")]
+    #[test]
+    fn tests_gate_passes_through_when_skipped_past_cheap_bound_or_deferred_at_start_bound() {
+        let tested = ["a".into()];
+        let calls = AtomicUsize::new(0);
+        let red = |_: &CheckRun| {
+            calls.fetch_add(1, Ordering::Relaxed);
+            Red::new()
+        };
+        let skipped = tests_gate(&tested, &|run| (2, format!("{}\n", pre_land(run, Some(CHEAP_GATE_MS + 60_000)).unwrap_err())), &red)
+            .expect("a slow check is left to the fast bucket");
+        assert!(skipped[0].starts_with("test targets: a not checked (estimated 3m00s, past the 2m00s "), "{skipped:?}");
+        assert!(skipped[0].ends_with("); the fast bucket checks them after the landing"), "{skipped:?}");
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+
+        assert_eq!(gate_start_bound(Some(5_000)), Duration::from_millis(GATE_START_MIN_MS));
+        assert_eq!(gate_start_bound(Some(90_000)), Duration::from_secs(90));
+        assert_eq!(gate_start_bound(None), Duration::from_millis(CHEAP_GATE_MS));
+        let deferred = tests_gate(&tested, &|_| {
+            (DEFERRED_EXIT, not_run_line("check of a", &deferred_said("L9", Duration::from_secs(46), gate_start_bound(Some(45_000)))))
+        }, &red).expect("a deferred check is left to the fast bucket");
+        assert!(deferred[0].starts_with("test targets: a not checked (L9 had not started 46 s after it asked"), "{deferred:?}");
+        assert!(deferred[0].ends_with("); the fast bucket checks them after the landing"), "{deferred:?}");
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
     }
 
     /// #5188 (11-15): the lane's makepad half had merged work past a two-repo landing (#5185) and

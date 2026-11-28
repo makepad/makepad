@@ -77,7 +77,7 @@ A reissued credential takes effect only after each long-running fleet
 process on that machine restarts (its AI hub, Desk Link, devhub): a process
 reads `id.key` and `id.cred` once and serves under them until it exits.
 
-`local/agent_state/relax-campaign/fleetid-data/issue-credentials.sh` issues
+The issuing script, kept with the fleet's private data, issues
 and installs every machine's credential through the ssh path, ships
 `revoked` (`--revoked`) and deletes the retired symmetric secrets
 (`--retire-old`). It prints no secrets.

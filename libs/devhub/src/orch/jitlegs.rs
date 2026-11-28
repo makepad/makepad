@@ -138,11 +138,17 @@ fn run(ctx: &Ctx, r: JitLegsRun) {
         env.push(format!("VERIFY_BASE={}", b.work));
         env.push(format!("VERIFY_CBASE={}", b.main));
     }
-    for def in verify::legs(true) {
+    let defs = verify::legs(true);
+    let to_run = |name: &str| r.legs.iter().any(|l| l.name == name && !matches!(l.state.as_str(), "ok" | "fail" | "incomplete" | NOT_RUN));
+    for (i, def) in defs.iter().enumerate() {
         let Some(leg) = r.legs.iter().find(|l| l.name == def.name).cloned() else { continue };
-        if matches!(leg.state.as_str(), "ok" | "fail" | "incomplete" | NOT_RUN) {
+        if !to_run(&def.name) {
             continue;
         }
+        // the leg before a timed one says so: a bench box that could run it is lent only runs
+        // that end first (Req::then_timed; a lane's live session lent there held the warm leg
+        // 13 min, 11-27)
+        let then_timed = defs[i + 1..].iter().find(|d| to_run(&d.name)).filter(|d| d.kind == crate::lease::Kind::Timed).map(|d| d.needs.as_str());
         let os = def.needs.split(',').find_map(|kv| kv.strip_prefix("os=")).unwrap_or("linux");
         let needs = match super::fleet_rustc(ctx, os) {
             Some(v) => format!("{}{}rustc_eq={v}", def.needs, if def.needs.is_empty() { "" } else { "," }),
@@ -150,7 +156,7 @@ fn run(ctx: &Ctx, r: JitLegsRun) {
         };
         let spec = Spec { since_ms: None, lane: format!("jitlegs-{}", def.name), agent: "devhub-jitlegs".into(), kind: def.kind, needs, prio: super::leg::BACKGROUND_PRIO, rev: r.pair.rev(), repo_dir: ctx.repo.to_string_lossy().into_owned(), node: def.node.clone() };
         let log = leg.log.clone();
-        let verdict = verify::run_leg(ctx, &spec, &r.pair, &def, &env, Path::new(&log), Some(leg));
+        let verdict = verify::run_leg(ctx, &spec, &r.pair, def, &env, Path::new(&log), Some(leg), then_timed);
         let summary = ctx.store.read(|d| d.jitlegs.runs.last().and_then(|r| r.legs.iter().find(|l| l.name == def.name)).map(|l| l.summary.clone()).unwrap_or_default());
         let name = &def.name;
         match verdict {

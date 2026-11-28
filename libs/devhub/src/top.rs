@@ -262,7 +262,7 @@ pub fn ticks() -> Ticks {
 }
 
 /// `ps`'s CPU time so far (`[dd-][hh:]mm:ss[.ss]`) in hundredths of a second.
-#[cfg(any(not(any(target_os = "linux", windows)), test))]
+#[cfg(any(not(any(target_os = "linux", windows)), all(test, not(windows))))]
 fn cpu_time_cs(t: &str) -> Option<u64> {
     let (days, rest) = match t.split_once('-') {
         Some((d, r)) => (d.parse::<u64>().ok()?, r),
@@ -746,14 +746,21 @@ pub fn cpu_of(pids: &[u32]) -> Vec<(u32, f64)> {
 /// A process outside the box's leases is named once it uses this many cores on average.
 #[cfg(not(windows))]
 const OUTSIDE_MIN_CORES: f64 = 0.5;
-/// and at most this many of them, the busiest
+/// Processes using at least one percent of a core contribute to the outside total.
 #[cfg(not(windows))]
-const OUTSIDE_TOP: usize = 3;
+const OUTSIDE_SUM_MIN_CORES: f64 = 0.01;
+/// Smaller unnamed processes at or above this threshold are checked for live Linux scopes.
+#[cfg(not(windows))]
+const OUTSIDE_SCOPE_CHECK_MIN_CORES: f64 = 0.05;
+/// At most this many outside processes are kept for display after scope deduplication.
+pub(crate) const OUTSIDE_TOP: usize = 3;
 
 /// The box's CPU by whose it was since the previous call (the master's caps poll, every 10 s),
 /// cores on average: each lease's (`lease_of(pgid)` names a lease run's process group: what runs
-/// in it or under it is that lease's), the busiest first, and the busiest processes outside the
-/// leases (what it is, pid, cores), at least [`OUTSIDE_MIN_CORES`] each, at most [`OUTSIDE_TOP`];
+/// in it or under it is that lease's), the busiest first, and all processes outside the leases
+/// using at least [`OUTSIDE_MIN_CORES`] (what it is, pid, cores), also busiest first. The
+/// executor keeps [`OUTSIDE_TOP`] for display after checking their scopes. Work outside leases
+/// contributes to the total from [`OUTSIDE_SUM_MIN_CORES`] upwards;
 /// what the hub started outside a lease is named as the hub's. A box measured busier than its
 /// leases' charges says what took the rest: a lease past its charge or work of no lease's (a box
 /// charged a few cores measured 7-8 more the whole of a live launch's 9 min wait, and nothing said
@@ -784,8 +791,15 @@ pub fn cpu_split(_lease_of: &dyn Fn(u32) -> Option<String>) -> CpuSplit {
 pub struct CpuSplit {
     /// (lease, cores), the busiest first
     pub leases: Vec<(String, f64)>,
-    /// (what, pid, cores), the busiest first
+    /// All (what, pid, cores) at half a core or more, busiest first, until the executor
+    /// truncates to [`OUTSIDE_TOP`] after checking their scopes.
     pub outside: Vec<(String, u32, f64)>,
+    /// Cores used by all non-lease processes at one percent of a core or more.
+    pub outside_cores: f64,
+    /// Unowned processes below the naming threshold and at five percent of a core or more.
+    /// Linux checks their scopes and drains them in the executor.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) outside_small: Vec<(u32, f64)>,
     /// (pid, app): the apps of ours that run outside every lease and the hub, busy or not, by the
     /// registry's label ([`apps_outside`])
     pub apps: Vec<(u32, String)>,
@@ -804,36 +818,42 @@ fn split_rows(rows: &[ProcRow], lease_of: &dyn Fn(u32) -> Option<String>) -> Cpu
     // (lease, cores, its busiest compiler: pid, % of a core, name)
     let mut builds: Vec<(String, f64, (u32, f64, String))> = Vec::new();
     for r in rows.iter().filter(|r| r.pid != me && r.cpu_pct > 0.0) {
-        let what = match owner_of(&by_pid, r, me, lease_of) {
+        let cores = r.cpu_pct / 100.0;
+        let hub_label = match owner_of(&by_pid, r, me, lease_of) {
             Owner::Group(lease) => {
                 if r.cpu_pct >= 1.0 && COMPILERS.contains(&r.name.as_str()) {
                     match builds.iter_mut().find(|(l, ..)| *l == lease) {
-                        Some((_, cores, busiest)) => {
-                            *cores += r.cpu_pct / 100.0;
+                        Some((_, total, busiest)) => {
+                            *total += cores;
                             if r.cpu_pct > busiest.1 { *busiest = (r.pid, r.cpu_pct, r.name.clone()); }
                         }
-                        None => builds.push((lease.clone(), r.cpu_pct / 100.0, (r.pid, r.cpu_pct, r.name.clone()))),
+                        None => builds.push((lease.clone(), cores, (r.pid, r.cpu_pct, r.name.clone()))),
                     }
                 }
                 match out.leases.iter_mut().find(|(l, _)| *l == lease) {
-                    Some((_, cores)) => *cores += r.cpu_pct / 100.0,
-                    None => out.leases.push((lease, r.cpu_pct / 100.0)),
+                    Some((_, total)) => *total += cores,
+                    None => out.leases.push((lease, cores)),
                 }
                 continue;
             }
-            // (named only when it is said: a look has hundreds of these)
-            _ if r.cpu_pct < OUTSIDE_MIN_CORES * 100.0 => continue,
-            Owner::Hub(what) => what,
-            Owner::Nobody => {
-                let what = label(r.pid).unwrap_or_else(|| r.name.clone());
-                under(&by_pid, r).map_or_else(|| what.clone(), |u| format!("{what} ({u})"))
-            }
+            Owner::Hub(what) => Some(what),
+            Owner::Nobody => None,
         };
-        out.outside.push((crate::proto::clean(&what, 60), r.pid, r.cpu_pct / 100.0));
+        if cores >= OUTSIDE_SUM_MIN_CORES { out.outside_cores += cores; }
+        if cores < OUTSIDE_MIN_CORES {
+            if cores >= OUTSIDE_SCOPE_CHECK_MIN_CORES && hub_label.is_none() {
+                out.outside_small.push((r.pid, cores));
+            }
+            continue;
+        }
+        let what = hub_label.unwrap_or_else(|| {
+            let what = label(r.pid).unwrap_or_else(|| r.name.clone());
+            under(&by_pid, r).map_or_else(|| what.clone(), |u| format!("{what} ({u})"))
+        });
+        out.outside.push((crate::proto::clean(&what, 60), r.pid, cores));
     }
     out.leases.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     out.outside.sort_by(|a, b| b.2.total_cmp(&a.2).then(a.1.cmp(&b.1)));
-    out.outside.truncate(OUTSIDE_TOP);
     out.apps = apps_outside(rows, &by_pid, me, lease_of);
     // (one argv read per lease that builds: its busiest compiler's)
     out.builds = builds.into_iter().map(|(lease, cores, (pid, _, name))| (lease, cores, crate_of(pid).unwrap_or(name))).collect();
@@ -1018,9 +1038,23 @@ mod tests {
         assert!(s.starts_with("t  cpu "), "{s}");
     }
 
+    #[cfg(not(windows))]
+    #[test]
+    fn outside_cores_sums_all_non_lease_processes_past_top_limit() {
+        let row = |pid, ppid, name: &str, cpu_pct| ProcRow { pid, ppid, pgid: pid, name: name.into(), cpu_pct, ..Default::default() };
+        let mut rows: Vec<_> = (4_000_001..=4_000_005).map(|pid| row(pid, 1, "rustc", 40.0)).collect();
+        rows.push(row(4_000_006, std::process::id(), "cargo", 60.0));
+        rows.push(row(4_000_007, 1, "test", 800.0));
+        let split = split_rows(&rows, &|pgid| (pgid == 4_000_007).then(|| "L1".into()));
+        assert_eq!(split.outside, vec![("the hub's cargo".into(), 4_000_006, 0.6)]);
+        assert!((split.outside_cores - 2.6).abs() < 1e-6, "all five compilers contribute to the outside total");
+        assert_eq!(split.outside_small, (4_000_001..=4_000_005).map(|pid| (pid, 0.4)).collect::<Vec<_>>());
+        assert_eq!(split.leases, vec![("L1".into(), 8.0)]);
+    }
+
     /// What a box ran outside its leases: a lease's run and what runs under it are the lease's;
     /// what the hub started outside a lease is the hub's; the rest by name and pid, busiest first,
-    /// at least half a core each, three at most.
+    /// at least half a core each, before the executor checks scopes and limits the display.
     #[cfg(not(windows))]
     #[test]
     fn the_busiest_processes_outside_the_leases_are_named() {
@@ -1056,10 +1090,12 @@ mod tests {
         assert_eq!(build_crate(&words("ld -o out a.o")), None, "a linker names no crate");
         let busy = split.outside;
         let pids: Vec<u32> = busy.iter().map(|b| b.1).collect();
-        assert_eq!(pids, vec![4000021, 4000010, 4000020], "{busy:?}");
+        assert_eq!(pids, vec![4000021, 4000010, 4000020, 4000023], "{busy:?}");
+        assert!((split.outside_cores - 6.21).abs() < 1e-6);
+        assert_eq!(split.outside_small, vec![(4000032, 0.4), (4000033, 0.4)]);
         assert_eq!(busy[0].0, "indexer");
         assert!(busy[1].0.starts_with("the hub's "), "{busy:?}");
-        assert_eq!(outside_said(&busy[2..]), "dumper pid 4000020 (1.0 cores)");
+        assert_eq!(outside_said(&busy[2..3]), "dumper pid 4000020 (1.0 cores)");
         let by_pid: std::collections::HashMap<u32, &ProcRow> = rows.iter().map(|r| (r.pid, r)).collect();
         let said = |pid: u32| owner(&by_pid, by_pid[&pid], me, &lease_of);
         assert_eq!(said(4000032).as_deref(), Some("under cargo < session"), "what an unowned process runs under");

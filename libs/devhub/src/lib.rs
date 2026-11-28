@@ -30,7 +30,7 @@ macro_rules! eprintln {
     ($($t:tt)+) => {{ use ::std::io::Write as _; let _ = ::std::io::stderr().write_fmt(format_args!("{}\n", format_args!($($t)+))); }};
 }
 
-pub mod proto;
+pub use makepad_devhub_client::proto;
 pub mod procinfo;
 pub mod heap;
 pub mod held;

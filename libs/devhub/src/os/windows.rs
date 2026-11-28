@@ -216,12 +216,17 @@ fn job_name(exit: &Path) -> Vec<u16> {
 }
 
 /// The argv a lease run executes: as given (priority is the creation class; no pinning).
-pub fn lease_argv(argv: Vec<String>, _unit: Option<&str>, _nice: i32, _cpus: &str, _weight: Option<u32>, _ram_max_gb: Option<f64>) -> Vec<String> {
+pub fn lease_argv(argv: Vec<String>, _unit: Option<&str>, _nice: i32, _cpus: &str, _weight: Option<u32>, _ram_max_gb: Option<f64>, _cpu_quota: Option<f64>) -> Vec<String> {
     argv
 }
 
 /// No scopes on Windows: no run has a unit to weigh.
 pub fn set_cpu_weight(_unit: &str, _weight: u32) -> Result<(), String> {
+    Ok(())
+}
+
+/// No run scopes here: a call's cores are its JIT's own business.
+pub fn set_cpu_quota(_unit: &str, _cores: Option<f64>) -> Result<(), String> {
     Ok(())
 }
 
@@ -306,6 +311,7 @@ extern "C" fn before_main() {
     match args.next() {
         Some(first) if first == WRAP => { quiet_errors(); wrapper(args) }
         Some(first) if first == LOG => { quiet_errors(); log_start(args) }
+        Some(first) if first == STAMP => { quiet_errors(); stamp_to(args) }
         _ => {}
     }
 }
@@ -319,19 +325,41 @@ const LOG: &str = "--makepad-devhub-log";
 /// process the hub starts can never hold the loop's own redirect open (cmd's `>>` shares no
 /// writing; a run that outlived its hub held it, and the loop started no hub, 11-04). The file is
 /// opened shared (Rust's default): whoever else has it open never keeps a new hub from writing.
+///
+/// Its output goes through a stamper ([`stamp_to`]): each line with the UTC time it came in, as
+/// the master's log has them (`crate::logstamp`). A Windows hub's restart took 73 s where a Linux
+/// one's takes 15, and its log, with no times, could not say where they went (11-26). The stamper
+/// ends when the pipe's last writer has, a run that outlived its hub included, never before:
+/// this start exits with its hub. Without one the output goes to the file as it is, said there.
 fn log_start(mut args: impl Iterator<Item = std::ffi::OsString>) -> ! {
+    use std::io::Write as _;
     let Some(file) = args.next() else {
         eprintln!("devhub: {LOG} needs its file");
         std::process::exit(2);
     };
-    let log = match std::fs::OpenOptions::new().create(true).append(true).open(&file) {
+    let mut log = match std::fs::OpenOptions::new().create(true).append(true).open(&file) {
         Ok(log) => log,
         Err(e) => {
             eprintln!("devhub: {}: {e}", file.to_string_lossy());
             std::process::exit(1);
         }
     };
-    let started = std::env::current_exe().and_then(|exe| Command::new(exe).args(args).stdout(log.try_clone()?).stderr(log).status());
+    let started = std::env::current_exe().and_then(|exe| {
+        let stamped = std::io::pipe().and_then(|(reader, writer)| {
+            Command::new(&exe).arg(STAMP).arg(&file).stdin(reader).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn()?;
+            Ok(writer)
+        });
+        match stamped {
+            Ok(mut writer) => {
+                let _ = writeln!(writer, "devhub: the hub starts (its start, pid {})", std::process::id());
+                Command::new(&exe).args(args).stdout(writer.try_clone()?).stderr(writer).status()
+            }
+            Err(e) => {
+                let _ = writeln!(log, "devhub: its log goes on without times: its stamper did not start: {e}");
+                Command::new(&exe).args(args).stdout(log.try_clone()?).stderr(log).status()
+            }
+        }
+    });
     std::process::exit(match started {
         Ok(status) => exit_code(status),
         Err(e) => {
@@ -339,6 +367,37 @@ fn log_start(mut args: impl Iterator<Item = std::ffi::OsString>) -> ! {
             1
         }
     });
+}
+
+/// The stamper of the node's start ([`log_start`]): `<image> --makepad-devhub-log-stamp <file>`.
+const STAMP: &str = "--makepad-devhub-log-stamp";
+
+/// Appends its stdin to `<file>`, each line with the UTC time it came in
+/// ([`crate::logstamp::copy_stamped`]), until the pipe's last writer ends.
+fn stamp_to(mut args: impl Iterator<Item = std::ffi::OsString>) -> ! {
+    let Some(file) = args.next() else { std::process::exit(2) };
+    let code = match std::fs::OpenOptions::new().create(true).append(true).open(&file) {
+        Ok(log) => match crate::logstamp::copy_stamped(std::io::stdin().lock(), log, &crate::proto::wall_ms) {
+            Ok(()) => 0,
+            Err(_) => 1,
+        },
+        Err(_) => 1,
+    };
+    std::process::exit(code)
+}
+
+/// The wrapper's line for a command it could not start ([`super::NEVER_STARTED`]). A shell's name
+/// says that a Windows run is plain argv: four of a lane's Windows checks ran `sh -c ...`, started
+/// nothing, and were read as 0 warnings (11-27).
+fn never_started_line(program: &str, e: &std::io::Error) -> String {
+    let what = if e.kind() == std::io::ErrorKind::NotFound {
+        let shell = matches!(program.to_ascii_lowercase().trim_end_matches(".exe"), "sh" | "bash" | "zsh");
+        let hint = if shell { " (a Windows box has no POSIX shell: give a Windows run its program and its arguments as plain argv, one command per run)" } else { "" };
+        format!("`{program}` is not on this box's PATH{hint}")
+    } else {
+        format!("`{program}`: {e}")
+    };
+    format!("{}{what}", super::NEVER_STARTED)
 }
 
 /// A run's wrapper ([`metered_argv`]): `<image> --makepad-devhub-run-wrapper <usage> <program>
@@ -370,7 +429,7 @@ fn wrapper(mut args: impl Iterator<Item = std::ffi::OsString>) -> ! {
             child.wait().map_or(-1, exit_code)
         }
         Err(e) => {
-            eprintln!("devhub: {}: {e}", program.to_string_lossy());
+            eprintln!("{}", never_started_line(&program.to_string_lossy(), &e));
             127
         }
     };
@@ -538,6 +597,12 @@ pub fn background(program: &std::ffi::OsStr) -> Command {
 
 pub fn background_scoped(program: &std::ffi::OsStr, _scope: Option<(&str, u32)>) -> Command {
     background(program)
+}
+
+pub fn scoped_build(program: &std::ffi::OsStr, _nice: i32, _scope: Option<(&str, u32)>) -> Command {
+    let mut cmd = Command::new(program);
+    windows::process::no_window(&mut cmd, 0);
+    cmd
 }
 
 pub fn pid_alive(pid: u32) -> bool {
@@ -828,8 +893,8 @@ mod tests {
     }
 
     /// The node's start (`--makepad-devhub-log <file> <args..>`): this image runs with `<args..>`,
-    /// its output appended to the file, and the start exits with its code. Here the image is this
-    /// test program, listing its tests.
+    /// its output appended to the file, each line with its time, and the start exits with its code.
+    /// Here the image is this test program, listing its tests.
     #[test]
     fn the_hub_writes_its_own_log() {
         if super::no_image_roles() { return; }
@@ -839,8 +904,20 @@ mod tests {
         std::fs::write(&log, "earlier\n").unwrap();
         let status = Command::new(std::env::current_exe().unwrap()).arg(LOG).arg(&log).arg("--list").stdout(std::process::Stdio::null()).status().unwrap();
         assert!(status.success(), "{status:?}");
-        let text = std::fs::read_to_string(&log).unwrap();
-        assert!(text.starts_with("earlier\n") && text.contains("the_hub_writes_its_own_log: test"), "{text}");
+        // (the stamper writes on after the start exits, until its pipe's last writer ends)
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let listed = |text: &str| text.lines().find(|l| l.ends_with("the_hub_writes_its_own_log: test")).map(str::to_string);
+        let mut text = std::fs::read_to_string(&log).unwrap();
+        while listed(&text).is_none() && std::time::Instant::now() < end {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            text = std::fs::read_to_string(&log).unwrap();
+        }
+        assert!(text.starts_with("earlier\n"), "{text}");
+        let line = listed(&text).unwrap_or_else(|| panic!("the listing reached the log: {text}"));
+        // `2026-11-26T15:26:27.613Z the_hub_writes_its_own_log: test`
+        let (at, _) = line.split_once(' ').unwrap();
+        assert!(at.len() == 24 && at.ends_with('Z') && at.as_bytes()[10] == b'T', "each line has its time: {line}");
+        assert!(text.lines().any(|l| l.contains("Z devhub: the hub starts (its start, pid ")), "and its start is said: {text}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -177,17 +177,29 @@ struct Push {
     sha: String,
 }
 
-/// What a node's store holds of `repo` (its refs and its checkout).
-fn node_has(status: &str, repo: &str) -> Vec<String> {
+/// Commits named by the node's store refs for `repo`, sorted and deduped.
+fn node_refs(status: &str, repo: &str) -> Vec<String> {
     let Ok(v) = makepad_strict_json::parse(status.as_bytes()) else { return Vec::new() };
     let Some(r) = v.get("repos").and_then(|r| r.get(repo)) else { return Vec::new() };
     let mut out: Vec<String> = r.get("refs").and_then(|a| a.as_arr()).map(|a| a.iter().filter_map(|x| x.get("sha")?.as_str().map(str::to_string)).collect()).unwrap_or_default();
-    if let Some(c) = r.get("checkout").and_then(|c| c.as_str()).filter(|_| r.get("held").and_then(|h| h.as_bool()) != Some(false)) {
-        out.push(c.to_string());
-    }
     out.retain(|s| valid_sha(s));
     out.sort();
     out.dedup();
+    out
+}
+
+/// What a node's store holds of `repo` (its refs and its checkout).
+fn node_has(status: &str, repo: &str) -> Vec<String> {
+    let mut out = node_refs(status, repo);
+    let Ok(v) = makepad_strict_json::parse(status.as_bytes()) else { return out };
+    let Some(r) = v.get("repos").and_then(|r| r.get(repo)) else { return out };
+    if let Some(c) = r.get("checkout").and_then(|c| c.as_str()).filter(|_| r.get("held").and_then(|h| h.as_bool()) != Some(false)) {
+        if valid_sha(c) {
+            out.push(c.to_string());
+            out.sort();
+            out.dedup();
+        }
+    }
     out
 }
 
@@ -454,6 +466,68 @@ fn send_bundle(c: &Client, node: &str, p: &Push, path: &Path, hash: &str, size: 
     }
 }
 
+/// Git's bundle verification errors that a different set of prerequisites can resolve.
+fn bundle_prereq_err(e: &str) -> bool {
+    e.contains("not connected to the repository's history") || e.contains("lacks these prerequisite commits")
+}
+
+/// The node's error message for a plain-text retry log.
+fn err_text(e: &str) -> String {
+    makepad_strict_json::parse(e.as_bytes()).ok()
+        .and_then(|v| v.get("err").and_then(|x| x.as_str()).map(str::to_string))
+        .unwrap_or_else(|| e.to_string())
+}
+
+fn push_one(
+    node: &str,
+    status: &str,
+    p: &Push,
+    bundles: &Bundles,
+    fresh_status: &mut dyn FnMut() -> Result<String, String>,
+    send: &mut dyn FnMut(&Path, &str, u64) -> Result<String, String>,
+    out: &mut dyn FnMut(&str, &str),
+) -> Result<(), String> {
+    let (bases, there) = bases_for(p, &node_has(status, &p.repo))?;
+    let pin = format!("{} {} {}", p.repo, p.branch, &p.sha[..10]);
+    if there {
+        out(node, &format!("{pin}: already there"));
+        return Ok(());
+    }
+    let mut transmit = |(path, hash, size): (PathBuf, String, u64), label: &str| -> Result<String, String> {
+        let t = std::time::Instant::now();
+        let reply = send(&path, &hash, size)?;
+        Ok(format!("{pin}: pushed {:.1} MB in {:.1} s{label} {reply}", size as f64 / 1048576.0, t.elapsed().as_secs_f64()))
+    };
+    let mut last_err = match transmit(bundles.get(p, &bases)?, "") {
+        Ok(line) => return Ok(out(node, &line)),
+        Err(e) if !bases.is_empty() && bundle_prereq_err(&e) => e,
+        Err(e) => return Err(e),
+    };
+
+    let fresh = fresh_status()?;
+    if is_err(&fresh) {
+        return Err(fresh);
+    }
+    let (ref_bases, there) = bases_for(p, &node_refs(&fresh, &p.repo))?;
+    if there {
+        out(node, &format!("{pin}: already there"));
+        return Ok(());
+    }
+    if !ref_bases.is_empty() && ref_bases != bases {
+        out(node, &format!("{pin}: prerequisite refused ({}), retrying from store refs alone", proto::clean(&err_text(&last_err), 160)));
+        match transmit(bundles.get(p, &ref_bases)?, " (refs alone)") {
+            Ok(line) => return Ok(out(node, &line)),
+            Err(e) if bundle_prereq_err(&e) => last_err = e,
+            Err(e) => return Err(e),
+        }
+    }
+    // With no prerequisites even an older hub can verify the bundle beside a broken ref.
+    out(node, &format!("{pin}: prerequisite refused ({}), retrying as a complete bundle", proto::clean(&err_text(&last_err), 160)));
+    let line = transmit(bundles.get(p, &[])?, " (complete bundle)")?;
+    out(node, &line);
+    Ok(())
+}
+
 /// Makes sure `node` holds every push's commit; reports what moved. `Ok(true)`: a device's store
 /// took the files and its JIT patched already (no apply step follows).
 fn push_to(c: &Client, node: &str, pushes: &[Push], bundles: &Bundles, out: &mut dyn FnMut(&str, &str)) -> Result<bool, String> {
@@ -469,16 +543,9 @@ fn push_to(c: &Client, node: &str, pushes: &[Push], bundles: &Bundles, out: &mut
     }
     prune_stale(c, node, &status, pushes, out);
     for p in pushes {
-        // bases this repo knows; a node that holds the commit (or a descendant) needs no bundle
-        let (bases, there) = bases_for(p, &node_has(&status, &p.repo))?;
-        if there {
-            out(node, &format!("{} {} {}: already there", p.repo, p.branch, &p.sha[..10]));
-            continue;
-        }
-        let (path, hash, size) = bundles.get(p, &bases)?;
-        let t = std::time::Instant::now();
-        let r = send_bundle(c, node, p, &path, &hash, size)?;
-        out(node, &format!("{} {} {}: pushed {:.1} MB in {:.1} s {r}", p.repo, p.branch, &p.sha[..10], size as f64 / 1048576.0, t.elapsed().as_secs_f64()));
+        let mut fresh = || ask(c, node, "sync", "status")?.into_iter().next().ok_or_else(|| "no status".to_string());
+        let mut send = |path: &Path, hash: &str, size: u64| send_bundle(c, node, p, path, hash, size);
+        push_one(node, &status, p, bundles, &mut fresh, &mut send, out)?;
     }
     Ok(false)
 }
@@ -1278,6 +1345,93 @@ mod tests {
         }
         assert_eq!(crate::git_exec::on_this_thread(), before, "a node's bases spawned git");
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn bundle_prereq_err_matches_only_git_prerequisite_failures() {
+        for e in [
+            r#"{"err":"git bundle: error: some prerequisite commits exist in the object store, but are not connected to the repository's history (exit status: 1)"}"#,
+            r#"{"err":"git bundle: error: Repository lacks these prerequisite commits: | error: deadbeef... (exit status: 1)"}"#,
+            "git bundle: error: Repository lacks these prerequisite commits (after dropping refs/devhub/pushed/x, which it could not read: git bundle: error)",
+        ] {
+            assert!(super::bundle_prereq_err(e), "{e}");
+        }
+        for e in [
+            "link lost: host `ipad` is not connected: it dials in (run `makepad remote-relay --dial ...` there)",
+            "host `ipad` is not connected",
+            r#"{"err":"the bundle's hash is not the one the master signed"}"#,
+            "link lost: connection closed by the peer",
+        ] {
+            assert!(!super::bundle_prereq_err(e), "{e}");
+        }
+    }
+
+    #[test]
+    fn push_one_retries_with_refs_alone_then_complete_bundle() {
+        use std::io::{BufRead, BufReader};
+        let d = makepad_git::test_support::tempdir().unwrap();
+        let g = |args: &[&str]| super::git(d.path(), &[&["-c", "user.name=t", "-c", "user.email=t@t"], args].concat()).unwrap();
+        g(&["init", "-q", "-b", "work"]);
+        let commit = |name: &str| {
+            g(&["commit", "-q", "--allow-empty", "-m", name]);
+            g(&["rev-parse", "HEAD"])
+        };
+        let (one, two, three) = (commit("one"), commit("two"), commit("three"));
+        let p = super::Push { repo: "makepad".into(), dir: d.path().to_path_buf(), branch: "work".into(), sha: three.clone() };
+        let bundles = super::Bundles::default();
+        let status = |checkout: Option<&str>, refs: &[(&str, &str)]| {
+            let checkout = checkout.map_or("null".to_string(), makepad_remote::json_str);
+            let refs = refs.iter().map(|(name, sha)| format!(r#"{{"ref":"refs/devhub/{name}","sha":"{sha}"}}"#)).collect::<Vec<_>>().join(",");
+            format!(r#"{{"repos":{{"makepad":{{"checkout":{checkout},"held":true,"refs":[{refs}]}}}}}}"#)
+        };
+        let mirrored = status(Some(&two), &[("checkout", &two)]);
+        let dangling = status(Some(&two), &[("pushed/work", &one)]);
+        let before_drop = status(None, &[("pushed/work", &one), ("pushed/bad", &two)]);
+        let after_drop = status(None, &[("pushed/work", &one)]);
+        let empty = status(None, &[]);
+        let connected = r#"{"err":"git bundle: error: some prerequisite commits exist in the object store, but are not connected to the repository's history"}"#;
+        let lacks = r#"{"err":"git bundle: error: Repository lacks these prerequisite commits"}"#;
+        let lost = "link lost: host `ipad` is not connected";
+
+        // Each send checks the actual bundle header before answering as the node.
+        let run = |initial: &str, fresh: Option<Result<&str, &str>>, sends: &[(Option<&str>, Option<&str>)]| {
+            let mut refreshes = 0;
+            let mut sent = 0;
+            let mut logs = Vec::new();
+            let result = super::push_one("node-a", initial, &p, &bundles, &mut || {
+                refreshes += 1;
+                fresh.expect("unexpected status request").map(str::to_owned).map_err(str::to_owned)
+            }, &mut |path, _, _| {
+                let (base, error) = sends[sent];
+                sent += 1;
+                let header = BufReader::new(std::fs::File::open(path).unwrap()).lines().map(Result::unwrap).take_while(|l| !l.is_empty());
+                let prerequisites: Vec<_> = header.filter_map(|l| l.strip_prefix('-')?.split_whitespace().next().map(str::to_string)).collect();
+                assert_eq!(prerequisites, base.into_iter().collect::<Vec<_>>(), "send {sent}");
+                match error {
+                    Some(e) => Err(e.into()),
+                    None => Ok("stored".into()),
+                }
+            }, &mut |_, line| logs.push(line.to_string()));
+            assert_eq!(sent, sends.len(), "number of sends");
+            assert_eq!(refreshes, usize::from(fresh.is_some()), "number of status requests");
+            assert!(logs.iter().all(|l| !l.contains(r#"{"err":"#)), "{logs:?}");
+            (result, logs.join("\n"))
+        };
+        let (base_one, base_two) = (Some(one.as_str()), Some(two.as_str()));
+        let complete = (None, None);
+        let (result, logs) = run(&mirrored, Some(Ok(&mirrored)), &[(base_two, Some(connected)), complete]);
+        result.unwrap();
+        assert!(logs.contains("retrying as a complete bundle") && logs.contains("(complete bundle) stored"), "{logs}");
+        let (result, logs) = run(&dangling, Some(Ok(&dangling)), &[(base_two, Some(connected)), (base_one, None)]);
+        result.unwrap();
+        assert!(logs.contains("retrying from store refs alone") && logs.contains("(refs alone) stored"), "{logs}");
+        run(&dangling, Some(Ok(&dangling)), &[(base_two, Some(lacks)), (base_one, Some(lacks)), complete]).0.unwrap();
+        run(&before_drop, Some(Ok(&after_drop)), &[(base_two, Some(lacks)), (base_one, None)]).0.unwrap();
+        assert_eq!(run(&empty, None, &[(None, Some(connected))]).0.unwrap_err(), connected);
+        assert_eq!(run(&mirrored, None, &[(base_two, Some(lost))]).0.unwrap_err(), lost);
+        let closed = "link lost: connection closed";
+        assert_eq!(run(&mirrored, Some(Err(closed)), &[(base_two, Some(connected))]).0.unwrap_err(), closed);
+        bundles.remove_all();
     }
 
     #[test]

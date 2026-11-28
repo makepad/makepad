@@ -31,8 +31,11 @@ use makepad_remote::json_str;
 use makepad_strict_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+pub(super) const SET_USAGE: &str = "--set needs <name>/<n>: a lane-local name and a member count of 1 or more";
 
 /// A hidden live job with no edit or call this long ends (tests too: an idle session's box waits
 /// for it); a visible one stays until its owner ends it ([`idle_kept`]).
@@ -155,7 +158,16 @@ fn said_once(id: &str, kind: &'static str) -> bool {
 /// is no call: its sessions keep their own touch through it ([`take_back`]). Its touch had kept
 /// W19220, with no save or call, on its box through four restarts in most of an hour (11-25).
 fn idle_now(ctx: &Ctx, now: u64) -> Vec<Live> {
-    let past: Vec<Live> = ctx.store.read(|d| d.lives.iter().filter(|x| x.active() && x.held.is_empty() && !x.lease.is_empty() && now.saturating_sub(x.touched_ms) >= IDLE_MS && !joined(&d.lives, &x.id)).cloned().collect());
+    let past: Vec<Live> = ctx.store.read(|d| {
+        let mut touched = HashMap::new();
+        for x in d.lives.iter().filter(|x| x.active() && !x.set.is_empty()) {
+            let last = touched.entry((&x.lane, &x.set)).or_insert(x.touched_ms);
+            *last = (*last).max(x.touched_ms);
+        }
+        d.lives.iter().filter(|x| x.active() && x.held.is_empty() && !x.lease.is_empty()
+            && now.saturating_sub(*touched.get(&(&x.lane, &x.set)).unwrap_or(&x.touched_ms)) >= IDLE_MS
+            && !joined(&d.lives, &x.id)).cloned().collect()
+    });
     past.into_iter().filter(|x| ctx.leases.caps_asked(&x.node) && unused_ms(x, ctx.leases.user_input_ms(&x.node), None, now) >= IDLE_MS)
         // (its app's own person's input, asked last: only of a session its other use left idle)
         .filter(|x| unused_ms(x, ctx.leases.user_input_ms(&x.node), person_input_at(x, now), now) >= IDLE_MS)
@@ -185,6 +197,7 @@ pub fn app_routed(node: &str, spec: &str, service: &str, caller: &str) {
     let ids: Vec<String> = ctx.store.read(|d| d.lives.iter().filter(|x| x.active() && names_app(x, node, spec)).map(|x| x.id.clone()).collect());
     for id in ids {
         let _ = try_set(ctx, &id, |s| s.touched_ms = wall_ms());
+        acted(ctx, &id, format!("`devhub inspect {node}/{spec}` ({service}, from {caller})"));
     }
 }
 
@@ -220,6 +233,10 @@ struct Running {
     calls: Mutex<Calls>,
     restart: std::sync::atomic::AtomicBool,
     resuming: std::sync::atomic::AtomicBool,
+    recover_cut: AtomicBool,
+    resume_active: AtomicBool,
+    supersede: AtomicBool,
+    active_wait: Mutex<Option<Arc<AtomicBool>>>,
     fault: Mutex<Option<String>>,
     /// the run of the app seen up ([`wait_up`]): an edit's ship asks nothing more
     up_pid: std::sync::atomic::AtomicU32,
@@ -236,15 +253,92 @@ struct Running {
 }
 
 /// A caller's wait for its session's run ([`Running::waiting`]), for as long as it is held.
-struct Waiting(Arc<Running>);
+struct Waiting {
+    r: Arc<Running>,
+    released: Arc<AtomicBool>,
+}
 impl Waiting {
     fn on(r: Arc<Running>) -> Waiting {
-        r.waiting.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Waiting(r)
+        r.waiting.fetch_add(1, SeqCst);
+        Waiting { r, released: Default::default() }
+    }
+
+    fn bind_active(&self) {
+        *self.r.active_wait.lock().unwrap() = Some(self.released.clone());
+    }
+
+    fn release_once(&self) {
+        if !self.released.swap(true, SeqCst) { self.r.waiting.fetch_sub(1, SeqCst); }
     }
 }
 impl Drop for Waiting {
-    fn drop(&mut self) { self.0.waiting.fetch_sub(1, std::sync::atomic::Ordering::SeqCst); }
+    fn drop(&mut self) { self.release_once(); }
+}
+
+impl Running {
+    fn release_active_wait(&self) {
+        if let Some(released) = self.active_wait.lock().unwrap().take() {
+            if !released.swap(true, SeqCst) { self.waiting.fetch_sub(1, SeqCst); }
+        }
+    }
+}
+
+fn try_supersede_orphan(r: &Running, fresh: bool, changed: bool) -> bool {
+    let _calls = r.calls.lock().unwrap();
+    if r.inflight.load(SeqCst)
+        && r.waiting.load(SeqCst) == 0
+        && !r.restart.load(SeqCst)
+        && (fresh || changed)
+    {
+        r.supersede.store(true, SeqCst);
+        return true;
+    }
+    false
+}
+
+fn try_supersede_running(ctx: &Ctx, id: &str, r: &Running, fresh: bool, changed: bool) -> bool {
+    ctx.store.read(|d| {
+        d.lives.iter().any(|s| s.id == id && s.state == "running" && s.pid > 0)
+            && try_supersede_orphan(r, fresh, changed)
+    })
+}
+
+fn watch_superseded(r: &Running) -> bool { r.supersede.load(SeqCst) }
+
+/// True once a supersede request may release `inflight`: no restart is pending and no
+/// `devhub-live-pid` watcher is actively running `resume_tests`.
+fn superseded_idle(r: &Running) -> bool {
+    let _calls = r.calls.lock().unwrap();
+    watch_superseded(r) && !r.resume_active.load(SeqCst) && !r.restart.load(SeqCst)
+}
+
+/// True when a superseded caller (`initial_call`) may drop `inflight` without racing a restart
+/// or a booting replacement process (`s.pid == 0`).
+fn can_yield_superseded(ctx: &Ctx, id: &str, r: &Running) -> bool {
+    ctx.store.read(|d| {
+        d.lives.iter().any(|s| s.id == id && s.state == "running" && s.pid > 0)
+            && superseded_idle(r)
+    })
+}
+
+/// Consumes a pending warm restart atomically with any stale `supersede` flag under `r.calls`
+/// so no waiter can observe `(!restart && supersede)` between the two stores, and a replacement
+/// process's `resume_tests` never aborts on a flag left by a disconnected earlier caller.
+fn take_restart(r: &Running) -> bool {
+    let _calls = r.calls.lock().unwrap();
+    if !r.restart.load(SeqCst) { return false; }
+    r.supersede.store(false, SeqCst);
+    r.restart.store(false, SeqCst);
+    true
+}
+
+struct ResumeGuard<'a>(&'a Ctx, &'a str, &'a Running);
+
+impl Drop for ResumeGuard<'_> {
+    fn drop(&mut self) {
+        self.2.resume_active.store(false, SeqCst);
+        self.0.store.notify("live", self.1);
+    }
 }
 
 /// Whether the run in flight keeps a session from its idle, left or landed end: while a caller
@@ -307,6 +401,106 @@ fn wake_ship() {
 
 static STARTING: Mutex<()> = Mutex::new(());
 
+/// The control listener can accept live calls while the master reconciles its saved sessions.
+/// The atomic keeps ordinary calls off the gate's mutex once startup is complete.
+static START_GATE_ARMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static START_GATE: (Mutex<bool>, std::sync::Condvar) = (Mutex::new(false), std::sync::Condvar::new());
+
+pub(crate) struct StartupGate;
+
+impl StartupGate {
+    pub(crate) fn arm() -> Self {
+        let mut armed = START_GATE.0.lock().unwrap_or_else(|e| e.into_inner());
+        *armed = true;
+        START_GATE_ARMED.store(true, std::sync::atomic::Ordering::Release);
+        Self
+    }
+
+    pub(crate) fn release() {
+        let mut armed = START_GATE.0.lock().unwrap_or_else(|e| e.into_inner());
+        if *armed {
+            *armed = false;
+            START_GATE_ARMED.store(false, std::sync::atomic::Ordering::Release);
+            START_GATE.1.notify_all();
+        }
+    }
+
+    fn wait_ready() {
+        if !START_GATE_ARMED.load(std::sync::atomic::Ordering::Acquire) { return; }
+        let mut armed = START_GATE.0.lock().unwrap_or_else(|e| e.into_inner());
+        while *armed {
+            armed = START_GATE.1.wait(armed).unwrap_or_else(|e| e.into_inner());
+        }
+    }
+}
+
+impl Drop for StartupGate {
+    fn drop(&mut self) { Self::release(); }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LaunchPath {
+    Serve,
+    Restarted,
+    Reattach,
+    ResumeParked,
+}
+
+impl LaunchPath {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Serve => "serve",
+            Self::Restarted => "restarted",
+            Self::Reattach => "reattach",
+            Self::ResumeParked => "resume_parked",
+        }
+    }
+}
+
+/// A leaf lock. Each worker owns its session from the launch decision through cleanup.
+static CLAIMED: Mutex<BTreeMap<String, LaunchPath>> = Mutex::new(BTreeMap::new());
+
+struct Claim {
+    id: String,
+    by: LaunchPath,
+}
+
+impl Claim {
+    fn acquire(id: &str, by: LaunchPath) -> Result<Self, LaunchPath> {
+        let mut map = CLAIMED.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(&owner) = map.get(id) { return Err(owner); }
+        map.insert(id.to_string(), by);
+        Ok(Self { id: id.to_string(), by })
+    }
+
+    fn id(&self) -> &str { &self.id }
+}
+
+impl Drop for Claim {
+    fn drop(&mut self) {
+        let mut map = CLAIMED.lock().unwrap_or_else(|e| e.into_inner());
+        if map.get(&self.id) == Some(&self.by) { map.remove(&self.id); }
+    }
+}
+
+fn claimed_by(id: &str) -> Option<LaunchPath> {
+    CLAIMED.lock().unwrap_or_else(|e| e.into_inner()).get(id).copied()
+}
+
+fn warn_duplicate(ctx: &Ctx, id: &str, by: LaunchPath, owner: LaunchPath) {
+    event(ctx, Sev::Warn, format!("live {id}: refused duplicate start from {} (already owned by {})", by.as_str(), owner.as_str()), get(ctx, id).as_ref());
+}
+
+fn try_claim_or_warn(ctx: &Ctx, id: &str, by: LaunchPath) -> Option<Claim> {
+    match Claim::acquire(id, by) {
+        Ok(claim) => Some(claim),
+        Err(owner) => {
+            warn_duplicate(ctx, id, by, owner);
+            None
+        }
+    }
+}
+
 #[derive(Default)]
 struct Calls {
     count: usize,
@@ -346,6 +540,7 @@ fn checked(ctx: &Ctx, id: &str, calls: &Mutex<Calls>, caller: &str, refusal: &st
     let unarmed = (confirmed && !calls.lock().unwrap().checks.iter().any(|c| c.caller == caller && c.refusal == refusal))
         .then(|| get(ctx, id).and_then(|x| crate::state::live_from(&crate::state::live_value(&x)).compile_errors().first().map(|e| crate::proto::clean(e, 240))))
         .flatten();
+    let progress = end_progress(ctx, id);
     let result = try_set(ctx, id, |x| {
         let mut calls = calls.lock().unwrap();
         let Some(i) = calls.checks.iter().position(|c| c.caller == caller && c.refusal == refusal) else {
@@ -367,6 +562,7 @@ fn checked(ctx: &Ctx, id: &str, calls: &Mutex<Calls>, caller: &str, refusal: &st
             x.state = "ended".into();
             x.ended_ms = wall_ms();
             x.note = "released: cargo did not confirm the live refusal".into();
+            settle_open_patch(x, x.ended_ms, progress.as_ref());
             released = Some(x.lease.clone());
         }
     });
@@ -421,8 +617,14 @@ impl Drop for Call<'_> {
 }
 
 fn call<'a>(ctx: &'a Ctx, id: &'a str) -> Result<Option<Call<'a>>, String> {
+    call_until(ctx, id, None)
+}
+
+/// [`call`], its wait for its session's box ([`rejoined`]) ending at `until`: a wait's own end
+/// ([`wait`]), which a restarted master that never took the box back held past (WORKBOARD, 11-27).
+fn call_until<'a>(ctx: &'a Ctx, id: &'a str, until: Option<Instant>) -> Result<Option<Call<'a>>, String> {
     let client = makepad_remote::lines::asked_on();
-    let waits = || get(ctx, id).is_some_and(|x| x.active() && x.pid != 0) && !client.as_ref().is_some_and(|c| c.is_closed());
+    let waits = || waits_on_box(get(ctx, id).as_ref(), client.as_ref().is_some_and(|c| c.is_closed()), until, Instant::now());
     let Some(r) = rejoined(&mut || running(id), &waits, &mut || {
         let line = format!("live call {id} waits for its session's box: the master restarted and takes it back now");
         makepad_remote::lines::say_waiting(&line);
@@ -436,6 +638,12 @@ fn call<'a>(ctx: &'a Ctx, id: &'a str) -> Result<Option<Call<'a>>, String> {
     let mut call = Call(ctx, id, r, None);
     call.3 = admit(ctx, id, &call.2, makepad_remote::lines::asked_on())?;
     Ok(Some(call))
+}
+
+/// Whether a call still waits for its session's box ([`rejoined`]): its session runs an app (a
+/// pid), its client stays, and its own end (`until`, a wait's) has not come.
+fn waits_on_box(x: Option<&Live>, client_gone: bool, until: Option<Instant>, now: Instant) -> bool {
+    x.is_some_and(|x| x.active() && x.pid != 0) && !client_gone && until.is_none_or(|u| now < u)
 }
 
 /// Wakes a call that waits for its session's box ([`rejoined`]): a reattach joined it.
@@ -471,7 +679,8 @@ fn begin_call(r: &Running) -> bool {
 fn finish_call(ctx: &Ctx, id: &str, r: &Running) {
     {
         let _calls = r.calls.lock().unwrap();
-        r.inflight.store(false, std::sync::atomic::Ordering::SeqCst);
+        *r.active_wait.lock().unwrap() = None;
+        r.inflight.store(false, SeqCst);
     }
     wake_ship();
     idle_charge(ctx, r);
@@ -605,7 +814,7 @@ fn accepting(id: &str) -> bool {
 /// Another system's session stays: a lane's Windows `test --live` ended its Linux one while that
 /// one's JIT still built, and the lane lost two test rounds (11-26).
 fn replaced<'a>(lives: &'a [Live], new: &Live) -> Vec<&'a str> {
-    lives.iter().filter(|x| new.test && x.test && x.id != new.id && x.active() && x.lane == new.lane && x.app == new.app && system(x) == system(new)).map(|x| x.id.as_str()).collect()
+    lives.iter().filter(|x| new.test && x.test && new.set.is_empty() && x.set.is_empty() && x.id != new.id && x.active() && x.lane == new.lane && x.app == new.app && system(x) == system(new)).map(|x| x.id.as_str()).collect()
 }
 
 /// The system a test session asks for, which keys it with its lane and package ([`replaced`]):
@@ -625,7 +834,7 @@ fn system(x: &Live) -> (String, &str) {
 /// 11-26).
 fn superseded_by<'a>(lives: &'a [Live], x: &Live) -> Option<&'a str> {
     let seq = |id: &str| id.trim_start_matches('W').parse::<u64>().unwrap_or(0);
-    lives.iter().filter(|o| x.test && o.test && o.active() && o.lane == x.lane && o.app == x.app && system(o) == system(x) && seq(&o.id) > seq(&x.id)).max_by_key(|o| seq(&o.id)).map(|o| o.id.as_str())
+    lives.iter().filter(|o| x.test && o.test && x.set.is_empty() && o.set.is_empty() && o.active() && o.lane == x.lane && o.app == x.app && system(o) == system(x) && seq(&o.id) > seq(&x.id)).max_by_key(|o| seq(&o.id)).map(|o| o.id.as_str())
 }
 
 /// A session that has its box ends after its first call when a newer one of its lane, package
@@ -652,15 +861,14 @@ fn retire_replaced(ctx: &Ctx, new: &Live) {
 
 /// Called by the lease master only when all blockers of the best box are live jobs. With
 /// `resume_after` (the timed lease they park for while in use) each starts again by itself once
-/// that lease ends ([`resume_parked`]).
+/// that lease ends ([`resume_parked`]), and its line says the work it interrupted: its last act
+/// ([`park_note`]).
 pub fn park(ctx: &Ctx, leases: &[String], note: &str, resume_after: Option<&str>) {
     let list: Vec<_> = RUNNING.lock().unwrap().as_ref().map(|m| m.iter().filter(|(_, r)| leases.contains(&r.lease)).map(|(id, r)| (id.clone(), r.clone())).collect()).unwrap_or_default();
-    // (what a call refused meanwhile answers too)
-    let note = match resume_after {
-        Some(_) => format!("{note}; {RESTARTS_BY_ITSELF}"),
-        None => note.to_string(),
-    };
+    let now = wall_ms();
     for (id, r) in list {
+        // (what a call refused meanwhile answers too)
+        let note = park_note(note, get(ctx, &id).as_ref(), resume_after.is_some(), now);
         let first = {
             let mut calls = r.calls.lock().unwrap();
             let first = calls.park.is_none();
@@ -683,42 +891,89 @@ const RESTARTS_BY_ITSELF: &str = "restarts by itself after it, same app, args, t
 /// are in its tree, and its app starts from that. One its lane has started anew meanwhile
 /// (the same app or package, active) stays ended.
 fn resume_parked(ctx: &Arc<Ctx>) {
-    for id in resume_due(ctx) {
-        let c = ctx.clone();
-        let _ = std::thread::Builder::new().name("devhub-live".into()).spawn(move || run(&c, &id, false));
+    for claim in resume_due_claims(ctx) {
+        if let Err((e, claim)) = spawn_run(ctx, claim, false) {
+            failed_to_spawn_run(ctx, claim, e);
+        }
     }
 }
 
-/// [`resume_parked`]'s sessions due to start again, set starting: their ids.
-fn resume_due(ctx: &Ctx) -> Vec<String> {
-    let waiting: Vec<Live> = ctx.store.read(|d| d.lives.iter().filter(|x| x.state == "ended" && !x.resume_after.is_empty()).cloned().collect());
+/// Claims the sessions due to start again and publishes their starting state together.
+fn resume_due_claims(ctx: &Ctx) -> Vec<Claim> {
+    let waiting: Vec<String> = ctx.store.read(|d| d.lives.iter().filter(|x| x.state == "ended" && !x.resume_after.is_empty()).map(|x| x.resume_after.clone()).collect());
     if waiting.is_empty() { return Vec::new(); }
-    let mut due = Vec::new();
     let open: std::collections::HashSet<String> = ctx.leases.view().into_iter().filter(|l| !matches!(l.state, crate::lease::sched::State::Ended(_))).map(|l| l.id).collect();
-    for x in waiting {
-        if open.contains(&x.resume_after) || running(&x.id).is_some() { continue; }
-        let after = x.resume_after.clone();
-        let anew = ctx.store.read(|d| d.lives.iter().find(|o| o.id != x.id && o.active() && o.lane == x.lane && o.app == x.app && o.test == x.test).map(|o| o.id.clone()));
-        let now = set(ctx, &x.id, |s| {
-            s.resume_after.clear();
-            if anew.is_some() { return; }
-            s.state = "starting".into();
-            (s.pid, s.run_pid) = (0, 0);
-            s.lease.clear();
-            s.run_n = 0;
-            s.ask.clear();
-            s.patch = None;
-            (s.touched_ms, s.left_ms, s.ended_ms) = (wall_ms(), 0, 0);
-            s.note = format!("started again by itself: timed {after}, which it was parked for, ended");
-        });
+    if waiting.iter().all(|after| open.contains(after)) { return Vec::new(); }
+
+    // Publish every member's next start together. A joiner must never wake to a partner
+    // still marked ended, including if the master restarts between this update and the launches.
+    let changed = ctx.store.update(|d| {
+        let mut changed = Vec::new();
+        let mut due = Vec::new();
+        let mut refused = Vec::new();
+        for i in 0..d.lives.len() {
+            let x = &d.lives[i];
+            if x.state != "ended" || x.resume_after.is_empty() || open.contains(&x.resume_after) { continue; }
+            let after = x.resume_after.clone();
+            let members = if x.set.is_empty() { vec![i] } else {
+                d.lives.iter().enumerate().filter(|(_, o)| o.set == x.set && o.lane == x.lane && o.resume_after == after).map(|(i, _)| i).collect()
+            };
+            if members.iter().any(|&i| d.lives[i].state != "ended" || running(&d.lives[i].id).is_some() || claimed_by(&d.lives[i].id).is_some()) { continue; }
+            let anew = members.iter().find_map(|&i| {
+                let x = &d.lives[i];
+                d.lives.iter().find(|o| o.active() && o.lane == x.lane && o.app == x.app && o.test == x.test && (x.set.is_empty() || x.set != o.set)).map(|o| o.id.clone())
+            });
+            if anew.is_none() {
+                let claims: Result<Vec<_>, _> = members.iter().map(|&i| {
+                    let id = &d.lives[i].id;
+                    Claim::acquire(id, LaunchPath::ResumeParked).map_err(|owner| (id.clone(), owner))
+                }).collect();
+                match claims {
+                    Ok(group) => due.extend(group),
+                    Err(conflict) => {
+                        refused.push(conflict);
+                        continue;
+                    }
+                }
+            }
+            for i in members {
+                let s = &mut d.lives[i];
+                s.resume_after.clear();
+                if anew.is_none() {
+                    s.state = "starting".into();
+                    (s.pid, s.run_pid) = (0, 0);
+                    s.lease.clear();
+                    s.node.clear();
+                    s.run_n = 0;
+                    s.ask.clear();
+                    s.patch = None;
+                    (s.touched_ms, s.left_ms, s.ended_ms) = (wall_ms(), 0, 0);
+                    s.note = format!("started again by itself: timed {after}, which it was parked for, ended");
+                }
+                changed.push((s.clone(), after.clone(), anew.clone()));
+            }
+        }
+        (changed, due, refused)
+    });
+    let (changed, due, refused) = match changed {
+        Ok(changed) => changed,
+        Err(e) => { eprintln!("devhub state: {e}"); return Vec::new(); }
+    };
+    for (id, owner) in refused { warn_duplicate(ctx, &id, LaunchPath::ResumeParked, owner); }
+    for (x, after, anew) in changed {
+        say_in_log(&x, "ended");
         if let Some(other) = anew {
-            event(ctx, Sev::Info, format!("live {} ({}) of lane {}: timed {after} ended; not started again, its lane runs {other} now", x.id, x.app, x.lane), now.as_ref());
+            event(ctx, Sev::Info, format!("live {} ({}) of lane {}: timed {after} ended; not started again, its lane runs {other} now", x.id, x.app, x.lane), Some(&x));
             continue;
         }
-        event(ctx, Sev::Info, format!("live {} ({}) of lane {}: timed {after} ended, so it starts again as it was asked; what its app held in memory is not kept", x.id, x.app, x.lane), now.as_ref());
-        due.push(x.id);
+        event(ctx, Sev::Info, format!("live {} ({}) of lane {}: timed {after} ended, so it starts again as it was asked; what its app held in memory is not kept", x.id, x.app, x.lane), Some(&x));
     }
     due
+}
+
+#[cfg(test)]
+fn resume_due(ctx: &Ctx) -> Vec<String> {
+    resume_due_claims(ctx).into_iter().map(|claim| claim.id().to_string()).collect()
 }
 
 fn park_ready(ctx: &Ctx, id: &str, r: &Running) {
@@ -735,13 +990,19 @@ fn end_parked(ctx: &Ctx, id: &str, r: &Running, wait_run: bool) {
     };
     // the one line its lane gets (its next call on it answers with it; the inbox has it too): why
     // it ended, and the one command that starts it again, or that it starts again by itself
-    if let Some(x) = set(ctx, id, |s| record_park(s, &note, wall_ms())) {
+    let progress = end_progress(ctx, id);
+    if let Some(x) = set(ctx, id, |s| record_park_with(s, &note, wall_ms(), progress.as_ref())) {
         ctx.store.event(if x.note.starts_with("parked for ") { "live_parked" } else { "live" }, Sev::Info, format!("live {id} ({}) of lane {}: {}", x.app, x.lane, x.note), Some(crate::state::live_value(&x).to_json()));
     }
     ctx.leases.release_live(&r.lease);
 }
 
+#[cfg(test)]
 fn record_park(x: &mut Live, note: &str, now: u64) {
+    record_park_with(x, note, now, None);
+}
+
+fn record_park_with(x: &mut Live, note: &str, now: u64, progress: Option<&RunProgress>) {
     x.state = "ended".into();
     x.ended_ms = now;
     if !x.held.is_empty() && note.starts_with("parked") {
@@ -750,6 +1011,7 @@ fn record_park(x: &mut Live, note: &str, now: u64) {
     } else {
         x.note = if note.ends_with(RESTARTS_BY_ITSELF) { note.into() } else { format!("{note}; `devhub live again {}` starts it again", x.id) };
     }
+    settle_open_patch(x, now, progress);
 }
 
 /// Consume the previous parked hold when placing its replacement. The notice precedes even
@@ -909,11 +1171,30 @@ fn set_test_patch(ctx: &Ctx, id: &str, run: &Live, p: &LivePatch) -> Option<Live
 }
 
 fn wait_tests(ctx: &Ctx, id: &str) {
+    wait_tests_with(ctx, id, makepad_remote::lines::client_gone, Duration::from_secs(1));
+}
+
+fn wait_tests_with(ctx: &Ctx, id: &str, mut client_gone: impl FnMut() -> bool, poll: Duration) {
+    let mut left = false;
     let signal = ctx.store.subscribe("live", &[id]);
     loop {
         let seen = signal.generation();
-        if !ctx.store.read(|d| d.lives.iter().find(|x| x.id == id).is_some_and(|s| s.state == "running" && s.patch.as_ref().is_some_and(|p| !terminal(p)))) { return; }
-        signal.wait(seen, Duration::from_secs(30));
+        if !left && client_gone() {
+            left = true;
+            if let Some(r) = running(id) { r.release_active_wait(); }
+            starter_left(ctx, id);
+        }
+        let r = running(id);
+        let (open, yield_now) = ctx.store.read(|d| {
+            let Some(s) = d.lives.iter().find(|x| x.id == id && x.state == "running") else {
+                return (false, false);
+            };
+            let open = s.patch.as_ref().is_some_and(|p| !terminal(p));
+            let yield_now = open && s.pid > 0 && r.as_deref().is_some_and(superseded_idle);
+            (open, yield_now)
+        });
+        if !open || yield_now { return; }
+        signal.wait(seen, poll);
     }
 }
 
@@ -1088,15 +1369,23 @@ pub fn start(ctx: Arc<Ctx>) {
     // run it had asked for (the lease is noted once shipped): the node may be building its JIT
     // for it. Placed again, that lease went unbeaten until it expired and the build was lost
     // (a lease lost 160 s into a dev JIT build on its box, 11-03). Else it is placed again and its
-    // app starts again. A restart is no call: each keeps its own touch ([`restarted`]).
-    for (x, held) in restarted(&ctx) {
-        let c = ctx.clone();
+    // app starts again. A restart is no call: each keeps its own touch ([`restarted_to_launch`]).
+    let to_launch = {
+        let _starting = STARTING.lock().unwrap();
+        restarted_to_launch(&ctx)
+    };
+    StartupGate::release();
+    for (x, held, claim) in to_launch {
         event(&ctx, Sev::Info, format!("live {} ({}): the master restarted; {}", x.id, x.app, if held { "its app runs on" } else { "placed again, its app starts again" }), Some(&x));
         if held {
-            let _ = std::thread::Builder::new().name("devhub-live".into()).spawn(move || reattach(&c, &x));
-        } else {
-            let id = x.id.clone();
-            let _ = std::thread::Builder::new().name("devhub-live".into()).spawn(move || run(&c, &id, false));
+            if let Err((e, claim)) = spawn_reattach(&ctx, x, claim) {
+                let note = format!("failed to spawn reattach thread: {e}");
+                event(&ctx, Sev::Warn, format!("live {}: {note}", claim.id()), get(&ctx, claim.id()).as_ref());
+                let _ = release(&ctx, claim.id(), &note);
+                drop(claim);
+            }
+        } else if let Err((e, claim)) = spawn_run(&ctx, claim, false) {
+            failed_to_spawn_run(&ctx, claim, e);
         }
     }
     // saves in a live job's worktree queue for its box
@@ -1194,10 +1483,10 @@ pub fn start(ctx: Arc<Ctx>) {
 /// ([`left_long`]), not placed again. (Every
 /// string of the store names a lease the restart keeps, an ended session's too: W9068's lease
 /// outlived its release, 11-15.)
-fn restarted(ctx: &Ctx) -> Vec<(Live, bool)> {
+fn restarted_to_launch(ctx: &Ctx) -> Vec<(Live, bool, Claim)> {
     let open: std::collections::HashSet<String> = ctx.leases.view().into_iter().filter(|l| !matches!(l.state, crate::lease::sched::State::Ended(_))).map(|l| l.id).collect();
     let (active, leaked): (Vec<Live>, Vec<Live>) = ctx.store.read(|d| d.lives.iter().filter(|x| x.active() || open.contains(&x.lease)).cloned().partition(|x| x.active()));
-    for x in leaked.iter().filter(|x| !active.iter().any(|a| a.lease == x.lease)) {
+    for x in leaked.iter().filter(|x| claimed_by(&x.id).is_none() && !active.iter().any(|a| a.lease == x.lease)) {
         if ctx.leases.release_live(&x.lease) {
             event(ctx, Sev::Warn, format!("live {} ({}): {} ({}), but its lease {} ran on: freed", x.id, x.app, x.state, x.note, x.lease), Some(x));
         }
@@ -1207,17 +1496,24 @@ fn restarted(ctx: &Ctx) -> Vec<(Live, bool)> {
     let joins: std::collections::HashSet<String> = active.iter().map(|x| x.joins.clone()).collect();
     for x in active {
         if open.contains(&x.lease) {
-            on.push((x, true));
+            if let Some(claim) = try_claim_or_warn(ctx, &x.id, LaunchPath::Reattach) {
+                on.push((x, true, claim));
+            }
             continue;
         }
         // (a session still starting waits for its box, or builds on one: placed again)
         if x.state == "starting" {
+            if let Some(owner) = claimed_by(&x.id) {
+                warn_duplicate(ctx, &x.id, LaunchPath::Restarted, owner);
+                continue;
+            }
             if left_long(&x, now) && !joins.contains(&x.id) {
                 let note = format!("ended {} min after its starter's call went, with no call or save since: the master's restart did not place it again; the lane's next call starts it again", LEFT_MS / 60_000);
                 event(ctx, Sev::Info, format!("live {} ({}) of lane {}: {note}", x.id, x.app, x.lane), Some(&x));
                 let _ = release(ctx, &x.id, &note);
                 continue;
             }
+            let Some(claim) = try_claim_or_warn(ctx, &x.id, LaunchPath::Restarted) else { continue };
             let again = set(ctx, &x.id, |s| {
                 s.state = "starting".into();
                 (s.pid, s.run_pid) = (0, 0);
@@ -1226,19 +1522,27 @@ fn restarted(ctx: &Ctx) -> Vec<(Live, bool)> {
                 s.ask.clear();
                 s.patch = None;
             });
-            on.push((again.unwrap_or(x), false));
+            on.push((again.unwrap_or(x), false, claim));
             continue;
         }
+        if claimed_by(&x.id).is_some() { continue; }
         let gone = if x.lease.is_empty() { "it held no lease".to_string() } else { format!("its lease {} had ended", x.lease) };
         let note = format!("it was {}, but {gone} when the master restarted; `devhub live again {}` starts it again", x.state, x.id);
+        let progress = open_progress(&x);
         let now = set(ctx, &x.id, |s| {
             s.state = "ended".into();
             s.ended_ms = wall_ms();
             s.note = note.clone();
+            settle_open_patch(s, s.ended_ms, progress.as_ref());
         });
         event(ctx, Sev::Warn, format!("live {} ({}) ends: {note}", x.id, x.app), now.as_ref());
     }
     on
+}
+
+#[cfg(test)]
+fn restarted(ctx: &Ctx) -> Vec<(Live, bool)> {
+    restarted_to_launch(ctx).into_iter().map(|(x, held, _claim)| (x, held)).collect()
 }
 
 /// Why a release or cancel of `lease` by its id is refused: it is an active session's, and a
@@ -1259,6 +1563,7 @@ pub(crate) fn owned_lease(lives: &[Live], lease: &str) -> Option<String> {
 /// nothing (W9068, 11-15). What became of its lease.
 fn release(ctx: &Ctx, id: &str, note: &str) -> Result<String, String> {
     let x = get(ctx, id).ok_or_else(|| format!("no live job {id}"))?;
+    let progress = open_progress(&x);
     try_set(ctx, id, |s| {
         s.note = note.into();
         s.held.clear();
@@ -1268,6 +1573,7 @@ fn release(ctx: &Ctx, id: &str, note: &str) -> Result<String, String> {
             s.state = "ended".into();
             s.ended_ms = wall_ms();
         }
+        settle_open_patch(s, wall_ms(), progress.as_ref());
     })?;
     Ok(free_lease(ctx, id, x.lease))
 }
@@ -1518,7 +1824,7 @@ fn whole_lines_end(end: u64, bytes: &[u8]) -> u64 {
 const JIT_SOURCES: [(&str, &str); 3] = [("relax-compiler", "/relax/compiler/src/"), ("relax-front", "/relax/front/src/"), ("relax-backend", "/relax/backend/src/")];
 
 /// A fault of the JIT itself in what it reported (a refused patch's reasons).
-fn jit_fault(line: &str) -> bool {
+pub(crate) fn jit_fault(line: &str) -> bool {
     jit_fault_of("", line)
 }
 
@@ -1599,7 +1905,7 @@ fn fault_line(app: &str, line: &str, scan: &mut Scan) -> bool {
 }
 
 fn terminal(p: &LivePatch) -> bool {
-    p.tests.is_some() || matches!(p.outcome.as_str(), "refused" | "compile_error" | "failed" | "jit_error" | "none" | "skipped" | "unchanged" | "told")
+    p.tests.is_some() || matches!(p.outcome.as_str(), "refused" | "compile_error" | "failed" | "jit_error" | "none" | "skipped" | "unchanged" | "told" | "ended")
 }
 
 /// How long a save of files the app read waits for its JIT to tell the app ([`told_verdict`]):
@@ -1662,8 +1968,14 @@ fn told_verdict(ctx: &Ctx, id: &str, x: &Live, r: &Running, p: &mut LivePatch, f
 /// rebuilt the box's checkout for 79 s and ran the same binary (W3752, 11-06). A session pinned
 /// to a JIT (`--jit`) keeps it: its lane chose that build, and the refusal says so.
 fn needs_devhub_rebuild(x: &Live, p: &LivePatch) -> bool {
-    x.loader.is_empty() && p.reason.contains("needs a JIT rebuild:")
+    x.loader.is_empty() && (p.reason.contains("needs a JIT rebuild:") || p.reason.contains(MACROS_DIFFER))
 }
+
+/// A run's refusal when the tree's proc macros are not those its JIT has built in (relax
+/// native_macros.rs `Mismatch`): only a JIT built from the tree runs it, as "needs a JIT rebuild"
+/// says of its other inputs. A held test harness restarted on a save of 57 files that changed
+/// them, on the same binary, and held again on this (W25685, W25686, 11-27).
+const MACROS_DIFFER: &str = "the proc macros in this tree differ from those built into";
 
 fn rebuild_tests(x: &Live, p: &LivePatch) -> bool {
     x.test && p.tests.is_none() && needs_devhub_rebuild(x, p)
@@ -1683,6 +1995,15 @@ fn relaunch_anyway(command: &str) -> Option<bool> {
         ["session", "relaunch", "--anyway" | "anyway=1"] => Some(true),
         _ => None,
     }
+}
+
+/// Whether `command` is `session relaunch --fresh` (`--anyway` beside it changes nothing): a real
+/// quit of the app and a new process on the session's home and lease ([`relaunch`]), devhub's own
+/// for any app session. A walk that tests going offline and linking again from disk needs the app
+/// to quit for real; a relaunch in place keeps its process and state (CREATE, 11-27).
+fn fresh_relaunch(command: &str) -> bool {
+    let words: Vec<&str> = command.split_whitespace().collect();
+    words.starts_with(&["session", "relaunch"]) && words.contains(&"--fresh") && words[2..].iter().all(|w| matches!(*w, "--fresh" | "--anyway" | "anyway=1"))
 }
 
 /// A `session relaunch` call with devhub's `--anyway` put in the JIT's words (`anyway=1`), for a
@@ -1714,16 +2035,25 @@ fn recover(ctx: &Ctx, id: &str, x: &Live, p: &mut LivePatch, stop: bool) {
 /// A new process on the overlay as shipped; `p.reason` says why. Tests restart at once, apps
 /// only on their lane's relaunch. The replacement's verdict belongs to this edit.
 fn restart_session(ctx: &Ctx, id: &str, x: &Live, r: &Running, p: &mut LivePatch, stop: bool) {
+    restart_session_in(ctx, id, x, r, p, stop.then_some(QUIT_GRACE));
+}
+
+/// [`restart_session`], its old process given `quit` (None: not stopped here) to exit on its own
+/// quit; how it stopped (None: not stopped, or it could not be and the session ends).
+fn restart_session_in(ctx: &Ctx, id: &str, x: &Live, r: &Running, p: &mut LivePatch, quit: Option<Duration>) -> Option<Stopped> {
     p.tests = None;
     p.jit_notice.clear();
     p.verdict_ms = 0;
     p.frame_ms = 0;
     p.outcome = "recovering".into();
-    if set_test_patch(ctx, id, x, p).is_none() { return; }
-    r.restart.store(true, std::sync::atomic::Ordering::SeqCst);
+    set_test_patch(ctx, id, x, p)?;
+    {
+        let _calls = r.calls.lock().unwrap();
+        r.restart.store(true, SeqCst);
+    }
     event(ctx, Sev::Info, format!("live {id}: restarting its JIT warm on {}: {}", x.node, p.reason), Some(x));
-    if !stop { return; }
-    if let Err(e) = stop_run(ctx, r, x) {
+    let stopped = stop_run_in(ctx, r, x, quit?);
+    if let Err(e) = &stopped {
         // no restart comes: the edit's answer is that, and the session ends (its lease's end stops
         // what carries the lease's mark). Kept running beside a JIT it could not stop, it tried
         // again on each later edit and failed the same way (W7246, 11-14). A lease that ended
@@ -1745,11 +2075,51 @@ fn restart_session(ctx: &Ctx, id: &str, x: &Live, r: &Running, p: &mut LivePatch
             event(ctx, Sev::Warn, format!("live {id}: ending it: {e}"), Some(x));
         }
     }
+    stopped.ok()
+}
+
+/// How long a restart's old process has to exit on its own quit before it is stopped.
+const QUIT_GRACE: Duration = Duration::from_secs(2);
+/// How long a fresh relaunch's app has to exit on its quit, as a real quit: saving what it keeps
+/// and closing its links take longer than a restart's quit. One that has not exited by then is
+/// stopped, and the answer says its quit did not finish.
+const FRESH_QUIT: Duration = Duration::from_secs(10);
+
+/// The answer of a fresh relaunch of `old` ([`relaunch`]) at the session as it is now (`now`): None
+/// until its new process is up, a process of a later run than the one it quit.
+fn fresh_said(old: &Live, now: &Live, stopped: Stopped) -> Option<String> {
+    (now.pid != 0 && now.run_n > old.run_n && now.pid != old.pid).then(|| {
+        let how = match stopped {
+            Stopped::Quit(ms) => format!("quit and exited in {:.1} s", ms as f64 / 1000.0),
+            Stopped::Killed => format!("did not exit within {} s of its quit, so it was stopped (its quit did not finish)", FRESH_QUIT.as_secs()),
+            Stopped::Ended => "had ended already".into(),
+        };
+        let home = if !now.home_dir.is_empty() { now.home_dir.clone() }
+            else if let Some((_, h)) = now.env.iter().find(|(k, _)| k == "MAKEPAD_TEST_HOME") { h.clone() }
+            else { format!("{} (the box's own)", if now.box_home.is_empty() { "-" } else { &now.box_home }) };
+        format!("live {}: pid {} {how}; pid {} runs on the same home {home}, lease {} kept", now.id, old.pid, now.pid, now.lease)
+    })
+}
+
+/// A fresh relaunch's answer once its old process has exited: its new process up, or the
+/// session's end. While the app builds and starts again the call waits; a client that leaves is
+/// told how to wait for it.
+fn fresh_up(ctx: &Ctx, id: &str, old: &Live, stopped: Stopped) -> Result<Vec<String>, String> {
+    let signal = ctx.store.subscribe("live", &[id]);
+    loop {
+        let seen = signal.generation();
+        let now = get(ctx, id).ok_or_else(|| not_running(ctx, id))?;
+        if let Some(line) = fresh_said(old, &now, stopped) { return Ok(vec![line]); }
+        if !now.active() { return Err(format!("{id}: pid {} exited, and its new process did not start: {}", old.pid, now.note)); }
+        if makepad_remote::lines::client_gone() { return Err(format!("{id}: this call's client has gone; pid {} exited and its new process starts (`devhub live wait {id} frame`)", old.pid)); }
+        signal.wait(seen, Duration::from_secs(1));
+    }
 }
 
 /// Own shipping until the replacement is up. In particular, a relaunch immediately after a
 /// save includes it even if the file monitor has not delivered that save yet.
-fn relaunch(ctx: &Ctx, id: &str, resend: bool, anyway: bool) -> Result<Vec<String>, String> {
+/// `fresh`: a real quit and a new process on the same home and lease ([`fresh_relaunch`]).
+fn relaunch(ctx: &Ctx, id: &str, resend: bool, anyway: bool, fresh: bool) -> Result<Vec<String>, String> {
     let r = running(id).ok_or_else(|| not_running(ctx, id))?;
     let signal = ctx.store.subscribe("live", &[id]);
     // (a refused edit's wait for its recovery, up to WATCH_S, ends for this call: patch_verdict)
@@ -1778,8 +2148,9 @@ fn relaunch(ctx: &Ctx, id: &str, resend: bool, anyway: bool) -> Result<Vec<Strin
         if p.outcome == "failed" { return Err(p.reason); }
         // Later unrelated saves may have replaced the patch's display text. The JIT keeps all
         // pending restart reasons. Ordinary relaunches retain its in-process state transfer.
-        let session = if needs_devhub_rebuild(&x, &p) { Vec::new() } else { inspect(&x.node, x.pid, "session")? };
-        if !needs_devhub_rebuild(&x, &p) && !session.iter().any(|l| l.contains("needs a JIT rebuild:")) {
+        let by_devhub = fresh || needs_devhub_rebuild(&x, &p);
+        let session = if by_devhub { Vec::new() } else { inspect(&x.node, x.pid, "session")? };
+        if !by_devhub && !session.iter().any(|l| l.contains("needs a JIT rebuild:")) {
             let pending = session.iter().find_map(|l| num(l, "restart_pending")).unwrap_or(0);
             if let Some(done) = resend.then(|| relaunch_applied(id, x.pid, pending)).flatten() { return Ok(vec![done]); }
             // (an app that postponed a restart earlier in this run says nothing new to this one)
@@ -1792,9 +2163,14 @@ fn relaunch(ctx: &Ctx, id: &str, resend: bool, anyway: bool) -> Result<Vec<Strin
             return follow_relaunch(ctx, id, &x, p, lines, log_from, earlier);
         }
         if x.patch.is_none() { set(ctx, id, |s| s.patch = Some(p.clone())); }
-        p.reason = "the lane asked for session relaunch".into();
-        restart_session(ctx, id, &x, &r, &mut p, true);
+        p.reason = if fresh { "the lane asked for session relaunch --fresh: a real quit, then a new process on the same home" } else { "the lane asked for session relaunch" }.into();
+        let stopped = restart_session_in(ctx, id, &x, &r, &mut p, Some(if fresh { FRESH_QUIT } else { QUIT_GRACE }));
         if p.outcome == "failed" { return Err(p.reason); }
+        if fresh {
+            let Some(stopped) = stopped else { return Err(format!("{id}: the session changed as its relaunch began (a newer edit or run): nothing was quit; ask again")) };
+            restarting = true;
+            return fresh_up(ctx, id, &x, stopped);
+        }
         restarting = true;
         Ok(vec![format!("live {id}: relaunch queued through devhub; resolving the JIT for the current sources")])
     })();
@@ -1832,19 +2208,22 @@ fn restarts_waiting(x: &Live) -> Result<u64, String> {
     Ok(inspect(&x.node, x.pid, "session")?.iter().find_map(|l| num(l, "restart_pending")).unwrap_or(0))
 }
 
-/// How a session rejoins its runs after a master restart: the run it noted, or the run its last
-/// ask asked for ([`Live::ask_after`]) once its box has it, or that ask again under its name.
+/// How a session rejoins its runs after a master restart: the run it noted, or its last ask
+/// ([`Live::ask_after`]) asked again under its name. Its box answers that from the run of that
+/// name whatever its number, from its JIT resolution going on, or starts it if it never got the
+/// ask. A run's number is no guess: a lease's runs share their numbers with its looks and gets.
+/// A relaunch's new run started as the master restarted, and the next master took the run after
+/// the noted one for it: the lane's first look, a grab long ended with exit 0. It followed that,
+/// and the user's demo session ended "the app exited (0)" after its JIT rebuilt (W25972, 11-27).
 #[derive(Debug, PartialEq)]
 enum Rejoin {
     Follow(u64),
-    Next(u64),
     Ask,
 }
 
-fn rejoin(x: &Live, has_run: impl FnOnce(u64) -> Result<bool, String>) -> Result<Rejoin, String> {
+fn rejoin(x: &Live) -> Rejoin {
     let asked = !x.ask.is_empty() && x.ask_after == x.run_n;
-    if x.run_n > 0 && !asked { return Ok(Rejoin::Follow(x.run_n)); }
-    Ok(if has_run(x.run_n + 1)? { Rejoin::Next(x.run_n + 1) } else { Rejoin::Ask })
+    if x.run_n > 0 && !asked { Rejoin::Follow(x.run_n) } else { Rejoin::Ask }
 }
 
 /// Every path of the session's tree that may differ from what it shipped: its saves vs HEAD,
@@ -1960,13 +2339,30 @@ fn lease_end(ctx: &Ctx, id: &str) -> Option<String> {
 }
 
 fn stop_run(ctx: &Ctx, r: &Running, x: &Live) -> Result<(), String> {
-    let Some(mut pid) = run_to_stop(x, Some(x)) else { return Ok(()) };
+    stop_run_in(ctx, r, x, QUIT_GRACE).map(|_| ())
+}
+
+/// How a run's process stopped ([`stop_run_in`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Stopped {
+    /// it exited on its quit, this long after it was asked
+    Quit(u64),
+    /// it had not exited when its grace ran out, and was stopped
+    Killed,
+    /// its run had ended before it was asked
+    Ended,
+}
+
+/// [`stop_run`], the process given `grace` to exit on its quit: the run's end is its exit.
+fn stop_run_in(ctx: &Ctx, r: &Running, x: &Live, grace: Duration) -> Result<Stopped, String> {
+    let Some(mut pid) = run_to_stop(x, Some(x)) else { return Ok(Stopped::Ended) };
+    let first = Instant::now();
     loop {
-        let _ = inspect(&x.node, pid, "quit");
+        let _ = inspect(&x.node, pid, "quit force=1");
         let (asked, mut moved) = (Instant::now(), None);
-        while asked.elapsed() < Duration::from_secs(2) {
+        while asked.elapsed() < grace {
             match run_to_stop(x, get(ctx, &x.id).as_ref()) {
-                None => return Ok(()),
+                None => return Ok(Stopped::Quit(first.elapsed().as_millis() as u64)),
                 Some(now) if now != pid => { moved = Some(now); break; }
                 Some(_) => std::thread::sleep(Duration::from_millis(20)),
             }
@@ -1977,7 +2373,7 @@ fn stop_run(ctx: &Ctx, r: &Running, x: &Live) -> Result<(), String> {
     }
     // The original run is still followed; only its recorded pid is stopped. (A lease that ended
     // stopped it already: its caller says that end.)
-    r.held.kill(pid).inspect_err(|e| if super::leg::lease_held(ctx, &r.lease) { event(ctx, Sev::Warn, format!("live {}: stopping pid {pid}: {e}", x.id), Some(x)) })
+    r.held.kill(pid).inspect_err(|e| if super::leg::lease_held(ctx, &r.lease) { event(ctx, Sev::Warn, format!("live {}: stopping pid {pid}: {e}", x.id), Some(x)) }).map(|()| Stopped::Killed)
 }
 
 /// The process a stop of `x`'s run quits, at the session as it is now (`now`); none once its run
@@ -2168,13 +2564,34 @@ fn watch_on(x: &mut Live, now: Option<&Live>, p: &mut LivePatch) -> bool {
     true
 }
 
+/// The first of a run's queued `events` past `since` of a kind in `on` (a watch's `on=` list), as
+/// a watch answers it ([`test_event`]).
+fn queued_event<'a>(events: &'a [Value], on: &str, since: u64) -> Option<&'a Value> {
+    let kinds: Vec<&str> = on.split(',').collect();
+    events.iter()
+        .filter(|v| v.get("seq").and_then(Value::as_u64).is_some_and(|seq| seq > since))
+        .filter(|v| v.get("event").and_then(Value::as_str).is_some_and(|k| kinds.contains(&k)))
+        .min_by_key(|v| v.get("seq").and_then(Value::as_u64))
+}
+
 /// One event, rearming across an exec's closed link and reset event sequence, and following the
 /// session's process across a restart ([`watch_on`]).
 fn test_event(ctx: &Ctx, id: &str, x: &mut Live, p: &mut LivePatch, on: &str) -> Option<Value> {
-    while running(id).is_some() && watch_on(x, get(ctx, id).as_ref(), p) {
-        match inspect(&x.node, x.pid, &format!("watch on={on} since={} timeout_s=1", p.seq)) {
+    let mut left = false;
+    while let Some(r) = running(id) {
+        if watch_superseded(&r) || !watch_on(x, get(ctx, id).as_ref(), p) { return None; }
+        if !left && makepad_remote::lines::client_gone() {
+            left = true;
+            r.release_active_wait();
+            starter_left(ctx, id);
+        }
+        let answer = inspect(&x.node, x.pid, &format!("watch on={on} since={} timeout_s=1", p.seq));
+        if watch_superseded(&r) { return None; }
+        match answer {
             Ok(lines) => {
+                let mut refused = false;
                 for v in lines.iter().filter_map(|l| makepad_strict_json::parse(l.as_bytes()).ok()) {
+                    refused |= v.get("err").is_some();
                     let Some(kind) = v.get("event").and_then(Value::as_str) else { continue };
                     if kind == "none" { continue; }
                     p.seq = v.get("seq").and_then(Value::as_u64).unwrap_or(p.seq);
@@ -2187,10 +2604,21 @@ fn test_event(ctx: &Ctx, id: &str, x: &mut Live, p: &mut LivePatch, on: &str) ->
                     }
                 }
                 if let Ok(lines) = inspect(&x.node, x.pid, "events") {
+                    if watch_superseded(&r) { return None; }
                     let events: Vec<Value> = lines.iter().filter_map(|l| makepad_strict_json::parse(l.as_bytes()).ok()).filter(|v| v.get("seq").is_some()).collect();
                     let reset = events.iter().filter_map(|v| v.get("seq").and_then(Value::as_u64)).max().is_some_and(|seq| seq < p.seq)
                         || events.iter().any(|v| v.get("seq").and_then(Value::as_u64) == Some(p.seq) && !p.cursor.is_empty() && event_cursor(v) != p.cursor);
                     if reset { p.seq = 0; p.cursor.clear(); }
+                    // A run held before its watcher exists (its resolve failed: a crate
+                    // substitution, a manifest) answers every watch "not a live session", and its
+                    // refusal is in its event queue: read there. Asked again and again, two test
+                    // calls waited 102 min at "restarting JIT" for the verdict their restarted run
+                    // had given in its first second (W25685, W25686, 11-27).
+                    if let Some(v) = refused.then(|| queued_event(&events, on, p.seq)).flatten() {
+                        p.seq = v.get("seq").and_then(Value::as_u64).unwrap_or(p.seq);
+                        p.cursor = event_cursor(v);
+                        return Some(v.clone());
+                    }
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
@@ -2366,7 +2794,7 @@ fn patch_verdict(ctx: &Ctx, id: &str, x: &mut Live, p: &mut LivePatch) {
             }
         }
     };
-    if p.outcome == "jit_fault" { return; }
+    if p.outcome == "jit_fault" || r.as_deref().is_some_and(watch_superseded) { return; }
     let installed = match &ran_out { Some(EditState::Installed(n, why)) => Some((*n, why.clone())), _ => None };
     let waited = asked.elapsed();
     // the line that answers (any header line before it is skipped)
@@ -2512,6 +2940,10 @@ fn test_verdict(ctx: &Ctx, id: &str, x: &mut Live, p: &mut LivePatch) {
     collect_test_verdict(ctx, id, x, p, |x, p| test_event(ctx, id, x, p, "testverdict,patchverified,patchrefused,patchreverted,patchfailed,patchrestarted,jiterror"));
 }
 
+/// The edit of the refusal a test run held at its start says ([`collect_test_verdict`]): relax's
+/// `harness_live::hold`, which waits for the next save.
+const HELD_AT_START: &str = "the tests did not compile";
+
 fn collect_test_verdict(ctx: &Ctx, id: &str, x: &mut Live, p: &mut LivePatch, mut next: impl FnMut(&mut Live, &mut LivePatch) -> Option<Value>) {
     // No verdict can come from this binary for the edit. Let finish_tests start the new JIT.
     if rebuild_tests(x, p) { return; }
@@ -2537,9 +2969,20 @@ fn collect_test_verdict(ctx: &Ctx, id: &str, x: &mut Live, p: &mut LivePatch, mu
         }
         if v.get("event").and_then(Value::as_str) == Some("patchrefused") {
             p.reason = v.get("reasons").and_then(Value::as_arr).unwrap_or(&[]).iter().filter_map(Value::as_str).collect::<Vec<_>>().join("\n");
-            p.outcome = if jit_fault(&p.reason) { "hot-recovery" } else if v.get("outcome").and_then(Value::as_str) == Some("restart") { "restart" } else { "refused" }.into();
+            // A run held at its start (the tests did not compile: relax's harness_live::hold) waits
+            // for the next save, and no hot recovery comes: a JIT fault among its errors (an
+            // internal compiler error) is its verdict, a JIT error. Taken as one to recover from,
+            // the call waited on until the box's idle end ended its lease as hung and the client
+            // said "no lease": nine sessions of four lanes, 10 min each, on a relax ICE (11-27).
+            let held = p.outcome == "initial" || v.get("edit").and_then(Value::as_str) == Some(HELD_AT_START);
+            p.outcome = if jit_fault(&p.reason) { if held { "jit_error" } else { "hot-recovery" } } else if v.get("outcome").and_then(Value::as_str) == Some("restart") { "restart" } else { "refused" }.into();
             if let Some(r) = running(id) { *r.fault.lock().unwrap() = None; }
             if p.outcome == "hot-recovery" { continue; }
+            if p.outcome == "jit_error" {
+                p.tests = None;
+                p.verdict_ms = wall_ms();
+                p.jit_error = ctx.store.event_seq("jit_error", Sev::Err, format!("live {id}: the tests did not compile under the JIT: {}", p.reason.lines().find(|l| jit_fault(l)).unwrap_or("")), None);
+            }
             return;
         }
         // a run on the code from before patches the JIT undid is no verdict on the saved source
@@ -2566,23 +3009,31 @@ fn collect_test_verdict(ctx: &Ctx, id: &str, x: &mut Live, p: &mut LivePatch, mu
 }
 
 /// The first run, or a verdict still pending when the master restarted.
-fn resume_tests(ctx: &Ctx, id: &str, r: &Running) {
+fn resume_tests(ctx: &Ctx, id: &str, r: &Running, guard: Option<ResumeGuard<'_>>) {
     let Some(mut x) = get(ctx, id) else { return };
-    if !x.held.is_empty() {
+    if watch_superseded(r) || !x.held.is_empty() {
         // A confirmed refusal is complete. Reattaching restores the idle charge without
         // reinterpreting the failed run's log or requesting a second verdict.
+        drop(guard);
         if r.resuming.swap(false, std::sync::atomic::Ordering::SeqCst) { finish_call(ctx, id, r); }
         return;
     }
     if let Err(e) = x.load_text() { eprintln!("live log: {e}"); return; }
     let Some(mut p) = x.patch.clone() else { return };
     if p.outcome == "recovering" { return; }
-    if p.outcome.is_empty() { patch_verdict(ctx, id, &mut x, &mut p); }
-    if p.tests.is_none() && matches!(p.outcome.as_str(), "initial" | "patched" | "restart" | "hot-recovery") {
+    let settled = r.recover_cut.swap(false, SeqCst) && recover_cut_verdict(ctx, id, r, &mut x, &mut p);
+    if !settled && !watch_superseded(r) && !terminal(&p) && p.outcome.is_empty() { patch_verdict(ctx, id, &mut x, &mut p); }
+    if !settled && !watch_superseded(r) && !terminal(&p) && matches!(p.outcome.as_str(), "initial" | "patched" | "restart" | "hot-recovery") {
         test_verdict(ctx, id, &mut x, &mut p);
+    }
+    if settled || watch_superseded(r) {
+        drop(guard);
+        if r.resuming.swap(false, SeqCst) { finish_call(ctx, id, r); }
+        return;
     }
     if get(ctx, id).is_none_or(|s| s.run_n != x.run_n || s.pid != x.pid || s.state != "running") { return; }
     finish_tests(ctx, id, &x, &mut p);
+    drop(guard);
     let done = ctx.store.read(|d| d.lives.iter().any(|s| s.id == id && s.run_n == x.run_n && s.pid == x.pid && s.patch.as_ref().is_some_and(terminal)));
     if done && r.resuming.swap(false, std::sync::atomic::Ordering::SeqCst) { finish_call(ctx, id, r); }
 }
@@ -2717,6 +3168,71 @@ impl Steps {
     }
 }
 
+/// Capture the overlay once so the event cursor can be sampled before publishing it.
+fn capture_overlay(ctx: &Ctx, id: &str, r: &Running, x: &Live, files: &[String], current: Option<(Vec<String>, Vec<String>)>, steps: &mut Steps) -> Result<BTreeMap<String, String>, String> {
+    let pin = crate::lease::Pin::of_rev(&x.rev).ok_or("live: missing pin")?;
+    let (mut changed, mut deleted) = match current {
+        Some(paths) => paths,
+        None => crate::lease::ship::uncommitted_seen(&ctx.monitor, &r.tree, &pin)?,
+    };
+    back_to_pin(&r.tree, &x.sources, &mut changed, &mut deleted);
+    changed.extend(also_files(&r.tree, &x.also)?);
+    changed.sort();
+    changed.dedup();
+    deleted.sort();
+    steps.lap("dirty");
+    let selected: BTreeSet<_> = files.iter().collect();
+    if x.test {
+        changed.retain(|p| selected.contains(p));
+        deleted.retain(|p| selected.contains(p));
+    }
+    let dir = ctx.logs("live").join(format!("{id}.ship"));
+    let mut sources = capture(&r.tree, &changed, &deleted, &x.sources, &dir)?;
+    if x.test { sources.extend(x.sources.iter().filter(|(p, _)| !selected.contains(p)).map(|(p, h)| (p.clone(), h.clone()))); }
+    steps.lap("capture");
+    Ok(sources)
+}
+
+fn overlay_changes(old: &BTreeMap<String, String>, new: &BTreeMap<String, String>) -> Vec<String> {
+    old.keys().chain(new.keys()).filter(|k| old.get(*k) != new.get(*k)).cloned().collect::<BTreeSet<_>>().into_iter().collect()
+}
+
+fn publish_overlay(ctx: &Ctx, id: &str, r: &Running, x: &Live, files: &[String], current: Option<(Vec<String>, Vec<String>)>) -> Result<Option<(Vec<String>, BTreeMap<String, String>)>, String> {
+    let mut steps = Steps::default();
+    let sources = capture_overlay(ctx, id, r, x, files, current, &mut steps)?;
+    if sources == x.sources { return Ok(None); }
+    let changes = overlay_changes(&x.sources, &sources);
+    send_overlay(ctx, id, r, x, &sources, &mut steps)?;
+    Ok(Some((changes, sources)))
+}
+
+fn send_overlay(ctx: &Ctx, id: &str, r: &Running, x: &Live, sources: &BTreeMap<String, String>, steps: &mut Steps) -> Result<(), String> {
+    let dir = ctx.logs("live").join(format!("{id}.ship"));
+    let pin = crate::lease::Pin::of_rev(&x.rev).ok_or("live: missing pin")?;
+    let mut entries = Vec::new();
+    for (path, hash) in sources {
+        if hash == "-" || x.sources.get(path) == Some(hash) { continue; }
+        crate::lease::ship::entries(&dir, path, &mut entries)?;
+    }
+    // files the session shipped before have their place on the node: no ship-have asks
+    let placed = entries.iter().all(|e| x.sources.get(&e.path).is_some_and(|h| h.as_str() != "-"));
+    let sent = if entries.is_empty() { Default::default() } else { crate::lease::ship::send(r.held.client(), &r.node, &r.lease, &dir, &entries, placed)? };
+    steps.lap("send");
+    steps.said.push_str(&format!(" (node {})", sent.node_ms));
+    // ship-done publishes the complete overlay, retaining paths this call did not send.
+    let changed: Vec<String> = sources.iter().filter(|(_, h)| h.as_str() != "-").map(|(p, _)| p.clone()).collect();
+    let deleted: Vec<String> = sources.iter().filter(|(_, h)| h.as_str() == "-").map(|(p, _)| p.clone()).collect();
+    let list = |v: &[String]| v.iter().map(|p| json_str(p)).collect::<Vec<_>>().join(",");
+    let bases = crate::lease::ship::bases_json(&r.tree, &pin, &changed.iter().chain(&deleted).cloned().collect::<Vec<_>>())?;
+    steps.lap("bases");
+    let body = format!("{{\"shipped\":[{}],\"deleted\":[{}],\"bases\":{bases}}}", list(&changed), list(&deleted));
+    let a = ask(r.held.client(), Some(&r.node), "ship-done", &format!("ship-done {} {}", r.lease, makepad_network::digest::base64_encode(body.as_bytes())))?;
+    if let Some(e) = a.first().filter(|e| e.starts_with("{\"err\":")) { return Err(e.clone()); }
+    steps.lap("done");
+    try_set(ctx, id, |s| s.sources.clone_from(sources))?.ok_or("live job disappeared")?;
+    Ok(())
+}
+
 /// `called_ms`: when the call came (a test session's `live sync`, before it waits for its box's
 /// room or an earlier call): what follows it is devhub's, what comes before it the caller's.
 /// `queued`: how long a test call waited for the previous call's tests, and behind what.
@@ -2739,29 +3255,7 @@ fn ship_edit(ctx: &Ctx, id: &str, r: &Running, files: Vec<String>, edit_ms: u64,
     let mut ship = || -> Result<bool, String> {
         steps = Steps { at: called_ms + queued_ms, said: if queued_ms > 0 { format!("queued {queued_ms}") } else { String::new() } };
         steps.lap("admit");
-        let pin = crate::lease::Pin::of_rev(&x.rev).ok_or("live: missing pin")?;
-        let (mut changed, mut deleted) = match current.clone() {
-            Some(paths) => paths,
-            // the save came from the monitor: its dirty set has it, no status of the tree
-            None => crate::lease::ship::uncommitted_seen(&ctx.monitor, &r.tree, &pin)?,
-        };
-        back_to_pin(&r.tree, &x.sources, &mut changed, &mut deleted);
-        changed.extend(also_files(&r.tree, &x.also)?);
-        changed.sort();
-        changed.dedup();
-        deleted.sort();
-        steps.lap("dirty");
-        let selected: BTreeSet<&String> = files.iter().collect();
-        if x.test {
-            changed.retain(|p| selected.contains(p));
-            deleted.retain(|p| selected.contains(p));
-        }
-        let dir = ctx.logs("live").join(format!("{id}.ship"));
-        let mut sources = capture(&r.tree, &changed, &deleted, &x.sources, &dir)?;
-        steps.lap("capture");
-        if x.test {
-            sources.extend(x.sources.iter().filter(|(p, _)| !selected.contains(p)).map(|(p, h)| (p.clone(), h.clone())));
-        }
+        let sources = capture_overlay(ctx, id, r, &x, &files, current.clone(), &mut steps)?;
         let unchanged = sources == x.sources;
         if unchanged {
             let Some(old) = x.patch.as_ref().filter(|old| x.test && terminal(old)) else { return Ok(false) };
@@ -2785,7 +3279,7 @@ fn ship_edit(ctx: &Ctx, id: &str, r: &Running, files: Vec<String>, edit_ms: u64,
             if !wait_up(ctx, id, r, x.pid) { return Ok(false); }
             steps.lap("up");
         }
-        p.files = sources.keys().chain(x.sources.keys()).filter(|k| sources.get(*k) != x.sources.get(*k)).cloned().collect::<BTreeSet<_>>().into_iter().collect();
+        p.files = overlay_changes(&x.sources, &sources);
         // the event cursor and the inputs at once, one round trip: both are asked before the
         // ship, so no answer can hold anything the JIT did with this edit. The inputs are asked
         // about the edit's files only (`of`): the whole list cost the JIT 25-40 ms.
@@ -2809,27 +3303,8 @@ fn ship_edit(ctx: &Ctx, id: &str, r: &Running, files: Vec<String>, edit_ms: u64,
         steps.lap("cursor");
         p.log_start = if x.test { run_log(r, x.run_n, x.patch.as_ref().map_or(0, |p| p.log_end))?.0 } else { 0 };
         set(ctx, id, |s| { s.patch = Some(p.clone()); s.touched_ms = wall_ms(); });
-        let mut entries = Vec::new();
-        for path in changed.iter().filter(|p| sources.get(*p) != x.sources.get(*p)) {
-            crate::lease::ship::entries(&dir, path, &mut entries)?;
-        }
-        // files the session shipped before have their place on the node: no ship-have asks
-        let placed = entries.iter().all(|e| x.sources.get(&e.path).is_some_and(|h| h.as_str() != "-"));
-        let sent = if entries.is_empty() { Default::default() } else { crate::lease::ship::send(r.held.client(), &r.node, &r.lease, &dir, &entries, placed)? };
-        steps.lap("send");
-        steps.said.push_str(&format!(" (node {})", sent.node_ms));
-        // ship-done publishes the complete overlay, retaining paths this call did not send.
-        let changed: Vec<String> = sources.iter().filter(|(_, h)| h.as_str() != "-").map(|(p, _)| p.clone()).collect();
-        let deleted: Vec<String> = sources.iter().filter(|(_, h)| h.as_str() == "-").map(|(p, _)| p.clone()).collect();
-        let list = |v: &[String]| v.iter().map(|p| json_str(p)).collect::<Vec<_>>().join(",");
-        let bases = crate::lease::ship::bases_json(&r.tree, &pin, &changed.iter().chain(&deleted).cloned().collect::<Vec<_>>())?;
-        steps.lap("bases");
-        let body = format!("{{\"shipped\":[{}],\"deleted\":[{}],\"bases\":{bases}}}", list(&changed), list(&deleted));
-        let a = ask(r.held.client(), Some(&r.node), "ship-done", &format!("ship-done {} {}", r.lease, makepad_network::digest::base64_encode(body.as_bytes())))?;
-        if let Some(e) = a.first().filter(|e| e.starts_with("{\"err\":")) { return Err(e.clone()); }
+        send_overlay(ctx, id, r, &x, &sources, &mut steps)?;
         p.shipped_ms = wall_ms();
-        steps.lap("done");
-        set(ctx, id, |s| s.sources = sources);
         // One query for the exact shipped set. Unknown or incomplete inputs cannot
         // justify waiting for a patch event (nor claiming this edit missed the target).
         if held { return Ok(true); }
@@ -2886,6 +3361,7 @@ fn ship_edit(ctx: &Ctx, id: &str, r: &Running, files: Vec<String>, edit_ms: u64,
             _ => break shipped,
         }
     };
+    if watch_superseded(r) { return room; }
     if p.shipped_ms == 0 { p.shipped_ms = wall_ms(); }
     if matches!(shipped, Ok(false)) { return room; }
     if p.files.is_empty() { p.files = files; }
@@ -2915,6 +3391,7 @@ fn ship_edit(ctx: &Ctx, id: &str, r: &Running, files: Vec<String>, edit_ms: u64,
             set_patch(ctx, id, &p);
             loop {
                 test_verdict(ctx, id, &mut x, &mut p);
+                if watch_superseded(r) { return room; }
                 finish_tests(ctx, id, &x, &mut p);
                 let now = get(ctx, id);
                 if now.as_ref().is_none_or(|s| s.pid == x.pid || s.patch.as_ref().is_some_and(terminal)) || !watch_on(&mut x, now.as_ref(), &mut p) { break; }
@@ -2994,10 +3471,12 @@ fn ship_edit(ctx: &Ctx, id: &str, r: &Running, files: Vec<String>, edit_ms: u64,
         return room;
     }
     if x.test {
+        if watch_superseded(r) { return room; }
         if p.tests.is_none() && set_test_patch(ctx, id, &x, &p).is_none() { wait_tests(ctx, id); return room; }
         if p.tests.is_none() && matches!(p.outcome.as_str(), "patched" | "restart" | "hot-recovery") {
             test_verdict(ctx, id, &mut x, &mut p);
         }
+        if watch_superseded(r) { return room; }
         // A verdict on a round that took none of them is not about this edit: a JIT miss, never
         // a pass (a ship's folder answered for the file in it, 11-17)
         if let Some(missed) = jit_miss(&mut p, &taken) {
@@ -3215,15 +3694,176 @@ enum Cut {
     Watch,
     Ship(LivePatch, Vec<String>),
     Said(LivePatch),
+    RecoverTest,
 }
 
-fn cut_by_restart(x: &Live, now: u64) -> Option<Cut> {
+#[derive(Debug, PartialEq)]
+enum CutProbe {
+    Finished { patch: Option<Value>, verdict: Value },
+    RunningPatch(Value),
+    StillRunning,
+    FromLog(crate::state::LiveTests),
+    Lost(String),
+}
+
+fn log_test_verdict(log: &str, p: &LivePatch, allow_group_zero: bool) -> Option<crate::state::LiveTests> {
+    let mut end = log.len();
+    for raw in log.split_inclusive('\n').rev() {
+        let start = end - raw.len();
+        end = start;
+        let Some(rest) = raw.trim_end().strip_prefix("testverdict ") else { continue };
+        let fields: BTreeMap<_, _> = verdict_fields(rest).collect();
+        if fields.contains_key("faulted") || fields.contains_key("reverted") { continue; }
+        let number = |k| fields.get(k).and_then(|s| s.parse::<u64>().ok());
+        let (Some(group), Some(ran), Some(passed), Some(failed), Some(ms)) = (number("group"), number("ran"), number("passed"), number("failed"), fields.get("ms").and_then(|s| s.parse().ok())) else { continue };
+        let restarted = fields.get("restarted") == Some(&"true");
+        let matches = match p.outcome.as_str() {
+            "initial" => group == 0,
+            "restart" => restarted || group == 0,
+            _ if p.group.is_some() => restarted || p.group == Some(group),
+            "" => restarted || group > 0 || allow_group_zero,
+            _ => false,
+        };
+        if !matches { continue; }
+        let round = parse_rounds(&log[..start]).pop().unwrap_or_default();
+        let mut failures = round.failed;
+        if fields.get("borrowck") == Some(&"failed") {
+            failures.push(format!("borrow check failed: {}", fields.get("first").copied().unwrap_or("see run log")));
+        }
+        return Some(crate::state::LiveTests { group, ran, passed, failed, failures, ms, restarted,
+            ignored: round.ignored.len() as u64, skipped: number("skipped").unwrap_or_default(),
+            selected: fields.get("selected").copied().unwrap_or_default().into(), ..Default::default() });
+    }
+    None
+}
+
+fn probe_cut_events(events: &[Value], live_lines: &[String], log_tail: &str, p: &LivePatch, allow_group_zero: bool) -> CutProbe {
+    let seq = |v: &Value| v.get("seq").and_then(Value::as_u64);
+    let reset = events.iter().filter_map(seq).max().is_some_and(|n| n < p.seq)
+        || events.iter().any(|v| seq(v) == Some(p.seq) && !p.cursor.is_empty() && event_cursor(v) != p.cursor);
+    let since = if reset { 0 } else { p.seq };
+    let mut newer: Vec<_> = events.iter().filter(|v| seq(v).is_some_and(|n| n > since)).collect();
+    newer.sort_by_key(|v| seq(v));
+    let mut group = p.group;
+    let mut patch = None;
+    let mut terminal_event = None;
+    let mut restarted = reset || p.outcome == "restart";
+    for v in newer {
+        match v.get("event").and_then(Value::as_str) {
+            Some("patchverified" | "patchrestarted" | "patchfailed") => {
+                restarted |= v.get("event").and_then(Value::as_str) == Some("patchrestarted");
+                group = v.get("group").and_then(Value::as_u64).or(group);
+                patch = Some(v.clone());
+                terminal_event = None;
+            }
+            Some("testverdict") if v.get("reverted").is_none() => {
+                if v.get("faulted").is_some() || crate::state::live_tests_from(v).is_some_and(|t| t.restarted || Some(t.group) == group
+                    || (t.group == 0 && (p.outcome == "initial" || (restarted && p.outcome.is_empty())))) {
+                    return CutProbe::Finished { patch, verdict: v.clone() };
+                }
+            }
+            Some("patchrefused" | "patchreverted" | "jiterror") => terminal_event = Some(v.clone()),
+            _ => {}
+        }
+    }
+    if let Some(verdict) = terminal_event { return CutProbe::Finished { patch, verdict }; }
+    if let Some(t) = log_test_verdict(log_tail, p, allow_group_zero) { return CutProbe::FromLog(t); }
+    if let Some(v) = patch { return CutProbe::RunningPatch(v); }
+    if matches!(edit_state(&Ok(live_lines.to_vec()), p.patches_at_ship), Some(EditState::On(_))) ||
+        parse_rounds(log_tail).last().is_some_and(|r| !r.finished && r.total > 0) { return CutProbe::StillRunning; }
+    CutProbe::Lost(if live_lines.is_empty() { "the JIT's inspect socket could not be reached and its run log has no verdict" }
+        else { "the JIT is idle with no matching verdict in its event queue or run log" }.into())
+}
+
+fn apply_cut_patch(ctx: &Ctx, id: &str, x: &Live, p: &mut LivePatch, v: &Value) {
+    if let Some(edit) = v.get("edit") { p.edit = edit.as_str().map(str::to_string).unwrap_or_else(|| edit.to_json()); }
+    p.group = v.get("group").and_then(Value::as_u64).or(p.group);
+    if !hot_event(ctx, id, x, p, v) {
+        let (outcome, reason) = verified_outcome(Some(v));
+        p.outcome = outcome.into();
+        p.reason = reason;
+        p.reason_ref = Default::default();
+        p.outcome_ms = wall_ms();
+        p.seq = v.get("seq").and_then(Value::as_u64).unwrap_or(p.seq);
+        p.cursor = event_cursor(v);
+    }
+}
+
+fn allow_group_zero(x: &Live, p: &LivePatch) -> bool {
+    p.outcome == "initial" || p.log_start > 0 || p.edit_ms <= x.started_ms
+}
+
+fn recover_cut_verdict(ctx: &Ctx, id: &str, r: &Running, x: &mut Live, p: &mut LivePatch) -> bool {
+    let events: Vec<_> = inspect(&x.node, x.pid, "events").unwrap_or_default().iter()
+        .filter_map(|l| makepad_strict_json::parse(l.as_bytes()).ok()).collect();
+    let live = inspect(&x.node, x.pid, "live").unwrap_or_default();
+    let log = run_log(r, x.run_n, p.log_start).map(|(_, log)| log).unwrap_or_default();
+    let probe = probe_cut_events(&events, &live, &log, p, allow_group_zero(x, p));
+    if watch_superseded(r) { return false; }
+    match probe {
+        CutProbe::Finished { patch, verdict } => {
+            if let Some(v) = patch { apply_cut_patch(ctx, id, x, p, &v); }
+            if verdict.get("event").and_then(Value::as_str) == Some("testverdict") {
+                if let Some(t) = crate::state::live_tests_from(&verdict) {
+                    // The probe matched the round across the restart gap. Preserve that
+                    // identity when the ordinary collector applies its group check.
+                    if t.restarted { p.outcome = "restart".into(); }
+                    else if t.group == 0 && p.group.is_none() { p.outcome = "initial".into(); }
+                    else if p.group == Some(t.group) { p.outcome = "patched".into(); }
+                }
+            }
+            p.seq = verdict.get("seq").and_then(Value::as_u64).unwrap_or(p.seq);
+            p.cursor = event_cursor(&verdict);
+            let mut event = Some(verdict);
+            collect_test_verdict(ctx, id, x, p, |_, _| event.take());
+            if let Some(t) = &p.tests {
+                if p.outcome.is_empty() { p.outcome = if t.restarted { "restart" } else { "patched" }.into(); }
+            }
+        }
+        CutProbe::FromLog(t) => {
+            p.outcome = if t.restarted { "restart" } else { "patched" }.into();
+            p.tests = Some(t);
+            p.verdict_ms = wall_ms();
+            p.reason = "recovered from run log after master restart".into();
+        }
+        CutProbe::RunningPatch(v) => {
+            apply_cut_patch(ctx, id, x, p, &v);
+            set_test_patch(ctx, id, x, p);
+        }
+        CutProbe::StillRunning => {
+            if p.outcome.is_empty() && parse_rounds(&log).last().is_some_and(|r| !r.finished && r.total > 0) {
+                p.outcome = if p.group.is_some() { "patched" } else { "restart" }.into();
+                set_test_patch(ctx, id, x, p);
+            }
+        }
+        CutProbe::Lost(why) => {
+            *p = lost_verdict(p, wall_ms(), format!("verdict lost: {why}; {NEXT_CALL_RERUNS}"));
+            if let Some(x) = set_test_patch(ctx, id, x, p) { event(ctx, Sev::Warn, format!("live {id}: {}", p.reason), Some(&x)); }
+            return true;
+        }
+    }
+    false
+}
+
+fn lost_verdict(p: &LivePatch, now: u64, reason: String) -> LivePatch {
+    LivePatch { tests: None, outcome: "failed".into(), outcome_ms: now, verdict_ms: now, reason, reason_ref: Default::default(), ..p.clone() }
+}
+
+fn cut_by_restart(x: &Live, now: u64, following: bool) -> Option<Cut> {
+    if x.test {
+        let p = x.patch.as_ref().filter(|p| !terminal(p) && p.outcome != "recovering")?;
+        if p.outcome.is_empty() && p.shipped_ms == 0 || !following {
+            let reason = if p.shipped_ms > 0 { CUT_LOST_NO_RUN } else { CUT_LOST_UNSHIPPED };
+            return Some(Cut::Said(lost_verdict(p, now, reason.into())));
+        }
+        return Some(Cut::RecoverTest);
+    }
     let p = x.patch.as_ref().filter(|p| p.outcome.is_empty())?;
-    if p.shipped_ms > 0 && !x.test { return Some(Cut::Watch); }
+    if p.shipped_ms > 0 { return Some(Cut::Watch); }
     let mut cut = LivePatch { outcome_ms: now, ..p.clone() };
-    if x.test || p.files.is_empty() {
+    if p.files.is_empty() {
         cut.outcome = "failed".into();
-        cut.reason = if x.test && p.shipped_ms > 0 { CUT_RERUN } else { "the master restarted before this edit's verdict: the session's next call ships its saves again" }.into();
+        cut.reason = "the master restarted before this edit's verdict: the session's next call ships its saves again".into();
         return Some(Cut::Said(cut));
     }
     cut.outcome = "superseded".into();
@@ -3235,10 +3875,19 @@ fn cut_by_restart(x: &Live, now: u64) -> Option<Cut> {
 /// left to ship, and the next call answered that cut verdict again, call after call, until the
 /// session ended (W18256, 11-24). That call runs its tests again on its JIT restarted warm.
 const CUT_RERUN: &str = "the master restarted before this edit's verdict: the session's next call runs its tests again";
+const CUT_LOST_UNSHIPPED: &str = "verdict lost: the master restarted before this edit finished shipping; the session's next call ships its saves again";
+const CUT_LOST_NO_RUN: &str = "verdict lost: the master restarted and the run for this edit is gone from its box; the session's next call runs its tests again";
+const NEXT_CALL_RERUNS: &str = "the session's next call runs its tests again";
 
 /// Whether `p` is such a cut verdict ([`CUT_RERUN`]).
 fn rerun_cut(p: &LivePatch) -> bool {
-    p.outcome == "failed" && p.shipped_ms > 0 && p.reason == CUT_RERUN
+    if p.outcome != "failed" || p.shipped_ms == 0 { return false; }
+    let why = reason_text(p);
+    why == CUT_RERUN || why.ends_with(NEXT_CALL_RERUNS)
+}
+
+fn reason_text(p: &LivePatch) -> String {
+    if p.reason.is_empty() { p.reason_ref.read().unwrap_or_default() } else { p.reason.clone() }
 }
 
 /// Holds a live job whose lease and app outlived the previous master, until it ends.
@@ -3250,24 +3899,20 @@ fn take_back(ctx: &Ctx, x: &Live) -> Arc<Running> {
     let tree = PathBuf::from(&x.tree);
     // an app's ships wait for its pid, as a started session's do (the run's watcher frees them):
     // one shipped before it found no app and dropped its files
-    let r = Arc::new(Running { node: x.node.clone(), lease: x.lease.clone(), held, tree, test: x.test, pending: Mutex::new((BTreeSet::new(), 0, None)), up_pid: Default::default(), calls: Mutex::new(Calls::default()), inflight: std::sync::atomic::AtomicBool::new(true), restart: std::sync::atomic::AtomicBool::new(false), resuming: std::sync::atomic::AtomicBool::new(x.test), fault: Mutex::new(None), waiting: Default::default(), relaunch_waits: Default::default(), kept_said: Default::default() });
+    let r = Arc::new(Running { node: x.node.clone(), lease: x.lease.clone(), held, tree, test: x.test, pending: Mutex::new((BTreeSet::new(), 0, None)), up_pid: Default::default(), calls: Mutex::new(Calls::default()), inflight: std::sync::atomic::AtomicBool::new(true), restart: std::sync::atomic::AtomicBool::new(false), recover_cut: Default::default(), resume_active: Default::default(), supersede: Default::default(), active_wait: Default::default(), resuming: std::sync::atomic::AtomicBool::new(x.test), fault: Mutex::new(None), waiting: Default::default(), relaunch_waits: Default::default(), kept_said: Default::default() });
     join(&ctx.monitor, &x.id, r.clone());
     r
 }
 
-fn reattach(ctx: &Arc<Ctx>, x: &Live) {
+fn reattach_claimed(ctx: &Arc<Ctx>, x: &Live, claim: Claim) {
     let r = take_back(ctx, x);
     let len = std::fs::metadata(&x.log).map_or(0, |m| m.len());
-    // a run asked for and not noted: the node has it (followed), or is still getting it ready (the
-    // same ask answers from that: an overlay's JIT resolution goes on), or never got the ask
-    let follow = match rejoin(x, |n| r.held.has_run(n)) {
-        Ok(Rejoin::Next(n)) => {
-            set(ctx, &x.id, |s| { s.run_n = n; s.run_log_start = len; });
-            Some((n, 0))
-        }
-        Ok(Rejoin::Ask) => None,
-        Ok(Rejoin::Follow(n)) => Some((n, len.saturating_sub(x.run_log_start))),
-        Err(e) => return finished(ctx, &x.id, &r, Err(e)),
+    // a run asked for and not noted is asked again under its name ([`rejoin`]): the node answers
+    // from it, or from its JIT resolution going on, or starts it if it never got the ask
+    let rejoined = rejoin(x);
+    let follow = match rejoined {
+        Rejoin::Ask => None,
+        Rejoin::Follow(n) => Some((n, len.saturating_sub(x.run_log_start))),
     };
     let found = lost_pid(x, follow).map(|(pid, run)| {
         set(ctx, &x.id, |s| if (s.pid, s.run_pid) == (x.pid, x.run_pid) { (s.pid, s.run_pid) = (pid, run); });
@@ -3275,13 +3920,15 @@ fn reattach(ctx: &Arc<Ctx>, x: &Live) {
         Live { pid, run_pid: run, ..x.clone() }
     });
     let x = found.as_ref().unwrap_or(x);
-    if follow.is_some_and(|(n, _)| n > x.run_n) {
-        // the restart's new run itself: nothing of the old one is left to stop
+    if rejoined == Rejoin::Ask {
+        // the restart's new run itself, asked: nothing of the old one is left to stop, and a
+        // restart marked now would start the app once more when that new run ends
     } else if x.patch.as_ref().is_some_and(|p| p.outcome == "recovering") {
         r.restart.store(true, std::sync::atomic::Ordering::SeqCst);
         if stop_run(ctx, &r, x).is_err() { r.restart.store(false, std::sync::atomic::Ordering::SeqCst); }
     }
-    match cut_by_restart(x, wall_ms()) {
+    match cut_by_restart(x, wall_ms(), follow.is_some()) {
+        Some(Cut::RecoverTest) => r.recover_cut.store(true, SeqCst),
         Some(Cut::Watch) => {
             let (c, id, r2, mut x2) = (ctx.clone(), x.id.clone(), r.clone(), x.clone());
             let _ = std::thread::Builder::new().name("devhub-live-rewatch".into()).spawn(move || {
@@ -3315,6 +3962,7 @@ fn reattach(ctx: &Arc<Ctx>, x: &Live) {
     let asked = (follow.is_none() && !x.ask.is_empty()).then(|| x.ask.clone());
     let res = run_processes(ctx, &x.id, &r, follow, asked);
     finished(ctx, &x.id, &r, res);
+    drop(claim);
 }
 
 /// The pids of a session's app that its state lost while its run went on, read back from its log:
@@ -3408,10 +4056,6 @@ fn alive_look(ctx: &Ctx, id: &str, lease: &str, restarting: bool, look: &mut Ali
 /// goes (what is left of its run with it), and the call that waits on it answers with its end.
 fn process_gone(ctx: &Ctx, id: &str, note: &str) {
     let Some(x) = get(ctx, id).filter(|x| x.active()) else { return };
-    if let Some(mut p) = x.patch.clone().filter(|p| !terminal(p)) {
-        p.reason = note.to_string();
-        set_patch(ctx, id, &p);
-    }
     event(ctx, Sev::Warn, format!("live {id} ({}) of lane {} ends: {note}", x.app, x.lane), Some(&x));
     if let Err(e) = release(ctx, id, note) {
         event(ctx, Sev::Warn, format!("live {id}: ending it: {e}"), Some(&x));
@@ -3435,6 +4079,7 @@ fn finished(ctx: &Ctx, id: &str, r: &Running, res: Result<i32, String>) {
         get(ctx, id).and_then(|s| std::fs::read_to_string(s.log).ok())
             .and_then(|text| makepad_remote::hot::Verdict::from_output(makepad_remote::hot::JIT_ERROR_EXIT, &text)).map(|v| v.line())
     } else { None };
+    let progress = end_progress(ctx, id);
     let x = set(ctx, id, |s| {
         if s.active() {
             s.state = "ended".into();
@@ -3449,23 +4094,80 @@ fn finished(ctx: &Ctx, id: &str, r: &Running, res: Result<i32, String>) {
                 Err(e) => crate::proto::clean(e, 200),
             };
         }
+        settle_open_patch(s, wall_ms(), progress.as_ref());
     });
     let _ = std::fs::remove_dir_all(ctx.logs("live").join(format!("{id}.ship")));
     event(ctx, Sev::Info, format!("live {id} ended: {}", x.as_ref().map_or(String::new(), |x| x.note.clone())), x.as_ref());
 }
 
+/// The partner's current ask, including a queued ask: the store records its lease only after
+/// its sources ship. Waiting for that record alone would leave a set waiting for its joiner.
+fn partner_ask(ctx: &Ctx, joins: &str) -> Result<String, String> {
+    let asked = ASKED.lock().unwrap().get(joins).cloned();
+    let lease = ctx.store.read(|d| d.lives.iter().find(|j| j.id == joins && j.active()).map(|j| j.lease.clone()))
+        .ok_or_else(|| format!("the session it joins ({joins}) ended before it got its box"))?;
+    Ok(asked.unwrap_or(lease))
+}
+
+/// Return ownership to the caller if the OS cannot start the thread. It can then finish
+/// the session's store transition while still holding the claim.
+fn spawn_claimed(claim: Claim, worker: impl FnOnce(Claim) + Send + 'static) -> Result<(), (std::io::Error, Claim)> {
+    let slot = Arc::new(Mutex::new(Some(claim)));
+    let worker_slot = slot.clone();
+    let spawned = std::thread::Builder::new().name("devhub-live".into()).spawn(move || {
+        let claim = worker_slot.lock().unwrap().take().expect("worker owns the claim");
+        worker(claim);
+    });
+    match spawned {
+        Ok(_) => Ok(()),
+        Err(e) => Err((e, slot.lock().unwrap().take().expect("spawn failed before thread ran"))),
+    }
+}
+
+fn spawn_run(ctx: &Arc<Ctx>, claim: Claim, first_call: bool) -> Result<(), (std::io::Error, Claim)> {
+    let c = ctx.clone();
+    spawn_claimed(claim, move |claim| run_claimed(&c, claim, first_call))
+}
+
+fn spawn_reattach(ctx: &Arc<Ctx>, x: Live, claim: Claim) -> Result<(), (std::io::Error, Claim)> {
+    let c = ctx.clone();
+    spawn_claimed(claim, move |claim| reattach_claimed(&c, &x, claim))
+}
+
+fn failed_to_spawn_run(ctx: &Ctx, claim: Claim, e: std::io::Error) {
+    let note = format!("failed to spawn live thread: {e}");
+    let progress = end_progress(ctx, claim.id());
+    let x = set(ctx, claim.id(), |s| {
+        s.state = "failed".into();
+        s.ended_ms = wall_ms();
+        s.note = note.clone();
+        settle_open_patch(s, s.ended_ms, progress.as_ref());
+    });
+    event(ctx, Sev::Warn, format!("live {}: {note}", claim.id()), x.as_ref());
+}
+
+#[cfg(test)]
+fn try_run(ctx: &Arc<Ctx>, id: &str, first_call: bool, by: LaunchPath) -> bool {
+    let Some(claim) = try_claim_or_warn(ctx, id, by) else { return false };
+    run_claimed(ctx, claim, first_call);
+    true
+}
+
 /// Places the live job, starts its app, runs until it ends.
-fn run(ctx: &Arc<Ctx>, id: &str, first_call: bool) {
+fn run_claimed(ctx: &Arc<Ctx>, claim: Claim, first_call: bool) {
+    let id = claim.id();
     let Some(x) = get(ctx, id) else { return };
     // (a job released meanwhile stays released: its lease wait gives up because of that)
     let fail = |e: String| {
         let mut failed = false;
+        let progress = end_progress(ctx, id);
         let x = set(ctx, id, |s| {
             if !s.active() { return; }
             failed = true;
             s.state = "failed".into();
             s.ended_ms = wall_ms();
             s.note = crate::proto::clean(&e, 300);
+            settle_open_patch(s, s.ended_ms, progress.as_ref());
         });
         if failed { event(ctx, Sev::Warn, format!("live {id} ({}) failed: {e}", x.as_ref().map_or("", |x| &x.app)), x.as_ref()); }
     };
@@ -3500,11 +4202,10 @@ fn run(ctx: &Arc<Ctx>, id: &str, first_call: bool) {
     let spec = Spec { since_ms: None, lane: if x.test { format!("live-{id}") } else { x.lane.clone() }, agent: x.agent.clone(), kind, needs: needs.clone(), prio: crate::lease::sched::DEFAULT_PRIO, rev, repo_dir: x.tree.clone(), node: (!x.pin.is_empty()).then(|| x.pin.clone()) };
     let argv: Vec<String> = ["cargo", "run", "--profile", "host", "-p", "makepad-run", "--bin", "makepad", "--", "run"].iter().map(|s| s.to_string()).chain(std::iter::once(x.app.clone())).collect();
     let src = Src::for_run(spec.kind, &argv, x.src == "tree", false);
-    // (the session it joins, by its lease: never idle while this one is queued or runs)
-    let joined_lease = (!x.joins.is_empty()).then(|| get(ctx, &x.joins)).flatten().map(|j| j.lease).filter(|l| !l.is_empty());
-    let configure = |r: &mut crate::lease::sched::Req| {
+    let configure = |r: &mut crate::lease::sched::Req, joined_lease: Option<String>| {
         r.run_options(src, CostClass::parse(&x.cost), x.est_min, &x.class, &argv);
-        r.joins = joined_lease.clone();
+        r.set = (!x.set.is_empty()).then(|| x.set.clone());
+        r.joins = joined_lease;
         r.cores = x.cores;
         r.ram_gb = x.ram_gb;
         r.live = true;
@@ -3538,8 +4239,29 @@ fn run(ctx: &Arc<Ctx>, id: &str, first_call: bool) {
     };
     let mut placed = 0;
     let (held, ship_started, home_dir) = loop {
-        let held = match Held::acquire_with(&spec, &configure, &mut on_wait, &|| get(ctx, id).is_none_or(|x| !x.active())) {
+        let joined_lease = if x.joins.is_empty() { None } else {
+            loop {
+                if get(ctx, id).is_none_or(|x| !x.active()) { return; }
+                let lease = match partner_ask(ctx, &x.joins) {
+                    Ok(lease) => lease,
+                    Err(note) => {
+                        let ended = set(ctx, id, |s| if s.active() { s.state = "ended".into(); s.ended_ms = wall_ms(); s.note = note.clone(); settle_open_patch(s, s.ended_ms, None); });
+                        event(ctx, Sev::Info, format!("live {id}: {note}"), ended.as_ref());
+                        return;
+                    }
+                };
+                if !lease.is_empty() && ctx.leases.view().iter().any(|l| l.id == lease && !matches!(l.state, crate::lease::sched::State::Ended(_))) { break Some(lease); }
+                std::thread::sleep(Duration::from_secs(1));
+            }
+        };
+        // A partner can end or ask again while this ask is queued. Give the old join up and
+        // resolve it again before asking for another box.
+        let partner_changed = || joined_lease.as_ref().is_some_and(|lease| partner_ask(ctx, &x.joins).as_ref().ok() != Some(lease));
+        let stop = || get(ctx, id).is_none_or(|x| !x.active()) || partner_changed();
+        let held = match Held::acquire_with(&spec, &|r| configure(r, joined_lease.clone()), &mut on_wait, &stop) {
+            Ok(h) if partner_changed() => { h.release(None); continue; }
             Ok(h) => h,
+            Err(_) if partner_changed() => continue,
             // placed again however often, after a pause that grows ([`super::job::again_after`])
             Err(e) if super::leg::exit_lost(&e) => {
                 placed += 1;
@@ -3555,8 +4277,10 @@ fn run(ctx: &Arc<Ctx>, id: &str, first_call: bool) {
         let ship_started = wall_ms();
         let shipped = if !snap.is_empty() || src == Src::Overlay { super::job::ship_snap(ctx, &held, &snap).map(drop).map_err(|e| (format!("shipping {snap}"), e)) } else { Ok(()) };
         // its home's files go to the box once (by their hash) and the app gets its own copy
-        let shipped = shipped.and_then(|()| if x.home.is_empty() { Ok(String::new()) } else {
-            crate::lease::ship::send_home(held.client(), &held.node, &held.id, Path::new(&x.home)).map_err(|e| (format!("shipping its home {}", x.home), e))
+        let shipped = shipped.and_then(|()| match home_archive(ctx, &x) {
+            Ok(None) => Ok(String::new()),
+            Ok(Some(a)) => crate::lease::ship::send_home(held.client(), &held.node, &held.id, &a).map_err(|e| (format!("shipping its home {}", a.display()), e)),
+            Err(e) => Err(("making its fresh home".to_string(), e)),
         });
         let (what, e) = match shipped {
             Ok(home_dir) => {
@@ -3598,9 +4322,8 @@ fn run(ctx: &Arc<Ctx>, id: &str, first_call: bool) {
         Ok(f) => f,
         Err(e) => return fail(format!("{}: {e}", log.display())),
     };
-    let r = Arc::new(Running { node: held.node.clone(), lease: held.id.clone(), held, tree: tree.clone(), test: x.test, pending: Mutex::new((BTreeSet::new(), 0, None)), up_pid: Default::default(), calls: Mutex::new(Calls::default()), inflight: std::sync::atomic::AtomicBool::new(true), restart: std::sync::atomic::AtomicBool::new(false), resuming: std::sync::atomic::AtomicBool::new(x.test && !first_call), fault: Mutex::new(None), waiting: Default::default(), relaunch_waits: Default::default(), kept_said: Default::default() });
+    let r = Arc::new(Running { node: held.node.clone(), lease: held.id.clone(), held, tree: tree.clone(), test: x.test, pending: Mutex::new((BTreeSet::new(), 0, None)), up_pid: Default::default(), calls: Mutex::new(Calls::default()), inflight: std::sync::atomic::AtomicBool::new(true), restart: std::sync::atomic::AtomicBool::new(false), recover_cut: Default::default(), resume_active: Default::default(), supersede: Default::default(), active_wait: Default::default(), resuming: std::sync::atomic::AtomicBool::new(x.test && !first_call), fault: Mutex::new(None), waiting: Default::default(), relaunch_waits: Default::default(), kept_said: Default::default() });
     join(&ctx.monitor, id, r.clone());
-    drop(asking);
     let x = set(ctx, id, |s| {
         s.state = "running".into();
         // (a placement's "placed again" note says how it waited, not how it runs)
@@ -3612,10 +4335,12 @@ fn run(ctx: &Arc<Ctx>, id: &str, first_call: bool) {
         s.log = log.to_string_lossy().into_owned();
         s.sources = sources;
         s.home_dir = home_dir;
+        (s.work_dir, s.box_home) = (r.held.work.clone(), r.held.home.clone());
         if s.test {
             s.patch = Some(LivePatch { files: s.sources.keys().cloned().collect(), edit_ms: ship_started, shipped_ms: s.started_ms, outcome: "initial".into(), ..Default::default() });
         }
     });
+    drop(asking);
     event(ctx, Sev::Info, format!("live {id}: {} starting on {} ({}, {})", x.as_ref().map_or("", |x| &x.app), r.node, r.lease, if x.as_ref().is_some_and(|x| x.visible) { "visible" } else { "headless" }), x.as_ref());
     retire_if_superseded(ctx, id, &r);
     drop(file);
@@ -3652,6 +4377,10 @@ fn run_processes(ctx: &Arc<Ctx>, id: &str, r: &Arc<Running>, mut follow: Option<
         // Marks the app as a test run (its lane and session) for anything it shows to other
         // devices, so a lane's instance is never mistaken for the user's own.
         if !x.env.iter().any(|(k, _)| k == "MAKEPAD_TEST_RUN") { argv.push(format!("MAKEPAD_TEST_RUN={} {}", x.lane, x.id)); }
+        // An agent drives every session: it asks for the app's remote endpoint itself, whatever
+        // its box's setting (`~/.makepad/remote`, which a box's hub writes at its own start: a
+        // hub not yet rolled onto that code had none, and sessions there opened no endpoint).
+        if !x.env.iter().any(|(k, _)| k == "MAKEPAD_REMOTE") { argv.push("MAKEPAD_REMOTE=1".into()); }
         argv.extend(hide.iter().chain(live).chain(&["cargo", "run", "--profile", "host", "-p", "makepad-run", "--bin", "makepad", "--"]).map(|s| s.to_string()));
         argv.extend(if x.test { ["test", "--live", &x.app].into_iter().chain(crate::lease::JIT_TEST_PROFILE).map(String::from).collect() } else { vec!["run".into(), x.app.clone()] });
         argv.extend(x.test_args.iter().cloned());
@@ -3674,6 +4403,10 @@ fn run_processes(ctx: &Arc<Ctx>, id: &str, r: &Arc<Running>, mut follow: Option<
                 if startup_due(pids, wrote, started, building) { no_startup_said(&c2, &id2); }
                 if let Some((pid, run_pid)) = pids.filter(|pair| Some(*pair) != seen) {
                     let first = seen.is_none();
+                    let guard = (first && r2.test).then(|| {
+                        r2.resume_active.store(true, SeqCst);
+                        ResumeGuard(&c2, &id2, &r2)
+                    });
                     seen = pids;
                     // a new process loads the sources as they are: no save waits for a restart
                     let mut withdrew = false;
@@ -3681,7 +4414,7 @@ fn run_processes(ctx: &Arc<Ctx>, id: &str, r: &Arc<Running>, mut follow: Option<
                     if withdrew { event(&c2, Sev::Info, format!("live {id2}: its startup line came after all (pid {pid}): the no-startup-line failure is withdrawn, and its run's verdict answers"), x.as_ref()); }
                     if d2.load(std::sync::atomic::Ordering::SeqCst) { return; }
                     if !first { continue; }
-                    if x.as_ref().is_some_and(|x| x.test) { resume_tests(&c2, &id2, &r2); }
+                    if x.as_ref().is_some_and(|x| x.test) { resume_tests(&c2, &id2, &r2, guard); }
                     else {
                         if let Some(x) = x.filter(|x| x.patch.as_ref().is_some_and(|p| p.outcome == "initial")) {
                             if wait_up(&c2, &id2, &r2, pid) {
@@ -3745,7 +4478,7 @@ fn run_processes(ctx: &Arc<Ctx>, id: &str, r: &Arc<Running>, mut follow: Option<
         x.load_text()?;
         if x.test && x.active() && !r.restart.load(std::sync::atomic::Ordering::SeqCst) {
             let mut p = x.patch.clone().unwrap_or_default();
-            let log = run_log(r, x.run_n, p.log_start).map(|(_, log)| log).unwrap_or_default();
+            let (log_end, log) = run_log(r, x.run_n, p.log_start).unwrap_or_else(|_| (p.log_end, String::new()));
             let mut scan = Scan::default();
             let fault = r.fault.lock().unwrap().take().or_else(|| log.lines().find(|l| fault_line(&x.app, l, &mut scan)).map(str::to_string));
             if let Some(verdict) = makepad_remote::hot::Verdict::from_output(makepad_remote::hot::JIT_ERROR_EXIT, &log) {
@@ -3756,29 +4489,45 @@ fn run_processes(ctx: &Arc<Ctx>, id: &str, r: &Arc<Running>, mut follow: Option<
                 p.jit_error = ctx.store.event_seq("jit_error", Sev::Err, p.reason.clone(), None);
                 set_patch(ctx, id, &p);
             } else if let Some(reason) = fault {
-                if begin_call(r) {
-                    r.resuming.store(true, std::sync::atomic::Ordering::SeqCst);
+                let own = begin_call(r);
+                if own {
+                    r.resuming.store(true, SeqCst);
                     // a session parking meanwhile restarts nothing: the fault is its edit's answer
                     if admit(ctx, id, r, None).is_err() {
-                        r.resuming.store(false, std::sync::atomic::Ordering::SeqCst);
+                        r.resuming.store(false, SeqCst);
                         (p.tests, p.outcome, p.reason, p.verdict_ms) = (None, "failed".into(), reason, wall_ms());
                         set_patch(ctx, id, &p);
                         finish_call(ctx, id, r);
                         return res;
                     }
                 }
-                p.tests = None;
-                p.reason = reason;
-                recover(ctx, id, &x, &mut p, false);
+                if own || !watch_superseded(r) {
+                    p.tests = None;
+                    p.reason = reason;
+                    recover(ctx, id, &x, &mut p, false);
+                } else {
+                    (p.tests, p.outcome, p.reason, p.verdict_ms) = (None, "failed".into(), reason, wall_ms());
+                    set_patch(ctx, id, &p);
+                }
             } else if !terminal(&p) {
-                p.outcome = if !crate::jit_misses::compile_errors(&log).is_empty() { "compile_error" } else { "failed" }.into();
-                p.reason = format!("live test ended without a verdict: {res:?}");
-                if !log.is_empty() { p.reason.push('\n'); p.reason.push_str(&log); }
+                if let Some(mut tests) = log_test_verdict(&log, &p, allow_group_zero(&x, &p)) {
+                    tests.warnings = round_warnings(&log, Path::new(&x.tree));
+                    p.log_end = log_end;
+                    p.output = failure_output(&log, &tests.failures);
+                    p.tests = Some(tests);
+                    p.outcome = "recovered".into();
+                    p.reason = "recovered from run log after the test process exited".into();
+                    p.reason_ref = Default::default();
+                } else {
+                    p.outcome = if !crate::jit_misses::compile_errors(&log).is_empty() { "compile_error" } else { "failed" }.into();
+                    p.reason = format!("live test ended without a verdict: {res:?}");
+                    if !log.is_empty() { p.reason.push('\n'); p.reason.push_str(&log); }
+                }
                 p.verdict_ms = wall_ms();
                 set_patch(ctx, id, &p);
             }
         }
-        if !x.active() || !r.restart.swap(false, std::sync::atomic::Ordering::SeqCst) { return res; }
+        if !x.active() || !take_restart(r) { return res; }
         *r.fault.lock().unwrap() = None;
         set(ctx, id, |s| {
             (s.pid, s.run_pid) = (0, 0);
@@ -4027,7 +4776,9 @@ mod gone_tests {
         let answer = caller.join().unwrap().unwrap();
         let told = crate::state::live_from(&makepad_strict_json::parse(answer.as_bytes()).unwrap());
         assert_eq!((told.state.as_str(), told.note.as_str()), ("ended", note.as_str()), "the waiting call answers with its end");
-        assert_eq!(told.patch.map(|p| p.reason), Some(note.clone()), "its edit's answer says so");
+        let p = told.patch.unwrap();
+        assert!(p.outcome == "ended" && terminal(&p), "its edit finishes with its session");
+        assert!(p.reason.contains(&note) && p.reason.contains("ended before its verdict"), "{}", p.reason);
         assert_eq!(*ended.lock().unwrap(), ["L1"], "its lease ends on its box");
         assert!(!ctx.leases.view().iter().any(|l| l.id == "L1" && !matches!(l.state, State::Ended(_))), "and in the scheduler");
         assert_eq!(quiet_ms(&get(&ctx, "WG1").unwrap(), wall_ms()), None, "an ended session says no silence");
@@ -4038,9 +4789,9 @@ mod gone_tests {
 #[cfg(all(test, unix))]
 mod relaunch_cut_tests {
     /// The master restarts between accepting a relaunch and applying it. A relaunch through devhub
-    /// goes on under the next master: its new run, asked and not yet noted, is followed once its
-    /// box has it, or asked again under its name, never a second ask beside it nor the old run
-    /// taken for it; and the cut call, sent again, answers from that relaunch without starting it
+    /// goes on under the next master: its new run, asked and not yet noted, is asked again under its
+    /// name (its box answers from that run, whatever its number), never a second ask beside it nor
+    /// another run taken for it; and the cut call, sent again, answers from that relaunch without starting it
     /// twice. A relaunch its JIT serves is sent again only while an edit still waits for it
     /// (W11772's was cut before it reached the app, and the app ran the old code, 11-17).
     #[test]
@@ -4057,11 +4808,12 @@ mod relaunch_cut_tests {
         let store = crate::state::Store::open(&home, "", Arc::new(|_: Record| 0)).unwrap();
         let x = store.read(|d| d.lives[0].clone());
         assert_eq!((x.ask.as_str(), x.ask_after), ("a-2", 1), "the ask and the run it follows outlive the master");
-        assert_eq!(rejoin(&x, |n| Ok(n == 2)), Ok(Rejoin::Next(2)), "the new run its box has is followed, not the old one");
-        assert_eq!(rejoin(&x, |_| Ok(false)), Ok(Rejoin::Ask), "one its box has not started yet is asked again under its name");
-        assert_eq!(rejoin(&Live { run_n: 2, pid: 9, ..x.clone() }, |_| panic!("a noted run needs no look")), Ok(Rejoin::Follow(2)));
-        assert_eq!(rejoin(&Live { run_n: 0, ask_after: 0, ..x.clone() }, |n| Ok(n == 1)), Ok(Rejoin::Next(1)), "a first run as before");
-        assert_eq!(rejoin(&Live { ask_after: 0, pid: 9, ..x.clone() }, |_| panic!("an old state's run needs no look")), Ok(Rejoin::Follow(1)), "a state with no ask_after follows its run");
+        // (its box answers the ask from the run of that name, whatever its number: the run after
+        // the noted one was a look's grab, W25972)
+        assert_eq!(rejoin(&x), Rejoin::Ask, "the new run, asked and not noted, is asked again under its name, not guessed by its number");
+        assert_eq!(rejoin(&Live { run_n: 2, pid: 9, ..x.clone() }), Rejoin::Follow(2), "a noted run is followed");
+        assert_eq!(rejoin(&Live { run_n: 0, ask_after: 0, ..x.clone() }), Rejoin::Ask, "a first run as well");
+        assert_eq!(rejoin(&Live { ask_after: 0, pid: 9, ..x.clone() }), Rejoin::Follow(1), "a state with no ask_after follows its run");
         // the cut call sent again: answered from the relaunch under way, its box not asked (there is none here)
         let leases = Arc::new(crate::lease::master::LeaseMaster::new("", home.clone(), Arc::new(|_: &str, service: &str, _: &str| Err(format!("no {service} here"))), Arc::new(|_| {}), Arc::new(|| 1), None, true));
         let ctx = Arc::new(Ctx { store, leases, machine: String::new(), monitor: crate::monitor::Monitor::start(&[]), repo: home.clone(), home: home.clone() });
@@ -4184,6 +4936,560 @@ mod look_tests {
         assert!(bare.starts_with("W1 ended") && bare.contains("`devhub live again W1` starts it again"), "an end with no note still names the way back: {bare}");
         let starting = super::no_frame(&x("starting", "placed again: waits for n2"));
         assert!(starting.contains("is starting: placed again: waits for n2") && starting.contains("no frame yet"), "a session not up yet says what it waits on: {starting}");
+        // a wait for the frame of an app whose sources do not build ends at once, with the error: a
+        // lane's wait for its Town's first frame sat 21 min on a failed build and a refused save
+        // (WORKBOARD, 11-27); a build on its way, or one that patched, waits on
+        let error = "/n/src/apps/town/src/main.rs:1216:17: E0027: pattern does not mention field `reason`";
+        let built = |outcome: &str, reason: &str, edit: &str| super::unbuilt(&Live { patch: Some(crate::state::LivePatch { outcome: outcome.into(), reason: reason.into(), edit: edit.into(), ..Default::default() }), ..x("running", "") });
+        assert_eq!(built("refused", &format!("{error}\nmore"), ""), Some(format!("W1 draws no frame before its next save: its sources do not build: {error}")), "a refused build names its first error");
+        assert!(built("refused", "", &format!("its app check found 1 error: {error}")).is_some_and(|w| w.ends_with(&format!("its app check found 1 error: {error}"))), "a refusal kept with no reason says its edit's");
+        assert!(built("compile_error", error, "").is_some(), "a compile error too");
+        for outcome in ["patched", "shipped", "initial", ""] { assert_eq!(built(outcome, "", ""), None, "{outcome:?}: it may draw yet"); }
+        assert_eq!(super::unbuilt(&x("running", "")), None, "no build yet");
+        // the call's wait for its box after a master restart ends at the wait's end
+        let now = std::time::Instant::now();
+        let app = Live { pid: 7, ..x("running", "") };
+        assert!(super::waits_on_box(Some(&app), false, None, now) && super::waits_on_box(Some(&app), false, Some(now + std::time::Duration::from_secs(1)), now), "before its end it waits");
+        assert!(!super::waits_on_box(Some(&app), false, Some(now), now), "at the wait's end it stops waiting for the box");
+        assert!(!super::waits_on_box(Some(&app), true, None, now) && !super::waits_on_box(None, false, None, now) && !super::waits_on_box(Some(&x("running", "")), false, None, now), "a gone client, an unknown session, one with no app: at once");
+    }
+}
+
+#[cfg(test)]
+mod verdict_recovery_tests {
+    use super::*;
+    use std::{cell::RefCell, fs};
+
+    struct Fixture(Ctx);
+
+    impl Fixture {
+        fn new(id: &str) -> Self {
+            let home = std::env::temp_dir().join(format!("devhub-verdict-{id}-{}", std::process::id()));
+            fs::create_dir_all(&home).unwrap();
+            let store = crate::state::Store::open_quiet(&home, "box-a").unwrap();
+            let leases = Arc::new(crate::lease::master::LeaseMaster::new("", home.clone(),
+                Arc::new(|_, _, _| Err("no box".into())), Arc::new(|_| {}), Arc::new(|| 1), None, true));
+            Self(Ctx { store, leases, monitor: crate::monitor::Monitor::start(&[]), machine: "box-a".into(), repo: home.clone(), home })
+        }
+
+        fn save(&self, x: Live) -> Live {
+            let id = x.id.clone();
+            self.0.store.update(|d| { d.lives.retain(|s| s.id != id); d.lives.push(x); }).unwrap();
+            get(&self.0, &id).unwrap()
+        }
+
+        fn rounds(&self, id: &str, missing: &str, ms: &str) -> Live {
+            let mut x = session(id);
+            x.log = self.0.home.join("run.log").to_str().unwrap().into();
+            let first = format!("running 3 tests\ntest a::one ... ok\ntest a::two - should panic ... ok <0.012s>\ntest {missing} ... ok\ntest result: ok. 3 passed\ntestverdict group=0 ran=3 passed=3 failed=0 ms={ms}\n");
+            x.run_log_start = first.len() as u64;
+            fs::write(&x.log, format!("{first}relax live: restarting (changes)\nrunning 3 tests\ntest a::one ... ok\nrunning 1 test\ntest a::two - should panic ... FAILED <0.123s>\n")).unwrap();
+            x
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0.home); }
+    }
+
+    fn session(id: &str) -> Live {
+        Live { id: id.into(), node: "box-a".into(), test: true, state: "running".into(), pid: 77,
+            patch: Some(LivePatch { edit_ms: 10, shipped_ms: 20, seq: 5, ..Default::default() }), ..Default::default() }
+    }
+
+    fn json(line: &str) -> Value { makepad_strict_json::parse(line.as_bytes()).unwrap() }
+
+    struct RemoveRunning<'a>(&'a str);
+    impl Drop for RemoveRunning<'_> {
+        fn drop(&mut self) {
+            RUNNING.lock().unwrap().as_mut().unwrap().remove(self.0);
+        }
+    }
+
+    struct EndOnDrop<'a>(&'a Ctx, &'a str);
+    impl Drop for EndOnDrop<'_> {
+        fn drop(&mut self) {
+            set(self.0, self.1, |s| s.state = "ended".into());
+        }
+    }
+
+    #[test]
+    fn warm_restart_blocks_supersede_and_keeps_inflight_until_replacement_starts() {
+        let f = Fixture::new("restart-race-a");
+        let x = f.save(Live { lease: "L-vr-ra".into(), tree: f.0.home.to_string_lossy().into_owned(), ..session("WVRRestartA") });
+        let r = take_back(&f.0, &x);
+        let _remove = RemoveRunning(&x.id);
+        let caller = Waiting::on(r.clone());
+        caller.bind_active();
+        r.restart.store(true, SeqCst);
+        let signal = f.0.store.subscribe("live", &[&x.id]);
+        std::thread::scope(|scope| {
+            let _end = EndOnDrop(&f.0, &x.id);
+            let waiter = scope.spawn(|| wait_tests_with(&f.0, &x.id, || true, Duration::from_millis(1)));
+            loop {
+                let seen = signal.generation();
+                if get(&f.0, &x.id).unwrap().left_ms > 0 { break; }
+                signal.wait(seen, Duration::from_millis(1));
+            }
+            assert_eq!(r.waiting.load(SeqCst), 0);
+            assert!(!try_supersede_orphan(&r, true, true), "a pending restart protects the old pid");
+            assert!(!try_supersede_running(&f.0, &x.id, &r, true, true));
+            assert!(!watch_superseded(&r));
+            let assert_waiting = || {
+                f.0.store.notify("live", &x.id);
+                std::thread::sleep(Duration::from_millis(15));
+                assert!(!can_yield_superseded(&f.0, &x.id, &r));
+                assert!(!waiter.is_finished(), "the disconnected request must still own inflight");
+            };
+            r.supersede.store(true, SeqCst);
+            assert_waiting();
+
+            set(&f.0, &x.id, |s| s.pid = 0);
+            assert!(take_restart(&r));
+            assert!(!r.restart.load(SeqCst) && !watch_superseded(&r));
+            assert!(!try_supersede_running(&f.0, &x.id, &r, true, true), "the replacement has no pid yet");
+            r.supersede.store(true, SeqCst);
+            assert_waiting();
+            r.supersede.store(false, SeqCst);
+
+            r.resume_active.store(true, SeqCst);
+            set(&f.0, &x.id, |s| s.pid = 88);
+            assert!(try_supersede_running(&f.0, &x.id, &r, true, false) && watch_superseded(&r));
+            assert_waiting();
+            r.resume_active.store(false, SeqCst);
+            f.0.store.notify("live", &x.id);
+            assert!(can_yield_superseded(&f.0, &x.id, &r));
+            waiter.join().unwrap();
+            assert!(r.inflight.load(SeqCst), "the request releases inflight after the wait returns");
+            assert_eq!(r.waiting.load(SeqCst), 0);
+        });
+    }
+
+    #[test]
+    fn restart_clears_stale_supersede_so_replacement_resume_tests_does_not_abort() {
+        let f = Fixture::new("restart-race-b");
+        let x = f.save(Live { lease: "L-vr-rb".into(), tree: f.0.home.to_string_lossy().into_owned(), ..session("WVRRestartB") });
+        let r = take_back(&f.0, &x);
+        let _remove = RemoveRunning(&x.id);
+        assert!(try_supersede_orphan(&r, true, false));
+        finish_call(&f.0, &x.id, &r);
+        assert!(!r.inflight.load(SeqCst) && watch_superseded(&r));
+        assert!(!take_restart(&r) && watch_superseded(&r), "an ordinary exit preserves the new caller's request");
+        assert!(begin_call(&r));
+        r.resuming.store(true, SeqCst);
+        r.restart.store(true, SeqCst);
+        assert!(take_restart(&r));
+        assert!(!r.restart.load(SeqCst));
+        assert!(!watch_superseded(&r), "a restart must clear the disconnected caller's supersede");
+        set(&f.0, &x.id, |s| s.patch.as_mut().unwrap().outcome = "recovering".into());
+        resume_tests(&f.0, &x.id, &r, None);
+        assert!(r.resuming.load(SeqCst) && r.inflight.load(SeqCst), "recovery keeps ownership");
+        r.supersede.store(true, SeqCst);
+        resume_tests(&f.0, &x.id, &r, None);
+        assert!(!r.resuming.load(SeqCst) && !r.inflight.load(SeqCst), "a new supersede still aborts recovery");
+    }
+
+    #[derive(Default)]
+    struct ProbeGate(Mutex<bool>, std::sync::Condvar);
+    impl ProbeGate {
+        fn open(&self) {
+            *self.0.lock().unwrap() = true;
+            self.1.notify_all();
+        }
+
+        fn wait(&self, timeout: Duration) -> bool {
+            let (open, _) = self.1.wait_timeout_while(self.0.lock().unwrap(), timeout, |open| !*open).unwrap();
+            *open
+        }
+    }
+
+    struct OpenGateOnDrop<'a>(&'a ProbeGate);
+    impl Drop for OpenGateOnDrop<'_> {
+        fn drop(&mut self) { self.0.open(); }
+    }
+
+    fn probe_row(name: &str, state: &str, cpu_ms: u64, waits: &str) -> RunningThread {
+        RunningThread { name: name.into(), state: state.into(), cpu_ms, waits: waits.into() }
+    }
+
+    #[test]
+    fn slow_thread_probe_never_stalls_live_list_past_budget_and_deduplicates_single_flight() {
+        use std::sync::atomic::AtomicUsize;
+        let gate = Arc::new(ProbeGate::default());
+        let slow_calls = Arc::new(AtomicUsize::new(0));
+        let slow_done = Arc::new(AtomicUsize::new(0));
+        let fast_calls = Arc::new(AtomicUsize::new(0));
+        let probe = {
+            let (gate, slow_calls, slow_done, fast_calls) = (gate.clone(), slow_calls.clone(), slow_done.clone(), fast_calls.clone());
+            Arc::new(move |node: &str, pid: u32| match (node, pid) {
+                ("box-warmup", 1) => Vec::new(),
+                ("box-fast", 20) => {
+                    fast_calls.fetch_add(1, SeqCst);
+                    vec![probe_row("suite::fast_test", "running", 9, "")]
+                }
+                ("box-slow", 10) | ("box-slow-2", 11) => {
+                    slow_calls.fetch_add(1, SeqCst);
+                    gate.wait(Duration::from_millis(400));
+                    slow_done.fetch_add(1, SeqCst);
+                    vec![probe_row("suite::slow_test", "waiting", 5, "futex")]
+                }
+                _ => panic!("unexpected probe {node}:{pid}"),
+            })
+        };
+        let cache = ThreadCache::new(THREAD_PROBE_WORKERS, Duration::from_secs(5), Duration::from_secs(10), probe);
+        let _open = OpenGateOnDrop(&gate);
+        assert!(cache.lookup_one("box-warmup", 1, Duration::from_secs(2), false).is_empty());
+        let keys = [("box-slow".into(), 10), ("box-slow-2".into(), 11), ("box-fast".into(), 20)];
+        let wait = Duration::from_millis(60);
+        let start = Instant::now();
+        let rows = cache.lookup_batch(&keys, wait, false);
+        let elapsed = start.elapsed();
+        assert!(elapsed < Duration::from_millis(350) && slow_done.load(SeqCst) == 0, "cold batch took {elapsed:?}, rows {rows:?}");
+        assert!(rows[&keys[0]].is_empty() && rows[&keys[1]].is_empty());
+        assert_eq!(rows[&keys[2]], [probe_row("suite::fast_test", "running", 9, "")]);
+        let progress = RunProgress { current: Some(RoundLog { total: 3, ..Default::default() }), ..Default::default() };
+        for key in [&keys[0], &keys[2]] {
+            let x = Live { node: key.0.clone(), pid: key.1, ..session("WVRProbe") };
+            let value = progress_value_with(&x, &progress, &rows[key], Some(crate::state::QUIET_SAID_MS), 60_020);
+            let summary = value.get("no_progress").unwrap().as_str().unwrap();
+            assert!(summary.contains("0/3 finished"), "{summary}");
+            let threads = value.get("running_tests").unwrap().get("threads").unwrap().as_arr().unwrap();
+            if key == &keys[0] {
+                assert!(threads.is_empty() && !summary.contains("still running thread"), "{summary}");
+            } else {
+                assert!(threads.len() == 1 && summary.contains("still running thread suite::fast_test [running]"), "{summary}");
+            }
+        }
+        let start = Instant::now();
+        for _ in 0..5 {
+            let again = cache.lookup_batch(&keys[..2], wait, false);
+            assert!(again[&keys[0]].is_empty() && again[&keys[1]].is_empty());
+        }
+        assert!(start.elapsed() < Duration::from_millis(200), "follow-up looks must share the first deadline");
+        assert_eq!(slow_done.load(SeqCst), 0);
+        assert!(slow_calls.load(SeqCst) <= 2);
+        gate.open();
+        for (node, pid) in &keys[..2] {
+            assert_eq!(cache.lookup_one(node, *pid, Duration::from_secs(2), false), [probe_row("suite::slow_test", "waiting", 5, "futex")]);
+        }
+        assert_eq!(slow_calls.load(SeqCst), 2);
+        assert_eq!(fast_calls.load(SeqCst), 1);
+    }
+
+    #[test]
+    fn thread_cache_stamps_entry_on_completion_and_serves_stale_while_revalidating() {
+        use std::sync::atomic::AtomicUsize;
+        let gate = Arc::new(ProbeGate::default());
+        let started = Arc::new(ProbeGate::default());
+        let done = Arc::new(AtomicBool::new(false));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let probe = {
+            let (gate, started, done, calls) = (gate.clone(), started.clone(), done.clone(), calls.clone());
+            Arc::new(move |_: &str, _: u32| match calls.fetch_add(1, SeqCst) {
+                0 => {
+                    std::thread::sleep(Duration::from_millis(250));
+                    vec![probe_row("suite::round1", "waiting", 1, "")]
+                }
+                1 => {
+                    started.open();
+                    gate.wait(Duration::from_millis(400));
+                    done.store(true, SeqCst);
+                    vec![probe_row("suite::round2", "waiting", 2, "")]
+                }
+                _ => panic!("duplicate cache refresh"),
+            })
+        };
+        let cache = ThreadCache::new(2, Duration::from_millis(200), Duration::from_secs(10), probe);
+        let _open = OpenGateOnDrop(&gate);
+        let look = |wait, stale| cache.lookup_one("box-a", 42, wait, stale);
+        let round1 = [probe_row("suite::round1", "waiting", 1, "")];
+        assert_eq!(look(Duration::from_secs(2), false), round1);
+        assert_eq!(calls.load(SeqCst), 1);
+        let start = Instant::now();
+        let second = look(Duration::from_millis(500), false);
+        assert_eq!(calls.load(SeqCst), 1, "immediate lookup re-probed, returning {second:?} after {:?}", start.elapsed());
+        assert_eq!(second, round1);
+        assert!(start.elapsed() < Duration::from_millis(250));
+        std::thread::sleep(Duration::from_millis(210));
+        let start = Instant::now();
+        assert_eq!(look(Duration::from_millis(500), false), round1);
+        assert!(start.elapsed() < Duration::from_millis(250) && !done.load(SeqCst), "serve stale rows while refreshing");
+        assert!(started.wait(Duration::from_secs(2)), "the stale list lookup starts the refresh");
+        assert_eq!(calls.load(SeqCst), 2);
+        gate.open();
+        assert_eq!(look(Duration::from_secs(2), true), [probe_row("suite::round2", "waiting", 2, "")]);
+        assert_eq!(calls.load(SeqCst), 2);
+    }
+
+    #[test]
+    fn mid_suite_child_running_banners_and_child_results_do_not_reset_an_outer_round() {
+        let f = Fixture::new("children");
+        let path = f.0.home.join("rounds.log");
+        let log = path.to_str().unwrap();
+        let old = "running 5 tests\ntest old ... ok\n";
+        fs::write(&path, old).unwrap();
+        assert!(log_progress(log, old.len() as u64).current.is_none(), "the new process has not written yet");
+        fs::write(&path, format!("{old}running 3 tests\ntest one ... ok\n     Running unittests src/lib.rs\nrunning 1 test\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out\ntest two ... ok\n")).unwrap();
+        let current = log_progress(log, old.len() as u64).current.expect("the outer suite is still running");
+        assert_eq!(current.total, 3);
+        assert_eq!(current.passed, ["one", "two"]);
+    }
+
+    #[test]
+    fn an_exited_runs_log_recovered_verdict_passes_and_fails_honestly_after_finished() {
+        let f = Fixture::new("exit");
+        let mut x = session("WVRExited");
+        x.lease = "L-vr-exit".into();
+        x.tree = f.0.home.to_str().unwrap().into();
+        for fails in [false, true] {
+            let p = x.patch.as_mut().unwrap();
+            p.outcome = "recovered".into();
+            p.reason = "recovered from run log after the test process exited".into();
+            p.tests = Some(crate::state::LiveTests { ran: 1, passed: u64::from(!fails), failed: u64::from(fails),
+                failures: if fails { vec!["suite::broken".into()] } else { Vec::new() }, ..Default::default() });
+            f.save(x.clone());
+            let r = take_back(&f.0, &x);
+            finished(&f.0, &x.id, &r, Ok(i32::from(fails)));
+            let mut ended = get(&f.0, &x.id).unwrap();
+            assert_eq!(ended.state, "ended");
+            let p = ended.patch.as_ref().unwrap();
+            assert!(p.outcome == "recovered" && p.tests.is_some());
+            assert_eq!(ended.test_code(), i32::from(fails), "an exited run answers with its recovered verdict");
+            let shown = ended.test_result(1.0);
+            assert!(shown.contains("recovered from run log") && shown.contains(if fails { "suite::broken" } else { "1/1 ran" }), "{shown}");
+            ended.patch.as_mut().unwrap().outcome = "patched".into();
+            assert!(ended.test_code() == 1 && ended.test_result(1.0).contains("no verdict on this source state"));
+        }
+    }
+
+    #[test]
+    fn warm_restart_wait_tests_detects_client_disconnect_and_yields_after_watcher_exits() {
+        let f = Fixture::new("disconnect");
+        let mut x = session("WVRDisconnect");
+        x.lease = "L-vr-disconnect".into();
+        x.tree = f.0.home.to_str().unwrap().into();
+        f.save(x.clone());
+        let r = take_back(&f.0, &x);
+        let caller = Waiting::on(r.clone());
+        caller.bind_active();
+        r.resume_active.store(true, SeqCst);
+        let signal = f.0.store.subscribe("live", &[&x.id]);
+        let (released, superseded, stayed) = std::thread::scope(|scope| {
+            let waiter = scope.spawn(|| wait_tests_with(&f.0, &x.id, || true, Duration::from_millis(1)));
+            loop {
+                let seen = signal.generation();
+                if get(&f.0, &x.id).unwrap().left_ms > 0 { break; }
+                signal.wait(seen, Duration::from_millis(1));
+            }
+            let released = r.waiting.load(SeqCst) == 0;
+            let superseded = try_supersede_orphan(&r, true, false);
+            f.0.store.notify("live", &x.id);
+            let stayed = !waiter.is_finished();
+            r.resume_active.store(false, SeqCst);
+            f.0.store.notify("live", &x.id);
+            if !superseded { set(&f.0, &x.id, |s| s.state = "ended".into()); }
+            waiter.join().unwrap();
+            (released, superseded, stayed)
+        });
+        RUNNING.lock().unwrap().as_mut().unwrap().remove(&x.id);
+        drop(caller);
+        assert!(released, "the disconnected request releases its wait token during warm restart");
+        assert!(superseded && stayed && r.inflight.load(SeqCst), "the request owns inflight until the watcher exits");
+        assert_eq!(r.waiting.load(SeqCst), 0);
+    }
+
+    #[test]
+    fn a_verdict_that_finished_during_a_master_restart_is_delivered_from_events() {
+        let x = session("WVREvents");
+        assert!(matches!(cut_by_restart(&x, 50, true), Some(Cut::RecoverTest)), "follow the shipped test edit for its verdict");
+        let events = [
+            json(r#"{"seq":6,"event":"patchverified","group":2}"#),
+            json(r#"{"seq":7,"event":"testverdict","group":2,"ran":40,"passed":39,"failed":1,"failures":["a::b"],"ms":1200.0}"#),
+        ];
+        let probe = probe_cut_events(&events, &[], "", x.patch.as_ref().unwrap(), false);
+        let CutProbe::Finished { patch: Some(patch), verdict } = probe else { panic!("missing finished verdict: {probe:?}") };
+        assert_eq!(patch, events[0]);
+        let t = crate::state::live_tests_from(&verdict).unwrap();
+        assert_eq!((t.ran, t.passed, t.failed, t.ms), (40, 39, 1, 1200.0));
+        assert_eq!(t.failures, ["a::b"]);
+    }
+
+    #[test]
+    fn a_verdict_that_finished_during_a_master_restart_is_delivered_from_run_log_when_events_wrapped_or_ended() {
+        let p = session("WVRLog").patch.unwrap();
+        let log = "running 10 tests\ntest foo::bar ... FAILED\ntest result: FAILED\ntestverdict group=2 ran=10 passed=9 failed=1 ms=4321.0 selected=all skipped=0 borrowck=clean";
+        let probe = probe_cut_events(&[], &[], log, &p, false);
+        let CutProbe::FromLog(t) = probe else { panic!("missing verdict from the run log: {probe:?}") };
+        assert_eq!((t.ran, t.passed, t.failed, t.ms), (10, 9, 1, 4321.0));
+        assert_eq!(t.failures, ["foo::bar"]);
+        assert!(matches!(probe_cut_events(&[], &[], &format!("{log} reverted=[1]"), &p, false), CutProbe::Lost(_)), "reverted code cannot answer this edit");
+    }
+
+    #[test]
+    fn a_verdict_that_cannot_be_recovered_after_restart_says_lost_why_and_what_to_do() {
+        let mut x = session("WVRLost");
+        for (shipped, why, reruns) in [(0, CUT_LOST_UNSHIPPED, false), (20, CUT_LOST_NO_RUN, true)] {
+            x.patch.as_mut().unwrap().shipped_ms = shipped;
+            let Some(Cut::Said(p)) = cut_by_restart(&x, 50, false) else { panic!("the caller needs the lost verdict") };
+            assert!(terminal(&p));
+            assert_eq!(verdict(&p), format!("{why}\n"), "say why this verdict was lost and what the next call does");
+            assert_eq!(rerun_cut(&p), reruns);
+        }
+        let p = x.patch.as_ref().unwrap();
+        let CutProbe::Lost(why) = probe_cut_events(&[], &[r#"{"editing":0}"#.into()], "", p, false) else { panic!("the idle run has no verdict") };
+        assert!(why.contains("idle") && why.contains("verdict"), "{why}");
+        let cut = lost_verdict(p, 50, format!("verdict lost: {why}; {NEXT_CALL_RERUNS}"));
+        assert!(verdict(&cut).starts_with("verdict lost:") && rerun_cut(&cut));
+        assert_eq!((cut.outcome.as_str(), cut.verdict_ms), ("failed", 50));
+        x.patch = Some(cut);
+        assert_eq!(x.test_code(), 2);
+    }
+
+    fn spilled(f: &Fixture, why: &str, shipped_ms: u64) -> Live {
+        let mut x = session("WVRSpilled");
+        x.patch = Some(LivePatch { reason: why.into(), outcome: "failed".into(), shipped_ms, retried: true, ..x.patch.take().unwrap() });
+        let x = f.save(x);
+        let p = x.patch.as_ref().unwrap();
+        assert!(p.reason.is_empty() && p.reason_ref.len > 0, "the store must spill the reason");
+        x
+    }
+
+    #[test]
+    fn rerun_cut_still_triggers_after_store_spills_patch_reason_to_reason_ref() {
+        let f = Fixture::new("spill");
+        for (why, shipped, rerun) in [(CUT_RERUN, 20, true), (CUT_LOST_NO_RUN, 20, true), ("3 tests failed", 20, false), (CUT_LOST_UNSHIPPED, 0, false)] {
+            let x = spilled(&f, why, shipped);
+            assert_eq!(rerun_cut(x.patch.as_ref().unwrap()), rerun, "rerun decision after spilling {why}");
+        }
+    }
+
+    #[test]
+    fn next_edit_after_cut_ships_new_saves_before_single_warm_restart() {
+        let f = Fixture::new("publish");
+        let x = spilled(&f, CUT_RERUN, 20);
+        let files = vec!["changed.rs".to_string()];
+        fs::write(f.0.home.join(&files[0]), "new bytes").unwrap();
+        let snapshot = f.0.home.join("overlay");
+        let trace = RefCell::new(Vec::new());
+        let (before, result) = run_test_call_step(x, false, None,
+            |x| {
+                let sources = capture(&f.0.home, &files, &[], &x.sources, &snapshot)?;
+                try_set(&f.0, &x.id, |s| s.sources = sources)?;
+                trace.borrow_mut().push("publish");
+                Ok((get(&f.0, &x.id).unwrap(), LivePatch { files: files.clone(), edit_ms: 30, ..Default::default() }))
+            },
+            |x, p| {
+                assert_eq!(fs::read(snapshot.join(&files[0])).unwrap(), b"new bytes");
+                assert!(x.sources.contains_key(&files[0]) && !p.retried);
+                assert_eq!(p.files, files);
+                trace.borrow_mut().push("restart");
+            },
+            || { trace.borrow_mut().push("wait"); Ok(get(&f.0, "WVRSpilled").unwrap()) },
+            |_| { trace.borrow_mut().push("ship_edit"); Ok(Ok(None)) },
+        ).unwrap();
+        result.unwrap();
+        assert_eq!(*trace.borrow(), ["publish", "restart", "wait"], "publish this edit before the single warm restart");
+        assert!(before.is_none(), "the restarted run has its own fresh verdict");
+    }
+
+    #[test]
+    fn next_edit_supersedes_orphaned_hung_test_run_without_interrupting_active_caller() {
+        let f = Fixture::new("orphan");
+        let mut x = session("WVROrphan");
+        x.lease = "L-vr-orphan".into();
+        x.tree = f.0.home.to_str().unwrap().into();
+        let x = f.save(x);
+        let r = take_back(&f.0, &x);
+        RUNNING.lock().unwrap().as_mut().unwrap().remove(&x.id);
+        let caller = Waiting::on(r.clone());
+        caller.bind_active();
+        assert!(!try_supersede_orphan(&r, false, true) && !watch_superseded(&r), "a connected caller keeps its run");
+        drop(caller);
+        assert!(!try_supersede_orphan(&r, false, false) && !watch_superseded(&r), "a reconnect waits for the same bytes");
+        let caller = Waiting::on(r.clone());
+        caller.bind_active();
+        r.release_active_wait();
+        assert!(try_supersede_orphan(&r, false, true) && watch_superseded(&r), "a new save must supersede the disconnected caller's hung run");
+        assert!(r.supersede.load(SeqCst));
+        assert_eq!(get(&f.0, &x.id).unwrap().patch, x.patch, "the old watcher leaves its patch alone");
+        drop(caller);
+        assert_eq!(r.waiting.load(SeqCst), 0, "disconnect and drop release the caller only once");
+        r.supersede.store(false, SeqCst);
+        assert!(try_supersede_orphan(&r, true, false) && watch_superseded(&r), "fresh also supersedes an orphan");
+    }
+
+    #[test]
+    fn ending_a_session_settles_open_verdict_with_tests_that_did_finish() {
+        let f = Fixture::new("ends");
+        let base = f.rounds("WVREnd", "a::three", "5000.0");
+        for end in ["release", "park", "finished"] {
+            let mut x = base.clone();
+            x.id.push_str(end);
+            x.lease = format!("L-vr-{end}");
+            x.tree = f.0.home.to_str().unwrap().into();
+            f.save(x.clone());
+            match end {
+                "release" => { release(&f.0, &x.id, "released").unwrap(); }
+                "park" => {
+                    let progress = log_progress(&x.log, x.run_log_start);
+                    set(&f.0, &x.id, |s| record_park_with(s, "parked", 50, Some(&progress))).unwrap();
+                }
+                _ => { let r = take_back(&f.0, &x); finished(&f.0, &x.id, &r, Ok(0)); }
+            }
+            let x = get(&f.0, &x.id).unwrap();
+            let p = x.patch.as_ref().unwrap();
+            assert_eq!(p.outcome, "ended", "{end} must settle the edit");
+            assert!(terminal(p) && p.verdict_ms > 0);
+            let shown = render(&x);
+            assert!(!shown.contains("verdict pending") && shown.contains("ended before its verdict") && shown.contains("2/3 finished: 1 passed, 1 failed") && shown.contains("a::three"), "{end}: {shown}");
+        }
+    }
+
+    #[test]
+    fn render_never_says_verdict_pending_for_an_ended_session_even_on_historical_records() {
+        let f = Fixture::new("historical");
+        let mut x = f.rounds("WVRHistory", "a::three", "5000.0");
+        x.state = "ended".into();
+        x.note = "released".into();
+        x.patch.as_mut().unwrap().log_start = fs::metadata(&x.log).unwrap().len();
+        let shown = render(&x);
+        assert!(!shown.contains("verdict pending"), "historical ended session: {shown}");
+        assert!(shown.contains("verdict ended before its verdict (released; 2/3 finished: 1 passed, 1 failed; still running: a::three)"), "{shown}");
+    }
+
+    #[test]
+    fn running_test_look_names_hung_test_and_elapsed_vs_measured_without_killing_it() {
+        let f = Fixture::new("running");
+        let mut x = f.rounds("WVRRunning", "master::tests::hung_one", "73503.2");
+        let t0 = wall_ms().saturating_sub(192_000);
+        let p = x.patch.as_mut().unwrap();
+        (p.edit_ms, p.shipped_ms) = (t0, t0);
+        let progress = log_progress(&x.log, x.run_log_start);
+        let shown = render(&x);
+        for detail in ["master::tests::hung_one", "2/3 finished", "3m12s", "1m13s measured"] {
+            assert!(shown.contains(detail), "live get is missing {detail}: {shown}");
+        }
+        let summary = running_test_summary(&x, &progress, &[], Some(185_000), t0 + 192_000).unwrap();
+        for detail in ["master::tests::hung_one", "2/3 finished", "3m12s elapsed", "1m13s measured"] {
+            assert!(summary.contains(detail), "live list is missing {detail}: {summary}");
+        }
+        assert_eq!(x.state, "running");
+    }
+
+    #[test]
+    fn round_one_hung_test_look_uses_program_threads_when_no_prior_round_exists() {
+        let f = Fixture::new("threads");
+        let mut x = session("WVRThreads");
+        x.log = f.0.home.join("first.log").to_str().unwrap().into();
+        fs::write(&x.log, "running 4 tests\ntest a ... ok\ntest b ... ok\ntest c ... ok\n").unwrap();
+        let threads = parse_program_threads(&[
+            r#"{"role":"jit","name":"worker"}"#.into(), r#"{"role":"program","name":"main"}"#.into(),
+            r#"{"role":"program","name":"relax-watcher"}"#.into(),
+            r#"{"id":"t5","name":"master::tests::","role":"program","state":"waiting","cpu_ms":12,"waits":"futex"}"#.into(),
+        ]);
+        assert_eq!(threads, [RunningThread { name: "master::tests::".into(), state: "waiting".into(), cpu_ms: 12, waits: "futex".into() }], "show the program test thread");
+        let summary = running_test_summary(&x, &log_progress(&x.log, 0), &threads, Some(185_000), 192_020).unwrap();
+        for detail in ["master::tests::", "waiting", "3/4 finished", "3m12s elapsed", "no prior run measured"] { assert!(summary.contains(detail), "{summary}"); }
     }
 }
 
@@ -4200,7 +5506,7 @@ mod cut_tests {
     fn an_edit_cut_by_a_master_restart_ships_again_is_watched_again_or_is_said() {
         let edit = LivePatch { files: vec!["src/a.rs".into()], edit_ms: 10, called_ms: 11, ..Default::default() };
         let app = Live { id: "W1".into(), state: "running".into(), pid: 7, patch: Some(edit.clone()), ..Default::default() };
-        let Some(Cut::Ship(cut, files)) = cut_by_restart(&app, 50) else { panic!("an app session's edit that never shipped must ship again") };
+        let Some(Cut::Ship(cut, files)) = cut_by_restart(&app, 50, false) else { panic!("an app session's edit that never shipped must ship again") };
         assert_eq!(files, edit.files, "the cut edit's own files ship again");
         assert_eq!((cut.edit_ms, cut.called_ms, cut.outcome_ms), (10, 11, 50), "the cut patch keeps its edit and call, and is concluded now");
         assert!(cut.reason.contains("master restarted"), "the outcome says why: {}", cut.reason);
@@ -4209,19 +5515,206 @@ mod cut_tests {
         super::due(&pending, files);
         assert!(pending.lock().unwrap().0.contains("src/a.rs"), "its files are due, so `live wait patched` waits for their new ship, not for the cut one");
         let shipped = Live { patch: Some(LivePatch { shipped_ms: 20, ..edit.clone() }), ..app.clone() };
-        assert!(matches!(cut_by_restart(&shipped, 50), Some(Cut::Watch)), "an edit the node has is watched for its verdict again, never shipped twice");
+        assert!(matches!(cut_by_restart(&shipped, 50, false), Some(Cut::Watch)), "an edit the node has is watched for its verdict again, never shipped twice");
         let test = Live { test: true, ..shipped.clone() };
-        let Some(Cut::Said(cut)) = cut_by_restart(&test, 50) else { panic!("a test session's cut edit must be said") };
+        let Some(Cut::Said(cut)) = cut_by_restart(&test, 50, false) else { panic!("a test session's cut edit must be said") };
         assert!(super::terminal(&cut) && cut.reason.contains("next call"), "`live wait verdict` answers at once and names the call that ships it again: {} {}", cut.outcome, cut.reason);
         // its node has it, so the next call has nothing to ship: that call runs its tests again,
         // where every call answered the cut verdict again until the session ended (W18256, 11-24)
         assert!(super::rerun_cut(&cut), "a shipped test edit's cut is rerun by the next call: {}", cut.reason);
-        let Some(Cut::Said(unshipped)) = cut_by_restart(&Live { test: true, ..app.clone() }, 50) else { panic!("a test session's cut edit must be said") };
+        let Some(Cut::Said(unshipped)) = cut_by_restart(&Live { test: true, ..app.clone() }, 50, false) else { panic!("a test session's cut edit must be said") };
         assert!(!super::rerun_cut(&unshipped) && unshipped.reason.contains("ships its saves again"), "one its node never had ships on the next call: {}", unshipped.reason);
         assert!(!super::rerun_cut(&LivePatch { outcome: "failed".into(), shipped_ms: 20, reason: "3 tests failed".into(), ..Default::default() }), "a failed verdict of the tests is no cut");
         let done = Live { patch: Some(LivePatch { outcome: "patched".into(), ..edit }), ..app.clone() };
-        assert!(cut_by_restart(&done, 50).is_none(), "an edit with its verdict is left as it is");
-        assert!(cut_by_restart(&Live { patch: None, ..app }, 50).is_none(), "a session with no edit has nothing cut");
+        assert!(cut_by_restart(&done, 50, false).is_none(), "an edit with its verdict is left as it is");
+        assert!(cut_by_restart(&Live { patch: None, ..app }, 50, false).is_none(), "a session with no edit has nothing cut");
+    }
+}
+
+#[cfg(test)]
+mod dup_launch_tests {
+    use super::*;
+    use crate::lease::sched::{Req, State};
+    use std::sync::mpsc;
+
+    struct Fixture {
+        ctx: Arc<Ctx>,
+        events: Arc<Mutex<Vec<(Sev, String)>>>,
+    }
+
+    impl Fixture {
+        fn new(name: &str) -> Self {
+            let home = std::env::temp_dir().join(format!("devhub-live-dup-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&home);
+            std::fs::create_dir_all(home.join(".git")).unwrap();
+            let leases = Arc::new(crate::lease::master::LeaseMaster::new("", home.clone(),
+                Arc::new(|_, _, _| Err("no box".into())), Arc::new(|_| {}), Arc::new(|| 1), None, true));
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let heard = events.clone();
+            let store = crate::state::Store::open(&home, "", Arc::new(move |r| {
+                heard.lock().unwrap().push((r.sev, r.line));
+                0
+            })).unwrap();
+            let ctx = Arc::new(Ctx { store, leases, machine: String::new(), monitor: crate::monitor::Monitor::start(&[]), repo: home.clone(), home });
+            Self { ctx, events }
+        }
+
+        fn request(&self, verb: &str) -> String {
+            format!(r#"live {verb} {{"app":"app","lane":"lane","repo_dir":{}}}"#, json_str(self.ctx.repo.to_str().unwrap()))
+        }
+
+        fn queue(&self, kind: Kind) -> String {
+            let mut req = Req::new("lane", kind);
+            req.live = kind == Kind::Test;
+            let mut queued = String::new();
+            self.ctx.leases.test_sched(|s| queued = s.request(req, 1));
+            queued
+        }
+
+        fn assert_still_queued(&self, id: &str, queued: &str) {
+            assert!(self.ctx.leases.view().iter().any(|l| l.id == queued && l.state == State::Queued), "{queued} must still be queued");
+            assert_eq!(ASKED.lock().unwrap().get(id).map(String::as_str), Some(queued), "the first worker still owns its ask");
+        }
+
+        fn assert_refused(&self, id: &str, path: &str) {
+            let line = format!("live {id}: refused duplicate start from {path} (already owned by serve)");
+            assert!(self.events.lock().unwrap().contains(&(Sev::Warn, line.clone())), "missing warning: {line}");
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.ctx.home); }
+    }
+
+    #[test]
+    fn serve_created_session_is_not_relaunched_by_restarted() {
+        let f = Fixture::new("serve");
+        f.ctx.store.update(|d| d.lives_next = 900_100).unwrap();
+        let (launch_tx, launch_rx) = mpsc::channel();
+        let ctx = f.ctx.clone();
+        let request = f.request("test");
+        let caller = std::thread::spawn(move || {
+            serve_with(&ctx, &request, &|_| {}, &|_, claim, first_call| {
+                assert!(first_call);
+                launch_tx.send(claim).unwrap();
+                Ok(())
+            })
+        });
+        let claim = launch_rx.recv().unwrap();
+        let id = claim.id().to_string();
+        let asking = Asking(claim.id());
+        let queued = f.queue(Kind::Test);
+        asking.names(&queued);
+        let before = set(&f.ctx, &id, |s| s.note = format!("waiting for {queued}")).unwrap();
+        assert_eq!(before.state, "starting");
+        assert!(restarted_to_launch(&f.ctx).is_empty(), "restart must skip serve's pending worker");
+        assert_eq!(get(&f.ctx, &id).unwrap(), before, "reconciliation must preserve the pending start");
+        f.assert_refused(&id, "restarted");
+        f.assert_still_queued(&id, &queued);
+
+        set(&f.ctx, &id, |s| {
+            s.state = "running".into();
+            s.patch = Some(LivePatch { outcome: "initial".into(),
+                tests: Some(crate::state::LiveTests { ran: 1, passed: 1, ..Default::default() }), ..Default::default() });
+        }).unwrap();
+        let reply = caller.join().unwrap().unwrap();
+        let answer = crate::state::live_from(&makepad_strict_json::parse(reply.as_bytes()).unwrap());
+        assert_eq!(answer.id, id);
+        assert_eq!(answer.test_code(), 0, "the caller receives the first worker's passing verdict");
+        set(&f.ctx, &id, |s| { s.state = "ended".into(); s.ended_ms = wall_ms(); }).unwrap();
+        drop(asking);
+        drop(claim);
+        assert_eq!(claimed_by(&id), None);
+    }
+
+    #[test]
+    fn startup_gate_holds_serve_until_restart_reconciliation_completes() {
+        let f = Fixture::new("gate");
+        f.ctx.store.update(|d| {
+            d.lives_next = 900_200;
+            d.lives.push(Live { id: "WDUP-dead".into(), app: "app".into(), lane: "lane".into(),
+                state: "running".into(), lease: "L-dead".into(), ..Default::default() });
+            d.lives.push(Live { id: "WDUP-start".into(), app: "other".into(), lane: "lane".into(),
+                state: "starting".into(), ..Default::default() });
+        }).unwrap();
+
+        let gate = StartupGate::arm();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (launch_tx, launch_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let ctx = f.ctx.clone();
+        let request = f.request("start");
+        let caller = std::thread::spawn(move || {
+            entered_tx.send(()).unwrap();
+            let reply = serve_with(&ctx, &request, &|_| {}, &|_, claim, _| {
+                launch_tx.send(claim).unwrap();
+                Ok(())
+            });
+            done_tx.send(reply).unwrap();
+        });
+        entered_rx.recv().unwrap();
+        assert_eq!(done_rx.recv_timeout(Duration::from_millis(30)), Err(mpsc::RecvTimeoutError::Timeout));
+        assert!(launch_rx.try_recv().is_err());
+        let to_launch = restarted_to_launch(&f.ctx);
+        drop(gate);
+        let reply = done_rx.recv().unwrap().unwrap();
+        caller.join().unwrap();
+
+        assert_eq!(get(&f.ctx, "WDUP-dead").unwrap().state, "ended");
+        assert_eq!(to_launch.len(), 1);
+        let (x, held, restarted) = &to_launch[0];
+        assert_eq!(x.id, "WDUP-start");
+        assert!(!held);
+        assert_eq!(restarted.id(), x.id);
+        assert_eq!(claimed_by(restarted.id()), Some(LaunchPath::Restarted));
+        let served = launch_rx.try_recv().unwrap();
+        assert_eq!(served.id(), "W900201");
+        assert_eq!(crate::state::live_from(&makepad_strict_json::parse(reply.as_bytes()).unwrap()).id, served.id());
+        assert_eq!(claimed_by(served.id()), Some(LaunchPath::Serve));
+        drop(to_launch);
+        drop(served);
+    }
+
+    #[test]
+    fn second_claim_from_any_path_is_refused_and_names_both_paths() {
+        let f = Fixture::new("claim");
+        let id = "WDUP-claim";
+        let first = Claim::acquire(id, LaunchPath::Serve).unwrap();
+        let asking = Asking(id);
+        let queued = f.queue(Kind::Test);
+        asking.names(&queued);
+
+        assert!(!try_run(&f.ctx, id, false, LaunchPath::Restarted));
+        assert!(try_claim_or_warn(&f.ctx, id, LaunchPath::Reattach).is_none());
+        assert!(try_claim_or_warn(&f.ctx, id, LaunchPath::ResumeParked).is_none());
+        for path in ["restarted", "reattach", "resume_parked"] { f.assert_refused(id, path); }
+        f.assert_still_queued(id, &queued);
+        drop(asking);
+        drop(first);
+        let next = Claim::acquire(id, LaunchPath::ResumeParked).unwrap();
+        assert_eq!(claimed_by(next.id()), Some(LaunchPath::ResumeParked));
+    }
+
+    #[test]
+    fn resume_parked_skips_claimed_session_without_flipping_state() {
+        let f = Fixture::new("park");
+        let id = "WDUP-park";
+        let timed = f.queue(Kind::Timed);
+        f.ctx.leases.test_sched(|s| assert!(s.release(&timed, "released", 2)));
+        let parked = Live { id: id.into(), state: "ended".into(), resume_after: timed, ..Default::default() };
+        f.ctx.store.update(|d| d.lives.push(parked.clone())).unwrap();
+        let first = Claim::acquire(id, LaunchPath::Serve).unwrap();
+        assert!(resume_due_claims(&f.ctx).is_empty());
+        assert_eq!(get(&f.ctx, id).unwrap(), parked, "a claimed session stays parked for its timed lease");
+        drop(first);
+
+        let due = resume_due_claims(&f.ctx);
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].id(), id);
+        assert_eq!(claimed_by(id), Some(LaunchPath::ResumeParked));
+        let resumed = get(&f.ctx, id).unwrap();
+        assert_eq!(resumed.state, "starting");
+        assert!(resumed.resume_after.is_empty());
     }
 }
 
@@ -4302,6 +5795,17 @@ mod owner_tests {
         assert!(!taken_since(&[refusal_event.into()], &old_patch), "unchanged manifest and refusal cursor reuse the held answer");
         let answer = crate::state::live_from(&makepad_strict_json::parse(test_reply(&held, None, "again").as_bytes()).unwrap());
         assert_eq!((answer.test_code(), answer.held.as_str()), (1, "error: missing item"), "the unchanged call answers with the confirmed refusal");
+        // a call that ran no round answers its last verdict, marked cached with that verdict's time
+        let passed = LivePatch { seq: 3, edit_ms: 10_000, shipped_ms: 11_000, verdict_ms: 12_000, outcome: "patched".into(), tests: Some(Default::default()), answered_ms: 12_500, ..Default::default() };
+        let cached_ms = |before: Option<&LivePatch>, after: &LivePatch| makepad_strict_json::parse(cached_reply(test_reply(&held, None, "again"), before, Some(after)).as_bytes()).unwrap().get("cached_ms").and_then(Value::as_u64);
+        assert_eq!(cached_ms(Some(&passed), &passed), Some(12_000), "the last round's verdict answers, cached");
+        let unanswered = LivePatch { answered_ms: 0, ..passed.clone() };
+        assert_eq!(cached_ms(Some(&unanswered), &unanswered), None, "a round no caller heard (its call's link was cut) answers the call that asks again as its own, not cached");
+        let saved = crate::state::live_from(&crate::state::live_value(&Live { patch: Some(passed.clone()), ..held.clone() }));
+        assert_eq!(saved.patch.map(|p| p.answered_ms), Some(12_500), "a heard round stays heard across the master's restart");
+        assert_eq!(cached_ms(Some(&passed), &LivePatch { verdict_ms: 13_000, ..passed.clone() }), None, "a round that ran is no cached verdict");
+        assert_eq!(cached_ms(None, &passed), None, "nor is the session's first");
+        assert_eq!(cached_ms(Some(&LivePatch { tests: None, ..passed.clone() }), &LivePatch { tests: None, ..passed.clone() }), None, "a held refusal is no test verdict");
         let repaired = Live { id: "WR-edit".into(), lease: "L-edit".into(), ..held.clone() };
         ctx.store.update(|d| d.lives.push(repaired.clone())).unwrap();
         for (failed, expected) in [(0, 0), (1, 1)] {
@@ -4322,6 +5826,33 @@ mod owner_tests {
             assert!(saved.held.is_empty() && saved.patch.as_ref().unwrap().tests.as_ref().unwrap().restarted, "the restarted round supersedes the held refusal");
             assert_eq!((saved.lease.as_str(), saved.test_code()), ("L-edit", expected), "the fixed edit's verdict on the same lease");
         }
+        // a run held at its start (the tests did not compile) has that as its verdict at once: a
+        // JIT fault among its errors a JIT error, a plain compile error a refusal. Nine sessions
+        // waited out their box's idle end on a relax ICE and ended "no lease" (11-27).
+        for (reason, outcome, code, says) in [
+            ("core.rs:761:5: internal compiler error while checking the borrows of f: MIR bug", "jit_error", 3, "JIT error, not your change: core.rs:761:5: internal compiler error"),
+            ("error[E0425]: cannot find value `x`", "refused", 1, "cannot find value `x`"),
+        ] {
+            let mut watch = set(&ctx, &repaired.id, |s| *s = Live { held: String::new(), ..repaired.clone() }).unwrap();
+            let mut patch = LivePatch { edit_ms: old_patch.edit_ms + 2, outcome: "initial".into(), ..Default::default() };
+            let id = watch.id.clone();
+            set_patch(&ctx, &id, &patch);
+            let mut events = std::iter::once(format!(r#"{{"event":"patchrefused","seq":1,"edit":"{HELD_AT_START}","outcome":"refused","reasons":["{reason}"]}}"#));
+            collect_test_verdict(&ctx, &id, &mut watch, &mut patch, |_, _| events.next().and_then(|e| makepad_strict_json::parse(e.as_bytes()).ok()));
+            assert!(terminal(&patch) && patch.outcome == outcome, "a run held at its start on {reason:?} has its verdict at once, {outcome}: {patch:?}");
+            assert!(verdict(&patch).contains(says), "its verdict says what did not compile: {}", verdict(&patch));
+            let saved = set_test_patch(&ctx, &id, &watch, &patch).unwrap();
+            assert_eq!(saved.test_code(), code, "the client's exit for a held {outcome}");
+        }
+        // a run held before its watcher exists answers every watch "not a live session": its
+        // refusal is read from its event queue, the first of the watched kinds past the cursor
+        // (two calls waited 102 min for it, W25685, W25686, 11-27)
+        let queue: Vec<Value> = [r#"{"event":"panic","seq":1}"#, r#"{"event":"patchrefused","seq":3,"edit":"the tests did not compile"}"#, r#"{"event":"patchrefused","seq":2,"edit":"the tests did not compile"}"#]
+            .iter().map(|e| makepad_strict_json::parse(e.as_bytes()).unwrap()).collect();
+        let seq = |v: Option<&Value>| v.and_then(|v| v.get("seq")).and_then(Value::as_u64);
+        let on = "testverdict,patchverified,patchrefused";
+        assert_eq!((seq(queued_event(&queue, on, 0)), seq(queued_event(&queue, on, 2))), (Some(2), Some(3)), "the next watched event past the cursor, in order");
+        assert!(queued_event(&queue, on, 3).is_none() && queued_event(&queue, "testverdict", 0).is_none(), "none past the last, and only the kinds watched");
         release(&ctx, &repaired.id, "done").unwrap();
 
         let orphan = refused("WR-check", "L11");
@@ -4347,6 +5878,41 @@ mod owner_tests {
         assert_eq!(std::fs::read_to_string(&log).unwrap(), "app line\n[devhub] WR1 ended: released\n", "its log says it ended, and why");
         let e = serve(&ctx, "live wait WR1 settled 1").unwrap_err();
         assert!(e.starts_with("WR1 ended: released") && e.contains("live again WR1"), "a wait on an ended session fails, saying how it ended: {e}");
+        // a lane's wait on one of its sessions is its use of the lane's other running ones, not of
+        // another lane's nor of an ended one (a walk's two Towns ended while it waited for its
+        // Fab's first frame, W24524, 11-26)
+        let of = |id: &str, lane: &str, state: &str| Live { lane: lane.into(), ..live(id, "", state) };
+        ctx.store.update(|d| d.lives.extend([of("WT1", "walk", "starting"), of("WT2", "walk", "running"), of("WT3", "other", "running"), of("WT4", "walk", "ended")])).unwrap();
+        let e = serve(&ctx, "live wait WT1 frame 0").unwrap_err();
+        assert!(e.contains("not within 0 s"), "the wait on a session not up yet times out: {e}");
+        let touched = |id: &str| get(&ctx, id).unwrap().touched_ms;
+        assert!(touched("WT2") > 0, "the lane's other running session is in use while its lane waits");
+        assert_eq!((touched("WT3"), touched("WT4")), (0, 0), "another lane's session and an ended one are not");
+        // each one's last act, which a park for timed work while it is in use says it interrupted
+        // (a walk's owner saw only that its run broke, 11-26)
+        let act = |id: &str| get(&ctx, id).unwrap().last_act;
+        assert_eq!([act("WT1"), act("WT2"), act("WT3"), act("WT4")], ["`live wait WT1 frame 0`", "its lane's wait on WT1", "", ""], "the wait is WT1's act and its lane's other running session's");
+        let wt2 = get(&ctx, "WT2").unwrap();
+        let at = wt2.last_act_ms + 40_000;
+        assert_eq!(park_note("parked for timed L9 (bench)", Some(&wt2), true, at), format!("parked for timed L9 (bench); in use: its last act was its lane's wait on WT1, 40 s before; {RESTARTS_BY_ITSELF}"), "parked in use for timed work: what it interrupted");
+        assert_eq!(park_note("parked for timed L9 (bench)", Some(&get(&ctx, "WT3").unwrap()), true, at), format!("parked for timed L9 (bench); {RESTARTS_BY_ITSELF}"), "with no act, the line as before");
+        assert_eq!(park_note("parked for L9 (test of x): ..", Some(&wt2), false, at), "parked for L9 (test of x): ..", "an idle park says no act");
+        ctx.store.update(|d| d.lives.retain(|x| !x.id.starts_with("WT"))).unwrap();
+        // an app session's home: fresh by default (an empty archive), the box's own by name, its
+        // `--home` archive, the harness's own for a test session or an --env test home (a lane's
+        // Town signed a name into a box's own Town home, 11-27)
+        let app = Live { id: "WH1".into(), app: "makepad-app-x".into(), ..Default::default() };
+        let fresh = home_archive(&ctx, &app).unwrap().expect("an app session without --home gets a fresh home");
+        assert_eq!(std::fs::read(&fresh).unwrap(), vec![0u8; 10240], "the fresh home's seed is an empty tar archive");
+        assert_eq!(home_archive(&ctx, &app).unwrap(), Some(fresh), "the seed is made once and kept");
+        for (x, why) in [
+            (Live { home: BOX_HOME.into(), ..app.clone() }, "--home box runs on the box's own home"),
+            (Live { test: true, ..app.clone() }, "a test session's harness gives each app its own home"),
+            (Live { env: vec![("MAKEPAD_TEST_HOME".into(), "/x".into())], ..app.clone() }, "an --env test home is the session's own choice"),
+        ] {
+            assert_eq!(home_archive(&ctx, &x).unwrap(), None, "{why}");
+        }
+        assert_eq!(home_archive(&ctx, &Live { home: "/a/scan.tar".into(), ..app }).unwrap(), Some(PathBuf::from("/a/scan.tar")), "a --home archive seeds it");
         assert!(serve(&ctx, "live release WR-gone").unwrap_err().contains("no live job WR-gone"), "a release names what is missing");
 
         // a release by a lease's id frees what it names; a running session's lease is refused
@@ -4406,6 +5972,10 @@ mod owner_tests {
         assert!(idle(now).is_empty(), "the restarted master has not asked its box yet: a person's input there and its builds are not known");
         ctx.leases.test_sched(|s| { s.set_caps("idle-box", crate::lease::Caps { input_idle_ms: Some(min), ..Default::default() }, now); });
         assert_eq!(idle(now), ["WR11"], "once asked, the session past its idle end ends; one with a call or a save inside the window stays, and so does a visible one its person works at");
+        set(&ctx, "WR11", |s| s.set = "idle/2".into());
+        set(&ctx, "WR12", |s| s.set = "idle/2".into());
+        assert!(idle(now).is_empty(), "the other active set member's touch keeps the quiet session from its idle end");
+        assert!(idle(called.touched_ms + IDLE_MS).contains(&quiet.id), "the quiet member is idle when its set's latest touch reaches the idle end");
         for id in ["WR11", "WR12", "WR13", "WR14"] {
             release(&ctx, id, "done").unwrap();
         }
@@ -4415,6 +5985,8 @@ mod owner_tests {
         ctx.leases.test_sched(|s| { s.restore(&format!("{{\"id\":\"L7\",\"node\":\"node\",\"req\":{}}}", req.to_json()), 1); });
         let parked = |id: &str, app: &str, after: &str| Live { id: id.into(), app: app.into(), lane: "lane".into(), state: "ended".into(), resume_after: after.into(), ..Default::default() };
         ctx.store.update(|d| d.lives.extend([parked("WR7", "app7", "L7"), parked("WR8", "app", "L8"), parked("WR9", "app9", "L8")])).unwrap();
+        let town = |id| Live { set: "walk/2".into(), ..parked(id, "town", "L7") };
+        ctx.store.update(|d| d.lives.extend([town("WR-town-a"), town("WR-town-b")])).unwrap();
         serve(&ctx, "live release WR9").unwrap();
         assert!(resume_due(&ctx).is_empty(), "its timed lease runs: none is due");
         let x = get(&ctx, "WR8").unwrap();
@@ -4423,7 +5995,10 @@ mod owner_tests {
         assert!(get(&ctx, "WR9").is_some_and(|x| x.state == "ended" && x.resume_after.is_empty()), "released by its lane: it stays ended");
         assert_eq!(resume_due(&ctx), Vec::<String>::new(), "WR7's timed lease still runs");
         ctx.leases.test_sched(|s| { assert!(s.release("L7", "released", 3)); });
-        assert_eq!(resume_due(&ctx), ["WR7"], "its timed lease ended: it is due");
+        assert_eq!(resume_due(&ctx), ["WR7", "WR-town-a", "WR-town-b"], "both parked Towns of the same lane and set start together once the timed lease ends");
+        for id in ["WR-town-a", "WR-town-b"] {
+            assert!(get(&ctx, id).is_some_and(|x| x.state == "starting" && x.set == "walk/2" && x.resume_after.is_empty()), "resumed {id} starts as a member of its parked set");
+        }
         let x = get(&ctx, "WR7").unwrap();
         assert!(x.state == "starting" && x.resume_after.is_empty() && x.lease.is_empty() && x.note.contains("timed L7"), "{x:?}");
         assert!(resume_due(&ctx).is_empty(), "once");
@@ -4438,9 +6013,11 @@ mod owner_tests {
         ctx.store.update(|d| d.lives.push(live("WR10", "", "starting"))).unwrap();
         let asking = Asking("WR10");
         asking.names(super::super::leg::asked_lease(&format!("{queued} queued waits for a drained box")).unwrap());
+        assert_eq!(partner_ask(&ctx, "WR10"), Ok(queued.clone()), "a joiner can use its partner's queued lease before it has a box");
         assert!(open(&queued), "{queued} waits in the queue");
         let reply = serve(&ctx, "live release WR10").unwrap();
         assert_eq!(field(&reply, "lease"), format!("its asked lease {queued} given up"), "{reply}");
+        assert!(partner_ask(&ctx, "WR10").is_err_and(|e| e.contains("WR10") && e.contains("ended")), "a joiner learns that its queued partner ended");
         let timed_left = ctx.leases.view().iter().filter(|l| l.req.kind == Kind::Timed && l.req.lane == "lane" && !matches!(l.state, State::Ended(_))).map(|l| l.id.clone()).collect::<Vec<_>>();
         assert!(timed_left.is_empty(), "the release gave the ask up at once: no timed lease of the lane is left to refuse its next start: {timed_left:?}");
         // The held session's resident RAM keeps another lane's ask queued until the call-end grace passes.
@@ -4481,7 +6058,8 @@ mod owner_tests {
         std::fs::create_dir(home.join(".git")).unwrap();
         let request = format!(r#"live test {{"app":"app","lane":"lane","repo_dir":{}}}"#, json_str(&parked.tree));
         let notices = std::cell::RefCell::new(Vec::new());
-        let reply = serve_with(&ctx, &request, &|line| notices.borrow_mut().push(line.to_string()), &|ctx, id, first_call| {
+        let reply = serve_with(&ctx, &request, &|line| notices.borrow_mut().push(line.to_string()), &|ctx, claim, first_call| {
+            let id = claim.id();
             assert_eq!(*notices.borrow(), [format!("the held session WR-park was {note} at 01:01Z; this run started cold")], "the caller hears why before the new run starts");
             assert!(first_call && id != parked.id, "the call starts a fresh session");
             set(ctx, id, |s| {
@@ -4493,6 +6071,12 @@ mod owner_tests {
         let fresh = crate::state::live_from(&makepad_strict_json::parse(reply.as_bytes()).unwrap());
         assert!(fresh.id != parked.id && fresh.test_code() == 0, "the fresh run's passing verdict reaches the caller: {reply}");
         assert!(get(&ctx, &parked.id).unwrap().held.is_empty(), "the cold-start notice is consumed once");
+        // A call that names other DEVHUB_ALSO paths than its session's ships those from that call on.
+        set(&ctx, &fresh.id, |s| s.state = "paused".into());
+        let also_request = format!(r#"live test {{"app":"app","lane":"lane","repo_dir":{},"also":["local/later"]}}"#, json_str(&parked.tree));
+        serve_with(&ctx, &also_request, &|_| {}, &|_, claim, _| panic!("a call naming other DEVHUB_ALSO paths starts no new session ({})", claim.id())).expect("the call answers from its session");
+        assert_eq!(get(&ctx, &fresh.id).unwrap().also, ["local/later"], "the session ships the paths the call names");
+        set(&ctx, &fresh.id, |s| s.state = "running".into());
 
         // A lane may never call again. Its parked records share the ordinary history bound.
         ctx.store.update(|d| {
@@ -4590,7 +6174,17 @@ mod owner_tests {
         assert!(super::restart_rows(&[ended], t0 + 18 * 60_000).is_empty(), "an ended session runs nothing");
         super::restart_ran(&mut x);
         assert_eq!((x.restart_since_ms, x.restart_saves, x.restart_why.as_str()), (0, 0, ""));
-        assert!(super::restart_rows(&[x], t0 + 18 * 60_000).is_empty());
+        assert!(super::restart_rows(&[x.clone()], t0 + 18 * 60_000).is_empty());
+        // a test call whose edit has no verdict and whose JIT wrote nothing for 10 min makes no
+        // progress, said with that evidence (W25685 waited 102 min at "restarting JIT", 11-27)
+        let call = Live { test: true, pid: 41, patch: Some(LivePatch { edit_ms: t0, outcome: "restart".into(), ..Default::default() }), ..x };
+        let quiet = |min: u64| Some(min * 60_000);
+        assert_eq!(super::no_progress(&call, quiet(9), t0 + 9 * 60_000), None, "not past 10 min yet");
+        assert_eq!(super::no_progress(&call, quiet(102), t0 + 103 * 60_000).as_deref(), Some("no progress for 102 min through its JIT's restart: the edit saved at 13:49:00Z has no verdict, and its JIT (pid 41) has written nothing since 13:50:00Z"));
+        let verdict = Live { patch: Some(LivePatch { outcome: "refused".into(), ..call.patch.clone().unwrap() }), ..call.clone() };
+        let building = Live { pid: 0, ..call.clone() };
+        let app = Live { test: false, ..call.clone() };
+        assert!([verdict, building, app].iter().all(|x| super::no_progress(x, quiet(30), t0 + 30 * 60_000).is_none()), "an edit with its verdict, a run not started yet (its JIT builds: its phase says so) and an app session are none");
     }
 
     /// A closed watch's verdict says the app's exit as its waiter kept it, and its log's last
@@ -4630,17 +6224,23 @@ mod owner_tests {
     fn a_session_joins_a_placed_session_of_its_lane_on_its_box() {
         let live = |id: &str, lane: &str, state: &str, node: &str, joins: &str| crate::state::Live { id: id.into(), lane: lane.into(), state: state.into(), node: node.into(), joins: joins.into(), note: if state == "ended" { "parked for L9".into() } else { String::new() }, ..Default::default() };
         let lives = [live("W1", "a", "running", "n1", ""), live("W2", "b", "running", "n2", ""), live("W3", "a", "ended", "n1", ""), live("W4", "a", "starting", "", "")];
-        assert_eq!(super::joined_box(&lives, "W1", "a", ""), Ok("n1".to_string()));
-        assert_eq!(super::joined_box(&lives, "W1", "a", "n1"), Ok("n1".to_string()), "--node naming its box");
+        assert_eq!(super::joined_box(&lives, "W1", "a", "", ""), Ok("n1".to_string()), "a plain join takes its placed partner's box");
+        assert_eq!(super::joined_box(&lives, "W1", "a", "n1", ""), Ok("n1".to_string()), "--node naming its box");
         for (joins, asked, said) in [("W1", "n2", "name two boxes: W1 runs on n1"), ("W2", "", "it is lane b's session"), ("W3", "", "it ended: parked for L9"), ("W4", "", "still waits for its box"), ("W9", "", "no live session W9")] {
-            assert!(super::joined_box(&lives, joins, "a", asked).is_err_and(|e| e.contains(said)), "{joins}: {:?}", super::joined_box(&lives, joins, "a", asked));
+            assert!(super::joined_box(&lives, joins, "a", asked, "").is_err_and(|e| e.contains(said)), "{joins}: {:?}", super::joined_box(&lives, joins, "a", asked, ""));
         }
-        let with = [live("W1", "a", "running", "n1", ""), live("W5", "a", "running", "n1", "W1")];
+        let member = |mut x: crate::state::Live| { x.set = "walk/2".into(); x };
+        let with = [member(live("W1", "a", "starting", "", "")), member(live("W5", "a", "starting", "", "W1"))];
+        assert_eq!(super::joined_box(&with, "W1", "a", "", "walk/2"), Ok(String::new()), "a queued set partner leaves the box for the scheduler to choose");
+        for (records, set) in [(&with[..], "other/2"), (&with[..], ""), (&lives[..], "walk/2")] {
+            assert!(super::joined_box(records, "W1", "a", "", set).is_err_and(|e| e.contains("a member joins a member of its own set")), "a join cannot cross set membership ({set:?})");
+        }
         assert!(super::joined(&with, "W1") && !super::joined(&with, "W5"), "W1 is joined while W5 runs");
         let ended = [live("W1", "a", "running", "n1", ""), live("W5", "a", "ended", "n1", "W1")];
         assert!(!super::joined(&ended, "W1"), "an ended session joins nothing");
         let back = crate::state::live_from(&crate::state::live_value(&with[1]));
         assert_eq!(back.joins, "W1", "a session's join survives the store");
+        assert_eq!(back.set, "walk/2", "a session's set name and count survive the store");
         // its lease's kind and needs: a timed one's is timed, and visible it needs a display there
         use crate::lease::Kind;
         let x = |visible: bool, timed: bool, needs: &str| super::lease_kind(&crate::state::Live { visible, timed, needs: needs.into(), ..Default::default() });
@@ -5019,6 +6619,20 @@ mod owner_tests {
         let text = super::render(&x);
         assert!(text.contains("`makepad devhub live act W7 session relaunch`"), "{text}");
         assert!(text.starts_with("W7 running app-x of lane-x (AGENT-X) on box-a pid 0"), "a session's line names whose it is: {text}");
+        assert!(!text.contains("  on box-a: work"), "not placed: no work dir said: {text}");
+        // placed: where it runs on its box, its home and pid, and how to copy its files back with no
+        // lease of its own (a helper's probes each cost about 10 min of queue, 11-26)
+        let placed = crate::state::Live { work_dir: "/w/lane/lane-x/run".into(), box_home: "/home/someone".into(), pid: 41, ..x.clone() };
+        assert!(super::render(&placed).contains("  on box-a: work /w/lane/lane-x/run, home /home/someone, pid 41; its files: `devhub live get W7 <rel> <local-dir>`"), "{}", super::render(&placed));
+        let own_home = crate::state::Live { home: "/a/scan.tar".into(), home_dir: "/w/tmp/L1/app-home".into(), ..placed.clone() };
+        assert!(super::render(&own_home).contains(", home /w/tmp/L1/app-home (MAKEPAD_TEST_HOME, from --home), pid 41;"), "{}", super::render(&own_home));
+        // an app session without --home has a fresh one; `--home box` says plainly it is the box's own
+        // (a lane's Town opened a box's demo copy and signed a name into it, 11-27)
+        let fresh = crate::state::Live { home_dir: "/w/tmp/L1/app-home".into(), ..placed.clone() };
+        assert!(super::render(&fresh).contains(", home /w/tmp/L1/app-home (MAKEPAD_TEST_HOME, fresh: gone at its release), pid 41;"), "{}", super::render(&fresh));
+        let own_box = crate::state::Live { home: super::BOX_HOME.into(), ..placed };
+        let text = super::render(&own_box);
+        assert!(text.contains(", home /home/someone (the box's own home, from --home box: its real app data), pid 41;") && text.contains("  home: the box's own home (--home box): its real app data\n"), "{text}");
         let p = x.patch.as_ref().unwrap();
         assert!(super::needs_devhub_rebuild(&x, p));
         assert!(!super::rebuild_tests(&x, p), "an app's state stays until its lane asks");
@@ -5049,6 +6663,29 @@ mod owner_tests {
         (x.test, x.loader) = (true, String::new());
         x.patch.as_mut().unwrap().reason = "type mismatch".into();
         assert!(!super::rebuild_tests(&x, x.patch.as_ref().unwrap()), "a source error is still a refusal");
+        // the tree's proc macros are not those the JIT has built in: a JIT built from the tree runs
+        // it (a held harness restarted on the same binary and held again, W25685, 11-27)
+        x.patch.as_mut().unwrap().reason = "crate substitution: the proc macros in this tree differ from those built into makepad: rebuild makepad by starting it through cargo".into();
+        assert!(super::rebuild_tests(&x, x.patch.as_ref().unwrap()), "a run on stale built-in proc macros restarts on a rebuilt JIT");
+        x.loader = "0123456789abcdef01234567".into();
+        assert!(!super::rebuild_tests(&x, x.patch.as_ref().unwrap()), "a pinned JIT's mismatch is its refusal");
+        x.loader.clear();
+        // --fresh: a real quit, then a new process on the same home and lease, devhub's for any app
+        // session; never the JIT's, never sent twice after a cut (CREATE's offline walks, 11-27)
+        assert!(["session relaunch --fresh", "session relaunch --fresh anyway=1", "session  relaunch --anyway --fresh"].iter().all(|c| super::fresh_relaunch(c)), "--fresh, with or without --anyway");
+        assert!(["session relaunch", "session relaunch --fresh process=1", "ui find q=--fresh"].iter().all(|c| !super::fresh_relaunch(c)), "only a relaunch's --fresh, with nothing its JIT reads beside it");
+        assert_eq!(super::relaunch_anyway("session relaunch --fresh"), None, "a fresh relaunch is no relaunch in place");
+        assert!(!super::RESENT.iter().any(|c| "session relaunch --fresh".split_whitespace().eq(c.iter().copied())), "a cut fresh relaunch may have quit the app: it is never sent again");
+        let old = crate::state::Live { lease: "L1".into(), run_n: 3, ..fresh.clone() };
+        let up = crate::state::Live { pid: 57, run_n: 4, ..old.clone() };
+        for (now, why) in [(crate::state::Live { pid: 0, ..old.clone() }, "the old process gone, no new one yet"), (old.clone(), "the old process still up"), (crate::state::Live { run_n: 4, ..old.clone() }, "a new run with no pid of its own yet")] {
+            assert_eq!(super::fresh_said(&old, &now, super::Stopped::Quit(1_400)), None, "{why}: it waits");
+        }
+        assert_eq!(super::fresh_said(&old, &up, super::Stopped::Quit(1_400)).as_deref(), Some("live W7: pid 41 quit and exited in 1.4 s; pid 57 runs on the same home /w/tmp/L1/app-home, lease L1 kept"), "a new pid on the same home and lease");
+        let said = super::fresh_said(&old, &up, super::Stopped::Killed).unwrap();
+        assert!(said.contains("pid 41 did not exit within 10 s of its quit, so it was stopped (its quit did not finish)"), "a quit that did not finish is said: {said}");
+        let env_home = crate::state::Live { home_dir: String::new(), env: vec![("MAKEPAD_TEST_HOME".into(), "/w/own".into())], ..up.clone() };
+        assert!(super::fresh_said(&old, &env_home, super::Stopped::Ended).unwrap().contains("pid 41 had ended already; pid 57 runs on the same home /w/own,"), "an --env home is the one it keeps");
     }
 
     #[test]
@@ -5189,7 +6826,9 @@ fn act(ctx: &Arc<Ctx>, id: &str, arg: &str, held: Option<&Call<'_>>) -> Result<S
     // a grab's file: (node, lease, path under the lease's dir), and every frame the call drew, here
     let (mut png, mut paths) = (None, Vec::new());
     let mut lines = match arg.split_whitespace().next() {
-        _ if devhub_relaunch(&x, arg) => relaunch(ctx, id, resend, relaunch_anyway(arg) == Some(true))?,
+        _ if fresh_relaunch(arg) && x.test => return Err(format!("{id}: --fresh relaunches an app session: a test session's runs restart on their own")),
+        _ if fresh_relaunch(arg) => relaunch(ctx, id, false, true, true)?,
+        _ if devhub_relaunch(&x, arg) => relaunch(ctx, id, resend, relaunch_anyway(arg) == Some(true), false)?,
         // a resent relaunch its JIT serves: sent only while an edit still waits for it
         _ if resend && restarts_waiting(&x)? == 0 => relaunch_applied(id, x.pid, 0).into_iter().collect(),
         // images come from the app's frames, answered by a client on its box (the `cmd`
@@ -5321,15 +6960,51 @@ pub(crate) fn wait_args(arg: &str, now: u64) -> (&str, Duration, Duration, u64) 
     (what, timeout, timeout.saturating_sub(Duration::from_millis(now - asked)), asked)
 }
 
+/// How often a wait touches its lane's other running sessions ([`touch_lane`]).
+const LANE_TOUCH_EVERY: Duration = Duration::from_secs(30);
+
+/// A lane's wait on one of its sessions is its use of the lane's other running sessions: a walk
+/// that waited 10 min for its Fab's first frame lost its two Towns to the idle end before it could
+/// drive them again (W24524, W24525, 11-26). The wait ends ([`wait_args`]), so a session its lane
+/// forgot stays only while the lane waits on another. It is their last act ([`acted`]).
+fn touch_lane(ctx: &Ctx, x: &Live) {
+    if x.lane.is_empty() { return; }
+    let now = wall_ms();
+    let _ = ctx.store.update(|d| {
+        for o in d.lives.iter_mut().filter(|o| o.id != x.id && o.lane == x.lane && o.active()) {
+            o.touched_ms = o.touched_ms.max(now);
+            (o.last_act, o.last_act_ms) = (format!("its lane's wait on {}", x.id), now);
+        }
+    });
+}
+
+/// What a lane did with a session, as its last act and when: what a park for timed work while it
+/// is in use says it interrupted ([`park`]), so a walk's owner sees why its run broke.
+fn acted(ctx: &Ctx, id: &str, what: String) {
+    let now = wall_ms();
+    let _ = try_set(ctx, id, |s| if s.active() { (s.last_act, s.last_act_ms) = (what, now); });
+}
+
+/// A park's line for session `x` at `now`: one parked for timed work while in use (`resumes`) says
+/// the work it interrupted, its last act ([`acted`]), then that it starts again by itself.
+fn park_note(note: &str, x: Option<&Live>, resumes: bool, now: u64) -> String {
+    if !resumes { return note.to_string(); }
+    let act = x.filter(|x| !x.last_act.is_empty())
+        .map(|x| format!("; in use: its last act was {}, {} before", x.last_act, crate::lease::sched::dur(now.saturating_sub(x.last_act_ms))))
+        .unwrap_or_default();
+    format!("{note}{act}; {RESTARTS_BY_ITSELF}")
+}
+
 fn wait<'a>(ctx: &'a Arc<Ctx>, id: &'a str, arg: &str, held: &mut Option<Call<'a>>) -> Result<String, String> {
     let (what, timeout, left, asked) = wait_args(arg, wall_ms());
     let t = Instant::now();
     let x = try_set(ctx, id, |s| s.touched_ms = wall_ms())?.ok_or_else(|| format!("no live job {id}"))?;
     if what == "verdict" && !x.test { return Err(format!("{id}: verdict needs a live test job (--test)")); }
     let signal = ctx.store.subscribe("live", &[id]);
+    let mut lane_touched: Option<Instant> = None;
     loop {
         let seen = signal.generation();
-        if held.is_none() { *held = call(ctx, id)?; }
+        if held.is_none() { *held = call_until(ctx, id, Some(t + left))?; }
         // a test session ships its saves on its next call (`live sync`), never on a wait:
         // waiting for them waited to the timeout; the answer says they are there
         let (quiet, unshipped) = if let Some(r) = running(id) {
@@ -5344,6 +7019,10 @@ fn wait<'a>(ctx: &'a Arc<Ctx>, id: &'a str, arg: &str, held: &mut Option<Call<'a
         if !x.active() {
             return if what == "verdict" { Ok(crate::state::live_value(&x).to_json()) } else { Err(no_frame(&x)) };
         }
+        if lane_touched.is_none_or(|t| t.elapsed() >= LANE_TOUCH_EVERY) {
+            touch_lane(ctx, &x);
+            lane_touched = Some(Instant::now());
+        }
         let done = match what {
             // the newest edit has its verdict: nothing waits to ship or for a verdict, and an
             // edit saved before this call (the OS monitor hears it within ~0.1 s) is in
@@ -5357,14 +7036,33 @@ fn wait<'a>(ctx: &'a Arc<Ctx>, id: &'a str, arg: &str, held: &mut Option<Call<'a
             let answer = crate::state::live_value(&x).to_json();
             return Ok(match answer.strip_suffix('}') { Some(head) if unshipped > 0 => format!("{head},\"unshipped\":{unshipped}}}"), _ => answer });
         }
+        // an app whose sources do not build draws nothing before its next save: its wait for the
+        // app's frame ends with why at once ([`unbuilt`])
+        if let Some(why) = matches!(what, "frame" | "settled").then(|| unbuilt(&x)).flatten() {
+            return Err(format!("live wait {id} {what}: {why}"));
+        }
         if t.elapsed() > left {
-            return Err(format!("live wait {id} {what}: not within {} s", timeout.as_secs()));
+            let box_note = if held.is_none() && x.pid != 0 { "; the restarted master has not taken its box back" } else { "" };
+            return Err(format!("live wait {id} {what}: not within {} s{box_note}", timeout.as_secs()));
         }
         // Observe frame/idle transitions on the session's inspection deadline;
         // document and admission changes wake just this session immediately.
         let deadline = if t.elapsed() < Duration::from_millis(300) { Duration::from_millis(300) - t.elapsed().min(Duration::from_millis(300)) } else { Duration::from_millis(250) };
         signal.wait(seen, deadline.min(left.saturating_sub(t.elapsed())));
     }
+}
+
+/// Why a session's app draws no frame before its next save: the newest build of its sources was
+/// refused, its first (the session's build failed) or a later save's. A lane's wait for its Town's
+/// first frame sat 21 min on a build that failed (E0027) and a save refused on the same error,
+/// through a master restart (WORKBOARD, 11-27). An app that draws already has its frame: this is
+/// asked only of one that does not.
+fn unbuilt(x: &Live) -> Option<String> {
+    let p = x.patch.as_ref().filter(|p| matches!(p.outcome.as_str(), "refused" | "compile_error"))?;
+    let reason = if p.reason.is_empty() { p.reason_ref.read().unwrap_or_default() } else { p.reason.clone() };
+    let first = |t: &str| t.lines().map(str::trim).find(|l| !l.is_empty()).map(str::to_string);
+    let why = first(&reason).or_else(|| first(&p.edit)).unwrap_or_else(|| p.outcome.clone());
+    Some(format!("{} draws no frame before its next save: its sources do not build: {}", x.id, crate::proto::clean(&why, 300)))
 }
 
 /// Hold the session through both waits, the grab and its copy off the lease's scratch dir.
@@ -5417,12 +7115,14 @@ pub(super) fn validate_env(k: &str, v: &str) -> Result<(), String> {
 /// box). One that differs leaves it be and starts its own. A `--needs os=macos` test went to the
 /// lane's session on a Linux box, and --live takes no --node (W7272, 11-14).
 /// Offline and networked requests never share a session (11-15).
-/// The box a session that joins `joins` runs on ([`Live::joins`]): that session's, when it is one
-/// of `lane`'s that runs placed, and `--node` (`asked`) names no other box.
-fn joined_box(lives: &[Live], joins: &str, lane: &str, asked: &str) -> Result<String, String> {
+/// A join runs on its partner's box. Inside a set the scheduler places them together, so the
+/// partner may still be queued and have no box yet.
+fn joined_box(lives: &[Live], joins: &str, lane: &str, asked: &str, set: &str) -> Result<String, String> {
     let j = lives.iter().find(|x| x.id == joins).ok_or_else(|| format!("live: --joins {joins}: no live session {joins}"))?;
     if j.lane != lane { return Err(format!("live: --joins {joins}: it is lane {}'s session; a session joins one of its own lane's", j.lane)); }
+    if j.set != set { return Err(format!("live: --joins {joins}: a member joins a member of its own set")); }
     if !j.active() { return Err(format!("live: --joins {joins}: it {}{}; join the session that starts it again", j.state, if j.note.is_empty() { String::new() } else { format!(": {}", j.note) })); }
+    if j.node.is_empty() && !set.is_empty() { return Ok(asked.into()); }
     if j.node.is_empty() { return Err(format!("live: --joins {joins}: it still waits for its box; join it once it runs there")); }
     if !asked.is_empty() && asked != j.node { return Err(format!("live: --node {asked} and --joins {joins} name two boxes: {joins} runs on {}", j.node)); }
     Ok(j.node.clone())
@@ -5488,13 +7188,11 @@ fn suits(x: &Live, needs: &str, pin: &str, avoid: &str) -> bool {
 /// `live start {"app","repo_dir","tree"?,"lane","agent","needs","node"?,"avoid"?,"series"?,"pin_why"?,"visible","test","offline"?,"test_args","env"?}`, `live act <id> <cmd>`,
 /// `live wait <id> patched|verdict|settled|frame [timeout_s]`, `live sync|release|get <id>`, `live list [all]`.
 pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
-    serve_with(ctx, line, &makepad_remote::lines::say_waiting, &|ctx, id, first_call| {
-        let (c, id) = (ctx.clone(), id.to_string());
-        std::thread::Builder::new().name("devhub-live".into()).spawn(move || run(&c, &id, first_call)).map(|_| ())
-    })
+    serve_with(ctx, line, &makepad_remote::lines::say_waiting, &spawn_run)
 }
 
-fn serve_with(ctx: &Arc<Ctx>, line: &str, say: &dyn Fn(&str), launch: &dyn Fn(&Arc<Ctx>, &str, bool) -> std::io::Result<()>) -> Result<String, String> {
+fn serve_with(ctx: &Arc<Ctx>, line: &str, say: &dyn Fn(&str), launch: &dyn Fn(&Arc<Ctx>, Claim, bool) -> Result<(), (std::io::Error, Claim)>) -> Result<String, String> {
+    StartupGate::wait_ready();
     // `live --as <lane> <verb> ..`: the calling lane (see [`owned`])
     let (line, caller) = match line.strip_prefix("live --as ").and_then(|r| r.split_once(' ')) {
         Some((lane, rest)) => (format!("live {rest}"), Some(lane.to_string())),
@@ -5508,6 +7206,10 @@ fn serve_with(ctx: &Arc<Ctx>, line: &str, say: &dyn Fn(&str), launch: &dyn Fn(&A
     let (id, arg) = rest.split_once(' ').map_or((rest, ""), |(a, b)| (a, b.trim()));
     if matches!(verb, "act" | "wait" | "look" | "sync" | "release" | "again") {
         owned(ctx, id, caller.as_deref())?;
+    }
+    if matches!(verb, "act" | "wait" | "look" | "sync") {
+        let arg: String = arg.chars().take(80).collect();
+        acted(ctx, id, format!("`live {verb} {id}{}{arg}`", if arg.is_empty() { "" } else { " " }));
     }
     match verb {
         "start" | "test" => {
@@ -5551,7 +7253,9 @@ fn serve_with(ctx: &Arc<Ctx>, line: &str, say: &dyn Fn(&str), launch: &dyn Fn(&A
             // `--home`: files the app finds in a home of its own on its box (a capture to look at
             // was put into the box user's home by a job pinned to the session's box, 11-13)
             let home = s("home");
-            if !home.is_empty() {
+            if home == BOX_HOME {
+                if test { return Err("live: --home box runs an app on its box's own home; a test's app has its harness's own".into()); }
+            } else if !home.is_empty() {
                 if test { return Err("live: --home seeds an app's home; a test's app has its harness's own".into()); }
                 if !Path::new(&home).is_absolute() || !Path::new(&home).is_file() { return Err(format!("live: --home {home} is not an archive on this machine")); }
                 if env.iter().any(|(k, _)| k == "MAKEPAD_TEST_HOME") { return Err("live: --home is the app's MAKEPAD_TEST_HOME; drop the --env one".into()); }
@@ -5570,12 +7274,16 @@ fn serve_with(ctx: &Arc<Ctx>, line: &str, say: &dyn Fn(&str), launch: &dyn Fn(&A
             let visible = v.get("visible").and_then(|b| b.as_bool()).unwrap_or(false);
             // `--joins W<n>`: on that session's box, which a visible one must take
             let joins = s("joins");
+            let set_name = s("set");
+            if v.get("set").is_some_and(|v| v.as_str().is_none()) || !set_name.is_empty() && crate::lease::sched::parse_set(&set_name).is_none() {
+                return Err(format!("live: {SET_USAGE}"));
+            }
             let pin = if joins.is_empty() { s("node") } else {
-                let node = ctx.store.read(|d| joined_box(&d.lives, &joins, &lane, &s("node")))?;
-                if let Some(why) = ctx.leases.screen_refusal(&node).filter(|_| visible) {
+                let node = ctx.store.read(|d| joined_box(&d.lives, &joins, &lane, &s("node"), &set_name))?;
+                if let Some(why) = ctx.leases.screen_refusal(&node).filter(|_| visible && !node.is_empty()) {
                     return Err(format!("live: --joins {joins}: it runs on {node}, where a visible session would wait with no end: {why}; release {joins} and start it again on a box with a display (`--node <box>`), then join it"));
                 }
-                node
+                if set_name.is_empty() { node } else { s("node") }
             };
             let needs = s("needs");
             // placed as a lease is, by a lease's flags and rules ([`Req::place`])
@@ -5583,7 +7291,8 @@ fn serve_with(ctx: &Arc<Ctx>, line: &str, say: &dyn Fn(&str), launch: &dyn Fn(&A
             let mut asked = crate::lease::sched::Req::new(&lane, Kind::Test);
             asked.place(&pin, &needs, &avoid, &series, &pin_why);
             asked.check_series().map_err(|e| format!("live: {e}"))?;
-            if let Some(old) = ctx.store.read(|d| d.lives.iter().find(|x| x.active() && answers(x, &lane, &app, test, offline, &test_args, &needs, &pin, &avoid, &s("loader"), &env) && (accepting(&x.id) || verb == "test" && !x.held.is_empty())).cloned()) {
+            // Each explicit set start creates a member, even for two copies of the same app.
+            if let Some(old) = ctx.store.read(|d| d.lives.iter().find(|x| x.active() && set_name.is_empty() && x.set.is_empty() && answers(x, &lane, &app, test, offline, &test_args, &needs, &pin, &avoid, &s("loader"), &env) && (accepting(&x.id) || verb == "test" && !x.held.is_empty())).cloned()) {
                 if verb == "test" && !old.held.is_empty() && !accepting(&old.id) {
                     drop(starting);
                     let signal = ctx.store.subscribe("live", &[&old.id]);
@@ -5601,14 +7310,17 @@ fn serve_with(ctx: &Arc<Ctx>, line: &str, say: &dyn Fn(&str), launch: &dyn Fn(&A
                     if old.tree != tree { return Err(format!("{} belongs to worktree {}, and this was asked from {tree}: run it from {}; nothing shipped or ran for this call (the session's log still ends with its last run)", old.id, old.tree, old.tree)); }
                     if old.src != src.as_str() { return Err(format!("{} uses {}; live release {} before changing its source mode", old.id, old.src, old.id)); }
                     if old.timed != timed { return Err(format!("{} is {}a timed session; live release {} before changing that", old.id, if old.timed { "" } else { "not " }, old.id)); }
-                    if old.also != also { return Err(format!("{} ships DEVHUB_ALSO `{}`; live release {} before changing it", old.id, old.also.join(" "), old.id)); }
+                    // (other DEVHUB_ALSO paths than its session's ship from this call on, as changed
+                    // sources do: a file named after the session started never reached its box, 11-26)
+                    if old.also != also { try_set(ctx, &old.id, |s| s.also = also.clone())?; }
                     drop(starting);
-                    return match test_call(ctx, &old.id, &s("check"))? { Some(answer) => Ok(answer), None => serve_with(ctx, line, say, launch) };
+                    let fresh = v.get("fresh").map(|f| f.as_bool().ok_or("live: fresh must be a bool")).transpose()?.unwrap_or(false);
+                    return match test_call(ctx, &old.id, &s("check"), fresh)? { Some(answer) => Ok(answer), None => serve_with(ctx, line, say, launch) };
                 }
                 return Err(format!("{} already runs {app} for lane {lane} on {} (live release {} first)", old.id, old.node, old.id));
             }
             // (a lane's sessions are not counted: each asks for its box and waits in the queue for
-            // room, [`run`])
+            // room, [`run_claimed`])
             let priority = match s("priority").as_str() { "" => Priority::Interactive, p => Priority::parse(p).ok_or("priority is interactive or background")? };
             let cost = s("cost");
             if !cost.is_empty() && CostClass::parse(&cost).is_none() { return Err("cost is small, medium or large".into()); }
@@ -5617,9 +7329,9 @@ fn serve_with(ctx: &Arc<Ctx>, line: &str, say: &dyn Fn(&str), launch: &dyn Fn(&A
             let ram_gb = v.get("ram_gb").filter(|v| !v.is_null()).map(|v| crate::lease::num(v).filter(|n| n.is_finite() && *n > 0.0).ok_or("ram_gb is a positive number")).transpose()?;
             let (x, cold) = ctx.store.update(|d| {
                 d.lives_next += 1;
-                let x = Live { id: format!("W{}", d.lives_next), priority: priority.as_str().into(), loader: s("loader"), src: src.as_str().into(), cost: cost.as_str().into(), est_min, cores, ram_gb, class: s("class"), app: app.clone(), test, offline, test_args, env, also, home, lane: lane.clone(), agent: s("agent"), tree: tree.clone(), needs: s("needs"), pin: pin.clone(), avoid: avoid.clone(), series: series.clone(), pin_why: pin_why.clone(), joins: joins.clone(), visible, timed, state: "starting".into(), touched_ms: wall_ms(), ..Default::default() };
+                let x = Live { id: format!("W{}", d.lives_next), priority: priority.as_str().into(), loader: s("loader"), src: src.as_str().into(), cost: cost.as_str().into(), est_min, cores, ram_gb, class: s("class"), app: app.clone(), test, offline, test_args, env, also, home, lane: lane.clone(), agent: s("agent"), tree: tree.clone(), needs: s("needs"), pin: pin.clone(), avoid: avoid.clone(), series: series.clone(), pin_why: pin_why.clone(), joins, set: set_name, visible, timed, state: "starting".into(), touched_ms: wall_ms(), ..Default::default() };
                 let cold = if test {
-                    d.lives.iter_mut().rev().find(|p| p.test && p.app == app && p.lane == lane).and_then(|previous| cold_start(previous, &x))
+                    d.lives.iter_mut().rev().find(|p| p.test && p.app == app && p.lane == lane && p.set == x.set).and_then(|previous| cold_start(previous, &x))
                 } else { None };
                 d.lives.push(x.clone());
                 (x, cold)
@@ -5631,11 +7343,21 @@ fn serve_with(ctx: &Arc<Ctx>, line: &str, say: &dyn Fn(&str), launch: &dyn Fn(&A
                 say(&format!("live {}: lane {lane} has {} other live session{} of {app} ({}): each ends once its call does, one live test session per lane, package and system", x.id, others.len(), if others.len() == 1 { "" } else { "s" }, others.join(", ")));
             }
             retire_replaced(ctx, &x);
+            let Some(claim) = try_claim_or_warn(ctx, &x.id, LaunchPath::Serve) else {
+                return Err(format!("live {}: already started by another path", x.id));
+            };
             drop(starting);
             event(ctx, Sev::Info, format!("live {}: {app} for lane {lane} asks for a box", x.id), Some(&x));
             let first_call = verb == "test";
-            if let Err(e) = launch(ctx, &x.id, first_call) {
-                try_set(ctx, &x.id, |s| { s.state = "failed".into(); s.note = e.to_string(); })?;
+            if let Err((e, claim)) = launch(ctx, claim, first_call) {
+                let progress = end_progress(ctx, claim.id());
+                try_set(ctx, claim.id(), |s| {
+                    s.state = "failed".into();
+                    s.ended_ms = wall_ms();
+                    s.note = e.to_string();
+                    settle_open_patch(s, s.ended_ms, progress.as_ref());
+                })?;
+                drop(claim);
             }
             if first_call { initial_call(ctx, &x.id, &s("check")) }
             else { Ok(format!("{{\"id\":{},\"app\":{},\"state\":\"starting\",\"note\":{}}}", json_str(&x.id), json_str(&app), json_str(&x.note))) }
@@ -5655,7 +7377,7 @@ fn serve_with(ctx: &Arc<Ctx>, line: &str, say: &dyn Fn(&str), launch: &dyn Fn(&A
         "look" => look(ctx, id, arg),
         "sync" => {
             let x = try_set(ctx, id, |s| s.touched_ms = wall_ms())?.filter(|x| x.active()).ok_or_else(|| not_running(ctx, id))?;
-            if x.test { return test_call(ctx, id, "")?.ok_or_else(|| format!("{id}: parked; take a new live job")); }
+            if x.test { return test_call(ctx, id, "", false)?.ok_or_else(|| format!("{id}: parked; take a new live job")); }
             let held = call(ctx, id)?;
             let r = running(id).ok_or_else(|| format!("{id} has no box yet"))?;
             let tree = PathBuf::from(&x.tree);
@@ -5685,9 +7407,9 @@ fn serve_with(ctx: &Arc<Ctx>, line: &str, say: &dyn Fn(&str), launch: &dyn Fn(&A
             let strs = |v: &[String]| format!("[{}]", v.iter().map(|s| json_str(s)).collect::<Vec<_>>().join(","));
             let env = x.env.iter().map(|(k, v)| format!("[{},{}]", json_str(k), json_str(v))).collect::<Vec<_>>().join(",");
             let req = format!(
-                "{{\"app\":{},\"repo_dir\":{},\"tree\":{},\"lane\":{},\"agent\":{},\"needs\":{},\"node\":{},\"avoid\":{},\"series\":{},\"pin_why\":{},\"visible\":{},\"timed\":{},\"test\":{},\"offline\":{},\"test_args\":{},\"env\":[{env}],\"also\":{},\"home\":{},\"priority\":{},\"cost\":{},\"est_min\":{},\"cores\":{},\"ram_gb\":{},\"class\":{},\"loader\":{},\"joins\":{}}}",
-                json_str(&x.app), json_str(&x.tree), x.src == Src::Tree.as_str(), json_str(&x.lane), json_str(&x.agent), json_str(&x.needs), json_str(if x.joins.is_empty() { &x.pin } else { "" }), json_str(&x.avoid), json_str(&x.series), json_str(&x.pin_why), x.visible, x.timed, x.test, x.offline,
-                strs(&x.test_args), strs(&x.also), json_str(&x.home), json_str(&x.priority), json_str(&x.cost), x.est_min.map_or("null".to_string(), |m| m.to_string()), x.cores.map_or("null".to_string(), |n| n.to_string()), x.ram_gb.map_or("null".to_string(), |n| n.to_string()), json_str(&x.class), json_str(&x.loader), json_str(&x.joins),
+                "{{\"app\":{},\"repo_dir\":{},\"tree\":{},\"lane\":{},\"agent\":{},\"needs\":{},\"node\":{},\"avoid\":{},\"series\":{},\"pin_why\":{},\"visible\":{},\"timed\":{},\"test\":{},\"offline\":{},\"test_args\":{},\"env\":[{env}],\"also\":{},\"home\":{},\"priority\":{},\"cost\":{},\"est_min\":{},\"cores\":{},\"ram_gb\":{},\"class\":{},\"loader\":{},\"joins\":{},\"set\":{}}}",
+                json_str(&x.app), json_str(&x.tree), x.src == Src::Tree.as_str(), json_str(&x.lane), json_str(&x.agent), json_str(&x.needs), json_str(if x.joins.is_empty() || !x.set.is_empty() { &x.pin } else { "" }), json_str(&x.avoid), json_str(&x.series), json_str(&x.pin_why), x.visible, x.timed, x.test, x.offline,
+                strs(&x.test_args), strs(&x.also), json_str(&x.home), json_str(&x.priority), json_str(&x.cost), x.est_min.map_or("null".to_string(), |m| m.to_string()), x.cores.map_or("null".to_string(), |n| n.to_string()), x.ram_gb.map_or("null".to_string(), |n| n.to_string()), json_str(&x.class), json_str(&x.loader), json_str(&x.joins), json_str(&x.set),
             );
             serve_with(ctx, &format!("live {} {req}", if x.test { "test" } else { "start" }), say, launch)
         }
@@ -5704,19 +7426,36 @@ fn serve_with(ctx: &Arc<Ctx>, line: &str, say: &dyn Fn(&str), launch: &dyn Fn(&A
             })?;
             Ok(format!("{{\"released\":[{}]}}", ids.iter().map(|i| json_str(i)).collect::<Vec<_>>().join(",")))
         }
-        "get" => get(ctx, id).map(|x| crate::state::live_value(&x).to_json()).ok_or_else(|| format!("no live job {id}")),
+        "get" => get(ctx, id).map(|x| { let now = wall_ms(); progress_value(&x, quiet_ms(&x, now), now).to_json() }).ok_or_else(|| format!("no live job {id}")),
         "list" if rest == "held-leases" => Ok(ctx.store.read(|d| Value::Obj(d.lives.iter().filter(|x| x.active() && !x.held.is_empty() && !x.lease.is_empty())
             .map(|x| (x.lease.clone(), Value::Str(x.held.clone()))).collect()).to_json())),
         "list" => {
             let all = rest == "all";
-            // each with what devhub tells its owner of its lease (a call far past its measure)
-            let list: Vec<String> = ctx.store.read(|d| d.lives.iter().filter(|x| all || x.active()).cloned().collect::<Vec<_>>()).iter().map(|x| {
-                let mut v = crate::state::live_value(x);
+            let (now, lives) = ctx.store.read(|d| (wall_ms(), d.lives.iter().filter(|x| all || x.active()).cloned().collect::<Vec<_>>()));
+            let sessions: Vec<_> = lives.into_iter().map(|x| {
+                let quiet = quiet_ms(&x, now);
+                let progress = awaits_verdict(&x).map(|_| log_progress(&x.log, x.run_log_start));
+                let key = (progress.as_ref().is_some_and(|p| p.still_running.is_empty()) && quiet >= Some(crate::state::QUIET_SAID_MS))
+                    .then(|| (x.node.clone(), x.pid));
+                (x, quiet, progress, key)
+            }).collect();
+            let keys: Vec<ThreadKey> = sessions.iter().filter_map(|(_, _, _, key)| key.clone()).collect();
+            let threads = if keys.is_empty() { HashMap::new() } else { global_thread_cache().lookup_batch(&keys, LIST_THREADS_WAIT, false) };
+            // Each session includes what devhub tells its lease owner.
+            let list: Vec<String> = sessions.into_iter().map(|(x, quiet, progress, key)| {
+                let mut v = match progress {
+                    Some(progress) => {
+                        let rows = key.as_ref().and_then(|k| threads.get(k)).map_or(&[][..], Vec::as_slice);
+                        progress_value_with(&x, &progress, rows, quiet, now)
+                    }
+                    None => crate::state::live_value(&x),
+                };
                 if let (Value::Obj(fields), Some(word)) = (&mut v, (!x.lease.is_empty()).then(|| ctx.leases.owner_word(&x.lease)).flatten()) {
                     fields.push(("word".into(), Value::Str(word)));
                 }
-                // (how long its run has been silent: a hung one says it while its caller waits)
-                if let (Value::Obj(fields), Some(ms)) = (&mut v, quiet_ms(x, wall_ms())) {
+                // (how long its run has been silent: a hung one says it while its caller waits, and
+                // a test call's edit with no progress says that, [`progress_value`])
+                if let (Value::Obj(fields), Some(ms)) = (&mut v, quiet) {
                     fields.push(("quiet_ms".into(), Value::Int(ms as i64)));
                 }
                 v.to_json()
@@ -5766,7 +7505,14 @@ fn initial_call(ctx: &Ctx, id: &str, check: &str) -> Result<String, String> {
             waiting = None;
             starter_left(ctx, id);
         }
-        if !left && waiting.is_none() { waiting = running(id).map(Waiting::on); }
+        let r = running(id);
+        if left {
+            if let Some(r) = r.as_ref().filter(|r| can_yield_superseded(ctx, id, r)) {
+                finish_call(ctx, id, r);
+                return Err(format!("{id}: this call's client has gone"));
+            }
+        }
+        if !left && waiting.is_none() { waiting = r.map(Waiting::on); }
         let x = get(ctx, id).ok_or("live job disappeared")?;
         let waits = if x.state == "starting" { x.note.as_str() } else { "" };
         if waits != told {
@@ -5781,6 +7527,24 @@ fn initial_call(ctx: &Ctx, id: &str, check: &str) -> Result<String, String> {
         }
         signal.wait(seen, Duration::from_secs(1));
     }
+}
+
+/// Compare with the published overlay without consuming saves or writing into the active ship directory.
+fn saves_differ_from_sources(r: &Running, x: &Live) -> Result<bool, String> {
+    let pin = crate::lease::Pin::of_rev(&x.rev).ok_or("live: missing pin")?;
+    let (mut changed, mut deleted) = crate::lease::ship::uncommitted(&r.tree, &pin)?;
+    back_to_pin(&r.tree, &x.sources, &mut changed, &mut deleted);
+    changed.extend(also_files(&r.tree, &x.also)?);
+    for path in changed {
+        if crate::lease::ship::never_ships(&path) { continue; }
+        match std::fs::symlink_metadata(r.tree.join(&path)) {
+            Ok(_) if x.sources.get(&path) != Some(&source_of(&r.tree, &path)?.0) => return Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => deleted.push(path),
+            Err(e) => return Err(e.to_string()),
+            _ => {}
+        }
+    }
+    Ok(deleted.iter().any(|p| !crate::lease::ship::never_ships(p) && x.sources.get(p).is_none_or(|h| h != "-")))
 }
 
 /// What a call ships, with its edit time and the tree's uncommitted state: every save the
@@ -5810,8 +7574,48 @@ fn call_saves(ctx: &Ctx, r: &Running, x: &Live) -> Result<(Vec<String>, u64, (Ve
     Ok((files.into_iter().collect(), edit_ms, current))
 }
 
+/// The admitted caller owns the edit until shipping and any warm restart have answered.
+#[cfg(test)]
+fn run_test_call_step(
+    x: Live, fresh: bool, fault: Option<String>,
+    publish: impl FnOnce(&Live) -> Result<(Live, LivePatch), String>,
+    recover: impl FnOnce(&Live, &mut LivePatch),
+    wait_tests: impl FnOnce() -> Result<Live, String>,
+    ship_edit: impl FnOnce(&Live) -> Result<Result<Option<String>, String>, String>,
+) -> Result<(Option<LivePatch>, Result<Option<String>, String>), String> {
+    run_test_call_step_with(x, fresh, false, fault, publish, recover, wait_tests, ship_edit)
+}
+
+fn run_test_call_step_with(
+    x: Live, fresh: bool, superseded: bool, fault: Option<String>,
+    publish: impl FnOnce(&Live) -> Result<(Live, LivePatch), String>,
+    recover: impl FnOnce(&Live, &mut LivePatch),
+    wait_tests: impl FnOnce() -> Result<Live, String>,
+    ship_edit: impl FnOnce(&Live) -> Result<Result<Option<String>, String>, String>,
+) -> Result<(Option<LivePatch>, Result<Option<String>, String>), String> {
+    let cut = fault.is_none() && !superseded && x.patch.as_ref().is_some_and(rerun_cut);
+    let again = fresh && !superseded && !cut && x.patch.as_ref().is_some_and(|p| p.tests.is_some());
+    let retried = fault.is_some() && x.patch.as_ref().is_some_and(|p| p.retried);
+    let reason = fault.or_else(|| superseded.then(|| "its tests run again on the new saves after the earlier caller disconnected".into()))
+        .or_else(|| cut.then(|| "its tests run again: the master's restart cut their verdict".into()))
+        .or_else(|| again.then(|| "its tests run again: asked with --fresh".into()));
+    if let Some(reason) = reason {
+        let (published, mut p) = publish(&x)?;
+        p.reason = reason;
+        p.retried = retried;
+        recover(&published, &mut p);
+        wait_tests()?;
+        Ok((None, Ok(None)))
+    } else {
+        Ok((x.patch.clone(), ship_edit(&x)?))
+    }
+}
+
 /// Holds shipping until this call has copied the verdict for its exact source state.
-fn test_call(ctx: &Arc<Ctx>, id: &str, check: &str) -> Result<Option<String>, String> {
+/// `fresh`: its tests run again though nothing changed since their last round (`test --live
+/// --fresh`), as after a fault; without it such a call answers that round's verdict, and its reply
+/// says it is cached ([`cached_reply`]).
+fn test_call(ctx: &Arc<Ctx>, id: &str, check: &str, fresh: bool) -> Result<Option<String>, String> {
     let called = wall_ms();
     try_set(ctx, id, |s| { s.touched_ms = called; s.left_ms = 0; })?;
     let signal = ctx.store.subscribe("live", &[id]);
@@ -5832,8 +7636,29 @@ fn test_call(ctx: &Arc<Ctx>, id: &str, check: &str) -> Result<Option<String>, St
         if !accepting(id) || x.note.starts_with("parked for ") || x.state == "ended" { return Ok(None); }
         if !x.active() || x.state == "paused" { return Ok(Some(crate::state::live_value(&x).to_json())); }
         if let Some(r) = running(id) {
-            if _waiting.is_none() { _waiting = Some(Waiting::on(r.clone())); }
-            if !begin_call(&r) {
+            // Register the owner while admission is locked, so another call cannot mistake the
+            // interval between acquiring inflight and binding its wait token for an orphan.
+            let admitted = {
+                let calls = r.calls.lock().unwrap();
+                let acquired = calls.park.is_none() && !r.inflight.swap(true, SeqCst);
+                if acquired { _waiting.get_or_insert_with(|| Waiting::on(r.clone())).bind_active(); }
+                acquired
+            };
+            if !admitted {
+                if _waiting.is_none() {
+                    if watch_superseded(&r) {
+                        signal.wait(seen, Duration::from_secs(1));
+                        continue;
+                    }
+                    if x.pid > 0 && r.waiting.load(SeqCst) == 0 && !r.restart.load(SeqCst) {
+                        let changed = !fresh && saves_differ_from_sources(&r, &x)?;
+                        if try_supersede_running(ctx, id, &r, fresh, changed) {
+                            ctx.store.notify("live", id);
+                            continue;
+                        }
+                    }
+                    _waiting = Some(Waiting::on(r.clone()));
+                }
                 if behind.is_none() {
                     behind = Some(x.patch.as_ref().map_or_else(|| "the session's first run".to_string(), |p| {
                         let at = p.edit_ms / 1000 % 86_400;
@@ -5843,47 +7668,101 @@ fn test_call(ctx: &Arc<Ctx>, id: &str, check: &str) -> Result<Option<String>, St
             } else {
                 let queued = behind.take().map(|b| (wall_ms().saturating_sub(called), b));
                 let _inflight = Inflight(ctx, id, &r);
+                let superseded = r.supersede.swap(false, SeqCst);
                 let mut x = get(ctx, id).ok_or("live job disappeared")?;
+                x.load_text()?;
                 let fault = r.fault.lock().unwrap().clone();
                 let held = !x.held.is_empty();
                 let room = if held && fault.is_none() { None } else {
                     let admitted = admit(ctx, id, &r, makepad_remote::lines::asked_on());
                     if held && !accepting(id) { return Ok(None); }
                     x = get(ctx, id).ok_or("live job disappeared")?;
+                    x.load_text()?;
                     admitted.inspect_err(|_| if makepad_remote::lines::client_gone() { starter_left(ctx, id) })?
                 };
-                // (an edit whose verdict the master's restart cut: its tests again, as after a fault)
-                let cut = fault.is_none() && x.patch.as_ref().is_some_and(rerun_cut);
-                if let Some(reason) = fault.or_else(|| cut.then(|| "its tests run again: the master's restart cut their verdict".to_string())) {
-                    let mut p = x.patch.clone().ok_or("live: no test state")?;
-                    p.tests = None;
-                    p.reason = reason;
-                    // (the cut was no failure of its JIT: its warm retry is still to come)
-                    if cut { p.retried = false; }
-                    recover(ctx, id, &x, &mut p, true);
-                    wait_tests(ctx, id);
-                    // (that run had the bytes of the last ship, not of this call)
-                    x = get(ctx, id).ok_or("live job disappeared")?;
-                }
-                let (files, edit_ms, current) = call_saves(ctx, &r, &x)?;
-                // (with nothing to ship too: the last verdict answers only while the JIT took no
-                // change after it, [`taken_since`])
-                let shipped = ship_edit(ctx, id, &r, files, edit_ms, called, Some(current), queued);
+                let (before, shipped) = run_test_call_step_with(x, fresh, superseded, fault,
+                    |x| {
+                        let (files, edit_ms, current) = call_saves(ctx, &r, x)?;
+                        let published = loop {
+                            match publish_overlay(ctx, id, &r, x, &files, Some(current.clone())) {
+                                Err(e) if hub_away(&e) && hub_back(ctx, id, x, &r) => continue,
+                                result => break result?,
+                            }
+                        };
+                        let x = get(ctx, id).filter(|s| s.active() && s.run_n == x.run_n && s.pid == x.pid).ok_or("the live run ended during publication")?;
+                        let old = x.patch.as_ref().ok_or("live: no test state")?;
+                        let files = published.map_or_else(|| old.files.clone(), |(changes, _)| changes);
+                        let (queued_ms, behind) = queued.clone().unwrap_or_default();
+                        let p = LivePatch { files, edit_ms: edit_ms.max(old.edit_ms.saturating_add(1)), called_ms: called, shipped_ms: wall_ms(), queued_ms, behind, ..Default::default() };
+                        Ok((x, p))
+                    },
+                    |x, p| {
+                        if set(ctx, id, |s| {
+                            if s.state == "running" && s.pid == x.pid && s.run_n == x.run_n { s.patch = Some(p.clone()); }
+                        }).is_some_and(|s| s.patch.as_ref().is_some_and(|old| old.edit_ms == p.edit_ms)) { recover(ctx, id, x, p, true); }
+                    },
+                    || {
+                        wait_tests(ctx, id);
+                        if watch_superseded(&r) { return Err(format!("{id}: this call's client has gone")); }
+                        get(ctx, id).ok_or_else(|| "live job disappeared".into())
+                    },
+                    |x| {
+                        let (files, edit_ms, current) = call_saves(ctx, &r, x)?;
+                        let shipped = ship_edit(ctx, id, &r, files, edit_ms, called, Some(current), queued.clone());
+                        if watch_superseded(&r) { return Err(format!("{id}: this call's client has gone")); }
+                        Ok(shipped)
+                    },
+                )?;
                 if held && !accepting(id) { return Ok(None); }
                 let room = shipped.inspect_err(|_| if makepad_remote::lines::client_gone() { starter_left(ctx, id) })?.or(room);
                 let x = try_set(ctx, id, |s| s.touched_ms = wall_ms())?.ok_or("live job disappeared")?;
-                if makepad_remote::lines::client_gone() { starter_left(ctx, id); }
-                return Ok(Some(with_room(test_reply(&x, Some(&r), check), room.as_deref())));
+                let gone = makepad_remote::lines::client_gone();
+                if gone { starter_left(ctx, id); }
+                let reply = cached_reply(test_reply(&x, Some(&r), check), before.as_ref(), x.patch.as_ref());
+                // (its round's verdict reached a caller: the next call with nothing changed is cached)
+                if !gone && x.patch.as_ref().is_some_and(|p| p.tests.is_some() && p.answered_ms == 0) {
+                    let at = wall_ms();
+                    let round = x.patch.as_ref().map(round_key);
+                    let _ = try_set(ctx, id, |s| if let Some(p) = s.patch.as_mut().filter(|p| Some(round_key(p)) == round) { p.answered_ms = at; });
+                }
+                return Ok(Some(with_room(reply, room.as_deref())));
             }
         }
         signal.wait(seen, Duration::from_secs(1));
     }
 }
 
+/// A test call's reply whose verdict is the session's last round's (its patch before the call,
+/// `before`, is the one after it, `after`: no round ran) with `cached_ms`, that verdict's time: the
+/// client says the verdict is cached and that `--fresh` runs the tests again. Four of a lane's
+/// five reruns in a flake hunt read their session's last pass as a fresh one (11-26). Only once
+/// an earlier call carried that verdict to its caller (`answered_ms`): a call whose link was cut
+/// mid-round asked again and read its own edit's round as cached (W24157, 11-26).
+fn cached_reply(reply: String, before: Option<&LivePatch>, after: Option<&LivePatch>) -> String {
+    let cached = match (before, after) {
+        (Some(b), Some(a)) if a.tests.is_some() && b.answered_ms > 0 && round_key(a) == round_key(b) => a.verdict_ms.max(a.shipped_ms).max(a.edit_ms),
+        _ => return reply,
+    };
+    match reply.strip_suffix('}') {
+        Some(head) => format!("{head},\"cached_ms\":{cached}}}"),
+        None => reply,
+    }
+}
+
+/// What makes a session's round that round: its edit, ship, verdict and outcome.
+fn round_key(p: &LivePatch) -> (u64, u64, u64, u64, String) {
+    (p.seq, p.edit_ms, p.shipped_ms, p.verdict_ms, p.outcome.clone())
+}
+
 pub fn verdict(p: &LivePatch) -> String {
     let after = |t: u64| if t == 0 { "-".to_string() } else { format!("{} ms", t.saturating_sub(p.edit_ms)) };
     if p.outcome == "jit_error" { return crate::state::jit_error_verdict(p); }
     let Some(t) = &p.tests else {
+        if p.outcome == "ended" {
+            let reason = if p.reason.is_empty() { "ended before its verdict" } else { &p.reason };
+            return format!("{}verdict {reason}\n", p.jit_notice);
+        }
+        if p.reason.starts_with("verdict lost:") { return format!("{}{}\n", p.jit_notice, p.reason); }
         return format!("{}verdict {}{}\n", p.jit_notice, if p.outcome.is_empty() { "pending" } else { &p.outcome }, if p.reason.is_empty() { String::new() } else { format!(": {}", p.reason) });
     };
     // a save made long before its call (a test session ships on the call) says so: that wait was
@@ -5947,7 +7826,476 @@ fn restart_ran(s: &mut Live) {
 /// For the manager's check-in (`lane quiet`): the live sessions whose restart has waited longer
 /// than [`RESTART_LISTED_MS`], their lane measuring code the app does not run.
 pub(super) fn restarts_pending(ctx: &Ctx, now: u64) -> Vec<String> {
-    ctx.store.read(|d| restart_rows(&d.lives, now))
+    let (mut rows, waiting) = ctx.store.read(|d| (restart_rows(&d.lives, now), d.lives.iter().filter(|x| awaits_verdict(x).is_some()).cloned().collect::<Vec<_>>()));
+    let stalled: Vec<_> = waiting.into_iter().filter_map(|x| {
+        let quiet = quiet_ms(&x, now).filter(|q| *q >= crate::lease::sched::QUIET_STALL_MS)?;
+        let progress = log_progress(&x.log, x.run_log_start);
+        Some((x, quiet, progress))
+    }).collect();
+    let keys: Vec<ThreadKey> = stalled.iter().filter(|(_, _, progress)| {
+        (progress.current.is_some() || progress.measured_ms.is_some()) && progress.still_running.is_empty()
+    }).map(|(x, _, _)| (x.node.clone(), x.pid)).collect();
+    let threads = if keys.is_empty() { HashMap::new() } else { global_thread_cache().lookup_batch(&keys, GET_THREADS_WAIT, true) };
+    rows.extend(stalled.into_iter().filter_map(|(x, quiet, progress)| {
+        let why = if progress.current.is_none() && progress.measured_ms.is_none() {
+            no_progress(&x, Some(quiet), now)
+        } else {
+            let rows = threads.get(&(x.node.clone(), x.pid)).map_or(&[][..], Vec::as_slice);
+            running_test_summary(&x, &progress, rows, Some(quiet), now)
+        }?;
+        Some(format!("{}: {} {}@{} {why}: `makepad devhub live {}`", x.lane, x.id, x.app, x.node, x.id))
+    }));
+    rows
+}
+
+/// A running test session's edit whose verdict its call waits for: none yet, and its run started.
+fn awaits_verdict(x: &Live) -> Option<&LivePatch> {
+    x.patch.as_ref().filter(|p| x.test && x.state == "running" && x.pid > 0 && p.edit_ms > 0 && !terminal(p))
+}
+
+/// A test session's edit with no verdict ([`awaits_verdict`]) whose run has written nothing for
+/// [`crate::lease::sched::QUIET_STALL_MS`] or more (`quiet`: its log's last change) makes no
+/// progress: said on its caller's still-running line and in the manager's check-in
+/// ([`restarts_pending`]), with that evidence, and never a reason to end it. Two test calls waited
+/// 102 min at "restarting JIT" before their lane noticed by chance (W25685, W25686, 11-27).
+fn no_progress(x: &Live, quiet: Option<u64>, now: u64) -> Option<String> {
+    let p = awaits_verdict(x)?;
+    let quiet = quiet.filter(|q| *q >= crate::lease::sched::QUIET_STALL_MS)?;
+    let through = match p.outcome.as_str() {
+        "restart" | "recovering" => " through its JIT's restart",
+        "initial" => " in its first run",
+        _ => "",
+    };
+    Some(format!("no progress for {} min{through}: the edit saved at {} has no verdict, and its JIT (pid {}) has written nothing since {}", quiet / 60_000, hhmmss(p.edit_ms), x.pid, hhmmss(now.saturating_sub(quiet))))
+}
+
+#[derive(Debug, Default, Clone, PartialEq)]
+struct RoundLog {
+    total: usize,
+    passed: Vec<String>,
+    failed: Vec<String>,
+    ignored: Vec<String>,
+    over_60s: Vec<String>,
+    finished: bool,
+    verdict_ms: Option<u64>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq)]
+struct RunProgress {
+    current: Option<RoundLog>,
+    measured_ms: Option<u64>,
+    still_running: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct RunningThread {
+    name: String,
+    state: String,
+    cpu_ms: u64,
+    waits: String,
+}
+
+impl RoundLog {
+    fn done(&self) -> usize { self.passed.len() + self.failed.len() + self.ignored.len() }
+
+    fn names(&self) -> impl Iterator<Item = &String> { self.passed.iter().chain(&self.failed).chain(&self.ignored) }
+}
+
+/// Tokens of a harness verdict. A quoted why or diagnostic can contain spaces and even "ms=".
+fn verdict_fields(line: &str) -> impl Iterator<Item = (&str, &str)> {
+    let mut quoted = false;
+    let mut escaped = false;
+    line.split(move |c: char| {
+        if escaped { escaped = false; }
+        else if quoted && c == '\\' { escaped = true; }
+        else if c == '"' { quoted = !quoted; }
+        !quoted && c.is_ascii_whitespace()
+    }).filter_map(|field| field.split_once('='))
+}
+
+fn test_result_count(rest: &str) -> Option<usize> {
+    rest.split([';', '.']).filter_map(|part| {
+        let (n, kind) = part.trim().split_once(' ')?;
+        matches!(kind, "passed" | "failed" | "ignored").then(|| n.parse::<usize>().ok()).flatten()
+    }).reduce(usize::saturating_add)
+}
+
+fn parse_rounds(log: &str) -> Vec<RoundLog> {
+    let mut rounds = Vec::new();
+    let mut cur = RoundLog::default();
+    let mut done = std::collections::HashSet::new();
+    for line in log.lines() {
+        let header = line.strip_prefix("running ").and_then(|s| s.split_once(' '))
+            .filter(|(_, tail)| matches!(*tail, "test" | "tests")).and_then(|(n, _)| n.parse::<usize>().ok());
+        let boot = line.starts_with("relax live: restarting (") || line.starts_with("relax live: restarting:") || line.starts_with("devhub: the JIT is ");
+        if boot || (cur.finished && (line.starts_with("     Running ") || header.is_some())) {
+            if cur.total > 0 || cur.done() > 0 || cur.finished {
+                rounds.push(std::mem::take(&mut cur));
+                done.clear();
+            }
+        }
+        if let Some(n) = header {
+            if cur.total == 0 { cur.total = n; }
+        } else if let Some(rest) = line.strip_prefix("test result: ") {
+            if !test_result_count(rest).is_some_and(|n| n < cur.total) { cur.finished = true; }
+        } else if let Some(rest) = line.strip_prefix("testverdict ") {
+            cur.finished = true;
+            let fields: BTreeMap<_, _> = verdict_fields(rest).collect();
+            if !fields.contains_key("reverted") && !fields.contains_key("faulted") {
+                cur.verdict_ms = fields.get("ms").and_then(|s| s.parse::<f64>().ok()).map(|ms| ms as u64);
+            }
+        } else if let Some(test) = line.strip_prefix("test ").filter(|_| !cur.finished) {
+            if let Some(name) = test.strip_suffix(" has been running for over 60 seconds") {
+                let name = name.strip_suffix(" - should panic").unwrap_or(name);
+                if !name.is_empty() && !name.contains(char::is_whitespace) && !done.contains(name) && !cur.over_60s.iter().any(|n| n == name) {
+                    cur.over_60s.push(name.into());
+                }
+                continue;
+            }
+            let Some((name, outcome)) = test.split_once(" ... ") else { continue };
+            let name = name.strip_suffix(" - should panic").unwrap_or(name);
+            let outcome = match outcome.rsplit_once(" <") {
+                Some((result, time)) if time.strip_suffix("s>").is_some_and(|s| s.parse::<f64>().is_ok()) => result,
+                _ => outcome,
+            };
+            let list = match outcome { "ok" => &mut cur.passed, "FAILED" => &mut cur.failed, "ignored" => &mut cur.ignored, _ => continue };
+            if !name.is_empty() && !name.contains(char::is_whitespace) && done.insert(name) {
+                list.push(name.into());
+                cur.over_60s.retain(|n| n != name);
+            }
+        }
+    }
+    rounds.push(cur);
+    rounds
+}
+
+fn log_progress(log_path: &str, run_log_start: u64) -> RunProgress {
+    use std::io::{Read, Seek, SeekFrom};
+    const TAIL: u64 = 8 << 20;
+    let Ok(mut log) = std::fs::File::open(log_path) else { return RunProgress::default() };
+    let Ok(len) = log.seek(SeekFrom::End(0)) else { return RunProgress::default() };
+    let start = len.saturating_sub(TAIL);
+    let mut bytes = Vec::new();
+    if log.seek(SeekFrom::Start(start)).is_err() || log.take(len - start).read_to_end(&mut bytes).is_err() { return RunProgress::default(); }
+    let split = run_log_start.saturating_sub(start).min(bytes.len() as u64) as usize;
+    let mut rounds = parse_rounds(&String::from_utf8_lossy(&bytes[..split]));
+    rounds.extend(parse_rounds(&String::from_utf8_lossy(&bytes[split..])));
+    let measured_ms = rounds.iter().rev().find_map(|r| r.verdict_ms);
+    let current = rounds.pop().filter(|r| !r.finished && (r.total > 0 || r.done() > 0));
+    let mut still_running = Vec::new();
+    if let Some(cur) = &current {
+        still_running.clone_from(&cur.over_60s);
+        if still_running.is_empty() && cur.total > 0 {
+            if let Some(prev) = rounds.iter().rev().find(|r| r.finished && r.total == cur.total) {
+                let done: std::collections::HashSet<_> = cur.names().collect();
+                let missing: Vec<_> = prev.names().filter(|n| !done.contains(n)).cloned().collect();
+                if missing.len() <= cur.total.saturating_sub(done.len()).max(1) { still_running = missing; }
+            }
+        }
+    }
+    RunProgress { current, measured_ms, still_running }
+}
+
+fn parse_program_threads(lines: &[String]) -> Vec<RunningThread> {
+    lines.iter().filter_map(|line| {
+        let v = makepad_strict_json::parse(line.as_bytes()).ok()?;
+        let name = v.get("name")?.as_str()?;
+        if v.get("role")?.as_str()? != "program" || matches!(name, "" | "main" | "<unnamed>") ||
+            ["makepad-", "relax-", "devhub-"].iter().any(|s| name.starts_with(s)) { return None; }
+        Some(RunningThread { name: name.into(), state: v.get("state").and_then(Value::as_str).unwrap_or_default().into(),
+            cpu_ms: v.get("cpu_ms").and_then(Value::as_u64).unwrap_or_default(), waits: v.get("waits").and_then(Value::as_str).unwrap_or_default().into() })
+    }).collect()
+}
+
+const THREADS_LOOK: Duration = Duration::from_secs(2);
+const THREADS_CACHE_TTL: Duration = Duration::from_secs(10);
+const THREADS_CACHE_EVICT: Duration = Duration::from_secs(60);
+const THREAD_PROBE_WORKERS: usize = 4;
+const LIST_THREADS_WAIT: Duration = Duration::from_millis(250);
+const GET_THREADS_WAIT: Duration = Duration::from_millis(500);
+
+type ThreadKey = (String, u32);
+type ThreadProbeFn = Arc<dyn Fn(&str, u32) -> Vec<RunningThread> + Send + Sync>;
+
+#[derive(Default)]
+struct ThreadEntry {
+    rows: Vec<RunningThread>,
+    /// Stamped when the probe finishes (`None` until the first probe completes).
+    updated_at: Option<Instant>,
+    inflight: bool,
+    /// When the current in-flight probe was enqueued (caps follow-up callers' wait).
+    started_at: Option<Instant>,
+    logged_wait: bool,
+}
+
+#[derive(Default)]
+struct ThreadPoolState {
+    entries: HashMap<ThreadKey, ThreadEntry>,
+    queue: std::collections::VecDeque<ThreadKey>,
+    closed: bool,
+}
+
+struct ThreadCacheShared {
+    state: Mutex<ThreadPoolState>,
+    work_cv: std::sync::Condvar,
+    done_cv: std::sync::Condvar,
+    ttl: Duration,
+    evict: Duration,
+}
+
+struct ThreadCache {
+    shared: Arc<ThreadCacheShared>,
+    workers: Vec<std::thread::JoinHandle<()>>,
+}
+
+impl ThreadCache {
+    fn new(worker_count: usize, ttl: Duration, evict: Duration, probe: ThreadProbeFn) -> Self {
+        let shared = Arc::new(ThreadCacheShared {
+            state: Mutex::new(ThreadPoolState::default()),
+            work_cv: std::sync::Condvar::new(),
+            done_cv: std::sync::Condvar::new(),
+            ttl,
+            evict,
+        });
+        let mut workers = Vec::with_capacity(worker_count);
+        for i in 0..worker_count {
+            let s = shared.clone();
+            let p = probe.clone();
+            match std::thread::Builder::new()
+                .name(format!("devhub-live-threads-{i}"))
+                .spawn(move || thread_probe_worker(s, p))
+            {
+                Ok(h) => workers.push(h),
+                Err(e) => eprintln!("live threads: failed to spawn worker {i}: {e}"),
+            }
+        }
+        Self { shared, workers }
+    }
+
+    fn lookup_one(&self, node: &str, pid: u32, wait: Duration, wait_on_stale: bool) -> Vec<RunningThread> {
+        let key = (node.to_string(), pid);
+        self.lookup_batch(std::slice::from_ref(&key), wait, wait_on_stale)
+            .remove(&key)
+            .unwrap_or_default()
+    }
+
+    fn lookup_batch(&self, keys: &[ThreadKey], wait: Duration, wait_on_stale: bool) -> HashMap<ThreadKey, Vec<RunningThread>> {
+        if keys.is_empty() { return HashMap::new(); }
+        let call_start = Instant::now();
+        let call_deadline = call_start.checked_add(wait).unwrap_or(call_start);
+        let mut slow_to_log: Vec<ThreadKey> = Vec::new();
+        let out = {
+            let mut st = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
+            st.entries.retain(|_, e| e.inflight || e.updated_at.is_some_and(|at| call_start.saturating_duration_since(at) < self.shared.evict));
+            let mut enqueued = 0usize;
+            for key in keys {
+                let entry = st.entries.entry(key.clone()).or_default();
+                let fresh = entry.updated_at.is_some_and(|at| call_start.saturating_duration_since(at) < self.shared.ttl);
+                if !fresh && !entry.inflight && !self.workers.is_empty() {
+                    entry.inflight = true;
+                    entry.started_at = Some(call_start);
+                    entry.logged_wait = false;
+                    st.queue.push_back(key.clone());
+                    enqueued += 1;
+                }
+            }
+            if enqueued == 1 { self.shared.work_cv.notify_one(); }
+            else if enqueued > 1 { self.shared.work_cv.notify_all(); }
+            loop {
+                let now = Instant::now();
+                if now >= call_deadline { break; }
+                let wake_at = keys.iter()
+                    .filter_map(|k| st.entries.get(k))
+                    .filter_map(|e| thread_wait_until(e, now, call_start, wait, wait_on_stale))
+                    .max()
+                    .map(|cap| cap.min(call_deadline));
+                let Some(until) = wake_at else { break };
+                let Some(rem) = until.checked_duration_since(now).filter(|d| !d.is_zero()) else { break };
+                st = self.shared.done_cv.wait_timeout(st, rem).unwrap_or_else(|e| e.into_inner()).0;
+            }
+            let mut out = HashMap::with_capacity(keys.len());
+            for key in keys {
+                if let Some(entry) = st.entries.get_mut(key) {
+                    let still_waiting = !wait.is_zero()
+                        && entry.inflight
+                        && (entry.updated_at.is_none() || (wait_on_stale && entry.updated_at.is_some_and(|at| at < call_start)));
+                    if still_waiting && !entry.logged_wait {
+                        entry.logged_wait = true;
+                        slow_to_log.push(key.clone());
+                    }
+                    out.insert(key.clone(), entry.rows.clone());
+                }
+            }
+            out
+        };
+        for (node, pid) in slow_to_log {
+            eprintln!("live threads {node}:{pid}: probe still running past {} ms budget; returning without fresh thread rows", wait.as_millis());
+        }
+        out
+    }
+}
+
+impl Drop for ThreadCache {
+    fn drop(&mut self) {
+        {
+            let mut st = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
+            st.closed = true;
+            st.queue.clear();
+        }
+        self.shared.work_cv.notify_all();
+        for w in self.workers.drain(..) {
+            let _ = w.join();
+        }
+    }
+}
+
+fn thread_wait_until(entry: &ThreadEntry, now: Instant, call_start: Instant, wait: Duration, wait_on_stale: bool) -> Option<Instant> {
+    if !entry.inflight || wait.is_zero() { return None; }
+    if let Some(at) = entry.updated_at {
+        if !wait_on_stale || at >= call_start { return None; }
+    }
+    let cap = entry.started_at?.checked_add(wait)?;
+    (cap > now).then_some(cap)
+}
+
+fn thread_probe_worker(shared: Arc<ThreadCacheShared>, probe: ThreadProbeFn) {
+    loop {
+        let key = {
+            let mut st = shared.state.lock().unwrap_or_else(|e| e.into_inner());
+            loop {
+                if let Some(key) = st.queue.pop_front() { break key; }
+                if st.closed { return; }
+                st = shared.work_cv.wait(st).unwrap_or_else(|e| e.into_inner());
+            }
+        };
+        let rows = probe(&key.0, key.1);
+        let finished_at = Instant::now();
+        {
+            let mut st = shared.state.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(entry) = st.entries.get_mut(&key) {
+                entry.rows = rows;
+                entry.updated_at = Some(finished_at);
+                entry.inflight = false;
+                entry.started_at = None;
+                entry.logged_wait = false;
+            }
+        }
+        shared.done_cv.notify_all();
+    }
+}
+
+fn probe_program_threads(node: &str, pid: u32) -> Vec<RunningThread> {
+    let started = Instant::now();
+    let lines = inspect_until(node, pid, "threads", &|| started.elapsed() > THREADS_LOOK)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    parse_program_threads(&lines)
+}
+
+fn global_thread_cache() -> &'static ThreadCache {
+    static CACHE: std::sync::LazyLock<ThreadCache> = std::sync::LazyLock::new(|| {
+        ThreadCache::new(
+            THREAD_PROBE_WORKERS,
+            THREADS_CACHE_TTL,
+            THREADS_CACHE_EVICT,
+            Arc::new(probe_program_threads),
+        )
+    });
+    &CACHE
+}
+
+fn cached_program_threads(node: &str, pid: u32, wait: Duration, wait_on_stale: bool) -> Vec<RunningThread> {
+    global_thread_cache().lookup_one(node, pid, wait, wait_on_stale)
+}
+
+fn ended_verdict_reason(note: &str, progress: &RunProgress) -> String {
+    let Some(cur) = &progress.current else { return format!("ended before its verdict ({note}; 0 tests finished)") };
+    let ignored = if cur.ignored.is_empty() { String::new() } else { format!(", {} ignored", cur.ignored.len()) };
+    let still = if progress.still_running.is_empty() { String::new() } else { format!("; still running: {}", progress.still_running.join(", ")) };
+    format!("ended before its verdict ({note}; {}/{} finished: {} passed, {} failed{ignored}{still})", cur.done(), cur.total, cur.passed.len(), cur.failed.len())
+}
+
+fn settle_open_patch(s: &mut Live, now: u64, progress: Option<&RunProgress>) {
+    if !s.test { return; }
+    let Some(p) = s.patch.as_mut().filter(|p| !terminal(p)) else { return };
+    p.tests = None;
+    p.outcome = "ended".into();
+    p.verdict_ms = now;
+    if p.outcome_ms == 0 { p.outcome_ms = now; }
+    p.reason = ended_verdict_reason(&s.note, progress.unwrap_or(&RunProgress::default()));
+    p.reason_ref = Default::default();
+}
+
+fn end_progress(ctx: &Ctx, id: &str) -> Option<RunProgress> {
+    get(ctx, id).as_ref().and_then(open_progress)
+}
+
+fn open_progress(x: &Live) -> Option<RunProgress> {
+    (x.test && x.patch.as_ref().is_some_and(|p| !terminal(p))).then(|| log_progress(&x.log, x.run_log_start))
+}
+
+fn running_test_summary(x: &Live, progress: &RunProgress, threads: &[RunningThread], quiet: Option<u64>, now: u64) -> Option<String> {
+    use crate::lease::sched::dur;
+    let p = x.patch.as_ref().filter(|p| x.test && x.active() && !terminal(p))?;
+    let elapsed = dur(now.saturating_sub(p.edit_ms.max(p.shipped_ms).max(x.started_ms)));
+    let measured = progress.measured_ms.map_or_else(|| ", no prior run measured".into(), |ms| format!(" vs {} measured", dur(ms)));
+    let mut time = format!("{elapsed} elapsed{measured}");
+    if let Some(ms) = quiet { time.push_str(&format!("; quiet {}", dur(ms))); }
+    let mut summary = progress.current.as_ref().map_or_else(|| "waiting for tests to start".into(), |r| format!("{}/{} finished", r.done(), r.total));
+    let (noun, names, count) = if progress.still_running.is_empty() {
+        let names: Vec<_> = threads.iter().take(3).map(|t| format!("{} [{}{}{}]", t.name, t.state, if t.waits.is_empty() { "" } else { ", " }, t.waits)).collect();
+        ("thread ", names, threads.len())
+    } else {
+        ("", progress.still_running.iter().take(3).cloned().collect(), progress.still_running.len())
+    };
+    if count > 0 {
+        summary.push_str(&format!("; still running {noun}{}", names.join(", ")));
+        if count > names.len() { summary.push_str(&format!(" + {} more", count - names.len())); }
+    } else if progress.current.is_none() {
+        time.push_str(&format!("; edit saved at {} on pid {}", hhmmss(p.edit_ms), x.pid));
+    }
+    Some(format!("{summary} ({time})"))
+}
+
+fn running_tests_json(x: &Live, progress: &RunProgress, threads: &[RunningThread], quiet: Option<u64>, now: u64) -> Value {
+    use makepad_strict_json::{obj, s};
+    let round = progress.current.as_ref();
+    let names = progress.still_running.iter().map(s).collect();
+    let thread_rows = threads.iter().map(|t| obj(vec![("name", s(&t.name)), ("state", s(&t.state)), ("waits", s(&t.waits)), ("cpu_ms", Value::Int(t.cpu_ms as i64))])).collect();
+    obj(vec![("summary", s(running_test_summary(x, progress, threads, quiet, now).unwrap_or_default())),
+        ("total", Value::Int(round.map_or(0, |r| r.total) as i64)), ("finished", Value::Int(round.map_or(0, RoundLog::done) as i64)),
+        ("measured_ms", progress.measured_ms.map_or(Value::Null, |n| Value::Int(n as i64))),
+        ("still_running", Value::Arr(names)), ("threads", Value::Arr(thread_rows))])
+}
+
+fn progress_value(x: &Live, quiet: Option<u64>, now: u64) -> Value {
+    if awaits_verdict(x).is_none() { return crate::state::live_value(x); }
+    let progress = log_progress(&x.log, x.run_log_start);
+    let threads = if progress.still_running.is_empty() && quiet >= Some(crate::state::QUIET_SAID_MS) {
+        cached_program_threads(&x.node, x.pid, GET_THREADS_WAIT, true)
+    } else { Vec::new() };
+    progress_value_with(x, &progress, &threads, quiet, now)
+}
+
+fn progress_value_with(x: &Live, progress: &RunProgress, threads: &[RunningThread], quiet: Option<u64>, now: u64) -> Value {
+    let Some(p) = awaits_verdict(x) else { return crate::state::live_value(x) };
+    let info = running_tests_json(x, progress, threads, quiet, now);
+    let summary = info.get("summary").and_then(Value::as_str).unwrap_or_default();
+    let mut value = crate::state::live_value(x);
+    if let Value::Obj(fields) = &mut value {
+        if !threads.is_empty() && p.reason.is_empty() && p.reason_ref.len == 0 {
+            if let Some((_, Value::Obj(patch))) = fields.iter_mut().find(|(k, _)| k == "patch") {
+                if let Some((_, reason)) = patch.iter_mut().find(|(k, _)| k == "reason") { *reason = Value::Str(summary.into()); }
+            }
+        }
+        let elapsed = now.saturating_sub(p.edit_ms.max(p.shipped_ms).max(x.started_ms));
+        if quiet >= Some(crate::state::QUIET_SAID_MS) || progress.measured_ms.is_some_and(|ms| elapsed > ms.saturating_add(crate::state::STARTUP_MARGIN_MS)) {
+            fields.push(("no_progress".into(), Value::Str(summary.into())));
+        }
+        fields.push(("running_tests".into(), info));
+    }
+    value
 }
 
 fn restart_rows(lives: &[Live], now: u64) -> Vec<String> {
@@ -5956,6 +8304,54 @@ fn restart_rows(lives: &[Live], now: u64) -> Vec<String> {
         x.lane, x.id, x.app, x.node, now.saturating_sub(x.restart_since_ms) / 60_000, x.restart_saves, hhmm(x.restart_since_ms),
         if x.restart_why.is_empty() { "no reason given" } else { &x.restart_why }, x.id,
     )).collect()
+}
+
+/// `live start --home box`: the session's app runs on its box's own home, the person's app data there.
+pub const BOX_HOME: &str = "box";
+
+/// What a session's app home starts from ([`crate::lease::ship::send_home`]): its `--home` archive;
+/// for an app session without one, an empty archive, so its app finds a fresh home of its own
+/// (`MAKEPAD_TEST_HOME`), gone with its lease. None on the box's own home (`--home box`), for a test
+/// session (its harness gives each app its own), or when its `--env` names a test home. A lane's live
+/// Town opened a box's own Town home, a persistent demo copy linked to the person's Mac, and signed
+/// a name into it (11-27). A fresh home is a test home: Town takes the test driver's input to its
+/// call and sharing controls there, never in the box's own.
+fn home_archive(ctx: &Ctx, x: &Live) -> Result<Option<PathBuf>, String> {
+    match x.home.as_str() {
+        BOX_HOME => Ok(None),
+        "" if x.test || x.env.iter().any(|(k, _)| k == "MAKEPAD_TEST_HOME") => Ok(None),
+        "" => empty_home(&ctx.home).map(Some),
+        a => Ok(Some(PathBuf::from(a))),
+    }
+}
+
+/// An empty tar archive (one record of zero blocks) in devhub's home: a fresh app home's seed,
+/// shipped to a box once by its hash.
+fn empty_home(home: &Path) -> Result<PathBuf, String> {
+    const RECORD: usize = 10240;
+    let p = home.join("empty-home.tar");
+    if std::fs::metadata(&p).is_ok_and(|m| m.len() == RECORD as u64) { return Ok(p); }
+    let tmp = home.join(format!("empty-home.tar.{}", std::process::id()));
+    std::fs::write(&tmp, vec![0u8; RECORD]).and_then(|()| std::fs::rename(&tmp, &p)).map_err(|e| format!("{}: {e}", p.display()))?;
+    Ok(p)
+}
+
+/// Where a placed session runs on its box: its work dir, the home its app finds (`MAKEPAD_TEST_HOME`
+/// from `--home` or fresh, or the box's `HOME`), its pid, and how to copy its files back (`live get`) with no
+/// lease of its own: a helper's `run --node` job on the same box could not find them, and each probe
+/// cost it about 10 min of queue (11-26). None before it is placed.
+fn on_box_line(x: &Live) -> Option<String> {
+    if x.work_dir.is_empty() { return None; }
+    let home = if x.home == BOX_HOME {
+        format!("{} (the box's own home, from --home box: its real app data)", if x.box_home.is_empty() { "-" } else { &x.box_home })
+    } else if x.home_dir.is_empty() {
+        if x.box_home.is_empty() { "-".into() } else { x.box_home.clone() }
+    } else if x.home.is_empty() {
+        format!("{} (MAKEPAD_TEST_HOME, fresh: gone at its release)", x.home_dir)
+    } else {
+        format!("{} (MAKEPAD_TEST_HOME, from --home)", x.home_dir)
+    };
+    Some(format!("  on {}: work {}, home {home}, pid {}; its files: `devhub live get {} <rel> <local-dir>` (rel in its lease: its work, `target/..`, `tmp/..`)\n", x.node, x.work_dir, x.pid, x.id))
 }
 
 /// One live job, answer first: `W3 running makepad-app-calculator on a node pid 4412; last edit: 2
@@ -5976,10 +8372,23 @@ pub fn render(x: &Live) -> String {
     if let Some(ms) = quiet_ms(x, wall_ms()).filter(|ms| *ms >= crate::state::QUIET_SAID_MS) { out.push_str(&format!("  last output {} ago\n", crate::state::ago(ms))); }
     if let Some(line) = kept_line(x, wall_ms()) { out.push_str(&line); }
     if !x.env.is_empty() { out.push_str(&format!("  env: {}\n", x.env.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>().join(","))); }
-    if !x.home.is_empty() { out.push_str(&format!("  home: {}{}\n", x.home, if x.home_dir.is_empty() { String::new() } else { format!(" (the app's copy on its box: {})", x.home_dir) })); }
+    if let Some(line) = on_box_line(x) { out.push_str(&line); }
+    if x.home == BOX_HOME { out.push_str("  home: the box's own home (--home box): its real app data\n"); } else if !x.home.is_empty() { out.push_str(&format!("  home: {}{}\n", x.home, if x.home_dir.is_empty() { String::new() } else { format!(" (the app's copy on its box: {})", x.home_dir) })); }
     if let Some(p) = &x.patch {
         let after = |t: u64| if t == 0 { "-".to_string() } else { format!("{} ms", t.saturating_sub(p.edit_ms)) };
-        if x.test {
+        if x.test && !terminal(p) {
+            let progress = log_progress(&x.log, x.run_log_start);
+            if !x.active() {
+                out.push_str(&format!("{}verdict {}\n", p.jit_notice, ended_verdict_reason(&x.note, &progress)));
+            } else {
+                let now = wall_ms();
+                let summary = running_test_summary(x, &progress, &[], quiet_ms(x, now), now).unwrap_or_default();
+                let phase = if p.outcome.is_empty() { "pending" } else { &p.outcome };
+                let hint = progress.still_running.is_empty() && p.reason.contains("; still running thread ");
+                out.push_str(&format!("{}verdict {phase}: {}\n", p.jit_notice, if hint { &p.reason } else { &summary }));
+                if !hint && !p.reason.is_empty() { out.push_str(&format!("  {}\n", p.reason)); }
+            }
+        } else if x.test {
             out.push_str(&verdict(p));
         } else {
             out.push_str(&format!("  last edit: {} file(s) {}; save → shipped {}, → verdict {}, → frame {}{}\n", p.files.len(), if p.outcome.is_empty() { "shipping" } else { &p.outcome }, after(p.shipped_ms), after(p.outcome_ms), after(p.frame_ms), if p.reason.is_empty() { String::new() } else { format!(": {}", p.reason) }));

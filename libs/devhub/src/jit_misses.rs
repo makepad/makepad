@@ -3,6 +3,10 @@
 //! The JSONL ledger has one current row per diagnostic.
 
 use makepad_strict_json::{obj, s, Value};
+#[cfg(feature = "checkout")]
+use makepad_toml_parser::{parse_toml, Toml, TomlDocument};
+#[cfg(feature = "checkout")]
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -420,19 +424,42 @@ pub(crate) fn jit_binary_packages(repo: &Path, pair: &crate::state::Pair) -> Res
     Ok(package_dirs(&tree).into_iter().filter(|(_, dir)| dirs.contains(dir)).map(|(pkg, _)| pkg).collect())
 }
 
-/// The packages the lane's diff touches at `pin`, to check without their tests ([`check_failures`]):
-/// each path the lane changed since it left work (and commercial main), committed or, unless
-/// `commits_only`, not ([`crate::lease::ship::uncommitted`]: what ships with its runs), in the
-/// package that holds it ([`packages_touched`]).
+/// Touched workspace packages for the plain and test-target checks. Only the second set
+/// includes edits under `tests/` and requires an enabled test target in the shipped files.
 #[cfg(feature = "checkout")]
-pub(crate) fn touched_packages(repo: &Path, pin: &crate::lease::Pin, commits_only: bool) -> Result<Vec<String>, String> {
-    let paths = touched_paths(repo, pin, commits_only)?;
-    Ok(packages_touched(&crate::orch::ci::Tree::at_pin(repo, pin)?, &paths))
+pub(crate) fn touched_pre_land(repo: &Path, pin: &crate::lease::Pin, commits_only: bool) -> Result<(Vec<String>, Vec<String>), String> {
+    let mut paths = committed_touched_paths(repo, pin)?;
+    let (files, gone) = if commits_only { (Vec::new(), Vec::new()) } else { crate::lease::ship::uncommitted(repo, pin)? };
+    paths.extend(files.iter().chain(&gone).cloned());
+    if paths.is_empty() { return Ok((Vec::new(), Vec::new())); }
+    let tree = crate::orch::ci::Tree::at_pin(repo, pin)?;
+    let (plain, mut tests, dirs) = touched_split(&tree, &paths);
+    let edited = files.into_iter().collect();
+    let deleted = gone.into_iter().collect();
+    let view = ShippedTree { tree: &tree, repo: (!commits_only).then_some(repo), edited: &edited, deleted: &deleted };
+    tests.retain(|pkg| dirs.get(pkg).is_some_and(|dir| has_test_target(&view, dir)));
+    Ok((plain, tests))
 }
 
-/// The paths of [`touched_packages`], for a caller that holds the tree already.
+#[cfg(not(feature = "checkout"))]
+pub(crate) fn touched_pre_land(_: &Path, _: &crate::lease::Pin, _: bool) -> Result<(Vec<String>, Vec<String>), String> {
+    Ok((Vec::new(), Vec::new()))
+}
+
+/// The paths of [`touched_pre_land`], for a caller that holds the tree already.
 #[cfg(feature = "checkout")]
 pub(crate) fn touched_paths(repo: &Path, pin: &crate::lease::Pin, commits_only: bool) -> Result<Vec<String>, String> {
+    let mut paths = committed_touched_paths(repo, pin)?;
+    if !commits_only {
+        let (files, deleted) = crate::lease::ship::uncommitted(repo, pin)?;
+        paths.extend(files.into_iter().chain(deleted));
+    }
+    Ok(paths)
+}
+
+/// Committed paths touched since each side of the lane left its base branch.
+#[cfg(feature = "checkout")]
+fn committed_touched_paths(repo: &Path, pin: &crate::lease::Pin) -> Result<Vec<String>, String> {
     use crate::orch::ci::COMMERCIAL;
     let pair = pin.pair();
     let mut paths = Vec::new();
@@ -450,15 +477,7 @@ pub(crate) fn touched_paths(repo: &Path, pin: &crate::lease::Pin, commits_only: 
         let base = crate::orch::git(&dir, &["merge-base", &sha, &branch])?;
         paths.extend(crate::orch::git(&dir, &["diff", "--name-only", base.trim(), &sha])?.lines().map(|p| format!("{prefix}{p}")));
     }
-    if !commits_only {
-        let (files, deleted) = crate::lease::ship::uncommitted(repo, pin)?;
-        paths.extend(files.into_iter().chain(deleted));
-    }
     Ok(paths)
-}
-#[cfg(not(feature = "checkout"))]
-pub(crate) fn touched_packages(_: &Path, _: &crate::lease::Pin, _: bool) -> Result<Vec<String>, String> {
-    Ok(Vec::new())
 }
 
 /// The root workspace's crates that hold `paths`, each path in the package whose directory holds
@@ -468,33 +487,184 @@ pub(crate) fn touched_packages(_: &Path, _: &crate::lease::Pin, _: bool) -> Resu
 /// package of another workspace is left to the buckets (its check runs from its own directory).
 #[cfg(feature = "checkout")]
 pub(crate) fn packages_touched(tree: &crate::orch::ci::Tree, paths: &[String]) -> Vec<String> {
-    touched_in(tree, paths, false)
+    touched_split(tree, paths).0
 }
 
 /// The packages of [`packages_touched`] and those whose test targets (`tests/`) `paths` change:
 /// what rustc's check of the test targets checks ([`tests_run`]).
 #[cfg(feature = "checkout")]
 pub(crate) fn test_targets_touched(tree: &crate::orch::ci::Tree, paths: &[String]) -> Vec<String> {
-    touched_in(tree, paths, true)
+    touched_split(tree, paths).1
 }
 
 #[cfg(feature = "checkout")]
-fn touched_in(tree: &crate::orch::ci::Tree, paths: &[String], tests: bool) -> Vec<String> {
+fn touched_split(tree: &crate::orch::ci::Tree, paths: &[String]) -> (Vec<String>, Vec<String>, BTreeMap<String, String>) {
     use crate::orch::ci::{package_dirs, workspace_names};
     let dirs = package_dirs(tree);
     let root = workspace_names(tree);
-    let mut out = std::collections::BTreeSet::new();
+    let (mut plain, mut tests) = (BTreeSet::new(), BTreeSet::new());
     for path in paths.iter().filter(|p| !makepad_ci_merge::doc_file(p)) {
         let holds = |d: &&String| d.is_empty() || path.strip_prefix(d.as_str()).is_some_and(|r| r.starts_with('/'));
         let Some((name, dir)) = dirs.iter().filter(|(_, d)| holds(d)).max_by_key(|(_, d)| d.len()) else { continue };
         let inside = if dir.is_empty() { path.as_str() } else { &path[dir.len() + 1..] };
-        if ["tests/", "benches/", "examples/"].iter().any(|t| inside.starts_with(t) && !(tests && *t == "tests/")) { continue; }
-        if root.contains(name) { out.insert(name.clone()); }
+        if !root.contains(name) || inside.starts_with("benches/") || inside.starts_with("examples/") { continue; }
+        tests.insert(name.clone());
+        if !inside.starts_with("tests/") { plain.insert(name.clone()); }
     }
-    out.into_iter().collect()
+    (plain.into_iter().collect(), tests.into_iter().collect(), dirs)
 }
 
-/// One run of the pre-land check without tests ([`check_runs`]): its packages, its lease's class,
+/// Files at the pin, with exactly the edits and deletions that ship with a worktree run.
+#[cfg(feature = "checkout")]
+struct ShippedTree<'a> {
+    tree: &'a crate::orch::ci::Tree,
+    repo: Option<&'a Path>,
+    edited: &'a BTreeSet<String>,
+    deleted: &'a BTreeSet<String>,
+}
+
+#[cfg(feature = "checkout")]
+impl ShippedTree<'_> {
+    fn read(&self, path: &str) -> Option<Result<String, ()>> {
+        if self.deleted.contains(path) { return None; }
+        if let Some(repo) = self.repo.filter(|_| self.edited.contains(path)) {
+            return match std::fs::read_to_string(repo.join(path)) {
+                Ok(text) => Some(Ok(text)),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(_) => Some(Err(())),
+            };
+        }
+        self.tree.read(path).map(Ok)
+    }
+
+    fn has(&self, path: &str) -> bool {
+        if self.deleted.contains(path) { return false; }
+        if let Some(repo) = self.repo.filter(|_| self.edited.contains(path)) { return repo.join(path).is_file(); }
+        self.tree.has(path)
+    }
+
+    fn files_under(&self, prefix: &str) -> BTreeSet<String> {
+        let start = self.tree.files.partition_point(|f| f.as_str() < prefix);
+        let mut files: BTreeSet<_> = self.tree.files[start..].iter().take_while(|f| f.starts_with(prefix))
+            .filter(|f| !self.deleted.contains(*f) && !self.edited.contains(*f)).cloned().collect();
+        if let Some(repo) = self.repo {
+            files.extend(self.edited.range(prefix.to_string()..).take_while(|f| f.starts_with(prefix))
+                .filter(|f| repo.join(f).is_file()).cloned());
+        }
+        files
+    }
+}
+
+#[cfg(feature = "checkout")]
+fn join_rel(dir: &str, rel: &str) -> String {
+    if dir.is_empty() { rel.to_string() } else { format!("{dir}/{rel}") }
+}
+
+#[cfg(feature = "checkout")]
+fn normalize_join(dir: &str, rel: &str) -> String {
+    let path = rel.replace('\\', "/");
+    if path.starts_with('/') || path.as_bytes().get(1) == Some(&b':') { relax_base::vfs::normalize_path(&path) }
+    else { relax_base::vfs::normalize_path(&join_rel(dir, &path)) }
+}
+
+#[cfg(feature = "checkout")]
+fn auto_target_name(rel: &str) -> Option<&str> {
+    let name = rel.strip_suffix("/main.rs").or_else(|| rel.strip_suffix(".rs"))?;
+    (!name.contains('/')).then_some(name)
+}
+
+/// Package-local feature closure under default features. A strong `dep/feature` may enable
+/// a local feature of an optional dependency; `dep:dep` and `dep?/feature` do not.
+#[cfg(feature = "checkout")]
+fn default_features_of(doc: &TomlDocument) -> BTreeSet<String> {
+    let features = doc.root.get("features").and_then(Toml::as_table);
+    let hidden: BTreeSet<_> = features.into_iter().flat_map(|f| f.values())
+        .filter_map(Toml::as_array).flatten().filter_map(Toml::as_str).filter_map(|s| s.strip_prefix("dep:")).collect();
+    let mut optional = BTreeSet::new();
+    let target_tables = doc.root.get("target").and_then(Toml::as_table).into_iter().flat_map(|t| t.values()).filter_map(Toml::as_table);
+    for table in std::iter::once(&doc.root).chain(target_tables) {
+        for kind in ["dependencies", "build-dependencies", "build_dependencies"] {
+            if let Some(deps) = table.get(kind).and_then(Toml::as_table) {
+                optional.extend(deps.iter().filter(|(_, dep)| dep.as_table().and_then(|t| t.get("optional")).and_then(Toml::as_bool) == Some(true))
+                    .map(|(key, _)| key.as_str()));
+            }
+        }
+    }
+    let mut enabled = BTreeSet::new();
+    let mut pending = vec!["default"];
+    while let Some(word) = pending.pop() {
+        if word.starts_with("dep:") || word.contains("?/") { continue; }
+        let name = match word.split_once('/') {
+            Some((dep, _)) if optional.contains(dep) => dep,
+            Some(_) => continue,
+            None => word,
+        };
+        if enabled.contains(name) { continue; }
+        if let Some(feature) = features.and_then(|f| f.get(name)) {
+            enabled.insert(name.to_string());
+            pending.extend(feature.as_array().unwrap_or_default().iter().filter_map(Toml::as_str));
+        } else if optional.contains(name) && !hidden.contains(name) {
+            enabled.insert(name.to_string());
+        }
+    }
+    enabled
+}
+
+/// Whether the shipped package has a root for a default-feature `--tests` check. A broken
+/// manifest goes to the checker so that its diagnostic reaches the lane.
+#[cfg(feature = "checkout")]
+fn has_test_target(view: &ShippedTree<'_>, dir: &str) -> bool {
+    let Some(manifest) = view.read(&join_rel(dir, "Cargo.toml")) else { return false };
+    let Ok(doc) = manifest.and_then(|text| parse_toml(&text).map_err(|_| ())) else { return true };
+    let Some(package) = doc.root.get("package").and_then(Toml::as_table) else { return false };
+    let Some(name) = package.get("name").and_then(Toml::as_str) else { return false };
+    let lib = |key: &str| doc.get_path(&["lib", key]);
+    let has_lib = lib("path").and_then(Toml::as_str).is_some() ||
+        (package.get("autolib").and_then(Toml::as_bool) != Some(false) && view.has(&join_rel(dir, "src/lib.rs")));
+    if has_lib && lib("test").and_then(Toml::as_bool) != Some(false) { return true; }
+    let edition_2015 = if doc.get_path(&["package", "edition", "workspace"]).and_then(Toml::as_bool) == Some(true) {
+        let root = view.read("Cargo.toml").and_then(Result::ok).and_then(|s| parse_toml(&s).ok());
+        root.as_ref().and_then(|d| d.get_path(&["workspace", "package", "edition"])).and_then(Toml::as_str).unwrap_or("2015") == "2015"
+    } else { package.get("edition").and_then(Toml::as_str).unwrap_or("2015") == "2015" };
+    let enabled = default_features_of(&doc);
+    let main = join_rel(dir, "src/main.rs");
+    for (kind, auto, rel) in [("bin", "autobins", "src/bin/"), ("test", "autotests", "tests/")] {
+        let prefix = join_rel(dir, rel);
+        let explicit: Vec<_> = match doc.root.get(kind) {
+            None => Vec::new(),
+            Some(Toml::ArrayOfTables(tables)) => tables.iter().collect(),
+            Some(Toml::Array(values)) => match values.iter().map(Toml::as_table).collect::<Option<Vec<_>>>() {
+                Some(tables) => tables,
+                None => return true,
+            },
+            Some(_) => return true,
+        };
+        let discover = package.get(auto).and_then(Toml::as_bool).unwrap_or(!edition_2015 || explicit.is_empty());
+        let (mut names, mut paths) = (BTreeSet::new(), BTreeSet::new());
+        for table in explicit {
+            let Some(target) = table.get("name").and_then(Toml::as_str) else { continue };
+            let path = if let Some(p) = table.get("path").and_then(Toml::as_str) { normalize_join(dir, p) } else {
+                let flat = format!("{prefix}{target}.rs");
+                let nested = format!("{prefix}{target}/main.rs");
+                let candidates = if kind == "bin" && target == name { vec![main.clone(), nested, flat] } else { vec![flat, nested] };
+                let Some(path) = candidates.into_iter().find(|p| view.has(p)) else { continue };
+                path
+            };
+            let required = table.get("required-features").and_then(Toml::as_array).unwrap_or_default();
+            if table.get("test").and_then(Toml::as_bool) != Some(false) && required.iter().filter_map(Toml::as_str).all(|f| enabled.contains(f)) {
+                return true;
+            }
+            names.insert(target);
+            paths.insert(path);
+        }
+        if !discover { continue; }
+        if kind == "bin" && !names.contains(name) && !paths.contains(&main) && view.has(&main) { return true; }
+        if view.files_under(&prefix).iter().any(|p| !paths.contains(p) && auto_target_name(&p[prefix.len()..]).is_some_and(|n| !names.contains(n))) { return true; }
+    }
+    false
+}
+
+/// One run of the pre-land or hand-in checks: its packages, its lease's class,
 /// its command and the command that shows it alone.
 #[derive(Debug, PartialEq)]
 pub(crate) struct CheckRun {
@@ -504,8 +674,7 @@ pub(crate) struct CheckRun {
     pub class: String,
     pub cmd: Vec<String>,
     pub alone: String,
-    /// rustc's check of the packages' test targets ([`tests_run`]): its errors fail it, its
-    /// warnings do not
+    /// Checks the packages' test targets. Both pre-land and the hand-in gate treat source warnings as failures.
     pub tests: bool,
 }
 
@@ -517,11 +686,24 @@ pub(crate) struct CheckRun {
 /// on their box built one each (11-12). A run of one package keeps that package's class, and its
 /// measure.
 pub(crate) fn check_runs(touched: &[(String, bool)]) -> Vec<CheckRun> {
+    package_check_runs(touched, false)
+}
+
+/// The companion default-feature `--tests` checks, batched by the same checker as the plain runs.
+pub(crate) fn check_tests_runs(touched: &[(String, bool)]) -> Vec<CheckRun> {
+    package_check_runs(touched, true)
+}
+
+fn package_check_runs(touched: &[(String, bool)], tests: bool) -> Vec<CheckRun> {
     [false, true].into_iter().filter_map(|own| {
         let packages: Vec<String> = touched.iter().filter(|(_, o)| *o == own).map(|(p, _)| p.clone()).collect();
         let (first, rest) = packages.split_first()?;
-        let class = if rest.is_empty() { format!("check:{first}") } else { format!("check:{first} +{}", rest.len()) };
-        let flags: Vec<String> = packages.iter().flat_map(|p| ["-p".to_string(), p.clone()]).collect();
+        let kind = if tests { "check-tests" } else { "check" };
+        let class = if rest.is_empty() { format!("{kind}:{first}") } else { format!("{kind}:{first} +{}", rest.len()) };
+        let mut flags = Vec::new();
+        if own && tests { flags.push("--tests".to_string()); }
+        flags.extend(packages.iter().flat_map(|p| ["-p".to_string(), p.clone()]));
+        if !own && tests { flags.push("--tests".to_string()); }
         let (head, alone): (&[&str], &str) = if own { (&["cargo", "check", "--release", "--message-format", "short"], "cargo check --release") }
             else { (&["cargo", "run", "--profile", "host", "-q", "-p", "makepad-run", "--bin", "makepad", "--", "check"], "makepad check") };
         Some(CheckRun {
@@ -530,16 +712,15 @@ pub(crate) fn check_runs(touched: &[(String, bool)]) -> Vec<CheckRun> {
             cmd: head.iter().map(|w| w.to_string()).chain(flags.iter().cloned()).collect(),
             alone: format!("{alone} {}", flags.join(" ")),
             packages,
-            tests: false,
+            tests,
         })
     }).collect()
 }
 
 /// rustc's check of `packages`' test targets (`cargo check --release --tests`), as the fast
-/// bucket's testcheck runs it after a landing, its errors failing it and its warnings not: the
-/// JIT runs and checks a lane's tests with its own type checker, and one that took a test rustc
-/// rejects (E0277, an untyped closure argument under rustc's integer fallback) landed green and
-/// broke the fast bucket (#5087, 11-15). None for no package.
+/// bucket's `step_testcheck` runs it after a landing. Both errors and new warnings fail the
+/// hand-in (zero warnings). The JIT uses its own type checker and can accept a test rustc
+/// rejects (#5087) or miss a rustc late lint (#10571). None for no package.
 #[cfg(feature = "checkout")]
 pub(crate) fn tests_run(packages: &[String]) -> Option<CheckRun> {
     let (first, rest) = packages.split_first()?;
@@ -554,18 +735,28 @@ pub(crate) fn tests_run(packages: &[String]) -> Option<CheckRun> {
     })
 }
 
-/// What fails a check of a package without its tests: its compile errors and each warning at a
-/// source line, as the compiler said them. A fn only its tests call is used under cfg(test) and
-/// dead in the build that ships, which only a check without the tests says.
-pub(crate) fn check_failures(log: &str) -> Vec<String> {
-    // `<path>:<line>:<col>: warning..`
-    let located = |l: &&str| l.split_once(": warning").is_some_and(|(at, _)| {
-        let mut f = at.rsplitn(3, ':');
-        let number = |s: Option<&str>| s.is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()));
-        number(f.next()) && number(f.next()) && f.next().is_some_and(|p| !p.is_empty())
+/// Located compiler warnings (`<path>:<line>:<col>: warning...`), stripped of ANSI escapes.
+/// Unlocated summary warnings (`warning: \`pkg\` generated 1 warning`, `warning: unused manifest
+/// key`) are excluded.
+pub(crate) fn located_warnings(log: &str) -> Vec<String> {
+    let log = plain(log);
+    let located = |l: &&str| l.split_once(": warning").is_some_and(|(at, after)| {
+        (after.starts_with(':') || after.starts_with('[')) && {
+            let mut f = at.rsplitn(3, ':');
+            let number = |s: Option<&str>| s.is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()));
+            number(f.next()) && number(f.next()) && f.next().is_some_and(|p| !p.is_empty() && !p.starts_with([' ', '\t']))
+        }
     });
+    log.lines().filter(located).map(str::to_string).collect()
+}
+
+/// What fails a package or test-target check: its compile errors and each warning at a source
+/// line, as the compiler said them. A fn only its tests call is dead in the build that ships
+/// (#4005, #4024), and a rustc lint warning in a test target fails the fast bucket's
+/// `step_testcheck` (zero warnings).
+pub(crate) fn check_failures(log: &str) -> Vec<String> {
     let mut out = compile_errors(log);
-    out.extend(log.lines().filter(located).map(str::to_string));
+    out.extend(located_warnings(log));
     out
 }
 
@@ -774,9 +965,124 @@ pub(crate) fn serve(home: &Path, line: &str, now: u64, event: &dyn Fn(&str, &Val
     Ok(value.to_json())
 }
 
+#[cfg(all(test, feature = "checkout"))]
+pub(crate) mod pre_land_fixture {
+    use std::path::PathBuf;
+
+    pub(crate) struct Repo(pub PathBuf);
+
+    impl Repo {
+        pub fn new(case: &str, files: &[(&str, &str)]) -> Self {
+            let repo = Self(std::env::temp_dir().join(format!("devhub-pre-land-{case}-{}", std::process::id())));
+            let _ = std::fs::remove_dir_all(&repo.0);
+            for (path, contents) in files { repo.write(path, contents); }
+            repo.git(&["init", "-q", "-b", "work"]);
+            repo.git(&["add", "."]);
+            repo.git(&["commit", "-qm", "base"]);
+            repo.git(&["checkout", "-qb", "rc-lane"]);
+            repo
+        }
+
+        pub fn git(&self, args: &[&str]) -> String {
+            let config = ["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"];
+            crate::orch::git(&self.0, &[&config[..], args].concat()).unwrap().trim().to_string()
+        }
+
+        pub fn write(&self, path: &str, contents: &str) {
+            let file = self.0.join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, contents).unwrap();
+        }
+
+        pub fn pin(&self) -> crate::lease::Pin { crate::lease::Pin::at(&self.git(&["rev-parse", "HEAD"])) }
+    }
+
+    impl Drop for Repo {
+        fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn check_tests_runs_splits_jit_and_own_with_tests_flag() {
+        let runs = check_tests_runs(&[("a".into(), false), ("b".into(), true), ("c".into(), false)]);
+        assert_eq!(runs.len(), 2);
+        let (jit, native) = (&runs[0], &runs[1]);
+        assert!(jit.tests && !jit.own && native.tests && native.own);
+        assert_eq!(jit.packages, ["a", "c"]);
+        assert_eq!(jit.class, "check-tests:a +1");
+        assert_eq!(jit.alone, "makepad check -p a -p c --tests");
+        assert_eq!(crate::lease::loaders::cargo_run_args(&jit.cmd).unwrap().join(" "), "check -p a -p c --tests");
+        assert_eq!(native.packages, ["b"]);
+        assert_eq!(native.class, "native:check-tests:b");
+        assert_eq!(native.cmd.join(" "), "cargo check --release --message-format short --tests -p b");
+        assert_eq!(native.alone, "cargo check --release --tests -p b");
+        assert!(check_tests_runs(&[]).is_empty());
+    }
+
+    #[cfg(feature = "checkout")]
+    #[test]
+    fn touched_pre_land_includes_integration_test_only_edits() {
+        let repo = pre_land_fixture::Repo::new("integration", &[
+            ("Cargo.toml", "[workspace]\nmembers = ['pkg']\n"),
+            ("pkg/Cargo.toml", "[package]\nname = 'pkg'\n"),
+            ("pkg/src/lib.rs", ""), ("pkg/tests/it.rs", ""),
+        ]);
+        repo.write("pkg/tests/it.rs", "#[test] fn it() {}\n");
+        let (plain, tests) = touched_pre_land(&repo.0, &repo.pin(), false).unwrap();
+        assert!(plain.is_empty());
+        assert_eq!(tests, ["pkg"]);
+    }
+
+    #[cfg(feature = "checkout")]
+    #[test]
+    fn touched_pre_land_reads_uncommitted_manifest_and_targets_for_test_false_filter() {
+        let manifest = |name: &str, test: bool, extra: &str| format!(
+            "[package]\nname = '{name}'\nedition = '2021'\n{extra}\n[[bin]]\nname = '{name}'\npath = 'src/main.rs'\ntest = {test}\n"
+        );
+        let p = manifest("p", false, "");
+        let repo = pre_land_fixture::Repo::new("shipped", &[
+            ("Cargo.toml", "[workspace]\nmembers = ['tools/p', 'tools/q']\n"),
+            ("tools/p/Cargo.toml", &p), ("tools/p/src/main.rs", "fn main() {}\n"),
+            ("tools/q/Cargo.toml", &manifest("q", true, "")), ("tools/q/src/main.rs", "fn main() {}\n"),
+        ]);
+        repo.write("tools/p/src/main.rs", "fn main() { }\n");
+        repo.git(&["commit", "-qam", "touch p"]);
+        let pin = repo.pin();
+        let check = |pin, commits_only, plain: &[&str], tests: &[&str]| {
+            let got = touched_pre_land(&repo.0, pin, commits_only).unwrap();
+            assert_eq!(got.0, plain, "plain, commits_only={commits_only}");
+            assert_eq!(got.1, tests, "tests, commits_only={commits_only}");
+        };
+        check(&pin, false, &["p"], &[]);
+        check(&pin, true, &["p"], &[]);
+        repo.write("tools/p/Cargo.toml", &manifest("p", false, "description = 'x'"));
+        check(&pin, false, &["p"], &[]);
+        repo.write("tools/p/Cargo.toml", &manifest("p", true, ""));
+        check(&pin, false, &["p"], &["p"]);
+        check(&pin, true, &["p"], &[]);
+        repo.write("tools/p/Cargo.toml", &p);
+        repo.write("tools/p/tests/smoke.rs", "");
+        check(&pin, false, &["p"], &["p"]);
+        check(&pin, true, &["p"], &[]);
+        std::fs::remove_file(repo.0.join("tools/p/tests/smoke.rs")).unwrap();
+        check(&pin, false, &["p"], &[]);
+
+        repo.write("tools/q/Cargo.toml", &manifest("q", false, ""));
+        check(&pin, false, &["p", "q"], &[]);
+        repo.write("tools/p/tests/only.rs", "");
+        repo.git(&["add", "tools/p/tests/only.rs"]);
+        repo.git(&["commit", "-qm", "add integration target"]);
+        let next = repo.pin();
+        std::fs::remove_file(repo.0.join("tools/p/tests/only.rs")).unwrap();
+        check(&next, false, &["p", "q"], &[]);
+        check(&next, true, &["p"], &["p"]);
+        repo.write("tools/p/Cargo.toml", "[package\n");
+        check(&next, false, &["p", "q"], &["p"]);
+    }
 
     #[cfg(feature = "checkout")]
     #[test]
@@ -1054,6 +1360,8 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
         assert_eq!(check_failures(&check), vec![dead.to_string()], "the warning at its line, not the summary or the note");
         assert_eq!(check_failures(&format!("{log}{error}\n")), vec![error.to_string(), warn.to_string(), "/tree/src/a.rs:3:1: warning[W1]: x".to_string()], "errors, then warnings");
         assert!(check_failures("relax check: all, 0 errors\nwarning: unused manifest key\n").is_empty(), "a warning at no source line is no failure of the code");
+        let colored = "\x1b[1msrc/a.rs:1:2:\x1b[0m \x1b[33mwarning\x1b[0m: unused\nwarning: `a` (lib) generated 1 warning\nsrc/a.rs:2:1: warning_not_lint: nope\n  src/a.rs:3:1: warning: indented\n";
+        assert_eq!(located_warnings(colored), vec!["src/a.rs:1:2: warning: unused"]);
     }
 
     #[test]

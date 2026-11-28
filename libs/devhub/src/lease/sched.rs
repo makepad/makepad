@@ -58,6 +58,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 /// pid instead, which ends it within a second of the holder's end: its beats only carry news to
 /// the holder, and arrive late from a holder the OS throttles (an agent's job run at background
 /// priority under load went 10 s without a beat while alive, three leases ending at once, 11-03).
+/// An in-process holder also proves liveness directly, for as long as it holds the lease.
 pub const BEAT_EXPIRY_MS: u64 = 10_000;
 /// A node hub holding more than this share of its box's RAM is a warning (once per crossing):
 /// a hub needs tens of MB; node hubs reached 2.5-10 GB within an hour, unseen (11-03).
@@ -65,8 +66,10 @@ pub const HUB_HEAVY_SHARE: f64 = 0.25;
 /// How long a lease a restarted master took back waits for its holder's first beat.
 pub const RESTORE_GRACE_MS: u64 = 60_000;
 /// The refusal of a lane's non-timed ask pinned to a bench box: the bench's quiet window is the only
-/// clean number a timed series has.
-pub const BENCH_PIN: &str = "a bench box takes timed leases only; ask timed, or pin a pool box";
+/// clean number a timed series has. A timed series that opens windows asks `gui=1` too: a lane's
+/// timed GUI measurement asked a screen lease there, refused, and moved to a pool box as a screen
+/// lease whose `--native` the review warned of, with no word of the timed path (11-26).
+pub const BENCH_PIN: &str = "a bench box takes timed leases only; ask timed (with --needs gui=1 when it opens windows: its box's WM display), or pin a pool box";
 
 /// How long a lane's ask queues before the queue counts as busy ([`Sched::queue_busy_ms`]).
 const QUEUE_BUSY_WAIT_MS: u64 = 60_000;
@@ -100,9 +103,11 @@ pub const AGE_STEP_MS: u64 = 600_000;
 /// A node whose caps go unanswered this long counts as down (polls are every 10 s).
 pub const DOWN_AFTER_MS: u64 = 30_000;
 /// A box off the network this long (its connects fail as host down, no route or timed out; a
-/// restarting hub's are refused) ends its live leases as lost: its hub ends them itself after a
-/// minute without the master's beat, and their holders, reading the silence as a hub restart,
-/// waited 15 min to re-attach (a pool box left the network holding five leases, 11-07).
+/// restarting hub's are refused) dropped: its timed leases end as lost (a sleep inside a run
+/// spoils its timings), and its other live leases ride the outage while their holders beat, up
+/// to twice its longest recorded outage ([`Sched::caps_missed`]). With no outage on record they
+/// end at this mark: a pool box left the network for good holding five leases, and their holders
+/// waited 15 min to re-attach (11-07).
 pub const HOST_GONE_MS: u64 = 60_000;
 /// A box whose link dropped ([`HOST_GONE_MS`]) more than once within this window settles before
 /// it takes new work ([`Sched::settling_after_drops`]).
@@ -110,15 +115,12 @@ const DROPS_WINDOW_MS: u64 = 60 * 60_000;
 /// How long a box's drops are kept for the pattern its `devhub nodes` line says
 /// ([`Sched::link_said`]).
 const DROPS_KEEP_MS: u64 = 24 * 60 * 60_000;
-/// How long a lease pinned to a box off the network keeps its place before it is refused
-/// ([`Sched::pinned_gone`]), at least: twice the box's longest outage it recorded, if that is
-/// longer. A bench Mac whose lid was shut dropped off the network every 15 min between its dark
-/// wakes, each outage up to 18 min, and a minute of one refused two timed asks pinned to it that
-/// had queued 50 min (11-26).
-const PINNED_GONE_GRACE_MS: u64 = 30 * 60_000;
 /// How long a box that dropped more than once in [`DROPS_WINDOW_MS`] is heard steadily before it
 /// takes new work again.
 const SETTLE_MS: u64 = 10 * 60_000;
+/// How long after the roll asked a box's hub to restart for its update a miss of it is that
+/// restart, whatever the miss says ([`Sched::hub_restarting`]); the roll warns past it.
+pub const HUB_RESTART_MS: u64 = 120_000;
 /// Background legs owed a box (their run outlasted its fair share, `orch::leg`): verify's
 /// correctness legs and jitlegs, asking at one under a lane's default. They reserve their box for
 /// as long as they wait, so new lane work does not overtake them there (a jitlegs leg headed the
@@ -181,10 +183,16 @@ const TREE_TURN: &str = ": one lease at a time in its tree";
 /// A lane's overlay's turn after its overlay at another pin on its box ([`Req::other_pin`]).
 const PIN_TURN: &str = ": its lane's overlays at other pins, one at a time on a box";
 
-/// A live session whose last call ended this recently is in use, idle or not: no ask parks it.
-/// A lane's 3D session was parked for another ask's RAM between two looks of a proof, and every
-/// look after it came back without a frame (E3D, 11-15).
-pub const LIVE_IN_USE_MS: u64 = 300_000;
+/// A live session whose last call ended or that was last used this recently is in use, idle or
+/// not: no ask parks it for RAM ([`Sched::idle_live`]). Every use counts as a call does: an act, a
+/// look, a wait (its lane's other sessions' too), a sync, a routed inspect, a save, a person's
+/// input at a visible one's box ([`Sched::live_used`]). One window for both, the 10 min of its
+/// idle end (`orch::live::IDLE_MS`): a session kept alive is never parked for RAM. A lane's 3D
+/// session was parked for another ask's RAM between two looks of a proof, and every look after
+/// it came back without a frame (E3D, 11-15); a walk's two sessions, kept alive by a call every
+/// 45 s, were parked for a 6 GB test as a restarted master's first look read their last calls at
+/// its clock's zero (11-26).
+pub const LIVE_IN_USE_MS: u64 = 600_000;
 /// How long a live session's node sees its runs quiet before it is charged what it measures, a
 /// launch or call still open ([`Sched::charged`]): past a JIT's pauses between its compile bursts.
 const LIVE_QUIET_CHARGE_S: u64 = 60;
@@ -237,6 +245,47 @@ const FAR_OVERRUN_TIMES: u64 = 10;
 /// A live session holding this many times its class's measured peak has its memory recorded
 /// while it lives, once ([`Sched::record_far_over_ram`]).
 const MEM_RECORD_TIMES: f64 = 3.0;
+/// The leases a box's WM restart waits on as live sessions it cannot go around ([`Caps::wm_drain`]'s
+/// `<kind> lease <id> of <lane> (<what>)`, `<what>` [`super::exec::LIVE_UNKEPT`]).
+fn unkept_holds(drain: &str) -> Vec<String> {
+    let tag = format!(" ({})", super::exec::LIVE_UNKEPT);
+    drain.split("; ").filter_map(|part| part.strip_suffix(&tag)?.split_whitespace().nth(2).map(str::to_string)).collect()
+}
+
+/// Each lease a box's WM restart waits on ([`Caps::wm_drain`]'s `<kind> lease <id> of <lane>
+/// (<what>)` parts), by its id, with its part.
+fn drain_leases(drain: &str) -> Vec<(String, String)> {
+    drain.split("; ").filter_map(|part| {
+        let mut w = part.split_whitespace();
+        let (_, lease, id) = (w.next()?, w.next()?, w.next()?);
+        (lease == "lease").then(|| (id.to_string(), part.to_string()))
+    }).collect()
+}
+
+/// How long a lease may hold its box's WM restart before its lane is told so ([`Sched::set_caps`]):
+/// a lane's 40-min background test showed windows on a box, and that box ran its replaced WM and
+/// JIT apps behind it with nobody told (11-27). Told, never ended.
+const WM_HOLD_TOLD_MS: u64 = 5 * 60_000;
+const WM_WAIT_CAPTURE_TIMES: u64 = 2;
+
+/// One blocking lease (or live test call). An empty word means capture is in flight.
+/// Only a wait whose last owed note was written survives a master restart.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct WmWait {
+    node: String,
+    against: String,
+    word: String,
+    notified: bool,
+    owed: Vec<String>,
+    call_since: Option<u64>,
+}
+
+enum WmWaitBound {
+    Measured { ran_ms: u64, measure_ms: u64, against: String, timed: bool, call_since: Option<u64> },
+    Unmeasured,
+    Exempt(&'static str),
+}
+
 /// How long every process of a lease's runs may do nothing (under [`super::exec::IDLE_CPU_PCT`] of
 /// a core, no I/O) before it says so, whatever its class's length.
 pub const QUIET_STALL_MS: u64 = 600_000;
@@ -309,6 +358,9 @@ const AGE_LONG_RUN_MS: u64 = 5 * 60_000;
 /// A queued ask this long holds its box against interactive work too, and ranks with that work by
 /// age ([`Sched::long_overdue`]).
 const OVERDUE_MS: u64 = 30 * 60_000;
+/// How many times its run ([`Sched::run_ms`]) a running lease that yields to live work runs,
+/// yielding, before it keeps its whole charge ([`Sched::yield_aged`]).
+const YIELD_AGE_RUNS: u64 = 2;
 /// How long past the start a box's head was told it still waits before that start counts as
 /// missed ([`Sched::age_heads`]): the box's cleanup and the next look come between.
 const ETA_GRACE_MS: u64 = 30_000;
@@ -440,12 +492,15 @@ pub const FULL_RUN_MARK: &str = " full ";
 pub(crate) fn shard_class(cores: u32, full: bool) -> String {
     format!("test bash land_gate.sh testrun{} {cores} cores @{}", if full { " full" } else { "" }, TESTS_LANE)
 }
+/// A queued lease's reason as a restarted master takes it back, until its first look ranks it
+/// ([`Lease::wait_goes_on`]): its place and the box it held are kept.
+pub const RESTART_REASON: &str = "master restart";
 /// How long a lease sits at its own memory cap before its lane is told ([`Sched::say_at_memory_cap`]).
 const AT_CAP_SAID_MS: u64 = 5 * 60_000;
 /// A node's hub is asked to reclaim disk at most this often.
 const RECLAIM_EVERY_MS: u64 = 300_000;
 /// Ended leases kept for late beats and the view.
-const KEEP_ENDED: usize = 200;
+pub(super) const KEEP_ENDED: usize = 200;
 
 /// Whether a node takes `kind` at all (> 0): its lease.conf `slots.<kind>` (`slots.ci = 0` opts
 /// out, [`super::caps::LeaseConf::slots`]); a hub that reports none, one per kind (gpu: when it
@@ -474,6 +529,8 @@ fn buildish(kind: Kind) -> bool {
 /// waiting, without timed CPU pinning or a quiet mark.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Req {
+    /// Where the holder or the master copies this lease's $DEVHUB_KEEP before teardown.
+    pub keep_dir: Option<String>,
     pub exec_profile: Option<super::argv::ExecProfile>,
     pub lane: String,
     /// A warm lease uses this lane's native tree and target, but keeps its own accounting lane.
@@ -488,6 +545,13 @@ pub struct Req {
     /// runs, the session it joins is never idle ([`Sched::idle_live`]): the WM, idle, was parked
     /// for RAM twice under its app, which found a dead socket (11-16).
     pub joins: Option<String>,
+    /// The set this live session is a member of (`devhub live start --set <name>/<n>`):
+    /// `<name>/<n>`, a set of its lane's ([`Req::cap_lane`]) with n members. They are placed as
+    /// one ([`Sched::set_place`]) and kept as one ([`Sched::set_unready`]): a member with
+    /// `joins` goes on that member's box at their summed need, and the others on boxes of their
+    /// own. A walk's Fab waited 31 min for the box its Town took alone, too small for both, and
+    /// both Towns were parked meanwhile (11-27).
+    pub set: Option<String>,
     pub kind: Kind,
     /// GPU work a Mac takes as a timed lease ([`Self::normalize_kind`]): what it times is its
     /// GPU, so its box is quiet when its GPU is ([`gpu_noise`]), whatever CPU the Mac's own
@@ -578,6 +642,9 @@ pub struct Req {
     /// Overlay leases: the dev JIT ids their pin selects (one per compiler the nodes report),
     /// set by their client (or the master at intake); placement only, never sent to a node.
     pub hint: Vec<String>,
+    /// The store keys of a tree lease's pin, one per compiler ([`Sched::jit_compilers`]), from
+    /// [`super::master`]'s `with_hint`. Its box's prebuild builds that commit's JIT into the store.
+    pub tree_jit: Vec<String>,
     /// Overlay leases whose shipped edits change the JIT's inputs: the ids of the lane's own JIT
     /// their box builds for them (one per compiler, as `hint`), which their run selects in place of
     /// the pin's ([`Req::jit_ids`]); empty: none. Their client reads them off what it ships.
@@ -615,17 +682,29 @@ pub struct Req {
     /// a tests bucket shard's run: when it took its tip (`--run-since`), which says when its
     /// shards hold a box ([`Sched::shard_holds`]); its place in the queue stays its own ask
     pub run_ms: Option<u64>,
+    /// the needs of the timed lease its holder asks as it ends (the leg before an owed jitlegs
+    /// run's warm leg): a bench box that could run it is lent only runs that end first
+    /// ([`Sched::timed_coming`])
+    pub then_timed: Option<Vec<(String, String)>>,
     /// the agent behind the lane (`DEVHUB_AGENT`): what the panel shows and `evict` can name
     pub agent: Option<String>,
 }
 
+/// A set's `<name>/<members>` ([`Req::set`]): its name and member count, or None when it is not one.
+pub fn parse_set(set: &str) -> Option<(&str, usize)> {
+    let (name, n) = set.rsplit_once('/')?;
+    let n: usize = n.parse().ok().filter(|n| *n >= 1)?;
+    makepad_devhub_conf::valid_name(name).then_some((name, n))
+}
+
 // A key is never removed while a persisted lease may carry it.
 pub(crate) const REQ_KEYS: &[&str] = &[
-    "exec_profile", "lane", "warms", "for_lane", "joins", "series", "pin_why", "avoid", "lost_on", "plain_test", "windows", "targets", "kind", "gpu", "untimed",
+    "exec_profile", "lane", "warms", "for_lane", "joins", "set", "series", "pin_why", "avoid", "lost_on", "plain_test", "windows", "targets", "kind", "gpu", "untimed",
     "src", "live", "cost", "cost_asked", "est_min", "rounds", "yields", "patched", "cores", "cores_default",
     "ram_gb", "ram_floor_gb", "whole", "class", "node", "needs",
     "prio", "priority", "rev", "repo_dir", "jit", "loader",
-    "cpu_target", "hint", "holder", "master", "agent", "since_ms", "place_ms", "own_jit", "hand_in", "run_ms", "look",
+    "cpu_target", "hint", "tree_jit", "holder", "master", "agent", "since_ms", "place_ms", "own_jit", "hand_in", "run_ms", "look",
+    "then_timed", "keep_dir",
 ];
 
 impl Req {
@@ -634,7 +713,12 @@ impl Req {
     /// The lane whose cap counts it ([`Self::for_lane`], else its own).
     pub fn cap_lane(&self) -> &str { self.for_lane.as_deref().unwrap_or(&self.lane) }
 
-    pub fn on_node(&self) -> bool { self.kind != Kind::Inspect || self.src == Src::Overlay }
+    /// Its set's name and member count ([`Req::set`]).
+    pub fn set_of(&self) -> Option<(&str, usize)> {
+        parse_set(self.set.as_deref()?)
+    }
+
+    pub fn on_node(&self) -> bool { self.kind != Kind::Inspect || self.src == Src::Overlay || self.hub_build() }
 
     /// A box's own hub build ([`HUB_BUILD`]): the room its rustc takes there, the master's own
     /// lease that the self-update holds from its turn until the hub answers that it restarts
@@ -653,6 +737,18 @@ impl Req {
     /// deployment's build [`DEPLOY_BUILD_MIN_CORES`].
     fn hub_floor(&self) -> f64 {
         if self.deploy_build() { DEPLOY_BUILD_MIN_CORES } else { HUB_BUILD_MIN_CORES }
+    }
+
+    /// The node feature that lets this hub or deploy build take an explicit job count (`jobs=N`).
+    fn hub_jobs_feature(&self) -> &'static str {
+        if self.deploy_build() { "deploy-jobs" } else { "hub-jobs" }
+    }
+
+    /// Maximum cores an own build may take when admitted via `cores_bump` past its box's cores:
+    /// `DEPLOY_BUILD_MIN_CORES` (2) for a deploy build, `HUB_BUILD_MIN_CORES` (4) for a hub
+    /// self-update, `PREBUILD_BUMP_CORES` (4) for a prebuild.
+    fn own_bump_cap(&self) -> f64 {
+        if self.hub_build() { self.hub_floor() } else { PREBUILD_BUMP_CORES }
     }
 
     /// The name a box's CPU split gives a hub build's processes ([`crate::top::cpu_split`]): its
@@ -678,6 +774,10 @@ impl Req {
     /// A live test session (`devhub test --live`, class `live:test:<package>...`): its calls are
     /// test runs, held to [`Sched::call_quiet_ms`].
     fn live_test_run(&self) -> bool { self.class.starts_with("live:test:") }
+
+    /// A live app session (`devhub live start` without `--test`): a running app a lane drives,
+    /// often beside its other sessions. A test session leases for its lane ([`Self::for_lane`]).
+    fn live_app(&self) -> bool { self.live && self.for_lane.is_none() }
 
     fn top(&self) -> bool { self.lane == TOP_LANE }
 
@@ -750,11 +850,35 @@ impl Req {
 
     fn exclusive(&self) -> bool { self.kind == Kind::Timed || self.whole }
 
-    /// An ask devhub itself made (its master's, or an agent `devhub-...`: warm legs, prebuilds,
-    /// buckets, CI): a box it names is devhub's choice, and devhub moves it itself where it can
-    /// (orch/warm.rs: a spare's leg goes to a free box it may warm). Nobody reads an "unpin it".
+    /// An ask devhub itself made (a box's hub, deployment or tip build, a warm leg, CI, a
+    /// land-queue bucket or gate, or an internal `devhub-...` agent — not a lane's anonymous
+    /// `devhub-test` fallback from `shadow_test`): a box it names is devhub's choice, devhub
+    /// moves it itself where it can (`orch/warm.rs`), nobody reads an "unpin it", and it is not
+    /// a lane's ask for bench pinning, warm-up yielding, land-queue passing, shaky-box pins or
+    /// queue busyness.
+    ///
+    /// Not [`Req::master`]: `master` records only that the master holds and tracks the lease
+    /// across restarts (`orch::leg::Held`, `Sched::adopt`), which is also true for lanes' managed
+    /// jobs, live sessions and adopted runs.
     fn devhubs_own(&self) -> bool {
-        self.master || self.agent.as_deref().is_some_and(|a| a.starts_with("devhub-"))
+        self.own_build()
+            || self.lane_warm()
+            || self.ci()
+            || land_queue_lane(&self.lane)
+            || self.agent.as_deref().is_some_and(|a| a.starts_with("devhub-") && a != "devhub-test")
+    }
+
+    /// The lane agent that owns this lease and reads notes left for it (`notes::leave`), excluding
+    /// `"main"` (which callers notify unconditionally) and devhub's own work (unattended legs,
+    /// box builds, warm-ups, CI, land-queue lanes, and any `devhub-*` agent — including the
+    /// anonymous `"devhub-test"` fallback, whose inbox nobody reads). Independent of
+    /// [`Req::master`]: a lane's managed job, live session or adopted run is held by the master
+    /// and still owned by its lane agent.
+    fn lane_agent(&self) -> Option<&str> {
+        if self.unattended() || self.devhubs_own() {
+            return None;
+        }
+        self.agent.as_deref().filter(|a| !a.is_empty() && *a != "main" && !a.starts_with("devhub-"))
     }
 
     /// A leg of devhub's own ([`OWN_LEG_AGENTS`] and the Dock build, CI aside) that asks no cores:
@@ -770,8 +894,8 @@ impl Req {
     /// Cores devhub asked for its own work: a tests shard, a landing gate, an agent `devhub-...`
     /// (a bucket's gates and hot runs, a warm leg). Its class is that one job, so its ask is
     /// charged its class's measure on either side of it ([`Sched::charged_cores`]); any other ask
-    /// is a lane's, and the least it is charged. Not [`Self::devhubs_own`]: a lane's `devhub test`
-    /// goes through the master, and its `--cores` is still the lane's.
+    /// is a lane's, and the least it is charged. This also counts app-test defaults
+    /// ([`Self::cores_default`]). A box build or CI ask alone does not qualify.
     fn devhub_asked(&self) -> bool {
         self.cores_default || self.tests_shard() || self.landing_gate() || self.agent.as_deref().is_some_and(|a| a.starts_with("devhub-"))
     }
@@ -782,7 +906,13 @@ impl Req {
     /// a tests shard's charged RAM, and lanes built 10 JIT-min themselves meanwhile (11-09). Asked
     /// interactive it read as a stuck head, and contended with live calls at their CPU weight.
     pub(crate) fn upkeep(&self) -> bool {
-        self.kind == Kind::Build && self.node.as_deref().is_some_and(|n| self.lane.strip_prefix(super::PREBUILD_LANE_PREFIX) == Some(n))
+        self.kind == Kind::Build && !self.hub_build()
+            && self.node.as_deref().is_some_and(|n| self.lane.strip_prefix(super::PREBUILD_LANE_PREFIX) == Some(n))
+    }
+
+    /// A box's own build: its hub self-update, its deployment build, or its tip prebuild.
+    pub(crate) fn own_build(&self) -> bool {
+        self.hub_build() || self.upkeep()
     }
 
     /// devhub's own timed check (verify's and jitlegs' legs, jitlegs' warm leg among them): it
@@ -825,7 +955,7 @@ impl Req {
     fn allocation(&self, warm: bool) -> Cost {
         let mut cost = Cost::default_for(self.kind, warm);
         // (a look asks nothing of its own: what its class measures is what it is charged)
-        if self.look { (cost.cores, cost.ram_gb, cost.disk_gb) = (0.0, 0.0, 0.0); }
+        if self.look && !self.own_build() { (cost.cores, cost.ram_gb, cost.disk_gb) = (0.0, 0.0, 0.0); }
         if let Some(cores) = self.cores { cost.cores = cores; }
         if let Some(ram_gb) = self.ram_gb { cost.ram_gb = ram_gb; }
         // (it builds in the deployment's target, not a lease tree)
@@ -909,9 +1039,11 @@ impl Req {
 
     fn conflicts_on(&self, other: &Req, c: &Caps) -> bool {
         let role = c.role();
-        // a hub build writes no lease tree: beside it only timed work does not run (its rustc
-        // would be in the timings)
-        if self.hub_build() || other.hub_build() { return self.kind == Kind::Timed || other.kind == Kind::Timed; }
+        // Hub and deployment builds share the box's checkout and Cargo lock. Either can
+        // run beside work in a lease tree, except timed work that needs the box to itself.
+        if self.hub_build() || other.hub_build() {
+            return self.kind == Kind::Timed || other.kind == Kind::Timed || (self.hub_build() && other.hub_build());
+        }
         let native = self.uses_tree() && other.uses_tree() && (self.native(role) || other.native(role));
         // a lease in its lane's directory and one in a work tree share nothing ([`Self::in_lane_dir`])
         let apart = native || self.in_lane_dir() && other.uses_tree() || other.in_lane_dir() && self.uses_tree();
@@ -976,7 +1108,7 @@ impl Req {
     }
 
     pub fn new(lane: &str, kind: Kind) -> Req {
-        Req { exec_profile: None, lane: makepad_devhub_conf::lane_name(lane), warms: None, for_lane: None, joins: None, kind, gpu: false, untimed: false, src: Src::Tree, live: false, cost: CostClass::default_for(kind), cost_asked: false, est_min: None, rounds: None, yields: false, patched: false, cores: None, cores_default: false, ram_gb: None, ram_floor_gb: None, whole: false, class: String::new(), plain_test: None, windows: false, targets: Vec::new(), node: None, series: None, pin_why: None, avoid: Vec::new(), lost_on: Vec::new(), needs: Vec::new(), since_ms: None, place_ms: None, run_ms: None, prio: DEFAULT_PRIO, priority: Priority::Background, rev: None, repo_dir: None, jit: None, loader: None, cpu_target: None, hint: Vec::new(), own_jit: Vec::new(), holder: None, master: false, hand_in: false, look: false, agent: None }
+        Req { keep_dir: None, exec_profile: None, lane: makepad_devhub_conf::lane_name(lane), warms: None, for_lane: None, joins: None, set: None, kind, gpu: false, untimed: false, src: Src::Tree, live: false, cost: CostClass::default_for(kind), cost_asked: false, est_min: None, rounds: None, yields: false, patched: false, cores: None, cores_default: false, ram_gb: None, ram_floor_gb: None, whole: false, class: String::new(), plain_test: None, windows: false, targets: Vec::new(), node: None, series: None, pin_why: None, avoid: Vec::new(), lost_on: Vec::new(), needs: Vec::new(), since_ms: None, place_ms: None, run_ms: None, then_timed: None, prio: DEFAULT_PRIO, priority: Priority::Background, rev: None, repo_dir: None, jit: None, loader: None, cpu_target: None, hint: Vec::new(), tree_jit: Vec::new(), own_jit: Vec::new(), holder: None, master: false, hand_in: false, look: false, agent: None }
     }
 
     /// Where the lease may run, from a lease's placement flags as text (`--node`, `--needs`,
@@ -1005,12 +1137,14 @@ impl Req {
     pub fn to_json(&self) -> String {
         let opt = |o: &Option<String>| o.as_deref().map_or("null".to_string(), json_str);
         let needs: Vec<String> = self.needs.iter().map(|(k, v)| format!("{}:{}", json_str(k), json_str(v))).collect();
+        let keep = self.keep_dir.as_deref().map_or(String::new(), |p| format!(",\"keep_dir\":{}", json_str(p)));
         let exec_profile = self.exec_profile.as_ref().map_or("null".into(), |p| p.to_json());
         let plain_test = self.plain_test.map_or(String::new(), |v| format!(",\"plain_test\":{v}")) + if self.windows { ",\"windows\":true" } else { "" }
             + &if self.targets.is_empty() { String::new() } else { format!(",\"targets\":[{}]", self.targets.iter().map(|t| json_str(t)).collect::<Vec<_>>().join(",")) };
         let warms = self.warms.as_deref().map_or(String::new(), |lane| format!(",\"warms\":{}", json_str(lane)))
             + &self.for_lane.as_deref().map_or(String::new(), |lane| format!(",\"for_lane\":{}", json_str(lane)))
-            + &self.joins.as_deref().map_or(String::new(), |id| format!(",\"joins\":{}", json_str(id)));
+            + &self.joins.as_deref().map_or(String::new(), |id| format!(",\"joins\":{}", json_str(id)))
+            + &self.set.as_deref().map_or(String::new(), |set| format!(",\"set\":{}", json_str(set)));
         let series = self.series.as_deref().map_or(String::new(), |name| format!(",\"series\":{}", json_str(name)))
             + &self.pin_why.as_deref().map_or(String::new(), |why| format!(",\"pin_why\":{}", json_str(why)))
             + &if self.avoid.is_empty() { String::new() } else { format!(",\"avoid\":{}", json_str(&self.avoid.join(","))) }
@@ -1019,14 +1153,19 @@ impl Req {
         let rounds = self.rounds.map_or(String::new(), |n| format!(",\"rounds\":{n}")) + if self.yields { ",\"yields\":true" } else { "" } + if self.patched { ",\"patched\":true" } else { "" };
         let cores_default = if self.cores_default { ",\"cores_default\":true" } else { "" };
         // (only when set: a master that predates the field refuses a request that names it)
+        let tree_jit = if self.tree_jit.is_empty() { String::new() } else { format!(",\"tree_jit\":[{}]", self.tree_jit.iter().map(|id| json_str(id)).collect::<Vec<_>>().join(",")) };
         let own_jit = if self.own_jit.is_empty() { String::new() } else { format!(",\"own_jit\":[{}]", self.own_jit.iter().map(|id| json_str(id)).collect::<Vec<_>>().join(",")) };
         let own_jit = if self.hand_in { format!("{own_jit},\"hand_in\":true") } else { own_jit };
         // (only when given: a master before it refuses the field, [`REQ_KEYS`])
         let own_jit = match self.place_ms { Some(t) => format!("{own_jit},\"place_ms\":{t}"), None => own_jit };
         let own_jit = match self.run_ms { Some(t) => format!("{own_jit},\"run_ms\":{t}"), None => own_jit };
         let own_jit = if self.look { format!("{own_jit},\"look\":true") } else { own_jit };
+        let own_jit = match &self.then_timed {
+            Some(needs) => format!("{own_jit},\"then_timed\":{}", json_str(&needs.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(","))),
+            None => own_jit,
+        };
         format!(
-            "{{\"exec_profile\":{exec_profile},\"lane\":{}{warms}{series}{plain_test},\"kind\":\"{}\"{gpu}{rounds},\"src\":\"{}\",\"live\":{},\"cost\":\"{}\",\"cost_asked\":{},\"est_min\":{},\"cores\":{}{cores_default},\"ram_gb\":{},\"ram_floor_gb\":{},\"whole\":{},\"class\":{},\"node\":{},\"needs\":{{{}}},\"prio\":{},\"priority\":\"{}\",\"rev\":{},\"repo_dir\":{},\"jit\":{},\"loader\":{},\"cpu_target\":{},\"hint\":[{}],\"holder\":{},\"master\":{},\"agent\":{},\"since_ms\":{}{own_jit}}}",
+            "{{\"exec_profile\":{exec_profile},\"lane\":{}{warms}{series}{plain_test}{keep},\"kind\":\"{}\"{gpu}{rounds},\"src\":\"{}\",\"live\":{},\"cost\":\"{}\",\"cost_asked\":{},\"est_min\":{},\"cores\":{}{cores_default},\"ram_gb\":{},\"ram_floor_gb\":{},\"whole\":{},\"class\":{},\"node\":{},\"needs\":{{{}}},\"prio\":{},\"priority\":\"{}\",\"rev\":{},\"repo_dir\":{},\"jit\":{},\"loader\":{},\"cpu_target\":{},\"hint\":[{}]{tree_jit},\"holder\":{},\"master\":{},\"agent\":{},\"since_ms\":{}{own_jit}}}",
             json_str(&self.lane),
             self.kind.as_str(),
             self.src.as_str(),
@@ -1068,10 +1207,19 @@ impl Req {
         let lane = s("lane").map(|l| makepad_devhub_conf::lane_name(&l)).filter(|l| makepad_devhub_conf::valid_name(l)).ok_or("a lease needs a lane (a-z 0-9 - _)")?;
         let kind = s("kind").and_then(|k| Kind::parse(&k)).ok_or("unknown lease kind")?;
         let mut r = Req::new(&lane, kind);
+        if let Some(value) = v.get("keep_dir") {
+            let p = value.as_str().ok_or("keep_dir must be a path string")?;
+            let path = std::path::Path::new(p);
+            if p.is_empty() || p.chars().any(char::is_control) || !path.is_absolute() || path.components().any(|c| c == std::path::Component::ParentDir) {
+                return Err("keep_dir needs an absolute path without control characters or ..".into());
+            }
+            r.keep_dir = Some(p.into());
+        }
         r.exec_profile = v.get("exec_profile").filter(|v| !v.is_null()).map(|v| super::argv::ExecProfile::parse(v).ok_or("invalid exec profile")).transpose()?;
         r.warms = v.get("warms").filter(|v| !v.is_null()).map(|v| v.as_str().map(makepad_devhub_conf::lane_name).filter(|l| makepad_devhub_conf::valid_name(l)).ok_or("warms needs a lane (a-z 0-9 - _)")).transpose()?;
         r.for_lane = v.get("for_lane").filter(|v| !v.is_null()).map(|v| v.as_str().map(makepad_devhub_conf::lane_name).filter(|l| makepad_devhub_conf::valid_name(l)).ok_or("for_lane needs a lane (a-z 0-9 - _)")).transpose()?;
         r.joins = v.get("joins").filter(|v| !v.is_null()).map(|v| v.as_str().filter(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric())).map(str::to_string).ok_or("joins needs a lease id")).transpose()?;
+        r.set = v.get("set").filter(|v| !v.is_null()).map(|v| v.as_str().filter(|set| parse_set(set).is_some()).map(str::to_string).ok_or("set needs <name>/<members>: a name (a-z 0-9 - _) and a count of 1 or more")).transpose()?;
         r.src = s("src").map(|s| Src::parse(&s).ok_or("src is tree or overlay")).transpose()?.unwrap_or(Src::Tree);
         r.live = v.get("live").and_then(|v| v.as_bool()).unwrap_or(false);
         r.cost = s("cost").map(|s| CostClass::parse(&s).ok_or("cost is small, medium or large")).transpose()?.unwrap_or(r.cost);
@@ -1102,6 +1250,7 @@ impl Req {
         r.loader = s("loader");
         r.cpu_target = s("cpu_target").map(|t| if super::valid_cpu_target(&t) { Ok(t) } else { Err(format!("cpu_target `{t}` is not a CPU name")) }).transpose()?;
         r.hint = v.get("hint").and_then(|v| v.as_arr()).unwrap_or(&[]).iter().filter_map(|v| v.as_str()).map(str::to_string).collect();
+        r.tree_jit = v.get("tree_jit").and_then(|v| v.as_arr()).unwrap_or(&[]).iter().filter_map(|v| v.as_str()).map(str::to_string).collect();
         r.own_jit = v.get("own_jit").and_then(|v| v.as_arr()).unwrap_or(&[]).iter().filter_map(|v| v.as_str()).map(str::to_string).collect();
         r.agent = s("agent").filter(|a| makepad_devhub_conf::valid_name(a));
         r.holder = v.get("holder").and_then(super::num).map(|p| p as u32).filter(|p| *p > 1);
@@ -1114,6 +1263,7 @@ impl Req {
         r.since_ms = v.get("since_ms").and_then(super::num).map(|t| t as u64);
         r.place_ms = v.get("place_ms").and_then(super::num).map(|t| t as u64);
         r.run_ms = v.get("run_ms").and_then(super::num).map(|t| t as u64);
+        r.then_timed = v.get("then_timed").and_then(|v| v.as_str()).map(parse_needs);
         if let Some(makepad_strict_json::Value::Obj(pairs)) = v.get("needs") {
             for (k, x) in pairs {
                 r.needs.push((k.clone(), x.as_str().map(str::to_string).or_else(|| super::num(x).map(|n| n.to_string())).unwrap_or_default()));
@@ -1441,7 +1591,7 @@ pub struct Lease {
     /// The deployment (a pin key, [`super::Pin::key`]) of its box at its grant: what a timed run ran on,
     /// so two timings can be told apart or compared
     pub deployment: String,
-    seq: u64,
+    pub(crate) seq: u64,
     /// latency (ms): from the previous lease's release on its node to this grant, when it stood in
     /// the queue at that release; its setup (`lease-start`, the revisions shipped inside it); its teardown (`lease-end`)
     pub wait_ms: Option<u64>,
@@ -1454,6 +1604,9 @@ pub struct Lease {
     /// The most cores its box measured it on at one look ([`Sched::note_measures`]): its run's
     /// peak, which its class's next asks are admitted at ([`Sched::measured_peak_cores`]).
     pub peak_cores: Option<f64>,
+    /// Core-milliseconds this lease yielded to other work on its box, summed between
+    /// caps looks at the share of its charge it gave up ([`Sched::yield_scale`]).
+    pub yielded_core_ms: f64,
     queue_sample_ms: u64,
     /// The boxes its last look placed it on, each with what kept it off there (its blocker key):
     /// its queue samples keep them until its grant files its wait under the box it got
@@ -1466,7 +1619,7 @@ impl Lease {
     /// last beat said it. (An overlay's phase is the box's store build, whose CPU the box measures
     /// as the lease's that started it: charged as measured, [`Sched::measured_cores_now`].)
     fn building_jit(&self) -> bool {
-        self.req.src != Src::Overlay && self.node_phases.0.iter().rev().find(|s| s.phase == "jit").is_some_and(|s| s.end == 0)
+        self.req.set_up_on_node() && self.req.src != Src::Overlay && self.node_phases.0.iter().rev().find(|s| s.phase == "jit").is_some_and(|s| s.end == 0)
     }
 
     fn class_note(&self) -> String {
@@ -1577,9 +1730,11 @@ impl Lease {
     /// start, before which it asked nothing while lane work waited (`orch::leg`). Its own wait is
     /// its time in this queue, carried over a master restart: two owed legs asked a minute earlier
     /// read "waiting 55m07s" and "1h03m" as starved behind their boxes' own work (11-05), and
-    /// allapps asked 26 s before its grant read "waiting 17m51s: 1st in queue" (11-08).
+    /// allapps asked 26 s before its grant read "waiting 17m51s: 1st in queue" (11-08). So has an
+    /// owed CI shard's ask ([`owed_ci`]), placed at its run's start: two asked 82 s before read as
+    /// waiting 4h18m first in queue for their box (L1917264, L1917279, 11-27).
     pub(crate) fn waited_ms(&self, now: u64) -> u64 {
-        if !runs_place(&self.req) { return self.granted_ms.unwrap_or(now).saturating_sub(self.asked_ms); }
+        if !runs_place(&self.req) && !owed_ci(self) { return self.granted_ms.unwrap_or(now).saturating_sub(self.asked_ms); }
         let done: u64 = self.phases.0.iter().filter(|s| s.phase == "queued" && s.end != 0).map(|s| s.end.saturating_sub(s.start)).sum();
         done + if self.state == State::Queued { now.saturating_sub(self.queue_sample_ms) } else { 0 }
     }
@@ -1587,7 +1742,7 @@ impl Lease {
     /// The warn of a leg with its run's place ([`runs_place`]) says its run's wait too.
     fn owed_age(&self, now: u64) -> String {
         let age = dur(now.saturating_sub(self.asked_ms));
-        if owed_leg(self) { format!(" (its run owed a box for {age})") } else if runs_place(&self.req) { format!(" (its run waited {age} in all, standing back while lane work waited)") } else { String::new() }
+        if owed_leg(self) || owed_ci(self) { format!(" (its run owed a box for {age})") } else if runs_place(&self.req) { format!(" (its run waited {age} in all, standing back while lane work waited)") } else { String::new() }
     }
 
     /// Its wait goes on from an earlier ask of it: what that ask waited on stands, and the time
@@ -1596,7 +1751,7 @@ impl Lease {
     fn wait_goes_on(&mut self, waited: super::prof::Phases, now: u64) {
         self.queue_sample_ms = waited.0.last().map_or(self.asked_ms, |s| s.end.max(self.asked_ms)).min(now);
         self.phases = waited;
-        self.reason = "master restart".into();
+        self.reason = RESTART_REASON.into();
     }
 
     pub fn profile(&self) -> super::prof::Phases {
@@ -1632,8 +1787,11 @@ impl Lease {
             _ => "",
         };
         let ms = |o: Option<u64>| o.map_or("null".to_string(), |v| v.to_string());
+        let reason = if how == "stopped" && !self.reason.is_empty() {
+            format!(",\"reason\":{}", json_str(&self.reason))
+        } else { String::new() };
         format!(
-            "{{\"id\":{},\"lane\":{},\"kind\":\"{}\",\"node\":{},\"asked_ms\":{},\"granted_ms\":{},\"told_ms\":{},\"ended_ms\":{},\"how\":{},\"grant_why\":{},\"wait_ms\":{},\"setup_ms\":{},\"ship_ms\":{},\"teardown_ms\":{},\"cost\":\"{}\",\"cost_source\":{},\"measured_ms\":{},\"reported_ms\":{},\"alloc\":{{\"cores\":{},\"ram_gb\":{},\"gpus\":{}}}, {},\"req\":{}}}",
+            "{{\"id\":{},\"lane\":{},\"kind\":\"{}\",\"node\":{},\"asked_ms\":{},\"granted_ms\":{},\"told_ms\":{},\"ended_ms\":{},\"how\":{},\"grant_why\":{},\"wait_ms\":{},\"setup_ms\":{},\"ship_ms\":{},\"teardown_ms\":{},\"cost\":\"{}\",\"cost_source\":{},\"measured_ms\":{},\"reported_ms\":{},\"alloc\":{{\"cores\":{},\"ram_gb\":{},\"gpus\":{}}}, {},\"req\":{}{reason}}}",
             json_str(&self.id),
             json_str(&self.req.lane),
             self.req.kind.as_str(),
@@ -1690,7 +1848,7 @@ impl Lease {
         let (tree_lane, tree_rev) = (tree(l.req.tree_lane()), tree(l.req.rev.as_deref().unwrap_or("")));
         let jit_jobs = l.jit_jobs.map_or("null".to_string(), |j| j.to_string());
         let told = told.map_or("null".to_string(), |c| format!("{c:.1}"));
-        format!("{{\"class\":{},\"kind\":\"{}\",\"cost\":\"{}\",\"wall_ms\":{wall},\"jit_peak_gb\":{},\"peak_ram_gb\":{},\"cpu_seconds\":{},\"peak_cores\":{},\"disk_grew_gb\":{},\"warm\":{},\"node\":{},\"os\":{os},\"lane\":{},\"tree_lane\":{tree_lane},\"tree_rev\":{tree_rev},\"ended_ms\":{ended},\"lease\":{},\"how\":{},\"unmeasured\":{unmeasured},\"jit_jobs\":{jit_jobs},\"told_cores\":{told},\"deployment\":{},\"source\":{}, {}}}", json_str(class), l.req.kind.as_str(), l.cost_class.as_str(), measured("jit_peak_gb"), peak_ram, measured("cpu_seconds"), l.peak_cores.map_or("null".to_string(), |p| format!("{p:.2}")), measured("disk_grew_gb"), l.warm.map_or("null".to_string(), |w| w.to_string()), json_str(l.node.as_deref().unwrap_or("")), json_str(&l.req.lane), json_str(&l.id), json_str(how), json_str(&l.deployment), json_str(usage.and_then(|v| v.get("source")).and_then(|v| v.as_str()).unwrap_or("")), phases.fields(ended))
+        format!("{{\"class\":{},\"kind\":\"{}\",\"cost\":\"{}\",\"wall_ms\":{wall},\"jit_peak_gb\":{},\"peak_ram_gb\":{},\"cpu_seconds\":{},\"peak_cores\":{},\"yielded_core_min\":{:.1},\"disk_grew_gb\":{},\"warm\":{},\"node\":{},\"os\":{os},\"lane\":{},\"tree_lane\":{tree_lane},\"tree_rev\":{tree_rev},\"ended_ms\":{ended},\"lease\":{},\"how\":{},\"unmeasured\":{unmeasured},\"jit_jobs\":{jit_jobs},\"told_cores\":{told},\"deployment\":{},\"source\":{}, {}}}", json_str(class), l.req.kind.as_str(), l.cost_class.as_str(), measured("jit_peak_gb"), peak_ram, measured("cpu_seconds"), l.peak_cores.map_or("null".to_string(), |p| format!("{p:.2}")), l.yielded_core_ms / 60_000.0, measured("disk_grew_gb"), l.warm.map_or("null".to_string(), |w| w.to_string()), json_str(l.node.as_deref().unwrap_or("")), json_str(&l.req.lane), json_str(&l.id), json_str(how), json_str(&l.deployment), json_str(usage.and_then(|v| v.get("source")).and_then(|v| v.as_str()).unwrap_or("")), phases.fields(ended))
     }
 }
 
@@ -1716,6 +1874,10 @@ pub enum Action {
     MemRecord { id: String, node: String, why: String },
     /// its node makes the lease's `$DEVHUB_YIELD` file, `why` in it (`lease-yield`)
     Yield { id: String, node: String, why: String },
+    /// its node holds a shared lease that is no live session to its grant's cores (`Some`:
+    /// `lease-weight <id> grant <cores>`) or lets it go (`None`: `lease-weight <id> grant`),
+    /// as [`Sched::sync_grant_caps`] decided
+    HoldGrant { id: String, node: String, cores: Option<f64> },
     Event(Record),
     /// A line for an agent, said on its next devhub call (`notes::leave`): what a lease's
     /// lane must hear, not only the stream
@@ -1775,9 +1937,9 @@ struct NodeSt {
     /// its load at each caps round, oldest first, for [`super::panel::PRESSURE_KEEP_MS`]
     pressure: VecDeque<super::panel::Sample>,
     /// its demand past its charges at each look with a CPU measure ([`Sched::demand_now`]): when,
-    /// its busy cores less its charges then, and the tasks that waited for a CPU; the last
+    /// its busy cores less its charges then, tasks waiting for a CPU, and measured outside cores; the last
     /// [`DEMAND_WINDOW_MS`], and its newest whatever its age ([`Sched::outside_cores`])
-    demand: VecDeque<(u64, f64, f64)>,
+    demand: VecDeque<(u64, f64, f64, f64)>,
     /// its busy cores at its looks while no work of ours ran there, a mean per minute (the
     /// minute's start, the sum, the looks), over the last [`RESTING_WINDOW_MS`], oldest first
     /// ([`Sched::resting`])
@@ -1861,6 +2023,10 @@ pub struct NodeView {
     pub waiting: usize,
     /// dev off with leases still running
     pub draining: bool,
+    /// A restarted master has not heard it yet, within its restore grace ([`Sched::settling`]):
+    /// neither its caps nor a miss, and it was not down before the restart
+    /// ([`Sched::seed_unheard`]). What it takes is not known until it answers.
+    pub unheard_yet: bool,
     /// the queued lease reserving the node
     pub hold: Option<String>,
     /// Self-update progress, informational: leases keep being placed.
@@ -2051,7 +2217,7 @@ impl NodeView {
 
     pub fn to_json(&self) -> String {
         format!(
-            "{{\"node\":{},\"addr\":{},\"up\":{},\"dev\":{},\"dev_set\":{},\"role\":\"{}\",\"leases\":{},\"waiting\":{},\"draining\":{},\"hold\":{},\"updating\":{},\"update_waits\":{},\"update_pin\":{},\"timed\":{},\"state\":{},\"latency\":{},\"live_over\":{},\"whole\":{},\"past_grant\":{},\"settling\":{},\"link\":{},\"resting\":{},\"caps_line\":{},\"caps\":{}}}",
+            "{{\"node\":{},\"addr\":{},\"up\":{},\"dev\":{},\"dev_set\":{},\"role\":\"{}\",\"leases\":{},\"waiting\":{},\"draining\":{},\"unheard_yet\":{},\"hold\":{},\"updating\":{},\"update_waits\":{},\"update_pin\":{},\"timed\":{},\"state\":{},\"latency\":{},\"live_over\":{},\"whole\":{},\"past_grant\":{},\"settling\":{},\"link\":{},\"resting\":{},\"caps_line\":{},\"caps\":{}}}",
             json_str(&self.name),
             json_str(&self.addr),
             self.up,
@@ -2061,6 +2227,7 @@ impl NodeView {
             self.leases,
             self.waiting,
             self.draining,
+            self.unheard_yet,
             self.hold.as_deref().map_or("null".to_string(), json_str),
             self.updating.as_deref().map_or("null".to_string(), json_str),
             self.update_waits.as_deref().map_or("null".to_string(), json_str),
@@ -2097,6 +2264,7 @@ impl NodeView {
             leases: n("leases"),
             waiting: n("waiting"),
             draining: b("draining"),
+            unheard_yet: b("unheard_yet"),
             hold: s("hold"),
             updating: s("updating"),
             update_waits: s("update_waits"),
@@ -2170,6 +2338,7 @@ enum Pass {
     Look,
     Top,
     LiveLaunch,
+    VisibleLaunch,
     FirstLane,
     SameRun,
     TimedLetsIn,
@@ -2222,11 +2391,20 @@ pub const JIT_COPY: &str = "jit-copy";
 /// A copy's wall before one is measured.
 const JIT_COPY_GUESS_MS: u64 = 10_000;
 /// The fewest jobs a hub build starts on when its box has fewer cores free than it measured.
-const HUB_BUILD_MIN_CORES: f64 = 4.0;
+pub(crate) const HUB_BUILD_MIN_CORES: f64 = 4.0;
 /// A box's deployment build's floor ([`Req::deploy_build`], [`Req::hub_floor`]): it builds beside
 /// lane work, nothing waits on it but the box's next tree. On four jobs, deploy builds put boxes
 /// past their cores 24 times in an hour (11-16).
 const DEPLOY_BUILD_MIN_CORES: f64 = 2.0;
+
+/// Minimum cores a box's prebuild takes when admitted within free budget.
+const PREBUILD_MIN_CORES: f64 = 2.0;
+/// Maximum cores and cargo jobs a box's prebuild takes when admitted via `cores_bump`.
+const PREBUILD_BUMP_CORES: f64 = 4.0;
+/// How long a prebuild waits on a congested box before it may bump (when box is not overloaded/watched).
+const PREBUILD_BUMP_WAIT_MS: u64 = 15 * 60 * 1000;
+/// Maximum `cpu_wait` at which `prebuild` or `deploy-build` may still bump past cores.
+const BUILD_BUMP_MAX_WAIT: f64 = 2.0;
 
 /// How far behind the landings a box stays for its timed queue before it catches up.
 pub const QUEUE_BEHIND_MS: u64 = 30 * 60_000;
@@ -2290,6 +2468,8 @@ struct Room {
     short_bump: bool,
     /// an ask past its age bound ([`Sched::age_starts`]): past the cores up to [`AGED_LINE`]
     aged_bump: bool,
+    /// A visible live launch can start short on a box that confines it by CPU quota.
+    launch_bump: bool,
     hub_ram: bool,
 }
 
@@ -2315,6 +2495,10 @@ const RESTING_MIN_MINUTES: usize = 120;
 pub(crate) const NIGHT_END_HOUR: i64 = 6;
 
 pub struct Sched {
+    /// Bare schedulers start at `Some(0)` for normal expiry. During master startup `None` defers
+    /// heartbeat and restore-reask expiry. Once serving, every last beat and the start of each
+    /// restored reask grace period count from at least this time.
+    serving_ms: Option<u64>,
     /// until then a node not known yet may still be heard (a restarted master's links coming up):
     /// a lease waits for it instead of being denied
     pub nodes_settle_ms: u64,
@@ -2322,6 +2506,8 @@ pub struct Sched {
     nodes: BTreeMap<String, NodeSt>,
     /// queued and live
     leases: Vec<Lease>,
+    /// In-process guards for each lease. A restarted master has no such holders yet.
+    local_holders: HashMap<String, usize>,
     ended: VecDeque<Lease>,
     /// every lease that ended at or after this is in `ended`: the master's start, then just past
     /// the newest one dropped from it (older ones are in the ledger only)
@@ -2376,6 +2562,10 @@ pub struct Sched {
     /// Ended leases retain their conflicts and reservations until cleanup answers: box, ask,
     /// charge, and when it ended ([`Sched::cleanup_end`]).
     restoring: HashMap<String, (String, Req, Cost, u64)>,
+    pub(super) keep_pending: HashMap<String, String>,
+    /// An end action can start after a burst has rolled its lease out of recent history.
+    /// Retain that teardown record only while its keep worker still needs it.
+    keep_overflow: HashMap<String, Lease>,
     /// An ended lease's ledger line until the master has written it ([`super::master`]'s `end`,
     /// after its box's teardown answer), kept in the live set: a master restarted in between
     /// writes it, marked cut ([`Self::take_unledgered`]). L1596652's end, cut by a master restart,
@@ -2441,7 +2631,7 @@ pub struct Sched {
     /// ([`Self::note_tree_run`]): the tree's JIT there is that rev's.
     tree_jits: HashMap<(String, String), String>,
     /// Whether each tree lane's last JIT run at a rev new to its box built its JIT first
-    /// ([`Self::tree_builds`]).
+    /// ([`Self::tree_builds`]); a lane with none recorded builds.
     tree_rebuilds: HashMap<String, bool>,
     /// Running leases measured past what they were granted to take by a core or more
     /// ([`Self::note_overruns`]), with the most cores their box measured since: until they end,
@@ -2486,6 +2676,9 @@ pub struct Sched {
     /// The leases held by live jobs, as the live subsystem knows them: a lease granted before
     /// its request carried `live` (or restored without it) still parks for timed work.
     pub live_jobs: HashSet<String>,
+    /// Active live session and managed job ids, keyed by the lease each holds.
+    pub live_session_ids: HashMap<String, String>,
+    pub job_ids: HashMap<String, String>,
     /// Restored `starting` leases the master asks their node to start again (`lease-start` is
     /// idempotent there): (id, node).
     pub resume: Vec<(String, String)>,
@@ -2494,6 +2687,9 @@ pub struct Sched {
     /// Nodes whose hub lacks `handover` and has its update ready: it restarts
     /// only between runs, so it takes no new lease until it has (once per box).
     pub update_drain: HashSet<String>,
+    /// Boxes whose hub restarts for its update at the roll's word, since when (wall ms): a miss of
+    /// one within [`HUB_RESTART_MS`] is that restart, no drop ([`Sched::caps_missed`]).
+    hub_restarts: HashMap<String, u64>,
     /// Updates that a running timed lease made wait on a node, by what waits (its deployment's
     /// apply, its hub's restart). The next timed lease starts on what the box has all the same,
     /// unless the box catches up ([`Sched::pin_updates`]): back to back, a bench box's timed queue
@@ -2540,15 +2736,30 @@ pub struct Sched {
     /// When each live session's last call ended ([`Sched::live_call_ended`]; a master restart
     /// counts as one): within [`LIVE_IN_USE_MS`] of it the session is in use ([`Sched::idle_live`]).
     live_call_end_ms: HashMap<String, u64>,
+    /// When the live subsystem last saw each session used, by lease: its touch (an act, a look, a
+    /// wait, its lane's wait on another session, a sync, a routed inspect, a save, its start) and,
+    /// for a visible one, a person's input at its box. Set by the master at each look; it counts
+    /// as a call's end does ([`Self::last_use`]).
+    pub live_used: HashMap<String, u64>,
     /// Live sessions said to run a call past [`LIVE_OVERRUN_TIMES`] their measure
     /// ([`Sched::say_live_overruns`]): that call's start, and what their owner is told.
     live_overran: HashMap<String, (u64, String)>,
     /// Interactive live calls that started with the cores free on their box, fewer than their
     /// full charge ([`Sched::call_start_cores`]): what each is charged while its call runs.
     live_call_charge: HashMap<String, f64>,
+    /// Placement's decision for a starting live lease on a Linux `launch-cores` box:
+    /// Some((quota, full, in_use)) for a short launch, None for a full one. A restored
+    /// starting lease has no entry and computes its quota at lease-start.
+    launch_quotas: HashMap<String, Option<(f64, f64, f64)>>,
+    /// Running shared leases that are no live session, held to their grant's cores on their box
+    /// while interactive work there wants them ([`Sched::sync_grant_caps`]): the cores.
+    grant_held: HashMap<String, f64>,
     /// Idle live sessions asked to park for the RAM a queued ask waits for
     /// ([`Sched::park_idle_live_for_ram`]): until they end, no other session parks for that RAM.
     parking_ram: HashSet<String>,
+    /// The boxes a park freed room on, and for which queued ask ([`Sched::park_room_wait`]): its
+    /// room goes to that ask first, until its grant.
+    park_room: HashMap<String, String>,
     /// Running leases already said to be past twice their measured run ([`Sched::say_stalled`]), and when.
     stalled: HashMap<String, u64>,
     /// Of those said past their run: when its run started, what it was held to and how that reads,
@@ -2568,6 +2779,12 @@ pub struct Sched {
     /// When each box's deployment last moved, as its caps said it ([`Caps::deploy`]): a landing's
     /// apply reached it then ([`Sched::say_stale_boxes`]).
     deploy_moved_ms: HashMap<String, u64>,
+    /// The leases each box's WM restart waits on: since when, and whether its lane was told it
+    /// held it past [`WM_HOLD_TOLD_MS`]
+    wm_held: HashMap<String, HashMap<String, (u64, bool)>>,
+    wm_wait: HashMap<String, WmWait>,
+    /// Idle live sessions already asked to park for their WM restart.
+    wm_parking: HashSet<String>,
     /// The boxes already said to run older code past a landing, by since when they have
     /// ([`Sched::say_stale_boxes`]); kept over a master restart ([`Action::StaleTold`]).
     stale_told: HashSet<(String, u64)>,
@@ -2803,14 +3020,48 @@ fn wm_need(key: &str, v: &str) -> bool {
     }
 }
 
+// Keep scheduler-only state (in particular, the live lease queue) out of every checkpoint operation.
+macro_rules! cost_helpers {
+    ($($field:ident: $key:ty => $val:ty, $read:ident($($arg:expr),*);)*) => {
+        pub(super) fn encode_costs_body(&self) -> Vec<u8> {
+            super::costs::encode_body(super::costs::CostMapsRef { $($field: &self.$field,)* })
+        }
+
+        pub(super) fn install_cost_snap(&mut self, snap: super::costs::CostSnap) {
+            $(self.$field = snap.$field;)*
+        }
+
+        pub(super) fn swap_costs_from(&mut self, other: &mut Sched) {
+            $(std::mem::swap(&mut self.$field, &mut other.$field);)*
+        }
+
+        pub(super) fn clear_costs(&mut self) {
+            $(self.$field.clear();)*
+        }
+
+        pub(super) fn has_any_costs(&self) -> bool {
+            false $(|| !self.$field.is_empty())*
+        }
+
+        #[cfg(test)]
+        pub(super) fn clone_costs(&self) -> super::costs::CostSnap {
+            super::costs::CostSnap { $($field: self.$field.clone(),)* }
+        }
+    };
+}
+
 impl Sched {
+    super::costs::cost_sections!(cost_helpers);
+
     /// `machine`: the master's name (the records' machine); `next`: the first lease number.
     pub fn new(machine: &str, next: u64) -> Sched {
         Sched {
+            serving_ms: Some(0),
             nodes_settle_ms: 0,
             machine: machine.to_string(),
             nodes: BTreeMap::new(),
             leases: Vec::new(),
+            local_holders: HashMap::new(),
             ended: VecDeque::new(),
             ended_from_ms: 0,
             restored_pressure: HashMap::new(),
@@ -2838,6 +3089,8 @@ impl Sched {
             prebuild_since: HashMap::new(),
             promised: HashMap::new(),
             restoring: HashMap::new(),
+            keep_pending: HashMap::new(),
+            keep_overflow: HashMap::new(),
             unledgered: BTreeMap::new(),
             uncosted: BTreeMap::new(),
             dropped_asks: HashMap::new(),
@@ -2881,9 +3134,12 @@ impl Sched {
             oldest_unit: None,
             reserve_said: HashMap::new(),
             live_jobs: HashSet::new(),
+            live_session_ids: HashMap::new(),
+            job_ids: HashMap::new(),
             resume: Vec::new(),
             updating: HashMap::new(),
             update_drain: HashSet::new(),
+            hub_restarts: HashMap::new(),
             update_waits: HashMap::new(),
             tips: String::new(),
             landed: Vec::new(),
@@ -2899,15 +3155,22 @@ impl Sched {
             live_waiting: HashSet::new(),
             live_call_ms: HashMap::new(),
             live_call_end_ms: HashMap::new(),
+            live_used: HashMap::new(),
             live_overran: HashMap::new(),
             live_call_charge: HashMap::new(),
+            launch_quotas: HashMap::new(),
+            grant_held: HashMap::new(),
             parking_ram: HashSet::new(),
+            park_room: HashMap::new(),
             stalled: HashMap::new(),
             stall_runs: HashMap::new(),
             overran: HashMap::new(),
             captures: HashMap::new(),
             box_idle_since: HashMap::new(),
             deploy_moved_ms: HashMap::new(),
+            wm_held: HashMap::new(),
+            wm_wait: HashMap::new(),
+            wm_parking: HashSet::new(),
             stale_told: HashSet::new(),
             stale_seen: HashMap::new(),
             queue_busy_ms: 0,
@@ -3140,24 +3403,25 @@ impl Sched {
     /// Counted as cold, a lease went to another box and built the same JIT again: 40 of 234
     /// overlay JIT builds in 4 h had theirs in flight on another box of their OS (11-13).
     fn jit_building(&self, name: &str, l: &Lease) -> Option<&Lease> {
-        if l.req.src != Src::Overlay || l.req.jit_ids().is_empty() || !l.req.on_node() { return None; }
+        if l.req.src != Src::Overlay || l.req.jit_ids().is_empty() || !l.req.set_up_on_node() { return None; }
         let compiler = &self.nodes.get(name)?.caps.as_ref()?.jit_store.as_ref()?.compiler;
         let at = self.jit_compilers().iter().position(|x| x == compiler)?;
         let id = l.req.jit_ids().get(at).filter(|id| !id.is_empty())?;
         if Self::asked_jit(l).is_some_and(|asked| asked != id) { return None; }
-        self.leases.iter().find(|r| r.id != l.id && r.state.live() && r.node.as_deref() == Some(name) && r.req.jit_ids().get(at) == Some(id)
+        self.leases.iter().find(|r| r.id != l.id && r.req.set_up_on_node() && r.state.live() && r.node.as_deref() == Some(name) && r.req.jit_ids().get(at) == Some(id)
             && (r.req.src == Src::Overlay || r.req.warm_up()) && !r.node_phases.0.iter().any(|s| s.phase == "run"))
     }
 
     fn jit_build_charge(&self, name: &str, l: &Lease) -> Option<f64> {
+        if !l.req.set_up_on_node() { return None; }
         if self.tree_builds(name, l) { return self.jit_build_cores(name, l.req.kind); }
-        if l.req.src != Src::Overlay || l.req.jit_ids().is_empty() || !l.req.on_node() || l.node_phases.0.iter().any(|s| s.phase == "run") { return None; }
+        if l.req.src != Src::Overlay || l.req.jit_ids().is_empty() || l.node_phases.0.iter().any(|s| s.phase == "run") { return None; }
         let c = self.nodes.get(name)?.caps.as_ref()?;
         let compiler = &c.jit_store.as_ref()?.compiler;
         let at = self.jit_compilers().iter().position(|x| x == compiler)?;
         let id = l.req.jit_ids().get(at).filter(|id| !id.is_empty())?;
         if Self::asked_jit(l).is_some_and(|asked| asked != id) || holds_jit(c, id) || self.jit_source(name, l).is_some() { return None; }
-        let builds_first = |r: &Lease| r.id != l.id && r.state.live() && r.node.as_deref() == Some(name) && r.req.jit_ids().get(at) == Some(id)
+        let builds_first = |r: &Lease| r.id != l.id && r.req.set_up_on_node() && r.state.live() && r.node.as_deref() == Some(name) && r.req.jit_ids().get(at) == Some(id)
             && (r.req.src == Src::Overlay || r.req.warm_up()) && !r.node_phases.0.iter().any(|s| s.phase == "run")
             && (l.state == State::Queued || r.req.warm_up() || (r.granted_ms, &r.id) < (l.granted_ms, &l.id));
         if self.leases.iter().any(builds_first) { return None; }
@@ -3165,25 +3429,47 @@ impl Sched {
     }
 
     /// Whether `l`, a work tree's lease, builds its tree's JIT on `name` before its command runs:
-    /// its command is a JIT run ([`Self::jit_class`]), its lane's last run at a rev new to its box
-    /// built its JIT ([`Self::tree_rebuilds`]), the box's tree last ran another rev
-    /// ([`Self::tree_jits`]), and no lease of that tree at that rev there builds it or runs on it.
-    /// Its class says so only once its run began (`+jit-build`): admitted at its run's 4 cores, a
-    /// lane's test built its JIT on all 16 of a pool box for 126 s, and the box stood at 24 of 16
-    /// while an ask held it (L947202, 11-13).
+    /// its command is a JIT run ([`Self::jit_class`]), the box lacks its pin's store key (without
+    /// a key, its lane last built at a new rev or has no such record, [`Self::tree_rebuilds`]), the box's tree
+    /// last ran another rev ([`Self::tree_jits`]), and no lease of that tree at that rev there
+    /// builds it or runs on it. Its class says so only once its run began (`+jit-build`): admitted
+    /// at its run's 4 cores, a lane's test built its JIT on all 16 of a pool box for 126 s, and the
+    /// box stood at 24 of 16 while an ask held it (L947202, 11-13). A lane's first such run builds
+    /// too: one whose class was new (`sh -c '… makepad test …'`) was granted 2 cores as a short
+    /// run "its JIT on the box" and built on 11, its box at 21.9 in use of 16 (L1862047, 11-26).
+    /// A post-land Mac bucket built an old pin missing from the store and ran 15 min against its
+    /// class's 9m23s (L1864541, 11-26).
     fn tree_builds(&self, name: &str, l: &Lease) -> bool {
-        let Some(rev) = l.req.rev.as_deref().filter(|_| l.req.src == Src::Tree && l.req.on_node()) else { return false };
+        let Some(rev) = l.req.rev.as_deref().filter(|_| l.req.src == Src::Tree && l.req.set_up_on_node()) else { return false };
         let lane = l.req.tree_lane();
-        if l.node_phases.0.iter().any(|s| s.phase == "jit" || s.phase == "run") || !self.tree_rebuilds.get(lane).copied().unwrap_or(false) || !self.jit_class(l.req.class(), l.req.kind.as_str()) {
+        if l.node_phases.0.iter().any(|s| s.phase == "jit" || s.phase == "run") || !self.jit_class(l.req.class(), l.req.kind.as_str()) {
             return false;
         }
         if self.tree_jits.get(&(lane.to_string(), name.to_string())).map(String::as_str) == Some(rev) { return false; }
-        !self.leases.iter().any(|r| r.id != l.id && r.state.live() && r.node.as_deref() == Some(name) && r.req.src == Src::Tree && r.req.tree_lane() == lane && r.req.rev.as_deref() == Some(rev))
+        let stored = self.nodes.get(name).and_then(|n| n.caps.as_ref()).and_then(|c| {
+            if l.req.tree_jit.is_empty() { return None; }
+            let compiler = &c.jit_store.as_ref()?.compiler;
+            let at = self.jit_compilers().iter().position(|v| v == compiler)?;
+            let key = l.req.tree_jit.get(at).filter(|key| !key.is_empty())?;
+            Some(holds_jit(c, key))
+        });
+        match stored {
+            Some(true) => return false,
+            None if !self.tree_rebuilds.get(lane).copied().unwrap_or(true) => return false,
+            _ => {}
+        }
+        !self.leases.iter().any(|r| r.id != l.id && r.req.set_up_on_node() && r.state.live() && r.node.as_deref() == Some(name) && r.req.src == Src::Tree && r.req.tree_lane() == lane && r.req.rev.as_deref() == Some(rev))
     }
 
-    /// A class whose runs are JIT runs: one whose box built its JIT first (`+jit-build`), or a
-    /// command such a run of was measured for.
+    /// A class whose runs are JIT runs: one whose box built its JIT first (`+jit-build`), a
+    /// command such a run of was measured for, or one that calls the run's `makepad` (the node's
+    /// own test, [`super::native::calls_makepad`]: a JIT command's class names it first, a
+    /// shell's `-c` text keeps it among its words). A class new to the master is known by its
+    /// words alone: L1862047 above.
     fn jit_class(&self, class: &str, kind: &str) -> bool {
+        // (a box without checkouts builds no tree's JIT: the node's test is the checkout's too)
+        #[cfg(feature = "checkout")]
+        if super::native::calls_makepad(&[class.to_string()]) { return true; }
         class.ends_with(super::JIT_BUILD_RUN) || self.walls.contains_key(&(format!("{class}{}", super::JIT_BUILD_RUN), kind.to_string()))
     }
 
@@ -3416,7 +3702,8 @@ impl Sched {
     fn overruns_said(&self, name: &str, except: &str, status: bool) -> String {
         let grants = status && self.nodes.get(name).and_then(|n| n.caps.as_ref()).is_some_and(Self::weighs_cpu);
         self.live_on_node(name, except).filter_map(|r| self.past_grant.get(&r.id).map(|most| {
-            let asks = if grants && self.yields_to_live(r) { " by holds and timed work, at its grant by other asks" } else { "" };
+            if self.grant_held.contains_key(&r.id) { return format!("{} past its grant of {:.0} cores, held to its grant (measured {most:.1})", r.id, r.cost.cores); }
+            let asks = if grants && self.counts_at_grant(r) { " by holds and timed work, at its grant by other asks" } else { "" };
             format!("{} past its grant of {:.0} cores, counted at the {most:.1} it measured{asks}", r.id, r.cost.cores)
         })).collect::<Vec<_>>().join(", ")
     }
@@ -3441,9 +3728,13 @@ impl Sched {
     /// most of their box, their boxes ran well over their cores beside a tests shard, and a save
     /// waited a minute for its call (11-08).
     fn call_cores(&self, l: &Lease) -> f64 {
-        if l.req.cores.is_some() || !self.is_live_job(l) { return l.cost.cores; }
-        let Some((p90, _)) = self.call_p90(&l.req, !self.live_called.contains(&l.id)) else { return l.cost.cores };
-        let most = l.node.as_deref().and_then(|n| self.nodes.get(n)).and_then(|n| n.caps.as_ref()).map_or(f64::INFINITY, |c| c.cores_for(l.req.kind) as f64);
+        self.call_cores_on(l, l.node.as_deref(), &l.cost)
+    }
+
+    fn call_cores_on(&self, l: &Lease, name: Option<&str>, cost: &Cost) -> f64 {
+        if l.req.cores.is_some() || !self.is_live_job(l) { return cost.cores; }
+        let Some((p90, _)) = self.call_p90(&l.req, !self.live_called.contains(&l.id)) else { return cost.cores };
+        let most = name.and_then(|n| self.nodes.get(n)).and_then(|n| n.caps.as_ref()).map_or(f64::INFINITY, |c| c.cores_for(l.req.kind) as f64);
         p90.ceil().max(1.0).min(most)
     }
 
@@ -3500,12 +3791,16 @@ impl Sched {
     /// used 0.3-5: L615639 headed the queue 46 min at "budget cores 16, in use 16, asked 16"
     /// (11-07). A session that needs more asks it (`live start --cores`).
     pub(super) fn measured_cores(&self, req: &Req) -> Option<f64> {
+        self.measured_use(req, self.session(req))
+    }
+
+    /// Its class's median or p90 CPU use, falling back to the unfiltered class.
+    fn measured_use(&self, req: &Req, median: bool) -> Option<f64> {
         let kind = req.kind.as_str();
-        let session = self.session(req);
         let measure = |class: &str| self.cpu.get(&(class.to_string(), kind.to_string())).filter(|q| !q.is_empty()).map(|q| {
             let mut sorted: Vec<f64> = q.iter().copied().collect();
             sorted.sort_by(f64::total_cmp);
-            if session { sorted[(sorted.len() - 1) / 2] } else { sorted[(sorted.len() * 9).div_ceil(10) - 1] }
+            if median { sorted[(sorted.len() - 1) / 2] } else { sorted[(sorted.len() * 9).div_ceil(10) - 1] }
         });
         let base = super::base_class(req.class());
         measure(req.class()).or_else(|| if base != req.class() { measure(base) } else { None })
@@ -3578,7 +3873,7 @@ impl Sched {
 
     /// Whether box `name` lacks the JIT `l` runs on (its loader, or its `--jit` ids).
     fn lacks_loader(&self, name: &str, l: &Lease) -> bool {
-        l.req.on_node() && (l.req.loader.as_deref().is_some_and(|id| !id.is_empty()) || !l.req.jit_ids().is_empty()) && !self.has_loader(name, l)
+        l.req.set_up_on_node() && (l.req.loader.as_deref().is_some_and(|id| !id.is_empty()) || !l.req.jit_ids().is_empty()) && !self.has_loader(name, l)
     }
 
     /// The p90 of the class's recent peaks on the box `on` ([`ram_p90`]), before the scheduling
@@ -3798,7 +4093,7 @@ impl Sched {
     }
 
     fn has_loader(&self, name: &str, l: &Lease) -> bool {
-        l.req.on_node() && self.nodes[name].caps.as_ref().and_then(|c| c.jit_store.as_ref()).is_some_and(|s| s.ids.iter().any(|held| l.req.loader.as_ref() == Some(held) || l.req.jit_ids().contains(held)))
+        l.req.set_up_on_node() && self.nodes[name].caps.as_ref().and_then(|c| c.jit_store.as_ref()).is_some_and(|s| s.ids.iter().any(|held| l.req.loader.as_ref() == Some(held) || l.req.jit_ids().contains(held)))
     }
 
     /// The JIT build a lease waits for on this box first (its `--jit`'s copy there, [`Self::jit_source`]).
@@ -3849,7 +4144,8 @@ impl Sched {
         // the session ends then at the latest. Counted to its class's measure, a timed ask read
         // "expected start in ~55 min" behind a screen session whose class measured 1h01m, which
         // held its box 9m46s, and the ask started 19.5 min after it came (L1352188, 11-18).
-        let parked = |r: &Lease| (l.req.kind == Kind::Timed && self.is_live_job(r) && Self::parks_for(r, l)).then_some(r.granted_ms).flatten().map(|g| l.asked_ms.max(g).saturating_add(TIMED_DUE_MS).saturating_sub(self.clock));
+        // (one another session joins parks at no such point while that one is queued or runs)
+        let parked = |r: &Lease| (l.req.kind == Kind::Timed && self.is_live_job(r) && Self::parks_for(r, l) && !self.live_joined.contains(&r.id) && !self.set_unready(r)).then_some(r.granted_ms).flatten().map(|g| l.asked_ms.max(g).saturating_add(TIMED_DUE_MS).saturating_sub(self.clock));
         let left = |r: &Lease| {
             if self.live_launch(l) && self.is_live_job(r) { return u64::MAX; }
             let wall = self.run_ms(r);
@@ -3980,7 +4276,21 @@ impl Sched {
             self.move_heard_clocks(deaf, now);
             self.event(Sev::Info, format!("the master hears its boxes again after {}: its leases' output and idle times do not count that time", dur(deaf)), None);
         }
-        let sample = super::panel::Sample::of(now, &caps, self.charged_on(name));
+        if let Some(previous) = self.nodes.get(name).and_then(|n| n.heard_ms).filter(|t| *t < now) {
+            let scale = self.yield_scale(name);
+            if scale < 1.0 {
+                let dt_ms = (now - previous) as f64;
+                let yielded: Vec<_> = self.leases.iter().enumerate()
+                    .filter(|(_, r)| r.state.live() && r.node.as_deref() == Some(name) && self.yields_to_live(r))
+                    .map(|(i, r)| {
+                        let cores = self.charged(r).cores;
+                        (i, (cores - self.yield_floor(r).min(cores)) * (1.0 - scale) * dt_ms)
+                    })
+                    .collect();
+                for (i, core_ms) in yielded { self.leases[i].yielded_core_ms += core_ms; }
+            }
+        }
+        let sample = super::panel::Sample::of(now, &caps, self.charged_shown(name));
         let live_here = self.live_on_node(name, "").next().is_some();
         let n = self.nodes.entry(name.to_string()).or_default();
         n.displayed |= caps.display.is_some();
@@ -4044,6 +4354,11 @@ impl Sched {
             (true, true) => Some(format!("{name}: its WM restart's drain lifted (it ran, or a person holds it now): screen and gui leases take it again")),
             _ => None,
         };
+        // a live session the restart cannot go around (its WM keeps no apps over a restart) holds
+        // the box's update until it ends: its lane hears so at once, not at a check-in. A demo copy
+        // held a box's WM and JIT apps on replaced builds 13 min, and would have for its life (11-27)
+        let unkept: Vec<String> = unkept_holds(&caps.wm_drain).into_iter().filter(|id| !n.caps.as_ref().is_some_and(|c| unkept_holds(&c.wm_drain).contains(id))).collect();
+        let holding = drain_leases(&caps.wm_drain);
         if n.caps.as_ref().is_some_and(|c| !c.deploy.is_empty() && c.deploy != caps.deploy) {
             self.deploy_moved_ms.insert(name.to_string(), now);
         }
@@ -4062,6 +4377,36 @@ impl Sched {
         n.gone_ms = None;
         for (sev, line) in thermal { self.event(sev, line, None); }
         if let Some(line) = drain { self.event(Sev::Info, line, None); }
+        for id in unkept {
+            let Some(l) = self.leases.iter().find(|l| l.id == id && l.state.live()).cloned() else { continue };
+            self.tell_lane(Sev::Warn, format!("{name}'s WM update waits on {id}, a live session of {} there: its WM keeps no apps over a restart, so the restart waits for the session to end, and until then the box runs its replaced WM and JIT apps and takes no new screen or gui work. Release the session when it is done (`devhub live release`)", l.req.lane), &l);
+        }
+        // any other lease that holds it past [`WM_HOLD_TOLD_MS`]: its lane hears so once, with the
+        // wait so far (from when this master first saw it hold), and the lease runs on
+        let unkept_tag = format!(" ({})", super::exec::LIVE_UNKEPT);
+        let seen = self.wm_held.entry(name.to_string()).or_default();
+        seen.retain(|id, _| holding.iter().any(|(h, _)| h == id));
+        let mut long = Vec::new();
+        for (id, part) in &holding {
+            let (since, told) = seen.entry(id.clone()).or_insert((now, false));
+            if !*told && !self.wm_wait.contains_key(id) && !part.ends_with(&unkept_tag) && now.saturating_sub(*since) >= WM_HOLD_TOLD_MS {
+                *told = true;
+                long.push((id.clone(), part.clone(), now.saturating_sub(*since)));
+            }
+        }
+        for (id, part, waited) in long {
+            let Some(l) = self.leases.iter().find(|l| l.id == id && l.state.live()).cloned() else { continue };
+            let Some(c) = self.nodes.get(name).and_then(|n| n.caps.as_ref()) else { continue };
+            let next = match self.wm_wait_bound(name, c, &l, now) {
+                WmWaitBound::Measured { measure_ms, against, timed, .. } => {
+                    let action = if timed { "notify you and main (no capture: timed lease)" } else { "capture its state and notify you and main" };
+                    format!("if it runs past 2x {against} ({}), devhub will {action}", dur(measure_ms.saturating_mul(WM_WAIT_CAPTURE_TIMES)))
+                }
+                WmWaitBound::Unmeasured => "there is no 2x capture without a measure (its class has no measure yet, is a script, or its build is estimated)".into(),
+                WmWaitBound::Exempt(_reason) => "end it sooner if its work allows".into(),
+            };
+            self.tell_lane(Sev::Warn, format!("{name}'s WM update has waited {} on {part}: the restart waits for it to end, and until then the box runs its replaced WM and JIT apps and takes no new screen or gui work. Nothing ends it; {next}", dur(waited)), &l);
+        }
         if crossed {
             self.event(Sev::Warn, line, None);
         }
@@ -4083,11 +4428,11 @@ impl Sched {
     /// Keeps the look's demand ([`Self::demand_now`]) for [`DEMAND_WINDOW_MS`], and the newest
     /// past it ([`Self::outside_cores`]).
     fn note_demand(&mut self, name: &str, now: u64) {
-        let Some((base, wait)) = self.demand_now(name) else { return };
+        let Some((base, wait, direct)) = self.demand_now(name) else { return };
         let free = self.live_on_node(name, "").next().is_none() && !self.restoring.values().any(|(n, ..)| n == name);
         let n = self.nodes.get_mut(name).expect("its caps just came");
         let q = &mut n.demand;
-        q.push_back((now, base, wait));
+        q.push_back((now, base, wait, direct));
         while q.len() > 1 && q.front().is_some_and(|(t, ..)| t + DEMAND_WINDOW_MS < now) { q.pop_front(); }
         // a look whose whole measure is of no work of ours: the box's own load ([`Self::resting`])
         if free && n.ours_ended_ms.map_or(true, |e| n.measure_from_ms.is_some_and(|f| f >= e)) {
@@ -4167,16 +4512,26 @@ impl Sched {
     /// Its caps did not answer: it counts as down once they have not for [`DOWN_AFTER_MS`] (a
     /// missed poll, a link the master's exec just dropped, is no reason to reroute its work).
     /// `miss`: why, said on its node line. One that says the host is off the network
-    /// ([`super::master::host_gone`]) for [`HOST_GONE_MS`], every miss since, ends the box's live
-    /// leases as lost (their ids): their holders get no verdict and ask again. A miss of a host that
-    /// answers (a refused connect: its hub restarts) starts that count again.
+    /// ([`super::master::host_gone`]) for [`HOST_GONE_MS`], every miss since, is a drop: it ends
+    /// the box's timed leases as lost (their ids), and its other live leases once it has been off
+    /// the network past twice its longest recorded outage, or at once with none on record: their
+    /// holders get no verdict and ask again. Till then they ride the outage: the box's hub keeps
+    /// them for the master and its run goes on, and their holders re-attach once it is back. A
+    /// bench Mac that slept between dark wakes dropped every 10 to 31 min, and its 27 leases lost
+    /// in a morning were runs that went on there and were ended when it woke (11-26). A miss of a
+    /// host that answers (a refused connect: its hub restarts) starts that count again, and so
+    /// does one of a box whose hub restarts for its update at the roll's word, up to
+    /// [`HUB_RESTART_MS`] ([`Self::hub_restarting`]): a Windows box answers no connect to a port
+    /// nothing listens on, and its hub's restarts of 70-100 s read as drops off the network, three
+    /// an hour, each settling the box 10 min, 105 lease-min an hour (11-26).
     pub fn caps_missed(&mut self, name: &str, miss: &str, now: u64) -> Vec<String> {
+        let restarts = self.hub_restarts.get(name).is_some_and(|&since| now.saturating_sub(since) < HUB_RESTART_MS);
         let Some(n) = self.nodes.get_mut(name) else { return Vec::new() };
         let since = *n.unheard_ms.get_or_insert(now);
         if now.saturating_sub(since) >= DOWN_AFTER_MS {
             n.up = false;
         }
-        let gone = super::master::host_gone(miss);
+        let gone = super::master::host_gone(miss) && !restarts;
         n.miss = crate::proto::clean(miss, 160);
         let deaf = self.deaf(name, since, now);
         if deaf {
@@ -4191,17 +4546,35 @@ impl Sched {
         }
         let off = now.saturating_sub(*n.gone_ms.get_or_insert(now));
         if off < HOST_GONE_MS { return Vec::new(); }
-        let why = format!("its box {name} is off the network for {} ({}): no verdict, ask again", dur(off), n.miss);
+        let miss = n.miss.clone();
         // its run up ended when it stopped answering, once per outage
         let link = self.links.entry(name.to_string()).or_default();
-        if let Some(back) = link.back_ms.take() {
+        let (ride, rule) = match link.outs.iter().max() {
+            Some(&o) if 2 * o > HOST_GONE_MS => (2 * o, format!("twice its longest recorded outage, {}", dur(o))),
+            _ => (HOST_GONE_MS, "a minute: no longer outage of it on record".to_string()),
+        };
+        let dropped = link.back_ms.take().is_some_and(|back| {
             Lat::push(&mut link.ups, since.saturating_sub(back));
             link.drops.push_back(since);
             link.out_since = Some(since);
             while link.drops.front().is_some_and(|t| t + DROPS_KEEP_MS < since) { link.drops.pop_front(); }
+            true
+        });
+        let ends = |l: &Lease| l.state.live() && l.node.as_deref() == Some(name) && (l.req.kind == Kind::Timed || off >= ride);
+        if dropped && off < ride {
+            let riding: Vec<&str> = self.leases.iter().filter(|l| l.state.live() && l.node.as_deref() == Some(name) && !ends(l)).map(|l| l.id.as_str()).collect();
+            if !riding.is_empty() {
+                let line = format!("{name} is off the network ({miss}): its running lease(s) {} ride the outage up to {} away ({rule}), their runs going on there; past that they end as lost", riding.join(" "), dur(ride));
+                self.event(Sev::Warn, line, None);
+            }
         }
         let mut ended = Vec::new();
-        while let Some(i) = self.leases.iter().position(|l| l.state.live() && l.node.as_deref() == Some(name)) {
+        while let Some(i) = self.leases.iter().position(&ends) {
+            let why = if self.leases[i].req.kind == Kind::Timed {
+                format!("its box {name} is off the network for {} ({miss}): a timed lease ends at a drop, a sleep inside its run spoiling its timings: no verdict, ask again", dur(off))
+            } else {
+                format!("its box {name} is off the network for {} ({miss}), past the {} a running lease rides an outage ({rule}): no verdict, ask again", dur(off), dur(ride))
+            };
             ended.push(self.leases[i].id.clone());
             self.end_at(i, "lost", Sev::Warn, &why, now);
         }
@@ -4211,20 +4584,21 @@ impl Sched {
     /// A lease pinned to `name` while its box is off the network as long as its live leases end
     /// as lost ([`HOST_GONE_MS`], every miss since): it keeps its place and waits for the box,
     /// saying so plainly (a cleanup pinned to a box down 26 min queued 18 min saying only "node
-    /// down", 11-14), and is refused only once the box has been gone past its grace
-    /// ([`PINNED_GONE_GRACE_MS`]). A box that refuses the connect (its hub restarts) is waited for
-    /// as any down box.
+    /// down", 11-14), however long the box is away, and is ranked again once the box is heard.
+    /// Only a box that left the fleet refuses it: the master's next start does not add it, and an
+    /// ask pinned to it is refused there as no such node ([`Self::candidates`]). A bench Mac whose
+    /// lid was shut dropped off the network every 10 to 31 min, each outage up to 18 min, and a
+    /// minute of one refused two timed asks pinned to it that had queued 50 min; a grace of 30
+    /// min was one more limit that would refuse them (11-26). A box that refuses the connect (its
+    /// hub restarts) is waited for as any down box.
     fn pinned_gone(&self, name: &str) -> Option<Place> {
         let n = self.nodes.get(name).filter(|n| !n.up)?;
-        let off = self.clock.saturating_sub(n.gone_ms?);
-        if off < HOST_GONE_MS { return None; }
-        let grace = self.links.get(name).and_then(|k| k.outs.iter().max()).map_or(PINNED_GONE_GRACE_MS, |&o| PINNED_GONE_GRACE_MS.max(2 * o));
-        if off >= grace {
-            return Some(Place::Deny(format!("its box {name} has been off the network for {} ({}), past the {} a lease pinned to it waits for it: it cannot start; ask again once it is back (devhub nodes), or without --node", dur(off), n.miss, dur(grace))));
-        }
+        let gone = n.gone_ms?;
+        if self.clock.saturating_sub(gone) < HOST_GONE_MS { return None; }
+        let away = self.clock.saturating_sub(n.unheard_ms.unwrap_or(gone).min(gone));
         let drops = self.links.get(name).map_or(0, |k| k.drops.iter().filter(|&&t| t + DROPS_KEEP_MS > self.clock).count());
         let pattern = if drops > 1 { format!("; it dropped {drops} times in the last {}: its pattern is on its `devhub nodes` line", dur(DROPS_KEEP_MS)) } else { String::new() };
-        Some(Place::wait(format!("its box {name} is off the network for {} ({}): the lease keeps its place and starts once the box is back; it is refused only if the box stays gone {}{pattern}", dur(off), n.miss, dur(grace)), None, None, vec![name.to_string()]))
+        Some(Place::wait(format!("waits for {name} to come back, away {}: it is off the network ({}); the lease keeps its place and is ranked again once {name} is heard{pattern}", dur(away), n.miss), None, None, vec![name.to_string()]))
     }
 
     /// A box's link over the last [`DROPS_KEEP_MS`], once it dropped off the network (past
@@ -4278,6 +4652,12 @@ impl Sched {
         let up = now.saturating_sub(link.back_ms?);
         let drops = link.drops.iter().filter(|&&t| t + DROPS_WINDOW_MS > now).count();
         (drops > 1 && up < SETTLE_MS).then_some((drops, up))
+    }
+
+    /// The roll asked box `name`'s hub to restart for its update (`on`, at `now`), or that restart
+    /// is over (it is back, or the roll gave up on it): see [`Self::caps_missed`].
+    pub fn hub_restarting(&mut self, name: &str, on: bool, now: u64) {
+        if on { self.hub_restarts.insert(name.to_string(), now); } else { self.hub_restarts.remove(name); }
     }
 
     /// [`Self::settling_after_drops`], said in the queue line of work it keeps off `name`.
@@ -4419,7 +4799,7 @@ impl Sched {
             if l.asked_ms < first { req.place_ms = Some(req.place_ms.map_or(l.asked_ms, |t| t.min(l.asked_ms))); }
             (l.cost, l.run, l.priority, l.cost_class, l.cost_source, l.guess_note) = (req.allocation(false), req.allocation(false).cores, req.priority, cost_class, cost_source, guess_note);
             l.req = req;
-            l.beat_ms = now;
+            l.beat_ms = l.beat_ms.max(now);
             l.reask_by = None;
             return l.id.clone();
         }
@@ -4428,11 +4808,16 @@ impl Sched {
             if asked < first { req.place_ms = Some(req.place_ms.map_or(asked, |t| t.min(asked))); }
         }
         let waited = req.since_ms.filter(|_| req.master).and_then(|t| self.dropped_waits.remove(&(req.lane.clone(), t)));
+        // (a job's is said at its submission, orch/job.rs)
+        let narrow = (!req.master).then(|| self.narrow_places(&req)).flatten();
         let id = format!("L{}", self.next);
         self.next += 1;
         let id = self.request_as(id, req, now);
         if let (Some(waited), Some(l)) = (waited, self.leases.iter_mut().find(|l| l.id == id)) {
             l.wait_goes_on(waited, now);
+        }
+        if let (Some(n), Some(l)) = (narrow, self.leases.iter().find(|l| l.id == id).cloned()) {
+            self.tell_lane(Sev::Info, format!("{} of {}: {n}", l.tag(), l.req.lane), &l);
         }
         self.say_mixed_arms(&id, now);
         id
@@ -4492,6 +4877,11 @@ impl Sched {
 
     pub(super) fn retry_actions(&mut self, actions: Vec<Action>) {
         self.out.extend(actions);
+    }
+
+    #[cfg(test)]
+    pub(super) fn has_queued_end(&self, id: &str) -> bool {
+        self.out.iter().any(|a| matches!(a, Action::End { id: a_id, .. } if a_id == id))
     }
 
     /// The master's own queued ask a restart brought back that `req` asks again for: the same
@@ -4600,6 +4990,7 @@ impl Sched {
             node_phases: Default::default(),
             reported_ms: None,
             peak_cores: None,
+            yielded_core_ms: 0.0,
             // (asked again by a new master: the ledger's queue time counts from the first ask)
             // (`asked_ms` is its place: what it waited on before this ask is another lease's record)
             queue_sample_ms: now,
@@ -4634,25 +5025,99 @@ impl Sched {
         (!never.is_empty()).then(|| never.iter().map(|(e, boxes)| if l.req.node.is_some() { e.clone() } else { format!("{}: {e}", boxes.join(" ")) }).collect::<Vec<_>>().join("; "))
     }
 
+    /// The boxes a request that names none fits, and what kept the others out, when its asked
+    /// cores or RAM leave it fewer than two boxes that would take it without them. A lane's
+    /// `--cores 12` fit only the bench Mac and queued five tests behind a 100-min timed lease there,
+    /// with no word of it at submission (11-26). None when it names its box, fits two or more, is
+    /// as narrow without its asks (a platform with one box), fits none, or a box's caps are unknown.
+    pub fn narrow_places(&self, req: &Req) -> Option<String> {
+        if req.node.is_some() || req.cores.is_none() && req.ram_gb.is_none() { return None; }
+        let fits = |req: &Req| -> Option<(Vec<String>, Vec<(String, String)>)> {
+            let l = self.proposed(String::new(), req.clone(), self.clock);
+            let (mut fit, mut out) = (Vec::new(), Vec::new());
+            for name in self.candidates(&l).ok()? {
+                let c = self.nodes[name].caps.as_ref()?;
+                match self.never(name, c, &l, &self.cost_on(name, &l)) {
+                    Ok(()) => fit.push(name.clone()),
+                    Err(e) => out.push((name.clone(), e)),
+                }
+            }
+            Some((fit, out))
+        };
+        let (fit, out) = fits(req)?;
+        let (unasked, _) = fits(&Req { cores: None, ram_gb: None, ram_floor_gb: None, ..req.clone() })?;
+        if fit.len() >= 2 || unasked.len() < 2 { return None; }
+        // (the boxes its asks alone kept out, grouped by why)
+        let mut why: Vec<(String, Vec<String>)> = Vec::new();
+        for (name, e) in out.into_iter().filter(|(n, _)| unasked.contains(n)) {
+            match why.iter_mut().find(|(r, _)| *r == e) {
+                Some((_, b)) => b.push(name),
+                None => why.push((e, vec![name])),
+            }
+        }
+        let asked = [req.cores.map(|c| format!("--cores {c}")), req.ram_gb.map(|g| format!("--ram-gb {g}"))].into_iter().flatten().collect::<Vec<_>>().join(" ");
+        let kept = why.iter().map(|(e, b)| format!("{}: {e}", b.join(" "))).collect::<Vec<_>>().join("; ");
+        // (none at all is a denial: [`Self::never_places`])
+        let only = fit.first()?;
+        Some(format!("{asked} fits only {only}, so it waits for that box alone ({kept})"))
+    }
+
     pub fn get(&self, id: &str) -> Option<&Lease> {
-        self.leases.iter().find(|l| l.id == id).or_else(|| self.ended.iter().find(|l| l.id == id))
+        self.leases.iter().find(|l| l.id == id).or_else(|| self.ended.iter().find(|l| l.id == id)).or_else(|| self.keep_overflow.get(id))
     }
 
     pub fn addr(&self, node: &str) -> String {
         self.nodes.get(node).map(|n| n.addr.clone()).unwrap_or_default()
     }
 
+    /// Defers heartbeat and restore-reask expiry until [`Self::mark_serving`] is called once
+    /// startup finishes.
+    pub fn hold_beat_expiry(&mut self) {
+        self.serving_ms = None;
+    }
+
+    /// Records the wall ms at which the master is serving heartbeats: every lease's last beat
+    /// counts as at least `now`, and restored `reask_by` deadlines count from at least `now`.
+    pub fn mark_serving(&mut self, now: u64) {
+        self.serving_ms = Some(self.serving_ms.map_or(now, |t| t.max(now)));
+    }
+
+    pub fn hold_local(&mut self, id: &str) {
+        *self.local_holders.entry(id.to_string()).or_default() += 1;
+    }
+
+    pub fn unhold_local(&mut self, id: &str, now: u64) {
+        let Some(count) = self.local_holders.get_mut(id) else { return };
+        *count -= 1;
+        if *count == 0 {
+            self.local_holders.remove(id);
+            // Give the next holder a full heartbeat interval after the handoff.
+            if let Some(l) = self.leases.iter_mut().find(|l| l.id == id) {
+                l.beat_ms = l.beat_ms.max(now);
+            }
+        }
+    }
+
+    pub fn is_locally_held(&self, id: &str) -> bool {
+        self.local_holders.get(id).is_some_and(|n| *n > 0)
+    }
+
     /// The holder's heartbeat; its state line (None: no such lease).
     pub fn beat(&mut self, id: &str, now: u64) -> Option<String> {
         if let Some(l) = self.leases.iter_mut().find(|l| l.id == id) {
-            l.beat_ms = now;
+            l.beat_ms = l.beat_ms.max(now);
         }
         let l = self.get(id)?;
         Some(l.state_line(now, &l.node.as_deref().map(|n| self.addr(n)).unwrap_or_default()))
     }
 
     fn end_at(&mut self, i: usize, how: &str, sev: Sev, why: &str, now: u64) {
+        self.end_at_with(i, how, sev, why, false, now);
+    }
+
+    fn end_at_with(&mut self, i: usize, how: &str, sev: Sev, why: &str, holder_kept: bool, now: u64) {
         let mut l = self.leases.remove(i);
+        self.local_holders.remove(&l.id);
         l.ended_stalled = self.stalled.contains_key(&l.id);
         self.start_refused.remove(&l.id);
         self.holds.retain(|_, h| h.id != l.id);
@@ -4669,6 +5134,9 @@ impl Sched {
         }
         let held = l.granted_ms.map(|g| now.saturating_sub(g));
         l.state = State::Ended(how.to_string());
+        if !holder_kept && node.is_some() && l.req.set_up_on_node() {
+            if let Some(dst) = &l.req.keep_dir { self.keep_pending.insert(l.id.clone(), dst.clone()); }
+        }
         l.ended_ms = Some(now);
         l.reason = why.to_string();
         self.unledgered.insert(l.id.clone(), l.ledger_line());
@@ -4694,7 +5162,9 @@ impl Sched {
             // more, so a measured class's weight no longer counts (an asked RAM stays its ask)
             let mut held = self.charged(&l);
             if let Some(gb) = l.ram_held_gb.filter(|_| l.req.ram_gb.is_none()) { held.ram_gb = gb; }
-            self.restoring.insert(l.id.clone(), (n.clone(), l.req.clone(), held, now));
+            let mut cleanup_req = l.req.clone();
+            cleanup_req.keep_dir = self.keep_pending.get(&l.id).cloned();
+            self.restoring.insert(l.id.clone(), (n.clone(), cleanup_req, held, now));
             if let Some(st) = self.nodes.get_mut(n) {
                 st.released_ms = Some(now);
                 st.ours_ended_ms = Some(st.ours_ended_ms.unwrap_or(0).max(now));
@@ -4706,8 +5176,13 @@ impl Sched {
         self.out.push(Action::End { id: l.id.clone(), node, how: how.to_string() });
         self.ended.push_back(l);
         while self.ended.len() > KEEP_ENDED {
-            if let Some(e) = self.ended.pop_front().and_then(|l| l.ended_ms) {
+            let oldest = self.ended.pop_front().unwrap();
+            if let Some(e) = oldest.ended_ms {
                 self.ended_from_ms = self.ended_from_ms.max(e + 1);
+            }
+            if self.keep_pending.contains_key(&oldest.id) {
+                self.event(Sev::Info, format!("{}: retaining its teardown beyond the {KEEP_ENDED} recent leases until keep finishes", oldest.id), Some(&oldest));
+                self.keep_overflow.insert(oldest.id.clone(), oldest);
             }
         }
     }
@@ -4738,6 +5213,14 @@ impl Sched {
         true
     }
 
+    /// Record the verdict for a manually stopped run. Its box can take the lane's next run.
+    pub fn stop_by(&mut self, id: &str, reason: &str, now: u64) -> Option<String> {
+        let i = self.leases.iter().position(|l| l.id == id && l.state == State::Granted)?;
+        let node = self.leases[i].node.clone();
+        self.end_at(i, "stopped", Sev::Warn, reason, now);
+        node
+    }
+
     /// A stalled leg devhub runs ([`Req::unattended`]) whose JIT's capture found it parked (at
     /// code that did not compile, or a panic) ends as hung with that cause: a parked JIT waits for
     /// an edit or a resume, and no one makes one for such a leg. A jitlegs leg's app parked at a
@@ -4764,8 +5247,10 @@ impl Sched {
     pub fn end_for_memory(&mut self, id: &str, why: &str, now: u64) {
         if let Some(i) = self.leases.iter().position(|l| l.id == id && l.state.live()) {
             self.end_at(i, "memory", Sev::Err, why, now);
-        } else if let Some(l) = self.ended.iter_mut().find(|l| l.id == id && l.state == State::Ended("released".into())) {
-            (l.state, l.reason) = (State::Ended("memory".into()), why.to_string());
+        } else if let Some(l) = self.ended.iter_mut().find(|l| l.id == id).or_else(|| self.keep_overflow.get_mut(id)) {
+            if matches!(&l.state, State::Ended(how) if how == "released") {
+                (l.state, l.reason) = (State::Ended("memory".into()), why.to_string());
+            }
         }
     }
 
@@ -4783,18 +5268,22 @@ impl Sched {
         if (&req.lane, req.kind, &req.node) != (&l.req.lane, l.req.kind, &l.req.node) {
             return Err(format!("{id}: a new target is for the same lane, kind and box"));
         }
-        (l.req.rev, l.req.hint, l.req.own_jit) = (req.rev, req.hint, req.own_jit);
+        (l.req.rev, l.req.hint, l.req.tree_jit, l.req.own_jit) = (req.rev, req.hint, req.tree_jit, req.own_jit);
         l.jit_wait_since = None;
         Ok(())
     }
 
     /// Release (`how` = released | holder-dead | lost | failed …); false: not live or queued.
     pub fn release(&mut self, id: &str, how: &str, now: u64) -> bool {
+        self.release_kept(id, how, false, now)
+    }
+
+    pub fn release_kept(&mut self, id: &str, how: &str, holder_kept: bool, now: u64) -> bool {
         match self.leases.iter().position(|l| l.id == id) {
             Some(i) => {
                 self.keep_dropped_ask(i, now);
                 // anything but the holder's own release is worth a look
-                self.end_at(i, how, if how == "released" { Sev::Info } else { Sev::Warn }, "", now);
+                self.end_at_with(i, how, if how == "released" { Sev::Info } else { Sev::Warn }, "", holder_kept, now);
                 true
             }
             None => false,
@@ -4854,6 +5343,8 @@ impl Sched {
         // (a live session between calls: what it holds now is its own, not a call's)
         let calling = !self.live_idle.contains(id);
         if let Some(l) = self.leases.iter_mut().find(|l| l.id == id) {
+            // Master-side rooms and tree inspections receive no node beat, phases or class.
+            if !l.req.set_up_on_node() { return; }
             l.info = info.to_string();
             if let Ok(v) = makepad_strict_json::parse(info.as_bytes()) {
                 if v.get("phases").is_some() { l.node_phases = super::prof::Phases::parse(v.get("phases")); }
@@ -4880,7 +5371,9 @@ impl Sched {
                     (l.out_bytes, l.out_grew_ms) = (b, Some(now));
                 }
                 // (a lease that asked its command's class learns here that cargo builds its JIT first)
-                let class = v.get("class").and_then(|c| c.as_str()).map(|run| super::lease_class(&l.req.class, run)).filter(|c| !c.is_empty() && *c != l.req.class);
+                let class = v.get("class").and_then(|c| c.as_str())
+                    .map(|run| super::lease_class(&l.req.class, run))
+                    .filter(|c| !c.is_empty() && *c != l.req.class && !(l.req.master && c == HUB_BUILD));
                 if let Some(class) = class {
                     l.req.class = class;
                     // its row and stall check read this class now, not every class-less lease of its kind
@@ -4982,6 +5475,8 @@ impl Sched {
     /// to the queue, to the next box that fits, instead of failing.
     pub fn unreachable(&mut self, id: &str, why: &str) {
         let Some(l) = self.leases.iter_mut().find(|l| l.id == id && l.state == State::Starting) else { return };
+        self.live_call_charge.remove(id);
+        self.launch_quotas.remove(id);
         let node = l.node.take().unwrap_or_default();
         l.state = State::Queued;
         l.queue_sample_ms = l.phases.0.last().map_or(self.clock, |s| s.end.max(self.clock));
@@ -5008,6 +5503,8 @@ impl Sched {
 
     pub fn tree_busy(&mut self, id: &str, why: &str) {
         let Some(l) = self.leases.iter_mut().find(|l| l.id == id && l.state == State::Starting) else { return };
+        self.live_call_charge.remove(id);
+        self.launch_quotas.remove(id);
         let node = l.node.take().unwrap_or_default();
         l.state = State::Queued;
         l.queue_sample_ms = l.phases.0.last().map_or(self.clock, |s| s.end.max(self.clock));
@@ -5077,6 +5574,7 @@ impl Sched {
     pub fn started(&mut self, id: &str, answer: &str) -> bool {
         match self.leases.iter_mut().find(|l| l.id == id && l.state == State::Starting) {
             Some(l) => {
+                self.launch_quotas.remove(id);
                 l.state = State::Granted;
                 l.start = answer.to_string();
                 true
@@ -5095,7 +5593,16 @@ impl Sched {
             .map(|l| {
                 let mut req = l.req.clone();
                 req.priority = l.priority;
-                format!("{{\"id\":{},\"state\":\"{}\",\"node\":{},\"granted_ms\":{},\"asked_ms\":{},\"cost\":\"{}\",\"cost_source\":{},\"measured_ms\":{},\"req\":{},\"start\":{},\"phases\":{},\"node_phases\":{},\"allocation\":{{\"cores\":{},\"ram_gb\":{},\"disk_gb\":{},\"gpus\":{}}},\"ram_measured\":{}{},\"called\":{},\"deploy_pin\":{},\"deployment\":{},\"told_ms\":{},\"grant_why\":{},\"jit_jobs\":{},\"passed_ms\":{},\"level_passed_ms\":{},\"holds\":{}{}}}", json_str(&l.id), l.state.as_str(), json_str(l.node.as_deref().unwrap_or("")), l.granted_ms.unwrap_or(0), l.asked_ms, l.cost_class.as_str(), json_str(&l.cost_source.label()), l.cost_source.ms(), req.to_json(), json_str(&l.start), l.phases.json(), l.node_phases.json(), l.cost.cores, l.cost.ram_gb, l.cost.disk_gb, l.cost.gpus, l.ram_measured, l.native_warm.map_or(String::new(), |w| format!(",\"native_warm\":{w}")) + &l.warm.map_or(String::new(), |w| format!(",\"warm\":{w}")) + &l.ram_warm.map_or(String::new(), |w| format!(",\"ram_warm\":{w}")), self.live_called.contains(&l.id), json_str(l.deploy_pin.as_deref().unwrap_or("")), json_str(&l.deployment), l.told_ms.map_or("null".to_string(), |v| v.to_string()), json_str(&l.grant_why), l.jit_jobs.map_or("null".to_string(), |j| j.to_string()), l.passed_ms.map_or("null".to_string(), |v| v.to_string()), l.level_passed_ms.map_or("null".to_string(), |v| v.to_string()), self.holds.iter().find(|(_, h)| h.id == l.id && l.state == State::Queued).map_or("null".to_string(), |(n, _)| json_str(n)), self.yielded.get(&l.id).map_or(String::new(), |w| format!(",\"yielded\":{}", json_str(w))) + &l.deploy_pin_ms.map_or(String::new(), |t| format!(",\"deploy_pin_ms\":{t}")))
+                let mut output = String::new();
+                if l.state.live() {
+                    if l.out_bytes > 0 { output.push_str(&format!(r#","out_bytes":{}"#, l.out_bytes)); }
+                    if let Some(t) = l.out_grew_ms { output.push_str(&format!(r#","out_grew_ms":{t}"#)); }
+                }
+                let wm_wait = self.wm_wait.get(&l.id).filter(|w| w.notified).map_or(String::new(), |w| {
+                    let since = w.call_since.map_or("null".to_string(), |v| v.to_string());
+                    format!(r#","wm_wait":{{"node":{},"against":{},"word":{},"call_since":{since}}}"#, json_str(&w.node), json_str(&w.against), json_str(&w.word))
+                });
+                format!("{{\"id\":{},\"state\":\"{}\",\"node\":{},\"granted_ms\":{},\"asked_ms\":{},\"cost\":\"{}\",\"cost_source\":{},\"measured_ms\":{},\"req\":{},\"start\":{},\"phases\":{},\"node_phases\":{},\"allocation\":{{\"cores\":{},\"ram_gb\":{},\"disk_gb\":{},\"gpus\":{}}},\"ram_measured\":{}{},\"called\":{},\"deploy_pin\":{},\"deployment\":{},\"told_ms\":{},\"grant_why\":{},\"jit_jobs\":{},\"passed_ms\":{},\"level_passed_ms\":{},\"holds\":{}{}{output}}}", json_str(&l.id), l.state.as_str(), json_str(l.node.as_deref().unwrap_or("")), l.granted_ms.unwrap_or(0), l.asked_ms, l.cost_class.as_str(), json_str(&l.cost_source.label()), l.cost_source.ms(), req.to_json(), json_str(&l.start), l.phases.json(), l.node_phases.json(), l.cost.cores, l.cost.ram_gb, l.cost.disk_gb, l.cost.gpus, l.ram_measured, l.native_warm.map_or(String::new(), |w| format!(",\"native_warm\":{w}")) + &l.warm.map_or(String::new(), |w| format!(",\"warm\":{w}")) + &l.ram_warm.map_or(String::new(), |w| format!(",\"ram_warm\":{w}")), self.live_called.contains(&l.id), json_str(l.deploy_pin.as_deref().unwrap_or("")), json_str(&l.deployment), l.told_ms.map_or("null".to_string(), |v| v.to_string()), json_str(&l.grant_why), l.jit_jobs.map_or("null".to_string(), |j| j.to_string()), l.passed_ms.map_or("null".to_string(), |v| v.to_string()), l.level_passed_ms.map_or("null".to_string(), |v| v.to_string()), self.holds.iter().find(|(_, h)| h.id == l.id && l.state == State::Queued).map_or("null".to_string(), |(n, _)| json_str(n)), self.yielded.get(&l.id).map_or(String::new(), |w| format!(",\"yielded\":{}", json_str(w))) + &self.grant_held.get(&l.id).map_or(String::new(), |c| format!(",\"grant_held\":{c}")) + &l.deploy_pin_ms.map_or(String::new(), |t| format!(",\"deploy_pin_ms\":{t}")) + &((l.run - l.cost.cores).abs() >= 1e-9).then(|| format!(",\"run_cores\":{}", l.run)).unwrap_or_default() + &wm_wait)
             })
             // an ended lease whose node has not confirmed its cleanup holds what it held: a
             // restart keeps that, and asks the node again ([`Self::cleaning`])
@@ -5166,6 +5673,55 @@ impl Sched {
     /// The node of an ended lease whose cleanup is not confirmed yet, if `id` is one.
     pub fn cleaning(&self, id: &str) -> Option<&str> {
         self.restoring.get(id).map(|(n, ..)| n.as_str())
+    }
+
+    pub(super) fn cleaning_req(&self, id: &str) -> Option<(String, Req)> {
+        self.restoring.get(id).map(|(node, req, ..)| (node.clone(), req.clone()))
+    }
+
+    /// Continue claiming the scratch directory on node beats during a long copy or a retry.
+    pub(super) fn keeping_on(&self, node: &str) -> Vec<String> {
+        self.restoring.iter().filter(|(_, (n, req, ..))| n == node && req.keep_dir.is_some()).map(|(id, _)| id.clone()).collect()
+    }
+
+    pub(super) fn finish_keep(&mut self, id: &str, retry: bool) -> Option<String> {
+        self.keep_overflow.remove(id);
+        if !retry {
+            if let Some((_, req, ..)) = self.restoring.get_mut(id) { req.keep_dir = None; }
+        }
+        self.keep_pending.remove(id)
+    }
+
+    /// Live or queued lease held by `pid` matching `pred`, with whether a node was assigned.
+    pub(super) fn live_by_holder(&self, pid: u32, mut pred: impl FnMut(&Lease) -> bool) -> Option<(String, bool)> {
+        self.leases.iter()
+            .find(|l| l.req.holder == Some(pid) && pred(l))
+            .map(|l| (l.id.clone(), l.node.is_some()))
+    }
+
+    /// Most recent ended lease (including pending-keep overflow) held by `pid` on a node matching `pred`.
+    pub(super) fn ended_by_holder(&self, pid: u32, mut pred: impl FnMut(&Lease) -> bool) -> Option<String> {
+        if let Some(l) = self.ended.iter().rev().find(|l| l.req.holder == Some(pid) && l.node.is_some() && pred(l)) {
+            return Some(l.id.clone());
+        }
+        self.keep_overflow.values()
+            .filter(|l| l.req.holder == Some(pid) && l.node.is_some() && pred(l))
+            .max_by_key(|l| (l.ended_ms.unwrap_or(0), l.seq))
+            .map(|l| l.id.clone())
+    }
+
+    /// Normalizes stored `req.keep_dir` paths when restoring `leases.live` before the scheduler is locked.
+    pub(super) fn normalize_keep_dirs(&mut self, mut norm: impl FnMut(&str) -> String) {
+        for l in self.leases.iter_mut().chain(self.ended.iter_mut()).chain(self.keep_overflow.values_mut()) {
+            if let Some(k) = &mut l.req.keep_dir {
+                *k = norm(k);
+            }
+        }
+        for (_, req, ..) in self.restoring.values_mut() {
+            if let Some(k) = &mut req.keep_dir {
+                *k = norm(k);
+            }
+        }
     }
 
     /// Takes back a lease a previous master granted or queued ([`Sched::live_lines`]). Its holder has
@@ -5260,7 +5816,8 @@ impl Sched {
             id: id.clone(),
             cost,
             // (granted before: its run's cores went out with its start)
-            run: cost.cores,
+            run: v.get("run_cores").and_then(super::num).filter(|n| n.is_finite() && *n > 0.0)
+                .unwrap_or_else(|| if req.own_build() { req.cores.map_or(cost.cores, |a| a.ceil().max(1.0).min(cost.cores)) } else { cost.cores }),
             // as its grant weighed it ([`Self::charged`]): the master restores before it reads its
             // measures, and a restart charged every running lease only what it held then: a tests
             // shard granted 45.9 GB charged 18.2, and its sibling got 27.1 GB beside it on a 62 GB
@@ -5306,13 +5863,10 @@ impl Sched {
             quiet_at_ms: 0,
             panic: None,
             slow_s: None,
-            out_bytes: 0,
-            // What the previous master knew of its activity (what runs, its output, its last use)
-            // went with it: those clocks start at the restore, until its node's next word. Counted
-            // from its grant, a landing gate 12 min into its steps was ended as "idle for 10 min"
-            // and said stalled in the first tick after a master's self-update (L693168, 11-09).
-            out_grew_ms: Some(now),
+            out_bytes: v.get("out_bytes").and_then(|x| x.as_u64()).unwrap_or(0),
+            out_grew_ms: v.get("out_grew_ms").and_then(|x| x.as_u64()).or(Some(now)),
             progress: None,
+            // The node's idle time is unknown until its next report.
             idle_since: Some(now),
             past_budget: 0.0,
             jit_wait_since: None,
@@ -5331,6 +5885,7 @@ impl Sched {
             node_phases: super::prof::Phases::parse(v.get("node_phases")),
             reported_ms: None,
             peak_cores: None,
+            yielded_core_ms: 0.0,
             queue_sample_ms: now,
             queue_boxes: Vec::new(),
             seq: self.seq,
@@ -5348,10 +5903,24 @@ impl Sched {
             // session in use across a master update)
             self.live_call_end_ms.insert(id.clone(), now);
         }
+        if let Some(wait) = v.get("wm_wait") {
+            let field = |key| wait.get(key).and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+            let call_since = wait.get("call_since").and_then(|v| v.as_u64());
+            if let (Some(node), Some(against), Some(word)) = (field("node"), field("against"), field("word")) {
+                if call_since.is_none() || !self.live_idle.contains(&id) {
+                    self.wm_wait.insert(id.clone(), WmWait { node: node.into(), against: against.into(), word: word.into(), call_since, notified: true, owed: Vec::new() });
+                }
+            }
+        }
         // told to yield before the restart: not told again (a run that never yielded was warned
         // after each of four master restarts, 11-14), and its client still hears it
         if let Some(word) = v.get("yielded").and_then(|x| x.as_str()) {
             self.yielded.insert(id.clone(), word.to_string());
+        }
+        // held to its grant before the restart: its box still holds it, and the next tick lets it
+        // go should no interactive work want the box ([`Self::sync_grant_caps`])
+        if let Some(cores) = v.get("grant_held").and_then(super::num).filter(|c| c.is_finite() && *c > 0.0) {
+            self.grant_held.insert(id.clone(), cores);
         }
         self.leases.push(l);
         Some(id)
@@ -5416,7 +5985,7 @@ impl Sched {
         if self.restoring.get(id).is_some_and(|(n, ..)| n == node) {
             self.restoring.remove(id);
         }
-        if let Some(l) = self.ended.iter_mut().rev().find(|l| l.id == id) {
+        if let Some(l) = self.ended.iter_mut().rev().find(|l| l.id == id).or_else(|| self.keep_overflow.get_mut(id)) {
             l.teardown_ms = Some(teardown_ms);
         }
         let now = self.clock;
@@ -5444,7 +6013,7 @@ impl Sched {
     }
 
     pub fn reported(&mut self, id: &str, phases: super::prof::Phases, now: u64) {
-        if let Some(l) = self.ended.iter_mut().find(|l| l.id == id) {
+        if let Some(l) = self.ended.iter_mut().find(|l| l.id == id).or_else(|| self.keep_overflow.get_mut(id)) {
             l.node_phases = phases;
             l.phases.push("report", l.ended_ms.unwrap_or(now), now);
             l.reported_ms = Some(now);
@@ -5489,6 +6058,8 @@ impl Sched {
     /// relax-compiler .. FAILED: no error line", 11-13).
     pub fn refused_start(&mut self, id: &str, why: &str) {
         let Some(l) = self.leases.iter_mut().find(|l| l.id == id && l.state == State::Starting) else { return };
+        self.live_call_charge.remove(id);
+        self.launch_quotas.remove(id);
         let node = l.node.take().unwrap_or_default();
         let why = why.strip_prefix(&format!("{node} refused: ")).unwrap_or(why).to_string();
         l.state = State::Queued;
@@ -5607,6 +6178,7 @@ impl Sched {
                     leases,
                     waiting,
                     draining: !dev && leases > 0,
+                    unheard_yet: now < self.nodes_settle_ms && n.heard_ms.is_none() && n.unheard_ms.is_none(),
                     hold: self.holds.get(name).map(|h| h.id.clone()),
                     updating: self.updating.get(name).cloned(),
                     update_waits: self.update_waits.get(name).map(|w| w.values().cloned().collect::<Vec<_>>().join("; ")),
@@ -5728,7 +6300,12 @@ impl Sched {
         // 25 s later, which waited for it (L696386, 11-09). devhub's own (a box's prebuild, a warm
         // leg, CI, a show) is its choice, made around the box's timed queue ([`Self::gap_wait`])
         if k != Kind::Timed && k != Kind::Inspect && c.role() == Role::Bench && l.req.node.as_deref() == Some(name) && !l.req.devhubs_own() {
-            return Err(BENCH_PIN.into());
+            let joined_here = l.req.joins.as_deref().is_some_and(|j| {
+                self.leases.iter().any(|r| r.id == j && r.state.live() && r.node.as_deref() == Some(name))
+            });
+            if !joined_here {
+                return Err(BENCH_PIN.into());
+            }
         }
         if k != Kind::Inspect && slots(c, k) == 0 {
             return Err(format!("takes no {} leases", k.as_str()));
@@ -5777,7 +6354,7 @@ impl Sched {
 
     /// The JIT a lease asks for by id (`--jit`) on its box.
     fn asked_jit(l: &Lease) -> Option<&str> {
-        l.req.loader.as_deref().filter(|id| !id.is_empty() && l.req.on_node())
+        l.req.loader.as_deref().filter(|id| !id.is_empty() && l.req.set_up_on_node())
     }
 
     /// The lease is an overlay whose pin's own JIT for the box's compiler is `id`: it builds it there.
@@ -5857,7 +6434,7 @@ impl Sched {
     /// stood at 98% with 32 tasks waiting beside hot gates and live sessions for 13 min (L1398187,
     /// 11-19).
     fn cores_wait_ms(&self, l: &Lease) -> Option<u64> {
-        if l.state != State::Queued { return None; }
+        if l.state != State::Queued || l.req.own_build() { return None; }
         if l.req.tests_shard() { return Some(SHARD_RESIZE_MS); }
         if l.req.landing_gate() || l.req.hand_in { return Some(GATE_RESIZE_MS); }
         if self.launch_peak_charged(l) && !l.req.whole { return Some(0); }
@@ -5879,12 +6456,34 @@ impl Sched {
         self.is_live_job(l) && l.req.cores.is_none() && !self.live_called.contains(&l.id) && self.call_p90(&l.req, true).is_some()
     }
 
+    /// Commit the run charge, execution width and build jobs from the admitted cost.
+    fn commit_grant_width(&self, node: &str, l: &Lease, cost: Cost) -> (Cost, f64, Option<u32>) {
+        let placed = cost.cores;
+        let build = self.jit_build_charge(node, l);
+        let jit_jobs = self.jit_jobs(node, l, build, placed);
+        let cost = if build.is_some() {
+            let mut run_cost = self.run_cost_on(node, l);
+            run_cost.cores = run_cost.cores.min(placed);
+            run_cost
+        } else {
+            cost
+        };
+        let run = self.run_on(node, l, &cost);
+        (cost, run, jit_jobs)
+    }
+
     /// What a lease weighs on box `name` to be admitted there: its run's cost
     /// ([`Self::run_cost_on`]), and the cores of the JIT build it runs first, when it does
     /// ([`Self::jit_build_charge`]).
     pub(super) fn cost_on(&self, name: &str, l: &Lease) -> Cost {
         let mut cost = self.run_cost_on(name, l);
-        if let Some(build) = self.jit_build_charge(name, l) { cost.cores = cost.cores.max(self.build_cores_now(name, l, build)); }
+        let build = self.jit_build_charge(name, l);
+        if l.req.upkeep() && l.state == State::Queued {
+            let demand = build.map_or(cost.cores, |b| cost.cores.max(b));
+            cost.cores = self.upkeep_placed(name, l, demand);
+            return cost;
+        }
+        if let Some(build) = build { cost.cores = cost.cores.max(self.build_cores_now(name, l, build)); }
         cost
     }
 
@@ -5922,7 +6521,9 @@ impl Sched {
             // (started on part of its RAM need: its jobs in proportion, its peak with them)
             let need = self.unasked_ram(name, l).map(|gb| self.nodes[name].caps.as_ref().map_or(gb, |c| gb.min(l.req.ram_budget(c))));
             let share = need.map_or(1.0, |gb| self.prebuild_ram_share(name, l, gb));
-            return Some(((jobs(build.unwrap_or(0.0).max(placed)) as f64 * share).floor() as u32).max(1));
+            let base = jobs(placed);
+            let min_j = base.min(2).max(1);
+            return Some(((base as f64 * share).floor() as u32).max(min_j));
         }
         (placed < build?).then(|| jobs(placed))
     }
@@ -5961,6 +6562,7 @@ impl Sched {
     /// told those, at most its box's: the box drains for it all the same. A "3-core" series
     /// under `--whole` ran on its box's 10 (11-24).
     pub fn start_cores(&self, l: &Lease) -> f64 {
+        if l.req.own_build() { return l.run_cores(); }
         let whole = l.req.whole.then(|| self.nodes.get(l.node.as_deref()?)?.caps.as_ref().map(|c| c.cores)).flatten().filter(|n| *n > 0);
         match (whole, l.req.cores.filter(|_| !l.req.cores_default)) {
             (Some(cores), Some(asked)) => asked.min(f64::from(cores)),
@@ -6005,7 +6607,7 @@ impl Sched {
             // leases of the class) takes all of a smaller box's budget, never a denial: a 16 GB
             // Mac's prebuild against a build's 12 GB default or Linux builds' peaks. A measured
             // need goes to such a box only when no box it may use could ever hold it ([`Self::place`]).
-            cost.ram_gb = self.nodes[name].caps.as_ref().map_or(gb, |c| gb.min(l.req.ram_budget(c)));
+            cost.ram_gb = self.ram_most_on(name, l).map_or(gb, |most| gb.min(most));
         }
         // A tests shard that waited [`SHARD_RESIZE_MS`] starts on the RAM its box has free, down to
         // a third of its need (one of its three units at once), rather than wait for the box to
@@ -6060,15 +6662,26 @@ impl Sched {
         // HUB_BUILD_MIN_CORES jobs, rather than wait for all it measured: a hub on old code keeps
         // the fleet behind on fixes (L484101 waited 10 min on a Linux node with 8 of 16 cores in use,
         // 11-06). A hub without `hub-jobs` builds with cargo's own jobs: its measured cores.
+        // A box's deployment build first waits for the cores its class measured, for about its
+        // measured run, its box taking no new background work meanwhile
+        // ([`Self::pending_hub_update`]); then it starts on what is free, down to its floor. On its
+        // floor of two jobs beside a busy box, 56 of one box's 67 deployment builds past a minute
+        // took 5-24 min (its JIT 10 min, the WM 5, the WM's apps 2; the class measured
+        // 1m15s-1m35s), and its WM restart waited behind each (11-26/27).
         if l.req.hub_build() {
-            if let Some(c) = self.nodes[name].caps.as_ref().filter(|c| c.has("hub-jobs")) {
-                let used = self.in_use(name, l, true, &[]);
-                let in_use = used.cost.cores + used.outside;
+            if let Some(c) = self.nodes[name].caps.as_ref().filter(|c| c.has(l.req.hub_jobs_feature()) && !self.deploy_waits(l)) {
+                let in_use = if l.state == State::Queued {
+                    self.box_cores_used(name)
+                } else {
+                    let used = self.in_use(name, l, true, &[]);
+                    used.cost.cores + used.outside
+                };
                 cost.cores = cost.cores.min((c.cores_for(l.req.kind) as f64 - in_use).floor().max(l.req.hub_floor()));
             }
             // short of the RAM its box measures, it builds on its floor: fewer jobs, a lower peak
             if self.hub_ram_short(name, l, cost.ram_gb).is_some() { cost.cores = cost.cores.min(l.req.hub_floor()); }
         }
+        if l.req.own_build() { cost.cores = cost.cores.ceil().max(1.0); }
         cost
     }
 
@@ -6092,17 +6705,14 @@ impl Sched {
     /// small waited there 3 min (L1211477, 11-16).
     fn charged_cores(&self, name: &str, l: &Lease, asked: f64) -> f64 {
         let most = self.nodes[name].caps.as_ref().map_or(f64::INFINITY, |c| c.cores_for(l.req.kind) as f64);
-        let asked = if l.req.cores_default { asked.min(most) } else { asked };
+        let asked = if l.req.cores_default || l.req.hub_build() && l.req.cores.is_none() { asked.min(most) } else { asked };
         if l.req.cores.is_some_and(|a| a > most) && !l.req.cores_default || l.req.cores.is_some() && self.is_live_job(l) { return asked; }
         // a live session starts with its launch: its class's launches' peak ([`Self::call_cores`])
         let launch = if self.is_live_job(l) && l.req.cores.is_none() { self.call_p90(&l.req, true).map(|(p90, _)| p90) } else { None };
         let Some(measured) = launch.or_else(|| self.measured_cores(&l.req)).map(|cores| cores.ceil().max(1.0).min(most)) else { return asked };
         if l.req.cores.is_some() && self.session(&l.req) { return measured.max(asked); }
-        let floor = if l.req.cores.is_some() && !l.req.devhub_asked() { asked } else { 0.0 };
-        // a run told its ask ([`Self::run_on`]) is admitted at what it uses told that, its class's
-        // peak, as its charge follows that once its box measures it ([`Self::charged`]): admitted
-        // at its average, a tests shard told 12 ran 14-15 on a grant of 10, and its box sat past
-        // its cores the whole run (one box in all samples of an hour, another in half, 11-15)
+        let hub_jobs = l.req.hub_build() && self.nodes[name].caps.as_ref().is_some_and(|c| c.has(l.req.hub_jobs_feature()));
+        let floor = if l.req.cores.is_some() && !l.req.devhub_asked() || hub_jobs { asked.min(most) } else { 0.0 };
         measured.max(self.asked_peak(l, most).unwrap_or(0.0)).max(floor)
     }
 
@@ -6131,7 +6741,7 @@ impl Sched {
     /// its RAM need stays its class's peak. Not on a box another ask holds (timed, drained, its
     /// prebuild's) or that runs exclusive work: those keep it at its whole charge, as before.
     fn peak_need(&self, name: &str, l: &Lease) -> Option<(f64, f64)> {
-        if l.state != State::Queued || self.is_live_job(l) { return None; }
+        if l.state != State::Queued || l.req.own_build() || self.is_live_job(l) { return None; }
         if self.holds.get(name).is_some_and(|h| h.id != l.id && h.until > self.clock) || self.live_on_node(name, &l.id).any(|r| r.req.exclusive()) { return None; }
         let most = self.nodes[name].caps.as_ref().map_or(f64::INFINITY, |c| c.cores_for(l.req.kind) as f64);
         let peak = self.asked_peak(l, most)?;
@@ -6159,6 +6769,7 @@ impl Sched {
     /// on fewer than its charge (its box's free cores, [`Self::cost_on`]), it runs on those.
     fn run_on(&self, name: &str, l: &Lease, cost: &Cost) -> f64 {
         let Some(asked) = self.ask_on(name, l).or_else(|| self.own_leg_width(name, l)) else { return cost.cores };
+        if l.req.own_build() { return asked.ceil().max(1.0).min(cost.cores); }
         if cost.cores < self.charged_cores(name, l, asked) { asked.min(cost.cores) } else { asked }
     }
 
@@ -6169,8 +6780,6 @@ impl Sched {
         l.req.cores.map(|a| if l.req.cores_default { a.min(most) } else { a })
     }
 
-    /// The jobs a granted hub build builds with: its granted cores when its box had fewer free
-    /// than it measured ([`Self::cost_on`]); none (cargo's own) when it got all it measured.
     /// What box `name` measures for hub build `l`'s RAM (available less its margin,
     /// [`margin_share`]) and its need, when the room is less: the build waits while work of the
     /// master's there ends (the box drains for it, [`Self::passes`]), then starts on its floor,
@@ -6181,19 +6790,36 @@ impl Sched {
     /// rather than its floor (L1740714, 11-25).
     fn hub_ram_short(&self, name: &str, l: &Lease, charged: f64) -> Option<(f64, f64)> {
         let c = self.nodes.get(name)?.caps.as_ref()?;
-        if c.ram_gb <= 0.0 || !c.has("hub-jobs") { return None; }
+        if c.ram_gb <= 0.0 || !c.has(l.req.hub_jobs_feature()) { return None; }
         let need = self.measured_ram_on(name, l).filter(|_| l.req.ram_gb.is_none()).unwrap_or(charged);
         let room = c.ram_avail_gb - c.ram_gb * margin_share(c);
         (room < need).then_some((room, need))
     }
 
+    /// The committed job count for a box that can apply it to this build.
     pub fn hub_build_jobs(&self, id: &str) -> Option<u32> {
         let l = self.get(id).filter(|l| l.req.hub_build() && l.state.live())?;
-        (l.cost.cores < self.measured_cores(&l.req)?.ceil()).then_some(l.cost.cores as u32)
+        let c = self.nodes.get(l.node.as_deref()?)?.caps.as_ref()?;
+        if !c.has(l.req.hub_jobs_feature()) { return None; }
+        Some((l.run_cores().ceil() as u32).max(1))
     }
 
     /// The RAM need of a request that asks none (`--ram-gb`) before a box's budget cuts it: its
     /// class's measured peaks, else its kind's default. None: it asked.
+    /// The most RAM box `name` gives `l`'s unasked need: its budget ([`Req::ram_budget`]), and no
+    /// more than it measures available beside none of its leases (what it measures now, and what
+    /// those it has measured hold, `l` among them as it runs). A cut run takes all of it and runs alone. A 16 GB Mac
+    /// measured 9.7 GB available with nothing on it, under its 9.8 GB budget: a test cut to that
+    /// budget could never start there, and held its drained box 29 min while seven asks starved
+    /// behind it (L1818679, 11-26). None for a box with no measure.
+    fn ram_most_on(&self, name: &str, l: &Lease) -> Option<f64> {
+        let c = self.nodes.get(name)?.caps.as_ref()?;
+        let budget = l.req.ram_budget(c);
+        if c.ram_gb <= 0.0 || c.ram_avail_gb <= 0.0 { return Some(budget); }
+        let held: f64 = self.live_on_node(name, "").filter_map(|r| r.ram_held_gb).sum();
+        Some(budget.min(c.ram_avail_gb + held))
+    }
+
     fn unasked_ram(&self, name: &str, l: &Lease) -> Option<f64> {
         if l.req.ram_gb.is_some() { return None; }
         let default = l.req.allocation(self.warm_on(name, l)).ram_gb;
@@ -6203,8 +6829,8 @@ impl Sched {
     /// The box's budget cuts the request's unasked RAM need: it runs there on less than its class
     /// measured (a gate's 34 GB peaks on a 30 GB box).
     fn ram_cut(&self, name: &str, l: &Lease) -> bool {
-        let Some(c) = self.nodes[name].caps.as_ref() else { return false };
-        self.unasked_ram(name, l).is_some_and(|gb| gb > l.req.ram_budget(c))
+        let Some(most) = self.ram_most_on(name, l) else { return false };
+        self.unasked_ram(name, l).is_some_and(|gb| gb > most)
     }
 
     fn allocation_note(&self, name: &str, l: &Lease) -> String {
@@ -6337,7 +6963,13 @@ impl Sched {
         match (&l.req.series, &l.req.pin_why) {
             (Some(series), _) => Some(format!("the box of its series {series} (--series)")),
             (None, Some(why)) => Some(format!("{why} (--pin-why)")),
-            (None, None) => (l.req.kind == Kind::Timed && self.nodes.get(named).and_then(|n| n.caps.as_ref()).is_some_and(|c| c.role() == Role::Bench)).then(|| "a bench box, where timed runs belong".to_string()),
+            (None, None) => {
+                if let Some(partner) = l.req.joins.as_deref() {
+                    return Some(format!("the box of {partner} (--joins)"));
+                }
+                (l.req.kind == Kind::Timed && self.nodes.get(named).and_then(|n| n.caps.as_ref()).is_some_and(|c| c.role() == Role::Bench))
+                    .then(|| "a bench box, where timed runs belong".to_string())
+            }
         }
     }
 
@@ -6366,7 +6998,8 @@ impl Sched {
     /// (no session, box-wide or GPU work, nor the box's own builds) whose class measured a p90 run
     /// of at most [`SHORT_GATE_MS`] over [`LEND_MIN_RUNS`] runs, and that declared no longer.
     fn short_run(&self, l: &Lease) -> bool {
-        (l.req.hand_in || matches!(l.req.kind, Kind::Test | Kind::Build) && !(l.req.whole || l.req.upkeep() || l.req.hub_build() || self.is_live_job(l)))
+        matches!(l.req.kind, Kind::Test | Kind::Build)
+            && !(l.req.whole || l.req.own_build() || self.is_live_job(l))
             && l.req.declared_ms().is_none_or(|d| d <= SHORT_GATE_MS)
             && self.wall_p90(l).is_some_and(|p| p <= SHORT_GATE_MS)
     }
@@ -6377,8 +7010,16 @@ impl Sched {
     /// ([`Self::passes`]) and starts on the box's short line ([`SHORT_LINE`], [`Self::fits`]).
     fn short_on(&self, name: &str, l: &Lease) -> bool {
         self.short_run(l)
-            && self.nodes.get(name).and_then(|n| n.caps.as_ref()).is_some_and(|c| Self::weighs_cpu(c) && !c.temps.iter().any(|t| t.c >= SHORT_GATE_MAX_C))
+            && self.short_or_aged_box(name, l)
             && !self.cold_on(name, l)
+    }
+
+    /// Short and aged work may borrow cores on a cool box that weighs CPU. A watched
+    /// desktop keeps background work within the cores even when its wait grows long.
+    fn short_or_aged_box(&self, name: &str, l: &Lease) -> bool {
+        self.nodes.get(name).and_then(|n| n.caps.as_ref()).is_some_and(|c|
+            Self::weighs_cpu(c) && !(l.priority == Priority::Background && c.watched)
+                && !c.temps.iter().any(|t| t.c >= SHORT_GATE_MAX_C))
     }
 
     /// The p90 of a class's measured runs, once it has [`LEND_MIN_RUNS`] of them.
@@ -6389,11 +7030,33 @@ impl Sched {
         Some(sorted[(sorted.len() * 9).div_ceil(10) - 1])
     }
 
-    /// Why bench box `name` is not lent now: it drains for timed work ([`Self::timed_drain`]),
-    /// or a lease holds it. None: it may be lent.
+    /// Why bench box `name` is not lent `l` now: it drains for timed work ([`Self::timed_drain`]),
+    /// timed work comes there before `l` would end ([`Self::timed_coming`]), or a lease holds it.
+    /// None: it may be lent.
     fn lend_refusal(&self, name: &str, l: &Lease) -> Option<String> {
-        if let Some(why) = self.timed_drain(name) { return Some(why); }
+        if let Some(why) = self.timed_drain(name).or_else(|| self.timed_coming(name, l)) { return Some(why); }
         self.holds.get(name).filter(|h| h.id != l.id && h.until > self.clock).map(|h| format!("{} holds it", h.id))
+    }
+
+    /// A timed ask that comes to bench box `name` before `l`, lent there, would end: a lease whose holder
+    /// asks, as it ends, a timed lease that could run there ([`Req::then_timed`]), in less time by
+    /// its measure ([`Self::expected_end`]; one past it, now; one still queued, its whole run) than
+    /// `l` takes by its own ([`Self::run_ms`]). A run that yields at its step's end gives the box
+    /// back once that ask comes ([`Self::yield_lent`]), so it is lent still. Lent at 09:40, a
+    /// lane's live session (measured 16 min) held its bench box 22 min, and the warm leg that an
+    /// owed jitlegs run asked at 09:49, as the leg before it ended on a pool box, waited 13 min
+    /// behind it (L1938597, 11-27).
+    fn timed_coming(&self, name: &str, l: &Lease) -> Option<String> {
+        if l.req.yields { return None; }
+        let c = self.nodes.get(name)?.caps.as_ref()?;
+        let takes = self.run_ms(l);
+        self.leases.iter().filter(|r| r.id != l.id && (r.state == State::Queued || r.state.live()) && !self.denying.contains(&r.id)).find_map(|r| {
+            let needs = r.req.then_timed.as_ref().filter(|needs| needs.iter().all(|(k, v)| meets(c, k, v)))?;
+            let left = if r.state == State::Queued { self.run_ms(r) } else { self.expected_end(r).unwrap_or(0) };
+            let on = r.node.as_deref().map_or(String::new(), |n| format!(" on {n}"));
+            (takes > left).then(|| format!("{} ({}{on}) asks timed work ({}) that runs here as it ends, in ~{} by its measure; a run of {} would hold the box past it",
+                r.id, r.req.lane, needs.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(","), dur(left), self.estimate_said(l)))
+        })
     }
 
     /// Why box `name` (a bench box, a Mac) starts no other work now, its timed work first: timed
@@ -6758,6 +7421,234 @@ impl Sched {
         self.tell_lane(Sev::Warn, line, &l);
     }
 
+    // set_caps keeps wm_held in step with the ids in each node's latest wm_drain.
+    fn wm_drain_holds(&self, node: &str, id: &str) -> bool {
+        self.nodes.get(node).is_some_and(|n| n.up) && self.wm_held.get(node).is_some_and(|held| held.contains_key(id))
+    }
+
+    fn wm_waited_ms(&self, node: &str, id: &str, now: u64) -> u64 {
+        self.wm_held.get(node).and_then(|held| held.get(id)).map_or(0, |(since, _)| now.saturating_sub(*since))
+    }
+
+    fn wm_box_in_use(&self, node: &str, c: &Caps) -> bool {
+        c.role().users() || !self.dev(node) || c.watched || c.hand_held.is_some()
+    }
+
+    fn wm_wait_bound(&self, node: &str, c: &Caps, l: &Lease, now: u64) -> WmWaitBound {
+        if self.wm_box_in_use(node, c) { return WmWaitBound::Exempt("a person uses or watches this box"); }
+        if l.req.kind == Kind::Inspect || l.req.hub_build() { return WmWaitBound::Exempt("inspect or hub build"); }
+        let jit = l.node_phases.0.iter().rev().find(|s| s.phase == "jit");
+        let timed = l.req.kind == Kind::Timed;
+        if self.is_live_job(l) {
+            if !l.req.live_test_run() { return WmWaitBound::Exempt("live app session"); }
+            if jit.is_some_and(|s| s.end == 0) { return WmWaitBound::Exempt("building its JIT"); }
+            if self.live_idle.contains(&l.id) { return WmWaitBound::Exempt("live test session between calls"); }
+            let Some((ran_ms, measured, since)) = self.live_call_ran(l, now) else { return WmWaitBound::Unmeasured };
+            return WmWaitBound::Measured { ran_ms, measure_ms: measured.max(60_000), against: format!("its measured {}", dur(measured)), timed, call_since: Some(since) };
+        }
+        if self.session(&l.req) && !l.req.unattended() { return WmWaitBound::Exempt("attended screen session"); }
+        if jit.is_some_and(|s| s.end == 0) { return WmWaitBound::Exempt("building its JIT"); }
+        let build = if jit.is_some() { 0 } else { self.runner_build_ms(l) };
+        let warm = jit.is_some() && l.req.class().ends_with(super::JIT_BUILD_RUN);
+        let measured = if warm { self.warm_ms(l) } else { self.measured_ms(l) };
+        let (mut measure_ms, mut against) = match (l.req.declared_ms(), measured.filter(|_| !super::lane_script(l.req.class()))) {
+            (Some(d), _) => {
+                let mut base = format!("its declared {}", dur(d));
+                if build > 0 { base.push_str(&format!(" and its box's JIT build {}", dur(build))); }
+                (d.max(60_000).saturating_add(build), base)
+            }
+            (_, Some(m)) => (m.max(60_000), format!("its {} {}", if warm { "warm run's measured" } else { "measured" }, dur(m))),
+            _ => return WmWaitBound::Unmeasured,
+        };
+        match self.native_build(l.node.as_deref(), l) {
+            Some((_, _, "guess")) => return WmWaitBound::Unmeasured,
+            Some(_) => {
+                measure_ms = measure_ms.saturating_add(self.native_allowance(l));
+                against = self.held_to_said(l, &against);
+            }
+            None => {}
+        }
+        let from = jit.map_or(l.granted_ms.unwrap_or(now), |s| s.end);
+        WmWaitBound::Measured { ran_ms: now.saturating_sub(from), measure_ms, against, timed, call_since: None }
+    }
+
+    /// Reconstructs a live test session's case-sensitive id (`W<n>`) from its lowercased overlay
+    /// lane (`live-w<n>`, matching `exec::session_lane`) when live_session_ids has no entry.
+    fn live_session_id_from_lane(lane: &str) -> Option<String> {
+        let digits = lane.strip_prefix("live-")?.strip_prefix(['w', 'W'])?;
+        (!digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())).then(|| format!("W{digits}"))
+    }
+
+    fn wm_end_cmd(&self, l: &Lease) -> String {
+        if self.is_live_job(l) {
+            let lane = l.req.cap_lane();
+            let session_id = self.live_session_ids.get(&l.id).cloned()
+                .or_else(|| l.req.for_lane.as_ref().and_then(|_| Self::live_session_id_from_lane(&l.req.lane)));
+            return match session_id {
+                Some(w) => format!("end your live session with `devhub live release {w} --lane {lane}`"),
+                None => format!("find your live session with `devhub live list`, then end it with `devhub live release <W> --lane {lane}`"),
+            };
+        }
+        if let Some(job_id) = self.job_ids.get(&l.id) {
+            return format!("end your job with `devhub job cancel {job_id}`");
+        }
+        if l.req.tests_shard() {
+            if let Some(ms) = l.req.run_ms {
+                return format!("end your shard with `devhub bucket stop {ms} \"<unit>\" <why>` (or `devhub release {}`)", l.id);
+            }
+        }
+        format!("end your lease with `devhub release {}`", l.id)
+    }
+
+    fn wm_wait_recipients(l: &Lease) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Some(agent) = l.req.lane_agent() {
+            out.push(agent.to_string());
+        }
+        out.push("main".to_string());
+        out
+    }
+
+    fn wm_wait_line(node: &str, l: &Lease, ran_ms: u64, against: &str, waited_ms: u64, capture_detail: Option<&str>, end_cmd: &str) -> String {
+        let agent = l.req.agent.as_deref().filter(|a| !a.is_empty() && *a != l.req.lane).map_or(String::new(), |a| format!(" ({a})"));
+        let waited = if waited_ms >= 60_000 { format!(", WM waited {}", dur(waited_ms)) } else { String::new() };
+        let capture = capture_detail.map_or_else(|| "No capture taken (timed lease)".to_string(), |d| format!("Capture: {d}"));
+        format!("{node}'s WM update waits on you ({} of {}{agent}, `{}`, running {} against {against}{waited}; {node} refuses new screen and gui leases until it ends). {capture}. Nothing ends it on time; if it hangs, {end_cmd}; that frees {node}", l.tag(), l.req.lane, l.req.class(), dur(ran_ms))
+    }
+
+    fn notify_wm_wait(&mut self, l: &Lease, recipients: &[String], line: String) {
+        for agent in recipients {
+            self.out.push(Action::Note { agent: agent.clone(), line: line.clone() });
+        }
+        self.event(Sev::Warn, line, Some(l));
+    }
+
+    /// Observe the leases that actually hold a restart, even when their output is growing.
+    fn watch_wm_drain(&mut self, now: u64) {
+        let mut blockers = Vec::new();
+        for (name, n) in &self.nodes {
+            let Some(c) = n.caps.as_ref().filter(|c| n.up && !c.wm_drain.is_empty()) else { continue };
+            for (id, part) in drain_leases(&c.wm_drain) {
+                blockers.push((name.clone(), id, part));
+            }
+        }
+        if blockers.is_empty() { return; }
+        let unkept = format!(" ({})", super::exec::LIVE_UNKEPT);
+        for (node, id, part) in blockers {
+            let Some(l) = self.get(&id).filter(|l| l.state == State::Granted && l.node.as_deref() == Some(&node)) else { continue };
+            let c = self.nodes[&node].caps.as_ref().unwrap();
+            if part.ends_with(&unkept) && !self.wm_box_in_use(&node, c) && !self.wm_parking.contains(&id)
+                && l.req.kind != Kind::Timed && self.idle_live(l) && !self.set_unready(l) {
+                let leases = self.with_sets(std::slice::from_ref(&id), |m| {
+                    m.req.kind != Kind::Timed && self.idle_live(m) && m.node.as_ref().is_some_and(|n|
+                        self.nodes.get(n).filter(|s| s.up).and_then(|s| s.caps.as_ref()).is_some_and(|c| !self.wm_box_in_use(n, c)))
+                });
+                if let Some(leases) = leases {
+                    self.wm_parking.extend(leases.iter().cloned());
+                    self.out.push(Action::ParkLive { leases, note: format!("parked for {node}'s WM update"), resume_after: None });
+                    continue;
+                }
+            }
+            if self.wm_wait.contains_key(&id) { continue; }
+            let WmWaitBound::Measured { ran_ms, measure_ms, against, timed, call_since } = self.wm_wait_bound(&node, c, l, now) else { continue };
+            if ran_ms <= measure_ms.saturating_mul(WM_WAIT_CAPTURE_TIMES) { continue; }
+            let l = l.clone();
+            let waited = self.wm_waited_ms(&node, &id, now);
+            if let Some((_, told)) = self.wm_held.get_mut(&node).and_then(|held| held.get_mut(&id)) { *told = true; }
+            let mut w = WmWait { node: node.clone(), against, call_since, word: String::new(), notified: false, owed: Vec::new() };
+            if timed {
+                w.word = Self::wm_wait_line(&node, &l, ran_ms, &w.against, waited, None, &self.wm_end_cmd(&l));
+                w.owed = Self::wm_wait_recipients(&l);
+                self.notify_wm_wait(&l, &w.owed, w.word.clone());
+            } else {
+                let why = format!("{node}'s WM update waits on {} of {}, running {} against {}", l.tag(), l.req.lane, dur(ran_ms), w.against);
+                self.out.push(Action::Capture { id: id.clone(), node, why });
+            }
+            self.wm_wait.insert(id, w);
+        }
+    }
+
+    fn wm_run_ms(l: &Lease, call_since: Option<u64>, now: u64) -> u64 {
+        let from = call_since.or_else(|| l.node_phases.0.iter().rev().find(|s| s.phase == "jit" && s.end != 0).map(|s| s.end)).or(l.granted_ms);
+        now.saturating_sub(from.unwrap_or(now))
+    }
+
+    pub fn wm_captured(&mut self, id: &str, detail: &str, now: u64) {
+        let Some(w) = self.wm_wait.get(id).filter(|w| !w.notified && w.word.is_empty()).cloned() else { return };
+        let Some(l) = self.get(id).filter(|l| l.state.live() && self.wm_drain_holds(&w.node, id)).cloned() else {
+            self.wm_wait.remove(id);
+            return;
+        };
+        let line = Self::wm_wait_line(&w.node, &l, Self::wm_run_ms(&l, w.call_since, now), &w.against, self.wm_waited_ms(&w.node, id, now), Some(detail), &self.wm_end_cmd(&l));
+        let owed = Self::wm_wait_recipients(&l);
+        let w = self.wm_wait.get_mut(id).unwrap();
+        w.word = line.clone();
+        w.owed = owed.clone();
+        self.notify_wm_wait(&l, &owed, line);
+    }
+
+    pub fn wm_note_written(&mut self, agent: &str, line: &str) -> bool {
+        let mut done = false;
+        for w in self.wm_wait.values_mut() {
+            if !w.notified && !w.word.is_empty() && w.word == line {
+                w.owed.retain(|a| a != agent);
+                if w.owed.is_empty() {
+                    w.notified = true;
+                    done = true;
+                }
+            }
+        }
+        done
+    }
+
+    pub fn wm_note_failed(&mut self, agent: &str, line: &str) {
+        let hit = self.wm_wait.iter().find_map(|(id, w)| {
+            (!w.notified && !w.word.is_empty() && w.word == line && w.owed.iter().any(|a| a == agent))
+                .then(|| (id.clone(), w.node.clone()))
+        });
+        let Some((id, node)) = hit else { return };
+        if self.leases.iter().any(|l| l.id == id && l.state.live()) && self.wm_drain_holds(&node, &id) {
+            self.out.push(Action::Note { agent: agent.to_string(), line: line.to_string() });
+        } else {
+            self.wm_wait.remove(&id);
+        }
+    }
+
+    fn wm_wait_word(&self, id: &str) -> Option<String> {
+        self.wm_wait.get(id).filter(|w| !w.word.is_empty() && self.wm_drain_holds(&w.node, id)).map(|w| w.word.clone())
+    }
+
+    fn lease_wm_wait_tag(&self, l: &Lease, now: u64) -> String {
+        let Some(node) = l.node.as_deref().filter(|n| l.state == State::Granted && self.wm_drain_holds(n, &l.id)) else { return String::new() };
+        let waited = dur(self.wm_waited_ms(node, &l.id, now));
+        let tail = match self.wm_wait.get(&l.id) {
+            None => String::new(),
+            Some(w) if w.word.is_empty() => "; past 2x, capturing".to_string(),
+            Some(w) if l.req.kind == Kind::Timed => format!("; past 2x {}, told", w.against),
+            Some(w) => format!("; past 2x {}, captured: `devhub job result {}`", w.against, l.id),
+        };
+        format!("{node}'s WM update waits on this lease ({waited}{tail})")
+    }
+
+    #[cfg(any(feature = "checkout", test))]
+    pub fn wm_wait_rows(&self, now: u64) -> Vec<String> {
+        let mut rows = Vec::new();
+        for (node, held) in &self.wm_held {
+            for (id, (since, _)) in held {
+                let Some(l) = self.get(id).filter(|l| l.state.live() && l.node.as_ref() == Some(node) && self.wm_drain_holds(node, id)) else { continue };
+                let w = self.wm_wait.get(id);
+                let ran = Self::wm_run_ms(l, self.live_call_ms.get(id).copied().or_else(|| w.and_then(|w| w.call_since)), now);
+                let tail = w.filter(|w| !w.word.is_empty()).map_or(String::new(), |w| {
+                    let capture = if l.req.kind == Kind::Timed { "timed (no capture)".into() } else { format!("captured: `devhub job result {id}`") };
+                    format!("; past 2x {}, {capture}; if it hangs, {}; that frees {node}", w.against, self.wm_end_cmd(l))
+                });
+                rows.push(format!("  {node} (waited {}): {} of {} ({}, running {}{tail})", dur(now.saturating_sub(*since)), l.tag(), l.req.lane, l.req.class(), dur(ran)));
+            }
+        }
+        rows.sort();
+        rows
+    }
+
     fn say_stalled(&mut self, now: u64) {
         let mut said = Vec::new();
         let mut overran = Vec::new();
@@ -6841,10 +7732,10 @@ impl Sched {
     /// core never reads idle, so neither [`Self::say_stalled`] path said it. Only said: its lane
     /// decides (it may wait on a person), and [`Self::say_stalled`] still holds it to its measure.
     /// Not a timed lease (a capture disturbs its timing), an open session or a live job (they wait
-    /// for their user), nor while its JIT builds.
+    /// for their user, [`Self::waits_for_user`]), nor while its JIT builds.
     fn say_slow_silent(&mut self, now: u64) {
         let said: Vec<(String, String, String, String)> = self.leases.iter()
-            .filter(|l| l.state == State::Granted && l.req.kind != Kind::Timed && l.req.kind != Kind::Inspect && !l.req.hub_build() && !self.is_live_job(l) && !self.session(&l.req))
+            .filter(|l| l.state == State::Granted && l.req.kind != Kind::Timed && l.req.kind != Kind::Inspect && !l.req.hub_build() && !self.waits_for_user(l))
             .filter(|l| !self.slow_said.contains(&l.id) && !self.stalled.contains_key(&l.id))
             .filter_map(|l| {
                 let node = l.node.as_deref()?;
@@ -6875,7 +7766,7 @@ impl Sched {
     /// job (they wait for their user), an inspect lease, a hub build, nor while its JIT builds.
     fn output_silent(&self, now: u64) -> Vec<(String, String, String)> {
         self.leases.iter()
-            .filter(|l| l.state == State::Granted && l.req.kind != Kind::Inspect && !l.req.hub_build() && !self.is_live_job(l) && !self.session(&l.req))
+            .filter(|l| l.state == State::Granted && l.req.kind != Kind::Inspect && !l.req.hub_build() && !self.waits_for_user(l))
             .filter_map(|l| {
                 let node = l.node.as_deref()?;
                 let jit = l.node_phases.0.iter().rev().find(|s| s.phase == "jit");
@@ -7105,7 +7996,11 @@ impl Sched {
     /// long waits on its box, from its first minute: a 1-min case waited 31 min behind a 64-min
     /// run (11-07). So is a run in rounds (`devhub run --rounds`) while a short one waits, whatever
     /// its length: its client hands the box over at the round's end and asks again for the rest.
-    /// Never a kill: only the run knows where its steps end.
+    /// Never a kill: only the run knows where its steps end. A box's catch-up (the deployment a
+    /// queued ask waits for, [`Self::deploy_head`]) is no reason to yield: timed work drains its
+    /// box, so the catch-up waits for it to end and takes the box's next gap, as a WM restart waits
+    /// for its windows. A lane's 55-min timed series was told to hand its box over 3 min in, after
+    /// its warm-up take, for another lane's catch-up (GFXLEAN, 11-27).
     fn say_overruns(&mut self, now: u64) {
         let said: Vec<(String, String, String)> = self.leases.iter().filter(|h| h.state == State::Granted && h.req.kind == Kind::Timed && !self.yielded.contains_key(&h.id) && !self.is_live_job(h)).filter_map(|h| {
             let node = h.node.as_deref()?;
@@ -7120,11 +8015,6 @@ impl Sched {
             if !overrun && !long && !rounds { return None; }
             let on_it = |q: &&Lease| q.state == State::Queued && q.req.kind == Kind::Timed && (names_lease(&q.reason, &h.id) || q.eta_box.as_deref() == Some(node) || q.req.node.as_deref() == Some(node));
             let listed: Vec<&Lease> = self.leases.iter().filter(on_it).filter(|q| overrun || self.run_ms(q) <= LONG_TIMED_MS).collect();
-            // the box's catch-up a queued timed ask waits for (its deployment, in the box's next
-            // gap: [`Self::deploy_head`]) is short work waiting on the run, however long that ask:
-            // a bench box's catch-up waited 20 min behind back-to-back 16-18 min timed runs, and
-            // the asks behind it with it (L691645, 11-08)
-            let catch_up = self.deploy_head(node).filter(|q| q.id != h.id && !listed.iter().any(|l| l.id == q.id));
             let mut whom = Vec::new();
             let (why, short) = if overrun {
                 (format!("{} into its {}", dur(ran), self.estimate_said(h)), "")
@@ -7137,9 +8027,6 @@ impl Sched {
             if !listed.is_empty() {
                 let waiting: Vec<String> = listed.iter().map(|q| format!("{} of {}", q.id, q.req.lane)).collect();
                 whom.push(format!("{short} timed {} wait{} on its box", waiting.join(", "), if waiting.len() == 1 { "s" } else { "" }));
-            }
-            if let Some(q) = catch_up {
-                whom.push(format!(" its box's catch-up, which {} of {} waits for, waits on it", q.id, q.req.lane));
             }
             if whom.is_empty() { return None; }
             Some((h.id.clone(), node.to_string(), format!("{} of {} on {node}: {why}, while{}: {then}, or `devhub cancel {}`", h.tag(), h.req.lane, whom.join(", and"), h.id)))
@@ -7169,27 +8056,28 @@ impl Sched {
         }
     }
 
-    /// A warm-up running ([`Req::warm_up`]: a box's prebuild, a lane's warm leg) while a lease
-    /// waits that would start on its box but for it is told to yield, once: its leg ends after
-    /// its current step and asks again for the rest, behind that lease (`orch::warm`). A warm-up
-    /// exists to save lanes time, never to cost them any: a prebuild's test listings ran 2m00s
-    /// against its measured 1m00s while a lane's test waited 5m40s on its box, told "devhub does
-    /// not end it" (L1700278, 11-24). A lane's lease counts, and the pipeline's (a landing gate, a
-    /// tests shard); another warm-up or devhub's background legs do not, nor a lease that would
-    /// not start there without it: its yield would gain it nothing.
+    /// A warm-up yields after its current step when ending it would start a waiting lease,
+    /// or when its box is already past its cores and has work waiting. The in-process warm
+    /// runner reads this notice and asks again for the rest behind the waiter.
     fn yield_warm(&mut self, now: u64) {
-        let asked: Vec<(String, String, Vec<String>)> = self.leases.iter().filter(|h| h.state == State::Granted && h.req.warm_up() && !self.yielded.contains_key(&h.id)).filter_map(|h| {
+        let asked: Vec<_> = self.leases.iter().filter(|h| h.state == State::Granted && h.req.warm_up() && !self.yielded.contains_key(&h.id)).filter_map(|h| {
             let node = h.node.as_deref()?;
             let mut waiting: Vec<&Lease> = self.leases.iter().filter(|q| q.state == State::Queued && !q.req.warm_up() && (!q.req.devhubs_own() || q.req.landing_gate() || q.req.tests_shard())
-                && (names_lease(&q.reason, &h.id) || q.eta_box.as_deref() == Some(node) || q.req.node.as_deref() == Some(node))).collect();
+                && (names_lease(&q.reason, &h.id) || q.eta_box.as_deref() == Some(node) || q.req.node.as_deref() == Some(node)
+                    || q.queue_boxes.iter().any(|(b, k)| b == node && k == "budget cores")
+                    || self.holds.get(node).is_some_and(|hd| hd.id == q.id && hd.until > now))).collect();
             if waiting.is_empty() { return None; }
             waiting.sort_by_key(|q| self.exclusive_order(q));
-            Some((h.id.clone(), node.to_string(), waiting.iter().map(|q| q.id.clone()).collect()))
+            let over = self.nodes.get(node).and_then(|n| n.caps.as_ref()).is_some_and(|c| self.box_cores_used(node) > c.cores_for(h.req.kind) as f64 + 0.05);
+            Some((h.id.clone(), node.to_owned(), over, waiting.into_iter().map(|q| q.id.clone()).collect::<Vec<_>>()))
         }).collect();
-        for (id, node, waiting) in asked {
-            let Some(q) = waiting.into_iter().find(|q| self.starts_without(q, &node, std::slice::from_ref(&id), now)) else { continue };
-            let (Some(h), Some(w)) = (self.get(&id), self.get(&q)) else { continue };
-            let word = format!("{} of {} on {node}, a warm-up: {} of {} would start on its box but for it: it ends after its current step and asks again for the rest, behind it", h.tag(), h.req.lane, w.id, w.req.lane);
+        for (id, node, over, waiting) in asked {
+            let starts = waiting.iter().find(|q| self.starts_without(q, &node, std::slice::from_ref(&id), now));
+            let Some(q) = starts.or_else(|| waiting.first().filter(|_| over)) else { continue };
+            let (Some(h), Some(w)) = (self.get(&id), self.get(q)) else { continue };
+            let why = if starts.is_some() { format!("{} of {} would start on its box but for it", w.id, w.req.lane) }
+                else { format!("its box is past its cores while {} of {} waits", w.id, w.req.lane) };
+            let word = format!("{} of {} on {node}, a warm-up: {why}: it ends after its current step and asks again for the rest, behind it", h.tag(), h.req.lane);
             self.out.push(Action::Log(word.clone()));
             self.yielded.insert(id, word);
         }
@@ -7220,8 +8108,8 @@ impl Sched {
         for (id, line) in said {
             self.yield_at.insert(id.clone(), None);
             let Some(l) = self.get(&id).cloned() else { continue };
-            if let Some(agent) = l.req.agent.clone().filter(|a| !a.is_empty() && a != "main" && !l.req.devhubs_own()) {
-                self.out.push(Action::Note { agent, line: line.clone() });
+            if let Some(agent) = l.req.lane_agent() {
+                self.out.push(Action::Note { agent: agent.to_string(), line: line.clone() });
             }
             self.out.push(Action::Note { agent: "main".to_string(), line: line.clone() });
             self.event(Sev::Warn, line, Some(&l));
@@ -7351,8 +8239,8 @@ impl Sched {
     /// wakes a parked JIT, and it holds its tree's one lease (one hung test held all of Windows CI
     /// for 30 min, 11-04). A jitlegs leg's fixture stub slept at 37 min against its measured 12
     /// min, said stalled, while its shells' poll loop kept its box from ever reading idle, until it
-    /// was cancelled by hand (L634083, 11-08). A leg whose processes work at a core stays, past its
-    /// measure or not, and the check-in lists it ([`Self::legs_at_work_rows`]): a CI build whose
+    /// was cancelled by hand (L634083, 11-08). A busy unattended leg past its measure can spin:
+    /// it ends after [`OUTPUT_SILENT_MS`] of silence unless its compilers are active. A CI build whose
     /// rustc compiled a big crate at a core, its `cargo -q` silent, was ended hung twice at 8m37s
     /// against its 3m37s (L1524628, L1524729, 11-22). A leg with no measure ends on its idleness
     /// alone, never on how long it ran. Its line names where it waited and its capture (`devhub job
@@ -7382,6 +8270,13 @@ impl Sched {
                     (None, Some(against)) if !l.out_grew_ms.is_some_and(|t| now.saturating_sub(t) < OUTPUT_FRESH_MS) && slow.is_some() => {
                         let slow = slow.map_or(String::new(), |ms| format!(", its processes under {}% of a core for {}", super::exec::SLOW_CPU_PCT, dur(ms)));
                         format!("running {} against {against}, its output grown none for {}{slow}", dur(now.saturating_sub(l.granted_ms.unwrap_or(now))), dur(now.saturating_sub(l.out_grew_ms.unwrap_or(l.granted_ms.unwrap_or(now)))))
+                    }
+                    (None, Some(against)) if l.req.unattended() && l.req.kind != Kind::Timed
+                        && !self.built.get(&l.id).is_some_and(|(t, _)| now.saturating_sub(*t) < OUTPUT_FRESH_MS) => {
+                        let granted = l.granted_ms.unwrap_or(now);
+                        let silent = now.saturating_sub(l.out_grew_ms.unwrap_or(granted));
+                        if silent < OUTPUT_SILENT_MS { return None; }
+                        format!("running {} against {against}, its output grown none for {} (processes spinning)", dur(now.saturating_sub(granted)), dur(silent))
                     }
                     _ => return None,
                 };
@@ -7454,8 +8349,17 @@ impl Sched {
         over.iter().map(|(id, m, c)| format!("{id} {m:.1} cores (charged {c:.0})")).collect::<Vec<_>>().join(", ")
     }
 
+    /// Whether running lease `r` is charged its JIT's build now ([`Self::charged`]): its work
+    /// tree's build open ([`Lease::building_jit`]), or the build it does before its run
+    /// ([`Self::jit_build_charge`]). Its lines say so, not its grant: a CI leg granted 2 read
+    /// "cores 16 (granted 2, measured 13.5)" while it built its JIT, and was taken for a lease
+    /// past its grant (L1905880, 11-27).
+    fn builds_jit_now(&self, r: &Lease) -> bool {
+        r.state == State::Granted && (r.building_jit() || r.node.as_deref().is_some_and(|n| self.jit_build_charge(n, r).is_some()))
+    }
+
     /// The lease-list row includes its current charge when it differs from its grant by half a
-    /// core or more ([`Self::charged`]), and says when it holds a GB or more past its RAM ask
+    /// core or more ([`Self::charged`]), says when that charge is its JIT's build ([`Self::builds_jit_now`]), and says when it holds a GB or more past its RAM ask
     /// ([`Self::ram_past_ask`]).
     pub(super) fn lease_view_line(&self, r: &Lease, now: u64) -> String {
         let said = (r.state == State::Queued).then(|| r.eta_box.as_deref().or(r.req.node.as_deref()).and_then(|n| self.native_said(n, r))).flatten();
@@ -7465,21 +8369,28 @@ impl Sched {
             row
         });
         let line = row.as_ref().unwrap_or(r).state_line(now, &r.node.as_deref().map(|n| self.addr(n)).unwrap_or_default());
-        let cores = if r.state == State::Granted && !self.is_live_job(r) {
+        let mut cores = if r.state == State::Granted && !self.is_live_job(r) {
             let charge = self.charged(r).cores;
-            ((charge - r.cost.cores).abs() >= 0.5)
-                .then(|| format!(" cores {charge} (granted {}, measured {:.1})", r.cost.cores, self.measured_cores_now(r).unwrap_or(0.0)))
-                .unwrap_or_default()
+            let measured = self.measured_cores_now(r).unwrap_or(0.0);
+            if self.builds_jit_now(r) && charge >= r.cost.cores + 0.5 {
+                format!(" building its JIT, charged {charge} cores (granted {}, measured {measured:.1})", r.cost.cores)
+            } else {
+                let held = self.grant_held.get(&r.id).map_or(String::new(), |c| format!(", held to {c:.0}"));
+                ((charge - r.cost.cores).abs() >= 0.5 || !held.is_empty()).then(|| format!(" cores {charge} (granted {}, measured {measured:.1}{held})", r.cost.cores)).unwrap_or_default()
+            }
         } else if r.state == State::Granted {
             // a live call past its charge ([`Self::live_over`])
             let c = self.charged(r).cores;
             self.measured_cores_now(r).filter(|m| *m >= c + 0.5).map(|m| format!(" cores {c} (its call's charge, measured {m:.1})")).unwrap_or_default()
         } else { String::new() };
+        if r.state == State::Granted && r.yielded_core_ms >= 60_000.0 {
+            cores.push_str(&format!(" yielded {:.0} core-min", r.yielded_core_ms / 60_000.0));
+        }
         // RAM past its ask ([`Self::ram_past_ask`])
         let ram = Self::ram_past_ask(r).filter(|_| r.state.live()).map_or(String::new(), |(ask, _)| format!(" (past its ask of {ask} GB, counted at what it holds)"));
         let own = self.own_wait(r).map_or("null".to_string(), |id| json_str(&id));
         let progress = r.progress.as_deref().filter(|_| r.state.live()).unwrap_or("");
-        format!("{},\"cores_now\":{},\"ram_now\":{},\"progress\":{},\"own_wait\":{own}}}", line.strip_suffix('}').unwrap_or(&line), json_str(&cores), json_str(&ram), json_str(progress))
+        format!("{},\"cores_now\":{},\"ram_now\":{},\"progress\":{},\"own_wait\":{own},\"wm_wait\":{}}}", line.strip_suffix('}').unwrap_or(&line), json_str(&cores), json_str(&ram), json_str(progress), json_str(&self.lease_wm_wait_tag(r, now)))
     }
 
     /// When a lease queued behind its own lane's lease ([`Self::own_wait`]) starts: that lease's
@@ -7566,10 +8477,11 @@ impl Sched {
             let charge = self.live_call_charge.get(&r.id).copied().unwrap_or_else(|| self.call_cores(r));
             // (a launch that started on its box's free cores is charged those, [`Self::launch_peak_charged`])
             let charge = if self.launch_peak_charged(r) { charge.min(r.cost.cores) } else { charge };
-            // (one that asked its cores runs on them, [`Self::live_threads`]: its measure past them
-            // is its box's load, named as the call's past its charge, [`Self::live_over`])
+            // (one that asked its cores runs on them, [`Self::live_threads`], and one its box holds
+            // to the cores it started with, [`Self::call_confined`]: its measure past them is its
+            // box's load, named as the call's past its charge, [`Self::live_over`])
             c.cores = match self.call_measured(r) {
-                Some(measured) if r.req.cores.is_some() => measured.min(charge),
+                Some(measured) if r.req.cores.is_some() || self.call_confined(r).is_some() => measured.min(charge),
                 Some(measured) => measured,
                 None => charge,
             };
@@ -7681,6 +8593,14 @@ impl Sched {
         req.kind == Kind::Screen || req.live
     }
 
+    /// An open session or a live job that waits for its user: its quiet is theirs. A screen lease
+    /// devhub runs itself ([`Req::unattended`]: CI's live replay) waits for no one: CI's replay sat
+    /// 19 min on an app parked at a compile error, its processes at 6% of a core and its output
+    /// silent, unsaid, with its box's WM update and screen work behind it (L1922848, 11-27).
+    fn waits_for_user(&self, l: &Lease) -> bool {
+        (self.is_live_job(l) || self.session(&l.req)) && !l.req.unattended()
+    }
+
     /// What the box's running leases and the ones still being cleaned up are charged now.
     fn charged_on(&self, name: &str) -> Cost {
         let mut used = Cost { cores: 0.0, ram_gb: 0.0, disk_gb: 0.0, gpus: 0 };
@@ -7694,9 +8614,54 @@ impl Sched {
         used
     }
 
+    /// The live charges shown on a box that weighs CPU, and the share of each yielding
+    /// lease's cores they include. Count the firm cores first (a yielding lease's floor,
+    /// [`Self::yield_floor`], among them), then share the rest.
+    fn live_charges_shown(&self, name: &str, cores: u32) -> (Cost, f64) {
+        let mut used = Cost { cores: 0.0, ram_gb: 0.0, disk_gb: 0.0, gpus: 0 };
+        let mut yielding = 0.0;
+        for r in self.live_on_node(name, "") {
+            let c = self.charged(r);
+            if self.yields_to_live(r) {
+                let floor = self.yield_floor(r).min(c.cores);
+                used.cores += floor;
+                yielding += c.cores - floor;
+            } else {
+                used.cores += c.cores;
+            }
+            used.ram_gb += c.ram_gb;
+            used.disk_gb += c.disk_gb;
+            used.gpus += c.gpus;
+        }
+        let scale = if yielding > 0.0 { ((cores as f64 - used.cores).max(0.0) / yielding).min(1.0) } else { 1.0 };
+        used.cores += yielding * scale;
+        (used, scale)
+    }
+
+    /// The share of its core charge a yielding lease keeps in the box's history. A tests shard
+    /// charged 12 beside a 13-core live call got next to no CPU, yet counted in full (11-26).
+    fn yield_scale(&self, name: &str) -> f64 {
+        self.nodes.get(name).and_then(|n| n.caps.as_ref()).filter(|c| Self::weighs_cpu(c))
+            .map_or(1.0, |c| self.live_charges_shown(name, c.cores).1)
+    }
+
+    /// The box's charge for its history. A tests shard charged 12 beside a 13-core live call
+    /// read 25 of 16 cores and hid how much the shard yielded (11-26). Cleanup keeps its charge in full.
+    fn charged_shown(&self, name: &str) -> Cost {
+        let Some(c) = self.nodes.get(name).and_then(|n| n.caps.as_ref()).filter(|c| Self::weighs_cpu(c)) else { return self.charged_on(name) };
+        let (mut used, _) = self.live_charges_shown(name, c.cores);
+        for (_, _, c, _) in self.restoring.values().filter(|(n, ..)| n == name) {
+            used.cores += c.cores;
+            used.ram_gb += c.ram_gb;
+            used.disk_gb += c.disk_gb;
+            used.gpus += c.gpus;
+        }
+        used
+    }
+
     /// `devhub stats cores`: each box's cores as charged past its cores in the last hour, from its
     /// pressure samples (one a caps report): the share of samples over and the peak. Charged as the
-    /// grants count it (a live session between calls at its idle share, a hub build its lease),
+    /// box history shows it ([`Self::charged_shown`], a live session between calls at its idle share),
     /// not leases' sizes summed: that counted idle sessions whole (11-05).
     pub fn cores_over(&self, now: u64) -> String {
         let since = now.saturating_sub(3_600_000);
@@ -7741,8 +8706,8 @@ impl Sched {
     /// what the box measured busy: work past its charge is background work, whose runs yield to
     /// the call ([`super::Priority::cpu_weight`]), or another session's (calls waited 96-125 s on
     /// a box measured busy, charged 7-9 of 16, 11-06). On a box that weighs CPU, background shared
-    /// work's charges don't count at all ([`Self::yields_to_live`]): the call goes ahead of it. Nor
-    /// do idle sessions' cores: nothing runs on them, and a 15-core call waited 8 min on a box with 3
+    /// work yields all but running tests' floors ([`Self::yield_floor`]). Idle sessions' cores
+    /// are free: nothing runs on them, and a 15-core call waited 8 min on a box with 3
     /// cores charged, 2 of them idle sessions', for one of those to time out (W4484, 11-09). Their
     /// RAM counts: they hold it.
     ///
@@ -7753,21 +8718,22 @@ impl Sched {
     /// 16 cores), and with 6 charged beside it a save waited 166 s and 672 s for its call (W4666,
     /// 11-10). A background call still waits for its full charge. RAM is waited for either way.
     pub fn live_room(&self, id: &str) -> Result<(), String> {
-        let Some((l, name, c, call, in_use, ram)) = self.call_sums(id) else { return Ok(()) };
+        let Some((l, name, c, call, in_use, ram, _)) = self.call_sums(id) else { return Ok(()) };
         let (budget, ask) = (l.req.ram_budget(c), self.call_ram(l));
         let cores = call + in_use;
         let weighs = Self::weighs_cpu(c);
-        let counts = |r: &&Lease| !(weighs && self.yields_to_live(r)) && !(self.is_live_job(r) && self.live_idle.contains(&r.id));
         if cores > c.cores_for(l.req.kind) as f64 && l.priority != Priority::Interactive {
             // why its box's room for a call was not enough ([`Self::call_room`]): another session's
             // call took it, or the room is too small
             let calling: Vec<&str> = self.live_on_node(name, id).filter(|r| self.is_live_job(r) && !self.live_idle.contains(&r.id)).map(|r| r.id.as_str()).collect();
             let why = if !calling.is_empty() { format!("beside the call of {}", calling.join(", ")) } else { "beside the work granted there".to_string() };
             // and who holds the cores, most first: what it waits on, said while it waits
-            let mut held: Vec<(f64, String)> = self.live_on_node(name, id).filter(counts).map(|r| {
-                let charged = self.charged(r).cores;
+            let mut held: Vec<(f64, String)> = self.live_on_node(name, id).filter_map(|r| {
+                if self.is_live_job(r) && self.live_idle.contains(&r.id) { return None; }
+                let charged = if weighs && self.yields_to_live(r) { self.yield_floor(r) } else { self.charged(r).cores };
+                if charged <= 0.0 { return None; }
                 let what = if self.is_live_job(r) { "live, in a call" } else { r.req.kind.as_str() };
-                (charged, format!("{} ({what}, {charged:.0})", r.id))
+                Some((charged, format!("{} ({what}, {charged:.0})", r.id)))
             }).collect();
             held.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
             let held = if held.is_empty() { "nothing granted".to_string() } else { held.into_iter().map(|(_, h)| h).collect::<Vec<_>>().join(", ") };
@@ -7779,33 +8745,77 @@ impl Sched {
 
     /// A live call's charge beside its box's work ([`Self::live_room`]): the lease, its box and
     /// caps, its full charge ([`Self::call_cores`]), the cores of the work there that counts
-    /// against a call (not background shared work on a box that weighs CPU, not idle sessions;
-    /// sessions restoring after a master restart do), and the RAM of all of it with the call's.
-    fn call_sums(&self, id: &str) -> Option<(&Lease, &str, &Caps, f64, f64, f64)> {
+    /// against a call (including restoring sessions and yielding tests' floors), the RAM of
+    /// all of it with the call's, and the firm part of those cores: all but other calls' (floors,
+    /// work that is no live session, at its grant where an interactive call's box holds it there
+    /// ([`Self::interactive_holds_grants`]), and cleanups), which calls share the rest of
+    /// ([`Self::call_start_cores`]).
+    fn call_sums(&self, id: &str) -> Option<(&Lease, &str, &Caps, f64, f64, f64, f64)> {
         let l = self.get(id)?;
-        let name = l.node.as_deref().filter(|n| self.nodes.contains_key(*n))?;
-        let c = self.nodes[name].caps.as_ref()?;
+        self.call_sums_on(l.node.as_deref()?, l, self.call_cores(l))
+    }
+
+    fn call_sums_on<'a>(&'a self, name: &'a str, l: &'a Lease, full: f64) -> Option<(&'a Lease, &'a str, &'a Caps, f64, f64, f64, f64)> {
+        let c = self.nodes.get(name)?.caps.as_ref()?;
         let weighs = Self::weighs_cpu(c);
-        let (mut cores, mut ram) = (0.0, self.call_ram(l));
-        for r in self.live_on_node(name, id) {
+        let holds = self.interactive_holds_grants(name, l);
+        let (mut calls, mut ram, mut firm) = (0.0, self.call_ram(l), 0.0);
+        for r in self.live_on_node(name, &l.id) {
             let charged = self.charged(r);
-            if !(weighs && self.yields_to_live(r)) && !(self.is_live_job(r) && self.live_idle.contains(&r.id)) { cores += charged.cores; }
+            if weighs && self.yields_to_live(r) { firm += self.yield_floor(r); }
+            else if self.is_live_job(r) { if !self.live_idle.contains(&r.id) { calls += charged.cores; } }
+            else if holds && self.grant_confinable(name, r) { firm += charged.cores.min(self.granted_take(r)); }
+            else { firm += charged.cores; }
             ram += charged.ram_gb;
         }
         for (_, _, cost, _) in self.restoring.values().filter(|(n, ..)| n == name) {
-            cores += cost.cores;
+            firm += cost.cores;
             ram += cost.ram_gb;
         }
-        Some((l, name, c, self.call_cores(l), cores, ram))
+        Some((l, name, c, full, calls + firm, ram, firm))
     }
 
     /// The cores an interactive live call starts with when its full charge does not fit beside
-    /// its box's work ([`Self::live_room`]): (what is free there, at least a core; its full
-    /// charge; the cores in use beside it). None when it fits, or for a background call.
+    /// its box's work ([`Self::live_room`]): (what is free there, or its share of the cores left
+    /// after background tests keep their floors, whichever is more, at least one core and at most
+    /// its charge; its full charge; the cores in use beside it). None when it fits, or for a
+    /// background call. A box that confines it there ([`Self::call_confined`]) charges it no more:
+    /// calls stacked on calls without bound, every one charged its measure past its start, and the
+    /// Linux pool's four boxes held 131 cores of call charges on their 64 (11-26).
     pub fn call_start_cores(&self, id: &str) -> Option<(f64, f64, f64)> {
-        let (l, _, c, call, in_use, _) = self.call_sums(id)?;
+        let l = self.get(id)?;
+        self.launch_start_cores_on(l.node.as_deref()?, l, &l.cost)
+    }
+
+    /// Also used before placement, with the candidate box and its cost for the launch.
+    fn launch_start_cores_on(&self, name: &str, l: &Lease, cost: &Cost) -> Option<(f64, f64, f64)> {
+        let full = self.call_cores_on(l, Some(name), cost);
+        let (_, _, c, call, in_use, _, firm) = self.call_sums_on(name, l, full)?;
         let room = c.cores_for(l.req.kind) as f64;
-        (l.priority == Priority::Interactive && call + in_use > room).then(|| ((room - in_use).floor().max(1.0), call, in_use))
+        if l.priority != Priority::Interactive || call + in_use <= room { return None; }
+        let calls = self.live_on_node(name, &l.id).filter(|r| self.is_live_job(r) && !self.live_idle.contains(&r.id)).count();
+        // (the calls share what the firm work leaves: an 8-core gate's cores are no call's share)
+        let share = ((room - firm) / (calls + 1) as f64).floor();
+        Some(((room - in_use).floor().max(share).max(1.0).min(call), call, in_use))
+    }
+
+    /// The launch quota committed at placement, or a fresh one for a restored starting lease.
+    pub fn launch_quota(&self, id: &str) -> Option<(f64, f64, f64)> {
+        if let Some(&decided) = self.launch_quotas.get(id) {
+            return decided;
+        }
+        self.call_start_cores(id)
+    }
+
+    /// The cores a live call runs on where its box holds it to them: a call that started short of
+    /// its full charge ([`Self::call_start_cores`]) on a box whose run scopes weigh CPU and take a
+    /// call's cores (`call-cores`: its scopes' CPU quota, `lease-weight <id> call <cores>`). It is
+    /// charged no more than those ([`Self::charged`]). None for any other call, which runs on what
+    /// its weight gets it and is charged its measure.
+    pub fn call_confined(&self, l: &Lease) -> Option<f64> {
+        let charge = *self.live_call_charge.get(&l.id)?;
+        let c = self.nodes.get(l.node.as_deref()?)?.caps.as_ref()?;
+        (Self::weighs_cpu(c) && c.has("call-cores")).then_some(charge)
     }
 
     /// The cores and RAM a box keeps for a call of its idle live sessions: the largest one's full
@@ -7898,13 +8908,17 @@ impl Sched {
     /// "past its lane cap" behind its two running units, and one lane's small asks 176 lease-min
     /// in an hour so (L1201609-14, 11-16).
     /// Nor is a look ([`Req::look`]): it asks nothing, measured or not.
+    /// Nor is a live app session ([`Req::live_app`]): a lane's walk drove two Towns and a Fab
+    /// together, and the Fab, the third, waited 9 min past the cap on its pinned box while seven
+    /// newer live asks of other lanes took it (L1871681, 11-26). A test session's calls still count,
+    /// through [`Req::for_lane`].
     fn lane_over(&self, req: &Req, me: Option<&Lease>) -> Option<(u32, Vec<String>)> {
-        if req.kind == Kind::Inspect || req.cap_lane() == CI_LANE || req.landing_gate() || req.hand_in || req.look { return None; }
+        if req.kind == Kind::Inspect || req.cap_lane() == CI_LANE || req.landing_gate() || req.hand_in || req.look || req.live_app() { return None; }
         if me.is_some_and(|m| self.short_run(m)) { return None; }
         let ahead_of_me = |r: &Lease| me.is_none_or(|m| r.id != m.id && (r.asked_ms, r.seq) < (m.asked_ms, m.seq));
         // (an ask denied this look is no unit of its lane: it ends without running, and counted, it
         // kept the lane's next ask past the cap for a look beside a free box)
-        let mut ahead: Vec<&Lease> = self.leases.iter().filter(|r| r.req.kind == req.kind && r.req.cap_lane() == req.cap_lane() && me.is_none_or(|m| r.id != m.id) && (r.state.live() || r.state == State::Queued && ahead_of_me(r) && !self.denying.contains(&r.id)) && !self.short_run(r) && !r.req.look).collect();
+        let mut ahead: Vec<&Lease> = self.leases.iter().filter(|r| r.req.kind == req.kind && r.req.cap_lane() == req.cap_lane() && me.is_none_or(|m| r.id != m.id) && (r.state.live() || r.state == State::Queued && ahead_of_me(r) && !self.denying.contains(&r.id)) && !self.short_run(r) && !r.req.look && !r.req.live_app()).collect();
         ahead.sort_by_key(|r| (!r.state.live(), r.asked_ms, r.seq));
         // one lease per unit, the running ones first
         let mut units: Vec<&Lease> = Vec::new();
@@ -7956,22 +8970,20 @@ impl Sched {
     /// come keeps the CI run waiting one run of its own, no longer. An owed CI build took a box's
     /// tree 85 s before the land queue's next gate asked; the gate, its other boxes busy, waited
     /// 7 min behind it (L1666350, L1666363, 11-24).
+    /// Its age bounds that wait: once it has waited one gate's cycle ([`Self::gate_cycle_ms`]), it
+    /// leaves its tree to no gate, and ranks with the landing gates by its age
+    /// ([`Self::queue_order`]): it takes the tree as the running gate ends, before the gate's next
+    /// ask, or beside it where the box has a tree for each. Landings came every few minutes, so a
+    /// gate was always due "with a landing since its ask", and the CI bucket's 10 s tree asks
+    /// waited 82-100 min first in queue, 54 of its 116 shards unplaced (L1905568-L1905571, 11-27).
     fn gate_tree_wait(&self, name: &str, c: &Caps, l: &Lease) -> Option<Block> {
-        if l.state != State::Queued || !owed_ci(l) || !l.req.uses_tree() { return None; }
+        if l.state != State::Queued || !owed_ci(l) || !l.req.uses_tree() || self.ci_past_gates(l, self.gate_cycle_ms()) { return None; }
         let could = |g: &Lease| g.req.node.as_deref().is_none_or(|n| n == name) && l.req.tree_conflicts(&g.req, c) && self.never(name, c, g, &self.cost_on(name, g)).is_ok();
         if let Some(g) = self.leases.iter().filter(|g| g.state == State::Queued && g.req.landing_gate() && could(g)).min_by_key(|g| (g.asked_ms, g.seq)) {
             return Some(Block::by(format!("leaves its tree to {} (gate of {}, queued): CI takes a box's work tree after the landing gates that could take it", g.id, g.req.lane), &g.id));
         }
-        // each land queue's newest gate, queued, running or ended
-        let mut newest: Vec<&Lease> = Vec::new();
-        for g in self.leases.iter().chain(self.ended.iter()).filter(|g| g.req.landing_gate()) {
-            match newest.iter_mut().find(|n| n.req.lane == g.req.lane) {
-                Some(n) => if (g.asked_ms, g.seq) > (n.asked_ms, n.seq) { *n = g; },
-                None => newest.push(g),
-            }
-        }
         let run = self.run_ms(l);
-        for g in newest.into_iter().filter(|g| g.state != State::Queued && could(g)) {
+        for g in self.newest_gates().into_iter().filter(|g| g.state != State::Queued && could(g)) {
             let Some(landed) = self.landed.iter().map(|(_, ms)| *ms).filter(|ms| *ms > g.asked_ms).min() else { continue };
             let shortest = self.walls.get(&(g.req.class().to_string(), g.req.kind.as_str().to_string())).and_then(|w| w.iter().min().copied()).unwrap_or(0);
             let (due, live) = match g.ended_ms {
@@ -7985,6 +8997,29 @@ impl Sched {
             return Some(if live { Block::by(reason, &g.id) } else { Block::new(reason) });
         }
         None
+    }
+
+    /// Each land queue's newest gate, queued, running or ended.
+    fn newest_gates(&self) -> Vec<&Lease> {
+        let mut newest: Vec<&Lease> = Vec::new();
+        for g in self.leases.iter().chain(self.ended.iter()).filter(|g| g.req.landing_gate()) {
+            match newest.iter_mut().find(|n| n.req.lane == g.req.lane) {
+                Some(n) => if (g.asked_ms, g.seq) > (n.asked_ms, n.seq) { *n = g; },
+                None => newest.push(g),
+            }
+        }
+        newest
+    }
+
+    /// One landing gate's cycle: the longest run by its measure of each land queue's newest gate.
+    fn gate_cycle_ms(&self) -> u64 {
+        self.newest_gates().into_iter().map(|g| self.run_ms(g)).max().unwrap_or(0)
+    }
+
+    /// Whether owed CI tree ask `l` has waited one gate's cycle (`cycle`) for the landing gates:
+    /// past it, it waits for none ([`Self::gate_tree_wait`]) and ranks with them by its age.
+    fn ci_past_gates(&self, l: &Lease, cycle: u64) -> bool {
+        l.state == State::Queued && owed_ci(l) && l.req.uses_tree() && self.clock.saturating_sub(l.asked_ms) >= cycle
     }
 
     /// `held`: it holds the box, whose unconfirmed cleanups end before it starts
@@ -8024,6 +9059,18 @@ impl Sched {
                 return Err(Block::by(format!("a bench box {} (timed) waits for: interactive, live and screen work goes to another", t.id), &t.id));
             }
         }
+        // Background work another box can take leaves a queued timed ask the box it named or
+        // held at the last look, except that land-queue work keeps the last box the timed ask
+        // leaves it ([`Self::landing_wait`]). A post-land bucket took the draining pool Mac (L1864541, 11-26).
+        if l.state == State::Queued && l.req.node.is_none() && l.priority == Priority::Background
+            && !matches!(l.req.kind, Kind::Timed | Kind::Gate) && !owed_leg(l) && !l.req.hub_build() && !l.req.upkeep() {
+            if let Some(t) = self.leases.iter().find(|t| t.state == State::Queued && t.req.kind == Kind::Timed && !self.denying.contains(&t.id)
+                && (t.req.node.as_deref() == Some(name) || self.held_before.get(name).is_some_and(|h| h.id == t.id))) {
+                if self.goes_elsewhere(name, l) && self.landing_wait(name, t).is_none_or(|b| !b.blockers.contains(&l.id)) {
+                    return Err(Block::by(format!("{} (timed) waits for this box: background work another box can take goes there", t.id), &t.id));
+                }
+            }
+        }
         if let Some(b) = self.gate_tree_wait(name, c, l) { return Err(b); }
         // an app of ours a person uses outside every lease ([`super::hand`]): as beside their whole
         // interactive lease, only what its asker pinned here goes in (the box's own upkeep waits;
@@ -8058,10 +9105,13 @@ impl Sched {
         // not a measure; placed again holding nothing, pinned background work asked after it
         // took the box for 9.5 min (L1629060, 11-23). Its wait for quiet still ends
         // ([`Self::starts_unquiet`]).
+        // A timed ask that named the bench Mac held nothing through outside load, so a post-land
+        // bucket took it 2 s after the previous timed run ended for 15 min (L1867001, L1864541,
+        // 11-26). Its hold now lasts until quiet or until its wait ends.
         let ours = || self.live_on_node(name, &l.id).next().is_some() || self.restoring.values().any(|(n, ..)| n == name);
         let noise = || if l.req.gpu { gpu_noise(c) } else { timed_noise(c) };
         if let Some(why) = (l.req.kind == Kind::Timed && !ours()).then(noise).flatten() {
-            let held_through = self.measure_holds_ours(name) || l.bounced_on.as_deref() == Some(name);
+            let held_through = self.measure_holds_ours(name) || l.bounced_on.as_deref() == Some(name) || l.req.node.as_deref() == Some(name);
             if !(to_hold && held_through) && !self.starts_unquiet(c, l) {
                 return Err(Block::new(format!("the box is not quiet ({why}): timed work starts after it")));
             }
@@ -8161,6 +9211,13 @@ impl Sched {
         }
         if running {
             if let Some(r) = self.live_on_node(name, &l.id).filter(|r| !removed.contains(&r.id)).find(|r| l.req.conflicts_on(&r.req, c)) {
+                // a timed ask behind work lent there says so: that run goes on to its end, and no
+                // new lend starts there meanwhile ([`Self::lend_refusal`]); "held by L1938597 (test
+                // of boardlive)" said neither, 21 min into a session measured 16 (11-27)
+                if l.req.kind == Kind::Timed && self.lent(name, r) {
+                    let ago = r.granted_ms.map_or(String::new(), |g| format!(" {} ago", dur(self.clock.saturating_sub(g))));
+                    return Err(Block::by(format!("held by {} ({} of {}, lent there{ago}, its run {}: it runs on to its end, and no new lend starts there meanwhile)", r.id, r.req.kind.as_str(), r.req.lane, self.estimate_said(r)), &r.id));
+                }
                 return Err(Self::held_by_running(l, r, c));
             }
         }
@@ -8232,7 +9289,7 @@ impl Sched {
         Self::ages(l)
             && waited >= SHORT_BOUND_MS
             && !(self.is_live_job(l) || l.req.hub_build())
-            && self.nodes.get(name).and_then(|n| n.caps.as_ref()).is_some_and(|c| Self::weighs_cpu(c) && !c.temps.iter().any(|t| t.c >= SHORT_GATE_MAX_C))
+            && self.short_or_aged_box(name, l)
             && waited >= self.age_bound(name, l)
     }
 
@@ -8252,12 +9309,26 @@ impl Sched {
     /// A hub's first look after it started has no CPU measure: the box's last known demand stands
     /// until its next ([`Self::unmeasured`]).
     fn outside_cores(&self, name: &str, yielding: bool) -> f64 {
+        self.outside_cores_less(name, yielding, 0.0)
+    }
+
+    fn outside_cores_less(&self, name: &str, yielding: bool, wait_less: f64) -> f64 {
         let rest = self.resting(name);
-        let one = |base: f64, wait: f64| (base - rest + if yielding { 0.0 } else { wait }).max(0.0);
-        match self.demand_now(name) {
-            Some((base, wait)) => one(base, wait),
-            None => self.nodes[name].demand.back().map_or(0.0, |(_, b, w)| one(*b, *w)),
-        }
+        let direct = self.nodes.get(name).and_then(|n| n.caps.as_ref()).map_or(0.0, Self::direct_outside);
+        self.demand_now(name).or_else(|| self.nodes[name].demand.back().map(|&(_, b, w, d)| (b, w, d)))
+            .map_or((direct - rest).max(0.0), |(base, wait, direct)| Self::outside_at(base, wait, direct, rest, yielding, wait_less))
+    }
+
+    /// The residual may disappear under lease charges. Directly observed outside work
+    /// still needs CPU, even for an ask that takes precedence over waiting lease work.
+    fn outside_at(base: f64, wait: f64, direct: f64, rest: f64, yielding: bool, wait_less: f64) -> f64 {
+        let from_demand = (base - rest + if yielding { 0.0 } else { wait }).max(0.0)
+            - if yielding { 0.0 } else { wait_less };
+        from_demand.max(direct - rest).max(0.0)
+    }
+
+    fn direct_outside(c: &Caps) -> f64 {
+        c.outside_cores.max(c.busy_outside.iter().map(|(_, _, cores)| *cores).sum())
     }
 
     /// [`Self::peak_of`] at the box's [`Self::outside_cores`].
@@ -8275,20 +9346,21 @@ impl Sched {
         let n = &self.nodes[name];
         let Some(&(newest, ..)) = n.demand.back().filter(|_| n.caps.as_ref().is_some_and(|c| c.cpu_pct.is_some())) else { return now };
         let rest = self.resting(name);
-        n.demand.iter().filter(|(t, ..)| t + DEMAND_WINDOW_MS >= newest).map(|(_, b, w)| (b - rest + if yielding { 0.0 } else { *w }).max(0.0)).fold(now, f64::max)
+        n.demand.iter().filter(|(t, ..)| t + DEMAND_WINDOW_MS >= newest)
+            .map(|&(_, b, w, d)| Self::outside_at(b, w, d, rest, yielding, 0.0)).fold(now, f64::max)
     }
 
     /// The box's demand at its latest look, past what is charged there now: its busy cores less
     /// what rests there and every charge, and the tasks that waited for a CPU (`None`: no CPU
     /// measure, a hub's first look). Kept at each look ([`Self::note_demand`]) with the charges of
     /// its time: a lease granted since has no use in it, and one that ended since its whole.
-    fn demand_now(&self, name: &str) -> Option<(f64, f64)> {
+    fn demand_now(&self, name: &str) -> Option<(f64, f64, f64)> {
         let c = self.nodes[name].caps.as_ref()?;
         let busy = c.cpu_pct? / 100.0 * c.cores as f64;
         let resting = c.busy_leases.iter().filter(|(id, _)| self.get(id).is_some_and(|r| r.node.as_deref() == Some(name) && self.rests(r))).map(|(_, cores)| *cores).sum::<f64>();
         let charged = self.live_on_node(name, "").map(|r| self.charged(r).cores).sum::<f64>()
             + self.restoring.values().filter(|(n, ..)| n == name).map(|(_, _, cost, _)| cost.cores).sum::<f64>();
-        Some((busy - resting - charged, c.cpu_wait.unwrap_or(0.0)))
+        Some((busy - resting - charged, c.cpu_wait.unwrap_or(0.0), Self::direct_outside(c)))
     }
 
     /// A box whose hub just started: its look has no CPU measure, where an earlier one had
@@ -8306,17 +9378,27 @@ impl Sched {
         let mut used = InUse { cost: Cost { cores: 0.0, ram_gb: 0.0, disk_gb: 0.0, gpus: 0 }, ids: Vec::new(), outside: 0.0, line_cores: 0.0, line_outside: 0.0, outside_peak: 0.0, now: running && removed.is_empty() };
         let (ahead, test) = (self.ahead_of_background(name, l), self.live_test_ahead(name, l));
         let grants = running && self.grant_counts(name, l);
-        let waits = if grants { self.nodes[name].caps.as_ref().unwrap().wait_leases.as_slice() } else { &[] };
+        // (an interactive ask counts work its box holds to its grant at its grant: [`Self::sync_grant_caps`])
+        let hold_grants = running && self.interactive_holds_grants(name, l);
+        let waits = if grants || hold_grants { self.nodes[name].caps.as_ref().unwrap().wait_leases.as_slice() } else { &[] };
         let mut yielding_work = Vec::new();
         for (id, cost, line_cores) in self.live_on_node(name, &l.id).filter(|r| running && !removed.contains(&r.id)).map(|r| {
             let mut cost = self.charged(r);
             // A live launch passes yielding background cores, a live test its box's prebuild's;
-            // their other resources still count.
-            if ahead && self.yields_to_live(r) || test && Self::prebuild_yields(r) { cost.cores = 0.0; }
+            // a running background test keeps its floor, and their other resources still count.
+            if test && Self::prebuild_yields(r) { cost.cores = 0.0; }
+            else if ahead && self.yields_to_live(r) { cost.cores = self.yield_floor(r); }
             let line_cores = cost.cores;
-            if grants && self.yields_to_live(r) {
+            if grants && self.counts_at_grant(r) {
                 cost.cores = cost.cores.min(self.granted_take(r));
                 if !waits.is_empty() { yielding_work.push(r.req.hub_work().unwrap_or(&r.id)); }
+            } else if hold_grants && self.grant_confinable(name, r) {
+                // (one within its grant keeps its waiting tasks counted: they are the box's load)
+                let take = self.granted_take(r);
+                if cost.cores > take || self.grant_held.contains_key(&r.id) {
+                    cost.cores = cost.cores.min(take);
+                    if !waits.is_empty() { yielding_work.push(r.req.hub_work().unwrap_or(&r.id)); }
+                }
             }
             (&r.id, cost, line_cores)
         }).chain(self.restoring.iter().filter(|(id, (n, ..))| n == name && !removed.contains(id)).map(|(id, (_, _, cost, _))| (id, *cost, cost.cores))) {
@@ -8331,9 +9413,9 @@ impl Sched {
             let yielding = self.wait_yields(name, l, removed);
             let outside = self.outside_cores(name, yielding);
             used.line_outside = outside;
-            used.outside = if grants && !yielding {
+            used.outside = if (grants || hold_grants) && !yielding {
                 let waiting: f64 = waits.iter().filter(|(work, _)| yielding_work.contains(&work.as_str())).map(|(_, tasks)| tasks).sum();
-                (outside - waiting).max(0.0)
+                self.outside_cores_less(name, yielding, waiting)
             } else { outside };
             used.outside_peak = self.peak_of(name, yielding, outside);
         }
@@ -8346,55 +9428,103 @@ impl Sched {
         used
     }
 
+    fn box_cores_used(&self, name: &str) -> f64 {
+        let has_ours = self.live_on_node(name, "").next().is_some()
+            || self.restoring.values().any(|(n, ..)| n == name);
+        if !has_ours || !self.nodes.contains_key(name) { return 0.0; }
+        self.charged_on(name).cores + self.outside_cores(name, false)
+    }
+
+    fn box_allows_build_bump(&self, name: &str, l: &Lease, overdue: bool) -> bool {
+        let Some(c) = self.nodes.get(name).and_then(|n| n.caps.as_ref()) else { return false };
+        let total = c.cores_for(l.req.kind) as f64;
+        if c.watched { return false; }
+        if self.box_cores_used(name) > total + 0.05 { return false; }
+        if c.cpu_wait.unwrap_or(0.0) >= BUILD_BUMP_MAX_WAIT { return false; }
+        if !overdue {
+            let waiter = self.leases.iter().any(|q| {
+                q.state == State::Queued
+                    && q.id != l.id
+                    && !self.denying.contains(&q.id)
+                    && !q.req.upkeep()
+                    && !q.req.deploy_build()
+                    && (self.holds.get(name).is_some_and(|h| h.id == q.id && h.until > self.clock)
+                        || q.req.node.as_deref() == Some(name)
+                        || q.queue_boxes.iter().any(|(b, k)| b == name && k == "budget cores"))
+            });
+            if waiter { return false; }
+        }
+        true
+    }
+
+    fn upkeep_placed(&self, name: &str, l: &Lease, demand: f64) -> f64 {
+        let demand = demand.ceil().max(1.0);
+        let Some(c) = self.nodes.get(name).and_then(|n| n.caps.as_ref()) else { return demand };
+        let total = c.cores_for(l.req.kind) as f64;
+        if !c.has("jit-jobs") || total < 1.0 { return demand; }
+        let free = (total - self.box_cores_used(name)).floor();
+        if free >= PREBUILD_MIN_CORES.min(demand) {
+            demand.min(free)
+        } else {
+            demand.min(PREBUILD_BUMP_CORES.min(total))
+        }
+    }
+
+    fn own_build_allows_bump(&self, name: &str, l: &Lease, add: f64, running: bool, removed: &[String]) -> bool {
+        if !l.req.own_build() || self.unmeasured(name) { return false; }
+        let Some(c) = self.nodes.get(name).and_then(|n| n.caps.as_ref()) else { return false };
+        let total = c.cores_for(l.req.kind) as f64;
+        if add > l.req.own_bump_cap().min(total) { return false; }
+        if l.req.hub_build() {
+            if !c.has(l.req.hub_jobs_feature()) { return false; }
+            if !l.req.deploy_build() { return true; }
+            if self.deploy_waits(l) { return false; }
+            let stacked = running && self.live_on_node(name, &l.id)
+                .any(|r| !removed.contains(&r.id) && r.req.own_build() && self.expected_end(r).is_some());
+            if stacked { return false; }
+            let overdue = self.clock.saturating_sub(l.asked_ms) >= OVERDUE_MS;
+            return self.box_allows_build_bump(name, l, overdue);
+        }
+        if !c.has("jit-jobs") || total < 1.0 || !Self::weighs_cpu(c) { return false; }
+        let stacked = running && self.live_on_node(name, &l.id)
+            .any(|r| !removed.contains(&r.id) && r.req.own_build());
+        if stacked { return false; }
+        let overdue = self.clock.saturating_sub(l.asked_ms) >= PREBUILD_BUMP_WAIT_MS;
+        self.box_allows_build_bump(name, l, overdue)
+    }
+
     fn room(&self, name: &str, l: &Lease, cost: &Cost, running: bool, removed: &[String], ram_rooms: bool) -> Room {
         let c = self.nodes[name].caps.as_ref().unwrap();
         // A hub build keeps no room for a live session's next call.
-        let (cores, ram_gb) = if running && !l.req.hub_build() { self.call_room(name, &l.id, removed, (cost.cores, c.cores_for(l.req.kind) as f64), cost.ram_gb, l.req.ram_budget(c), self.past_age_bound(name, l)) } else { (0.0, 0.0) };
-        // a box's hub build waits for no cores: it builds beside what runs there, on the cores the
-        // box has free and at least HUB_BUILD_MIN_CORES jobs, past its cores for the build's
-        // minutes. It is devhub keeping itself current: heading its box's queue, a Linux node's
-        // still waited 10m48s on a box charged 16 of 16 (11-07), and an older hub's work
-        // waited on the box for it (a tests shard behind a 45-min run, 11-07). A hub without
-        // `hub-jobs` builds on cargo's own jobs, every core: it waits for its room. So does the
-        // box's own prebuild ([`Req::upkeep`]) for cores, on the jobs of its charge, whose CPU weight
-        // gets it those beside background work: every lane's next lease there builds its JIT itself
-        // without it, and a 49 s one headed a Linux node's queue 20 min behind two background tests
-        // shards charged its 16 cores (11-08). Its RAM stays charged: it waits for idle live sessions to end, not past them.
-        // One of these builds goes past the box's cores at a time; the next waits for its room or
-        // for that one to end: a prebuild, a deployment's build and a hub build granted together
-        // beside a 12-core tests shard had a 16-core box at 24 (L780395, L780405, L780406, 11-10).
-        // It waits only while that one runs within its measure ([`Self::expected_end`]): past it,
-        // no end is known, and the next goes past beside it. A box's deployment build, measured
-        // 51 s, waited 18 min behind its prebuild, measured 2m05s, which a cold JIT build and a
-        // stalled listing ran 19.6 min (L1352140, L1352117, 11-18).
-        // The box's hub build goes past them beside another: the box's roll waits for it, and the
-        // fleet's update for the box (L791258 waited 2 min at "budget cores" for its box's
-        // deployment build, 11-10). At most two go past the cores at once.
-        // A short run ([`Self::short_on`]) goes past the cores up to the box's short line
-        // ([`SHORT_LINE`], [`Self::fits`]): gates of 4-10 s runs waited for their box's cores a
-        // median 124 s, their holds keeping 273 lease-min of 6 h of other work off their boxes,
-        // and a 1-core 5 s test 21 min at "in use 15, asked 1" of 16 (11-16). One whose JIT is
-        // cold here builds it on all of cargo's jobs first, no short run: two such took a box to
-        // 29 of 16 (11-16). Past the cores it stops no build's, nor a build it: the box's prebuild
-        // waited 52 min on a box where short gates took turns past them (11-16).
-        let bump = l.req.hub_build() && c.has("hub-jobs");
-        let short = self.short_on(name, l);
-        let own_update = l.req.hub_build() && !l.req.deploy_build();
-        let stacked = running && !own_update && self.live_on_node(name, &l.id).any(|r| !removed.contains(&r.id) && (r.req.hub_build() || r.req.upkeep()) && self.expected_end(r).is_some());
-        // (a box whose hub just started takes nothing past its cores until it measures them, [`Self::unmeasured`])
+        let (cores, ram_gb) = if running && !l.req.hub_build() {
+            self.call_room(name, &l.id, removed, (cost.cores, c.cores_for(l.req.kind) as f64), cost.ram_gb, l.req.ram_budget(c), self.past_age_bound(name, l))
+        } else {
+            (0.0, 0.0)
+        };
+        if l.req.own_build() {
+            let hub_ram = l.req.hub_build() && c.has(l.req.hub_jobs_feature()) && !self.deploy_waits(l);
+            return Room {
+                cores,
+                ram_gb: if ram_rooms { ram_gb } else { 0.0 },
+                cores_bump: self.own_build_allows_bump(name, l, cost.cores, running, removed),
+                short_bump: false,
+                aged_bump: false,
+                launch_bump: false,
+                hub_ram,
+            };
+        }
         let measured = !self.unmeasured(name);
-        // (the box's prebuild only where CPU weight gives it the cores beside background work: a Mac
-        // weighs none, and its prebuild past the cores took a 10-core budget from 17.7 to 21.7
-        // beside a lane's memory series and a live test, L1486946, 11-21)
-        let upkeep = l.req.upkeep() && Self::weighs_cpu(c);
-        // An aged ask ([`Self::age_starts`]) goes past the cores only once the box's own build
-        // past them ends: both past them at once, with a live call ahead of its background work
-        // beside them, a 16-core box stood at load 48 (a 4-core tests shard on the aged line beside
-        // its prebuild, then its deployment build, past a 14-core shard and a 16-core call, 11-24).
-        // Its prebuild ran 6 min against its 3m16s.
-        let own_building = running && self.live_on_node(name, &l.id).any(|r| !removed.contains(&r.id) && (r.req.hub_build() || r.req.upkeep()) && self.expected_end(r).is_some());
-        Room { cores, ram_gb: if ram_rooms { ram_gb } else { 0.0 }, cores_bump: (bump || upkeep) && !stacked && measured, short_bump: short && measured,
-            aged_bump: self.age_starts(name, l) && measured && !own_building, hub_ram: bump }
+        let own_building = running && self.live_on_node(name, &l.id)
+            .any(|r| !removed.contains(&r.id) && r.req.own_build() && self.expected_end(r).is_some());
+        Room {
+            cores,
+            ram_gb: if ram_rooms { ram_gb } else { 0.0 },
+            cores_bump: false,
+            short_bump: self.short_on(name, l) && measured,
+            aged_bump: self.age_starts(name, l) && measured && !own_building,
+            launch_bump: self.visible_launch_bump(name, l),
+            hub_ram: false,
+        }
     }
 
     /// What stands past box `name`'s cores in its charges `u`, lease by lease, for a `budget cores`
@@ -8408,7 +9538,7 @@ impl Sched {
     fn past_cores_said(&self, name: &str, l: &Lease, u: &InUse, total: f64, named: &[String]) -> String {
         if u.cost.cores <= total { return String::new(); }
         let (ahead, test) = (self.ahead_of_background(name, l), self.live_test_ahead(name, l));
-        let grants = self.grant_counts(name, l);
+        let (grants, hold_grants) = (self.grant_counts(name, l), self.interactive_holds_grants(name, l));
         let past: Vec<String> = u.ids.iter().filter(|id| !named.contains(id)).filter_map(|id| {
             if let Some((_, _, cost, _)) = self.restoring.get(id).filter(|(n, ..)| n == name) {
                 return (cost.cores >= 0.5).then(|| format!("{id} {:.0} until its cleanup", cost.cores));
@@ -8417,7 +9547,7 @@ impl Sched {
             // (counted none for a live launch's or a live test's line, [`Self::in_use`])
             if ahead && self.yields_to_live(r) || test && Self::prebuild_yields(r) { return None; }
             let mut charge = self.charged(r).cores;
-            if grants && self.yields_to_live(r) { charge = charge.min(self.granted_take(r)); }
+            if grants && self.counts_at_grant(r) || hold_grants && self.grant_confinable(name, r) { charge = charge.min(self.granted_take(r)); }
             match r.req.hub_work() {
                 Some(DEPLOY_BUILD) => return Some(format!("{id} its deployment's build {charge:.0}")),
                 Some(_) => return Some(format!("{id} its hub's build {charge:.0}")),
@@ -8464,11 +9594,14 @@ impl Sched {
                 let r = self.get(id)?;
                 let g = r.cost.cores;
                 let work = r.req.hub_work();
-                // (a live session charged what it measures, an idle one, is past nothing)
-                let over = if self.is_live_job(r) { g.max(self.charged(r).cores) } else { g };
+                // (a live session charged what it measures, an idle one, is past nothing; nor is a
+                // lease charged its JIT's build past its grant, up to that charge)
+                let building = self.builds_jit_now(r);
+                let over = if self.is_live_job(r) || building { g.max(self.charged(r).cores) } else { g };
                 let (_, m) = c.busy_leases.iter().find(|(l, m)| l == work.unwrap_or(id.as_str()) && *m >= over + 1.0)?;
                 let what = match work { Some(DEPLOY_BUILD) => " (its deployment's build)", Some(_) => " (its hub's build)", None => "" };
                 named.push(id.clone());
+                if building { return Some(format!("{id}{what} {m:.1} cores (building its JIT, charged {over:.0})")); }
                 Some(format!("{id}{what} {m:.1} cores (granted {g:.0})"))
             }).collect();
             // what the box measured for a lease id none of the master's leases there has: charged
@@ -8485,7 +9618,8 @@ impl Sched {
             if !c.busy_outside.is_empty() { busy.push(crate::top::outside_said(&c.busy_outside)); }
             let busy = if busy.is_empty() { String::new() } else { format!("; busy: {}", busy.join(", ")) };
             let waiting = counted.map_or(String::new(), |w| if waited >= 0.5 { format!(", with {w:.0} tasks waiting for a CPU, {waited:.0} of them its leases'") } else { format!(", with {w:.0} tasks waiting for a CPU") });
-            format!(" (outside its leases {:.0}{waiting}{busy})", (outside - waited).max(0.0))
+            let direct = (Self::direct_outside(c) - self.resting(name)).max(0.0).min(outside);
+            format!(" (outside its leases {:.0}{waiting}{busy})", (outside - waited).max(direct).max(0.0))
         } else { String::new() };
         let measured = format!("{live_said}{measured}");
         let budget = l.req.ram_budget(c);
@@ -8511,40 +9645,45 @@ impl Sched {
         // (the short and aged lines go by the box's demand at its most of late, [`Self::peak_of`])
         let peak = u.line_cores + u.line_outside.max(u.outside_peak) + room;
         for (what, have, total, add) in [("cores", u.cost.cores + u.outside + room, c.cores_for(l.req.kind) as f64, cost.cores), ("ram", u.cost.ram_gb + ram_room, budget, cost.ram_gb), ("gpu", u.cost.gpus as f64, c.gpus.len() as f64, cost.gpus as f64)] {
-            if extra.cores_bump && what == "cores" || extra.hub_ram && what == "ram" && c.ram_gb > 0.0 { continue; }
-            // a look that adds nothing to a box's cores or RAM waits for neither: its wait would
-            // free nothing there ([`Req::look`])
-            if l.req.look && add <= 0.0 && matches!(what, "cores" | "ram") { continue; }
-            // a short run up to the box's short line, an ask past its age bound up to its aged line
-            if extra.short_bump && what == "cores" && peak + add <= SHORT_LINE * total { continue; }
-            if extra.aged_bump && what == "cores" && peak + add <= AGED_LINE * total { continue; }
-            if have + add > total {
-                let reason = if what == "ram" {
-                    format!("budget ram {total:.1} GB, in use {:.1} GB{kept_ram}, asked {add:.1} GB ({})", have - ram_room, l.req.ram_budget_why(c))
-                } else if what == "cores" {
-                    let beside = if self.ahead_of_background(name, l) { " (background work not counted)" }
-                        else if u.line_cores > u.cost.cores || u.line_outside > u.outside { " (background work at its grant)" } else { "" };
-                    let past = self.past_cores_said(name, l, u, total, &named);
-                    // (a fraction to a tenth: "in use 15, asked 1" of 16 read as fitting, 11-16)
-                    let close = (have + add - total) < 1.0;
-                    let n = |x: f64| if (x - x.round()).abs() >= 0.05 { format!("{x:.1}") } else { format!("{x:.0}") };
-                    let small = if close && measured.is_empty() && outside >= 0.05 { format!(" (outside its leases {outside:.1})") } else { String::new() };
-                    let kept = if room > 0.0 { format!(", kept for a live call {}", n(room)) } else { String::new() };
-                    // the sum it compares, when more than the charges counts in it: "in use 1.2
-                    // (outside its leases 1), asked 8" of 10 read as 8.8 free (L1620862, 11-23)
-                    let sum = if have - u.cost.cores >= 0.05 {
-                        let rest = self.resting(name);
-                        let past = if rest >= 0.05 { format!(" and its resting {}", n(rest)) } else { String::new() };
-                        let measured = if u.outside >= 0.05 { format!(" + {} measured past the charges{past}", n(u.outside)) } else { String::new() };
-                        let kept = if room > 0.0 { format!(" + {} kept", n(room)) } else { String::new() };
-                        format!(": {} charged{measured}{kept} + {} asked = {} of {total:.0}", n(u.cost.cores), n(add), n(have + add))
-                    } else { String::new() };
-                    format!("budget cores {total:.0}{}, in use {}{beside}{measured}{small}{past}{kept}, asked {}{sum}", Self::pinned_said(c, l.req.kind), n(u.cost.cores), n(add))
-                } else {
-                    format!("budget {what} {total:.0}, in use {have:.0}, asked {add:.0}")
-                };
-                return Err(Block { reason, blockers: blockers(), disk: false });
+            if what == "cores" && l.req.own_build() {
+                let cores_bump = extra.cores_bump && add <= l.req.own_bump_cap().min(total);
+                if cores_bump || have + add <= total { continue; }
+            } else {
+                if extra.cores_bump && what == "cores" || extra.hub_ram && what == "ram" && c.ram_gb > 0.0 { continue; }
+                // a look that adds nothing to a box's cores or RAM waits for neither: its wait would
+                // free nothing there ([`Req::look`])
+                if l.req.look && !l.req.own_build() && add <= 0.0 && matches!(what, "cores" | "ram") { continue; }
+                // a short run up to the box's short line, an ask past its age bound up to its aged line
+                if extra.short_bump && what == "cores" && peak + add <= SHORT_LINE * total { continue; }
+                if extra.aged_bump && what == "cores" && peak + add <= AGED_LINE * total { continue; }
+                if extra.launch_bump && what == "cores" { continue; }
+                if have + add <= total { continue; }
             }
+            let reason = if what == "ram" {
+                format!("budget ram {total:.1} GB, in use {:.1} GB{kept_ram}, asked {add:.1} GB ({})", have - ram_room, l.req.ram_budget_why(c))
+            } else if what == "cores" {
+                let beside = if self.ahead_of_background(name, l) { " (only test floors count from yielding background work)" }
+                    else if u.line_cores > u.cost.cores || u.line_outside > u.outside { " (background work at its grant)" } else { "" };
+                let past = self.past_cores_said(name, l, u, total, &named);
+                // (a fraction to a tenth: "in use 15, asked 1" of 16 read as fitting, 11-16)
+                let close = (have + add - total) < 1.0;
+                let n = |x: f64| if (x - x.round()).abs() >= 0.05 { format!("{x:.1}") } else { format!("{x:.0}") };
+                let small = if close && measured.is_empty() && outside >= 0.05 { format!(" (outside its leases {outside:.1})") } else { String::new() };
+                let kept = if room > 0.0 { format!(", kept for a live call {}", n(room)) } else { String::new() };
+                // the sum it compares, when more than the charges counts in it: "in use 1.2
+                // (outside its leases 1), asked 8" of 10 read as 8.8 free (L1620862, 11-23)
+                let sum = if have - u.cost.cores >= 0.05 {
+                    let rest = self.resting(name);
+                    let past = if rest >= 0.05 { format!(" and its resting {}", n(rest)) } else { String::new() };
+                    let measured = if u.outside >= 0.05 { format!(" + {} measured past the charges{past}", n(u.outside)) } else { String::new() };
+                    let kept = if room > 0.0 { format!(" + {} kept", n(room)) } else { String::new() };
+                    format!(": {} charged{measured}{kept} + {} asked = {} of {total:.0}", n(u.cost.cores), n(add), n(have + add))
+                } else { String::new() };
+                format!("budget cores {total:.0}{}, in use {}{beside}{measured}{small}{past}{kept}, asked {}{sum}", Self::pinned_said(c, l.req.kind), n(u.cost.cores), n(add))
+            } else {
+                format!("budget {what} {total:.0}, in use {have:.0}, asked {add:.0}")
+            };
+            return Err(Block { reason, blockers: blockers(), disk: false });
         }
         if l.cost_class != CostClass::Small && l.req.kind.writes() && c.ram_gb > 0.0 && c.ram_avail_gb < c.ram_gb * 0.1 {
             return Err(Block { reason: format!("ram: {:.1} GB available of {:.1} (under 10%)", c.ram_avail_gb, c.ram_gb), blockers: blockers(), disk: false });
@@ -8664,8 +9803,12 @@ impl Sched {
     /// leases waited 21 min behind a benchmark that ran twice its guessed 20 (11-05).
     fn behind_overrun(&self, name: &str, l: &Lease) -> Option<String> {
         let c = self.nodes[name].caps.as_ref()?;
+        let cost = self.cost_on(name, l);
+        let blockers: Vec<String> = self.resources(name, l, &cost, true).err().map_or_else(Vec::new, |b| b.blockers);
         let ran = |r: &Lease| self.clock.saturating_sub(r.granted_ms.unwrap_or(self.clock));
-        let r = self.live_on_node(name, &l.id).filter(|r| !self.is_live_job(r) && l.req.conflicts_on(&r.req, c) && ran(r) >= self.run_ms(r)).max_by_key(|r| ran(r) - self.run_ms(r))?;
+        let r = self.live_on_node(name, &l.id).filter(|r| !self.is_live_job(r)
+            && (l.req.conflicts_on(&r.req, c) || blockers.iter().any(|id| id == &r.id))
+            && ran(r) >= self.run_ms(r)).max_by_key(|r| ran(r) - self.run_ms(r))?;
         let agent = r.req.agent.as_deref().map_or(String::new(), |a| format!(" ({a})"));
         // a timed run hears when to yield to timed work: its waiters read the same deadline
         let yields = if self.yielded.contains_key(&r.id) {
@@ -8697,21 +9840,35 @@ impl Sched {
     /// runs there (all of it when the box drains for the owner, `drains`; else what came in since
     /// its ask and what has no end it waits for), `l` and the owner's reservation all fit.
     fn fits_beside(&self, name: &str, l: &Lease, cost: &Cost, owner: &Lease, c: &Caps, drains: bool) -> bool {
-        let reserved = self.cost_on(name, owner);
-        let since_ask = |r: &Lease| r.granted_ms.is_some_and(|g| g >= owner.asked_ms);
-        let add = |sum: &mut Cost, x: Cost| (sum.cores, sum.ram_gb, sum.gpus) = (sum.cores + x.cores, sum.ram_gb + x.ram_gb, sum.gpus + x.gpus);
-        let mut stays = Cost { cores: 0.0, ram_gb: 0.0, disk_gb: 0.0, gpus: 0 };
-        for r in self.live_on_node(name, &l.id).filter(|r| !since_ask(r) && self.expected_end(r).is_none()) { add(&mut stays, self.held_charge(r)); }
-        let stays_beside = stays.cores + reserved.cores <= c.cores_for(owner.req.kind) as f64 && stays.ram_gb + reserved.ram_gb <= owner.req.ram_budget(c) && (stays.gpus + reserved.gpus) as usize <= c.gpus.len();
-        let mut beside = Cost { cores: 0.0, ram_gb: 0.0, disk_gb: 0.0, gpus: 0 };
-        for r in self.live_on_node(name, &l.id).filter(|r| drains || since_ask(r) || stays_beside && self.expected_end(r).is_none()) { add(&mut beside, self.held_charge(r)); }
-        for (_, _, charged, _) in self.restoring.values().filter(|(n, ..)| n == name) { add(&mut beside, *charged); }
+        let (beside, reserved) = self.beside_charges(name, l, owner, c, drains, true);
         // (a lease there past its grant at the most it measured since, [`Self::held_charge`], now
         // as beside the room: nothing comes in on a dip of its measure)
         let room = self.with_past_grants(name, &l.id, cost);
         // (an owner past its age bound starts up to its aged line: what leaves it that room fits)
         let line = if self.cpu_aged.contains(&owner.id) { AGED_LINE } else { 1.0 };
         (room.cores <= cost.cores || self.resources(name, l, &room, true).is_ok()) && !l.req.conflicts_on(&owner.req, c) && beside.cores + cost.cores + reserved.cores <= line * c.cores_for(l.req.kind) as f64 && beside.ram_gb + cost.ram_gb + reserved.ram_gb <= l.req.ram_budget(c) && (beside.gpus + cost.gpus + reserved.gpus) as usize <= c.gpus.len() && cost.disk_gb + reserved.disk_gb <= c.disk_free_gb - c.disk_floor_gb
+    }
+
+    /// A quota-confined launch still leaves the holder its RAM, GPU and disk reservation.
+    fn fits_beside_non_cores(&self, name: &str, l: &Lease, cost: &Cost, owner: &Lease, c: &Caps, drains: bool) -> bool {
+        let (beside, reserved) = self.beside_charges(name, l, owner, c, drains, false);
+        !l.req.conflicts_on(&owner.req, c)
+            && beside.ram_gb + cost.ram_gb + reserved.ram_gb <= l.req.ram_budget(c).min(owner.req.ram_budget(c))
+            && (beside.gpus + cost.gpus + reserved.gpus) as usize <= c.gpus.len()
+            && cost.disk_gb + reserved.disk_gb <= c.disk_free_gb - c.disk_floor_gb
+    }
+
+    fn beside_charges(&self, name: &str, l: &Lease, owner: &Lease, c: &Caps, drains: bool, count_cores: bool) -> (Cost, Cost) {
+        let reserved = self.cost_on(name, owner);
+        let since_ask = |r: &Lease| r.granted_ms.is_some_and(|g| g >= owner.asked_ms);
+        let add = |sum: &mut Cost, x: Cost| (sum.cores, sum.ram_gb, sum.gpus) = (sum.cores + x.cores, sum.ram_gb + x.ram_gb, sum.gpus + x.gpus);
+        let mut stays = Cost { cores: 0.0, ram_gb: 0.0, disk_gb: 0.0, gpus: 0 };
+        for r in self.live_on_node(name, &l.id).filter(|r| !since_ask(r) && self.expected_end(r).is_none()) { add(&mut stays, self.held_charge(r)); }
+        let stays_beside = (!count_cores || stays.cores + reserved.cores <= c.cores_for(owner.req.kind) as f64) && stays.ram_gb + reserved.ram_gb <= owner.req.ram_budget(c) && (stays.gpus + reserved.gpus) as usize <= c.gpus.len();
+        let mut beside = Cost { cores: 0.0, ram_gb: 0.0, disk_gb: 0.0, gpus: 0 };
+        for r in self.live_on_node(name, &l.id).filter(|r| drains || since_ask(r) || stays_beside && self.expected_end(r).is_none()) { add(&mut beside, self.held_charge(r)); }
+        for (_, _, charged, _) in self.restoring.values().filter(|(n, ..)| n == name) { add(&mut beside, *charged); }
+        (beside, reserved)
     }
 
     /// The queued holder of `name` whose hold a grant of `l` there goes ahead of: any pass but one
@@ -8764,13 +9921,37 @@ impl Sched {
         (passed >= run).then_some((passed, run))
     }
 
+    /// Whether `owner` is a timed ask queued before `l` whose run is short ([`LONG_TIMED_MS`] at
+    /// most, by its class's measure or what it declared): a box's hub build lets it go first
+    /// ([`Pass::HubBuild`]).
+    fn short_timed_before(&self, owner: &Lease, l: &Lease) -> bool {
+        owner.req.kind == Kind::Timed && owner.state == State::Queued && (owner.asked_ms, owner.seq) < (l.asked_ms, l.seq) && self.run_ms(owner) <= LONG_TIMED_MS
+    }
+
+    /// Whether hub build `l` waits behind a short timed ask queued before it for its box (named
+    /// there or holding it, [`Self::short_timed_before`]). Not on a box whose dev switch is off:
+    /// lane work waits there, its hub build does not.
+    fn after_short_timed(&self, l: &Lease) -> bool {
+        let Some(node) = l.req.node.as_deref().filter(|n| l.req.hub_build() && self.dev(n)) else { return false };
+        self.leases.iter().any(|t| (t.req.node.as_deref() == Some(node) || self.holds.get(node).is_some_and(|h| h.id == t.id)) && self.short_timed_before(t, l))
+    }
+
     /// The self-update of `name` that waits for its turn and could take it next: its hub's build
     /// ([`Req::hub_build`], not a deployment's), queued for that box, that no starved head keeps
     /// the box from ([`Self::keeps_from`]). Such a head drains the box for itself and the build
     /// follows it: background work is judged by that head's drain meanwhile. Gated by a build the
     /// head held, 13 background asks waited 6 min on a box with the head (L1167996, 11-16).
+    /// Nor one behind a short timed ask asked before it ([`Self::after_short_timed`]): that ask
+    /// goes first.
+    /// Whether a box's deployment build, queued, still waits for the cores its class measured
+    /// ([`Self::cost_on`]): for its class's measured run since its ask. With no measure it starts
+    /// at once on what is free.
+    fn deploy_waits(&self, l: &Lease) -> bool {
+        l.req.deploy_build() && l.state == State::Queued && self.measured_ms(l).is_some_and(|run| self.clock.saturating_sub(l.asked_ms) < run)
+    }
+
     fn pending_hub_update(&self, name: &str, holds: &Holds) -> Option<&Lease> {
-        let b = self.leases.iter().find(|b| b.state == State::Queued && b.req.hub_build() && !b.req.deploy_build() && b.req.node.as_deref() == Some(name))?;
+        let b = self.leases.iter().find(|b| b.state == State::Queued && b.req.hub_build() && (!b.req.deploy_build() || self.deploy_waits(b)) && b.req.node.as_deref() == Some(name) && !self.after_short_timed(b))?;
         let head = holds.get(name).filter(|h| h.id != b.id && h.until > self.clock).and_then(|h| self.get(&h.id)).filter(|o| o.state == State::Queued);
         (!head.is_some_and(|o| self.keeps_from(name, o, b))).then_some(b)
     }
@@ -8857,7 +10038,19 @@ impl Sched {
             }
         };
         let native = self.native_said(name, l).map_or(String::new(), |s| format!("; {s}"));
-        format!("{who}{floor}{lend}{first}, {how}{}{native}{}{}{}", self.jit_said(name, l, holds), self.past_cores_rule(name, l, cost), self.kept_yield_said(name, l, cost), self.series_gap_said(name, l))
+        format!("{who}{floor}{lend}{first}, {how}{}{native}{}{}{}{}", self.jit_said(name, l, holds), self.past_cores_rule(name, l, cost), self.kept_yield_said(name, l, cost), self.series_gap_said(name, l), self.timed_park_said(name, l, holds))
+    }
+
+    /// A live session granted on a box a queued timed ask waits for (named there, or holding it):
+    /// when that ask parks it ([`Self::park_live`]): idle, or in use once the ask has waited
+    /// [`TIMED_DUE_MS`] and the session has held its box as long, at its next call boundary. A
+    /// walk's Town, placed on the one box it could take, was parked 10 min into its run, its
+    /// line silent on it (11-27). Empty otherwise.
+    fn timed_park_said(&self, name: &str, l: &Lease, holds: &Holds) -> String {
+        if !self.is_live_job(l) { return String::new(); }
+        let waits = |r: &&Lease| r.state == State::Queued && r.req.kind == Kind::Timed && (r.req.node.as_deref() == Some(name) || holds.get(name).is_some_and(|h| h.id == r.id));
+        let Some(t) = self.leases.iter().filter(waits).min_by_key(|r| (r.asked_ms, r.seq)) else { return String::new() };
+        format!("; timed {} ({}) waits for {name}: it parks this session when it is idle, or in use {} from now at a call boundary", t.id, t.req.lane, dur(TIMED_DUE_MS))
     }
 
     /// A timed grant on box `name` ahead of another lane's timed series in its gap there: that
@@ -8909,6 +10102,11 @@ impl Sched {
             "its box's own build, past the cores".to_string()
         } else if l.req.look && cost.cores <= 0.0 {
             "a look, which adds no cores".to_string()
+        } else if room.launch_bump {
+            match self.launch_start_cores_on(name, l, cost) {
+                Some((free, full, _)) => format!("a visible live session, starts at once on {free:.0} of its {full:.0} cores (confined by CPU quota)"),
+                None => "a visible live session, starts at once".to_string(),
+            }
         } else if room.short_bump && peak + cost.cores <= SHORT_LINE * total {
             format!("a short run, on the short line ({:.0})", SHORT_LINE * total)
         } else if room.aged_bump && peak + cost.cores <= AGED_LINE * total {
@@ -8927,8 +10125,8 @@ impl Sched {
     /// own upkeep (its prebuild) builds there by design, and says nothing: 34 of the first 53
     /// "cold" grants were prebuilds (11-13).
     fn jit_said(&self, name: &str, l: &Lease, holds: &Holds) -> String {
-        let loader = l.req.on_node() && (l.req.loader.as_deref().is_some_and(|id| !id.is_empty()) || !l.req.jit_ids().is_empty());
-        if !loader || l.req.upkeep() || l.req.hub_build() { return String::new(); }
+        let loader = l.req.set_up_on_node() && (l.req.loader.as_deref().is_some_and(|id| !id.is_empty()) || !l.req.jit_ids().is_empty());
+        if !loader || l.req.upkeep() { return String::new(); }
         if self.has_loader(name, l) { return "; its JIT is there".into(); }
         if let Some(r) = self.jit_building(name, l) { return format!("; its JIT builds there ({})", r.id); }
         if self.jit_source(name, l).is_some() { return "; its JIT is copied there".into(); }
@@ -8952,6 +10150,7 @@ impl Sched {
             Pass::Look => "a look, which takes next to nothing: it passes every hold but exclusive work's".into(),
             Pass::Top => "the hot bucket goes first".into(),
             Pass::LiveLaunch => "a live launch goes ahead of background work; the holder keeps its place".into(),
+            Pass::VisibleLaunch => "a person's visible session starts on its screen box beside the land queue's hold; the holder keeps its place".into(),
             Pass::FirstLane => "the user put its lane first".into(),
             Pass::SameRun => "a shard of the same tests run".into(),
             Pass::TimedLetsIn => "the timed ask does not drain the box for it".into(),
@@ -8989,7 +10188,7 @@ impl Sched {
         }
         // So does a look ([`Req::look`]): it takes next to nothing for seconds, and a hold waits
         // for no room it takes.
-        if l.req.look && holds.get(name).filter(|h| h.id != l.id && h.until > self.clock).and_then(|h| self.get(&h.id)).is_none_or(|o| !o.req.exclusive()) {
+        if l.req.look && !l.req.own_build() && holds.get(name).filter(|h| h.id != l.id && h.until > self.clock).and_then(|h| self.get(&h.id)).is_none_or(|o| !o.req.exclusive()) {
             return Ok(Pass::Look);
         }
         // A box's pending self-update (its hub's build) takes no new background work beside it,
@@ -9079,6 +10278,13 @@ impl Sched {
         // for it: at most the box's work there ends. Launches and live tests passed a lane's 8-core
         // build 20 min after its 10-min bound, and it waited 21m40s (L1706944, 11-24).
         if !keeps && self.ahead_of_background(name, l) && self.yields_to_live(owner) && !owner.req.exclusive() && !self.long_overdue(owner) && !self.cpu_aged.contains(&owner.id) && !l.req.conflicts_on(&owner.req, c) { return Ok(Pass::LiveLaunch); }
+        if !keeps && self.visible_launch_bump(name, l) && land_queue_work(owner) && !owner.req.exclusive()
+            && !self.long_overdue(owner) && !self.cpu_aged.contains(&owner.id) && !l.req.conflicts_on(&owner.req, c)
+            && self.resources_but(name, l, cost, true, &[], true, true).is_ok()
+            && self.fits_beside_non_cores(name, l, cost, owner, c, true)
+        {
+            return Ok(Pass::VisibleLaunch);
+        }
         // The land queue's work (a landing's gate, a post-land bucket, an owed leg) passes a lane's
         // untimed background whole-box ask while that ask still waits for its box's work to end: it
         // starts there when it fits, and the whole-box ask starts after it. The pipeline goes first.
@@ -9088,8 +10294,12 @@ impl Sched {
         // ([`Self::landing_wait`]) and a person's interactive whole-box ask keeps its box. Bound by
         // the whole-box ask's own run ([`Self::passed_within_run`]): passed for that long, it takes
         // the box next, as a measured holder does ([`Self::overpassed`]; an exclusive ask never
-        // starves by age, [`Self::ages`]).
-        if !keeps && !kept_off && land_queue_work(l) && !land_queue_work(owner) && owner.req.whole && owner.req.kind != Kind::Timed && owner.priority != Priority::Interactive && self.passed_within_run(owner) && self.remaining_ms(name, owner, &self.cost_on(name, owner)) > 0 { return Ok(Pass::LandBeforeWhole); }
+        // starves by age, [`Self::ages`]). A whole-box ask that names this box runs nowhere else:
+        // land work another box could take goes there, and passes it only where none could. A
+        // lane's 2-h series pinned to its box stood first in queue 30 min while post-land tests
+        // shards, which any pool box takes, took that box one after another (L1834214, 11-26).
+        if !keeps && !kept_off && land_queue_work(l) && !land_queue_work(owner) && owner.req.whole
+            && !(owner.req.node.as_deref() == Some(name) && self.goes_elsewhere(name, l)) && owner.req.kind != Kind::Timed && owner.priority != Priority::Interactive && self.passed_within_run(owner) && self.remaining_ms(name, owner, &self.cost_on(name, owner)) > 0 { return Ok(Pass::LandBeforeWhole); }
         // a lane the user put first takes a box another lane's lease holds (a box's hub build
         // still goes first on its box, and a landing's gate, which the first lanes' landings
         // wait on too)
@@ -9103,8 +10313,11 @@ impl Sched {
         // the series waits for this one, [`Self::series_waits`])
         if owner.req.kind == Kind::Timed && !Self::drains_for(owner, l) && !Self::land_held_off(l) { return Ok(Pass::TimedLetsIn); }
         // the box's own hub build goes first; its prebuild runs in the timed queue's gaps
-        // ([`Self::gap_wait`])
-        if !keeps && l.req.hub_build() && l.req.node.as_deref() == Some(name) && !kept_off { return Ok(Pass::HubBuild); }
+        // ([`Self::gap_wait`]). Not past a short timed ask that was queued before it: that ask's
+        // run is shorter than the wait for fixes it costs the fleet. A 1-min ask heading a bench
+        // box's timed queue as a long series ended waited for the box's hub build as well, 41 min
+        // in all (L1837670, 11-26). A long series, or an ask after the build, still waits for it.
+        if !keeps && l.req.hub_build() && l.req.node.as_deref() == Some(name) && !kept_off && !(self.short_timed_before(owner, l) && self.dev(name)) { return Ok(Pass::HubBuild); }
         if owner.req.kind == Kind::Timed && !self.timed_due(owner) && self.interactive_boxes.contains_key(name) { return Ok(Pass::TimedNotDue); }
         // A box's prebuild (its update to the landed tip, which every lane's next lease there
         // needs) waits for no drain but exclusive work's (timed and whole-box: it runs in their
@@ -9400,10 +10613,26 @@ impl Sched {
         Some(self.timed_holder(name, l, format!("behind {name}'s prebuild: {} waited {}, past its run's {}: it takes the next gap, timed work starts after it", p.id, dur(self.clock.saturating_sub(p.asked_ms)), dur(self.run_ms(p))), &p.id))
     }
 
+    /// The room a park freed on `name` goes to the ask that parked ([`Sched::park_room`]): from the
+    /// park until that ask's grant, the box is kept for it as its hold would keep it, held there or
+    /// not: what passes such a hold by its rules ([`Self::passes`]: an owed prebuild, what fits
+    /// beside it) still comes in. A walk's Fab, waiting on its Mac for a whole budget, took the
+    /// room its Town's park freed for an overdue timed run that held no hold there, and the 15-s
+    /// run waited 81 s behind it (L1907071, 11-27).
+    fn park_room_wait(&self, name: &str, l: &Lease, cost: &Cost, holds: &Holds) -> Option<Block> {
+        let p = self.park_room.get(name).filter(|p| **p != l.id).and_then(|p| self.get(p)).filter(|p| p.state == State::Queued)?;
+        // (its own hold there says it already, [`Self::held_by`])
+        if holds.get(name).is_some_and(|h| h.id == p.id && h.until > self.clock) { return None; }
+        let mut kept = holds.clone();
+        kept.insert(name.to_string(), Hold { id: p.id.clone(), until: self.hold_end() });
+        let b = self.passes(name, l, cost, &kept).err()?;
+        Some(Block { reason: format!("{} (the room its park freed on {name} goes to it first)", b.reason), ..b })
+    }
+
     fn now_fits_as(&self, name: &str, l: &Lease, cost: &Cost, holds: &Holds, past_cap: bool) -> Result<f64, Block> {
         self.ready_as(name, l, cost, past_cap, false, false)?;
         if let Some(b) = self.timed_wait(name, l).or_else(|| self.spare_wait(name, l, holds)) { return Err(b); }
-        if let Some(b) = self.deploy_wait(name, l).or_else(|| self.prebuild_wait(name, l)).or_else(|| self.gap_wait(name, l)).or_else(|| self.hot_wait(name, l, holds)).or_else(|| self.held_by(name, l, cost, holds)).or_else(|| self.head_wait(name, l)) { return Err(b); }
+        if let Some(b) = self.deploy_wait(name, l).or_else(|| self.prebuild_wait(name, l)).or_else(|| self.gap_wait(name, l)).or_else(|| self.hot_wait(name, l, holds)).or_else(|| self.held_by(name, l, cost, holds)).or_else(|| self.park_room_wait(name, l, cost, holds)).or_else(|| self.head_wait(name, l)) { return Err(b); }
         self.resources(name, l, cost, true)?;
         let idle =self.nodes[name].released_ms.map_or(3_600_000, |r| self.clock.saturating_sub(r).min(3_600_000));
         Ok(idle as f64 / 36_000_000.0)
@@ -9598,6 +10827,9 @@ impl Sched {
         // lent a bench box, it takes it as it is free: it never holds it
         if self.lent(name, l) { return false; }
         if self.pin_drained(name, l) { return false; }
+        // a hub build behind a short timed ask asked before it holds nothing: the ask takes the box
+        // as it frees, which waits for its timed queue's turn and holds none meanwhile
+        if self.after_short_timed(l) { return false; }
         if l.req.full_run() && !self.shard_holds(l) && !self.is_oldest_unit(l) { return false; }
         if Self::land_held_off(l) && self.series_waits(name, l, holds).is_some() { return false; }
         // (a timed ask behind the box's owed prebuild holds the box for the gap after it: the
@@ -9625,6 +10857,7 @@ impl Sched {
         if let Some(r) = self.tree_wait(name, l) { return format!("it waits there for {r} in its tree, whose end no measure says"); }
         if let Some(r) = self.own_wait(l) { return format!("it waits for its own lane's {r}: no box's hold ends that"); }
         if self.pinned_without_why(l, holds) { return format!("it names {name} (--node) with no why while {} could start it", self.free_elsewhere(l, holds).join(" ")); }
+        if self.after_short_timed(l) { return "a box's hub build behind a short timed ask asked before it holds nothing: the ask goes first".into(); }
         if l.req.full_run() && !self.shard_holds(l) && !self.is_oldest_unit(l) { return "a young full run's shard holds a box by day only as the land queue's oldest waiting unit".into(); }
         if let Some(r) = self.series_waits(name, l, holds).filter(|_| Self::land_held_off(l)) { return format!("{} ({} {}) waits for {name} as a series does: the land queue's work holds no box a series waits for", r.id, r.req.lane, r.req.kind.as_str()); }
         if let Some(b) = self.timed_wait(name, l).or_else(|| self.spare_wait(name, l, holds)).or_else(|| self.deploy_wait(name, l)).or_else(|| self.gap_wait(name, l)).or_else(|| self.head_wait(name, l)) { return b.reason; }
@@ -9877,7 +11110,18 @@ impl Sched {
     /// cores in use of 16 (L952841, 11-13). Nor a timed session's (`live start --timed`): that is
     /// timed work, which waits for its drained box and parks the sessions in its way.
     fn live_launch(&self, l: &Lease) -> bool {
-        l.state == State::Queued && l.req.live && l.priority == Priority::Interactive && !l.req.live_test_run() && l.req.kind != Kind::Timed
+        !l.req.own_build() && l.state == State::Queued && l.req.live && l.priority == Priority::Interactive && !l.req.live_test_run() && l.req.kind != Kind::Timed
+    }
+
+    /// A person's visible interactive live app launch on its screen.
+    fn visible_launch(&self, l: &Lease) -> bool {
+        self.live_launch(l) && l.req.kind == Kind::Screen && !l.req.whole
+    }
+
+    /// A warm launch on a measured box that can confine its launch scopes.
+    fn visible_launch_bump(&self, name: &str, l: &Lease) -> bool {
+        self.visible_launch(l) && !self.cold_on(name, l) && !self.unmeasured(name)
+            && self.nodes.get(name).and_then(|n| n.caps.as_ref()).is_some_and(|c| Self::weighs_cpu(c) && c.has("launch-cores"))
     }
 
     /// Whether `l` builds its JIT on `name` before it runs ("cold", [`Self::jit_said`]): it names a
@@ -9885,7 +11129,7 @@ impl Sched {
     /// JIT builds there first ([`Self::tree_builds`]).
     fn cold_on(&self, name: &str, l: &Lease) -> bool {
         if self.tree_builds(name, l) { return true; }
-        let loader = l.req.on_node() && (l.req.loader.as_deref().is_some_and(|id| !id.is_empty()) || !l.req.jit_ids().is_empty());
+        let loader = l.req.set_up_on_node() && (l.req.loader.as_deref().is_some_and(|id| !id.is_empty()) || !l.req.jit_ids().is_empty());
         loader && !self.has_loader(name, l) && self.jit_building(name, l).is_none() && self.jit_source(name, l).is_none()
     }
 
@@ -9900,8 +11144,139 @@ impl Sched {
     /// and so does everyone's RAM. A box charged full by work using half of it kept launches
     /// queued 7 min at the median, and those launches held 75% of what queued behind holds
     /// (one reading, 11-09); they use their peak for 15-141 s.
-    fn yields_to_live(&self, r: &Lease) -> bool {
+    pub(super) fn yields_to_live(&self, r: &Lease) -> bool {
         r.priority == Priority::Background && r.req.kind.shared() && r.req.kind != Kind::Gate && !owed_leg(r) && !self.is_live_job(r)
+    }
+
+    /// Work an ask counts at its grant ([`Self::granted_take`]) where the box weighs CPU
+    /// ([`Self::grant_counts`]): what yields to live work ([`Self::yields_to_live`]), and gates and
+    /// owed legs at background priority, which go ahead of live work but weigh as background work
+    /// does, 1 a core ([`Priority::cpu_weight`]). Under contention each keeps its grant's share of
+    /// the box, so its use past the grant only borrows idle cores and its own threads wait when an
+    /// ask wants them. Over a day (11-27) none ran past its grant on average, 114 of 183 at their
+    /// peaks, and asks waited on their peaks' measure up to 384 of 5199 min of the Linux pool's
+    /// waits for cores.
+    fn counts_at_grant(&self, r: &Lease) -> bool {
+        self.yields_to_live(r) || r.priority == Priority::Background && r.req.kind.shared() && (r.req.kind == Kind::Gate || owed_leg(r)) && !self.is_live_job(r)
+    }
+
+    /// The cores a running background test keeps when live work goes ahead of it: its class's
+    /// median measured use, up to its charge. A live test granted all 16 cores beside a running
+    /// shard starved the shard's app to 2.4% of a core and its test failed (L1869366, L1869231, 11-26).
+    /// One past its age bound ([`Self::yield_aged`]) keeps its whole charge, whatever its kind.
+    /// Never past its grant ([`Self::granted_take`]): on a box whose run scopes weigh CPU, its use
+    /// past the grant is borrowed idle CPU, and a tests shard measured 6.3 on a grant of 4 kept a
+    /// person's 3-core screen session off its box at "in use 17.6" of 16 (11-27).
+    fn yield_floor(&self, r: &Lease) -> f64 {
+        if r.state != State::Granted || !self.yields_to_live(r) { return 0.0; }
+        let most = self.charged(r).cores.min(self.granted_take(r));
+        if self.yield_aged(r) { return most; }
+        if r.req.kind != Kind::Test { return 0.0; }
+        self.measured_use(&r.req, true).map_or(0.0, |median| median.min(most))
+    }
+
+    /// A running shared lease that is no live session, on a box whose run scopes weigh CPU and can
+    /// hold a lease to its grant (`grant-cores`): one an interactive ask there counts at its grant
+    /// ([`Self::in_use`]) and that interactive work holds to it ([`Self::sync_grant_caps`]).
+    /// Not timed or GPU work (not shared), a whole box's, a hub build, nor one granted the box.
+    fn grant_confinable(&self, name: &str, r: &Lease) -> bool {
+        let Some(c) = self.nodes.get(name).and_then(|n| n.caps.as_ref()) else { return false };
+        Self::weighs_cpu(c) && c.has("grant-cores")
+            && r.state == State::Granted && r.req.kind.shared() && !r.req.whole
+            && r.req.set_up_on_node() && !self.is_live_job(r)
+            && self.granted_take(r) < c.cores_for(r.req.kind) as f64
+    }
+
+    /// Whether interactive ask `l` counts the work on `name` that can be held to its grant at its
+    /// grant ([`Self::grant_confinable`]): its box holds it there while `l` runs. Not timed or
+    /// whole-box work, nor beside or ahead of timed work there, which drains its box.
+    fn interactive_holds_grants(&self, name: &str, l: &Lease) -> bool {
+        !l.req.own_build() && l.priority == Priority::Interactive
+            && self.nodes.get(name).and_then(|n| n.caps.as_ref()).is_some_and(|c| Self::weighs_cpu(c) && c.has("grant-cores"))
+            && l.req.kind != Kind::Timed && !l.req.whole && !l.req.exclusive()
+            && !self.live_on_node(name, &l.id).any(|r| r.req.kind == Kind::Timed || r.req.exclusive())
+            && self.timed_queued_for(name, l).is_none()
+            && !self.holds.get(name).is_some_and(|h| h.id != l.id && h.until > self.clock && self.get(&h.id).is_some_and(|o| o.req.kind == Kind::Timed))
+    }
+
+    /// Whether interactive work on box `name` wants the cores lease `r` ran past its grant on: a
+    /// live session in a call or whose call waits, a person's visible interactive screen session
+    /// (in a call or not: someone drives its window), an interactive ask that waits on the box's
+    /// cores, holds it or names it, or attended interactive work beside it that is no live session
+    /// while the box's charges pass its cores. It reads nothing `r`'s own measure moves, so a hold it starts stays while
+    /// that work does, however low the hold brings `r` ([`Self::sync_grant_caps`]).
+    fn box_holds_grants(&self, name: &str, c: &Caps, r: &Lease) -> bool {
+        if Self::yields_to_watched_wm(c, r) { return true; }
+        let live_peer = self.live_on_node(name, &r.id).any(|o| self.is_live_job(o) && (!self.live_idle.contains(&o.id)
+            || o.req.kind == Kind::Screen && o.priority == Priority::Interactive
+            || self.live_waiting.contains(&o.id)));
+        if live_peer { return true; }
+        let queued = self.leases.iter().any(|q| q.state == State::Queued && q.priority == Priority::Interactive && !self.denying.contains(&q.id)
+            && (q.req.node.as_deref() == Some(name)
+                || self.holds.get(name).is_some_and(|h| h.id == q.id && h.until > self.clock)
+                || q.queue_boxes.iter().any(|(b, k)| b == name && k == "budget cores")));
+        if queued { return true; }
+        // (no live session: those that want the box are the live peers above; an idle headless
+        // one, at rest for tens of minutes, would hold the work beside it to its grant all along)
+        if !self.live_on_node(name, &r.id).any(|o| !self.is_live_job(o) && o.priority == Priority::Interactive && !land_queue_lane(&o.req.lane)) { return false; }
+        self.live_on_node(name, "").map(|o| self.held_charge(o).cores).sum::<f64>() > c.cores_for(r.req.kind) as f64
+    }
+
+    fn yields_to_watched_wm(c: &Caps, r: &Lease) -> bool {
+        c.watched && (r.priority == Priority::Background || land_queue_lane(&r.req.lane))
+    }
+
+    /// Holds each running lease past its grant to its grant while interactive work on its box
+    /// wants those cores ([`Self::box_holds_grants`]), and lets it go once none does, so it
+    /// borrows idle cores again: the changes, as [`Action::HoldGrant`]. A lease is held once it
+    /// ran past its grant ([`Self::past_grant`], or charged half a core past it now) and stays
+    /// held while that work runs, its own measure aside (no hold and let go on each look). A land
+    /// queue's fast gate, interactive, measured 9.8 cores on a grant of 8 beside a person's screen
+    /// session and outweighed it (11-27). Once a tick and on each live call's admission: O(leases).
+    pub fn sync_grant_caps(&mut self) -> Vec<Action> {
+        let mut changes: Vec<(String, String, Option<f64>)> = Vec::new();
+        for r in self.leases.iter().filter(|r| r.state == State::Granted) {
+            let Some(name) = r.node.as_deref() else { continue };
+            // (a box that does not answer is asked nothing; it is set right once it does)
+            let Some(c) = self.nodes.get(name).filter(|n| n.up).and_then(|n| n.caps.as_ref()) else { continue };
+            let (take, held) = (self.granted_take(r), self.grant_held.get(&r.id).copied());
+            let overran = self.past_grant.contains_key(&r.id) || self.charged(r).cores >= take + 0.5;
+            let watched_active = Self::yields_to_watched_wm(c, r) && Self::direct_outside(c) >= 0.5;
+            let want = (self.grant_confinable(name, r) && (overran || held.is_some() || watched_active) && self.box_holds_grants(name, c, r)).then_some(take);
+            let differs = match (want, held) { (Some(a), Some(b)) => (a - b).abs() >= 0.05, (None, None) => false, _ => true };
+            if differs { changes.push((r.id.clone(), name.to_string(), want)); }
+        }
+        // (a lease that ended took its hold with it: no word to its box)
+        let granted: HashSet<&str> = self.leases.iter().filter(|r| r.state == State::Granted).map(|r| r.id.as_str()).collect();
+        self.grant_held.retain(|id, _| granted.contains(id.as_str()));
+        changes.into_iter().map(|(id, node, cores)| {
+            match cores { Some(c) => { self.grant_held.insert(id.clone(), c); } None => { self.grant_held.remove(&id); } }
+            Action::HoldGrant { id, node, cores }
+        }).collect()
+    }
+
+    /// The cores lease `id` is held to now ([`Self::sync_grant_caps`]), for its box's word.
+    pub fn grant_held_cores(&self, id: &str) -> Option<f64> { self.grant_held.get(id).copied() }
+
+    /// Its box did not take the hold: the next tick asks again while it is still wanted.
+    pub fn clear_grant_held(&mut self, id: &str) { self.grant_held.remove(id); }
+
+    /// Its box did not take the let-go: held again, so the next tick lets go again while no
+    /// interactive work wants the box (a running lease only, not held anew meanwhile).
+    pub fn restore_grant_held(&mut self, id: &str) {
+        let Some(take) = self.get(id).filter(|r| r.state == State::Granted).map(|r| self.granted_take(r)) else { return };
+        self.grant_held.entry(id.to_string()).or_insert(take);
+    }
+
+    /// A running lease that yields to live work ([`Self::yields_to_live`]) past its age bound: it
+    /// yielded cores ([`Lease::yielded_core_ms`]) and has run [`YIELD_AGE_RUNS`] times its run
+    /// ([`Self::run_ms`]). Its floor is then its whole charge ([`Self::yield_floor`]): live work
+    /// beside it starts short and is held to the rest, as a queued ask past its bound ranks with
+    /// interactive work ([`Self::long_overdue`]). Slower, never starved for good: at 1 a core
+    /// against 100, a tests shard beside two sessions' calls ran 11-13 times its measure (11-26).
+    fn yield_aged(&self, r: &Lease) -> bool {
+        r.state == State::Granted && r.yielded_core_ms > 0.0
+            && r.granted_ms.is_some_and(|g| self.clock.saturating_sub(g) > YIELD_AGE_RUNS.saturating_mul(self.run_ms(r)))
     }
 
     /// An ask that counts background shared work ([`Self::yields_to_live`]) at its grant
@@ -9913,7 +11288,7 @@ impl Sched {
     /// 6 idle cores. Timed and bench work keep their drain, and RAM counts as before.
     fn grant_counts(&self, name: &str, l: &Lease) -> bool {
         self.nodes.get(name).and_then(|n| n.caps.as_ref()).is_some_and(Self::weighs_cpu)
-            && !self.ahead_of_background(name, l)
+            && !l.req.own_build() && !self.ahead_of_background(name, l)
             && l.req.kind != Kind::Timed && !l.req.whole && !l.req.exclusive()
             && !self.live_on_node(name, &l.id).any(|r| r.req.kind == Kind::Timed || r.req.exclusive())
             && self.timed_queued_for(name, l).is_none()
@@ -9942,7 +11317,7 @@ impl Sched {
 
     /// A live test session's ask someone waits on: queued, interactive.
     fn live_test_ask(&self, l: &Lease) -> bool {
-        l.state == State::Queued && l.req.live_test_run() && l.priority == Priority::Interactive
+        !l.req.own_build() && l.state == State::Queued && l.req.live_test_run() && l.priority == Priority::Interactive
     }
 
     /// Whether `l` is a live test session's ask that goes past box `name`'s prebuild
@@ -10034,12 +11409,14 @@ impl Sched {
             self.never(o, c, l, &self.cost_on(o, l)).is_ok().then(|| (o.as_str(), l.req.ram_budget(c)))
         }).max_by(|a, b| a.1.total_cmp(&b.1).then(b.0.cmp(a.0)));
         let how = match &l.req.node { Some(n) => format!("pinned there (--node {n})"), None => "placed there by devhub".to_string() };
+        let budget = self.nodes[node].caps.as_ref().map_or(0.0, |c| l.req.ram_budget(c));
+        let gives = if l.cost.ram_gb + 0.05 < budget { format!("all the box measures available beside none of its leases (its budget there is {budget:.1} GB)") } else { "its budget there".to_string() };
         let then = match biggest {
             Some((b, gb)) if gb >= need => format!("{b}'s budget of {gb:.1} GB holds it"),
             Some((b, gb)) => format!("no box up holds it: the biggest budget is {b}'s {gb:.1} GB"),
             None => "no other box up may take it".to_string(),
         };
-        let line = format!("{} ({}, class {}), {how}, runs on {node} on {:.1} GB, its budget there, under its class's measured need of {need:.1} GB (its peak {:.1} GB and a fifth): it can peak past it, into the OOM killer. {then}. Said once for its class", l.tag(), l.req.lane, l.req.class, l.cost.ram_gb, need / 1.2);
+        let line = format!("{} ({}, class {}), {how}, runs on {node} on {:.1} GB, {gives}, under its class's measured need of {need:.1} GB (its peak {:.1} GB and a fifth): it can peak past it, into the OOM killer. {then}. Said once for its class", l.tag(), l.req.lane, l.req.class, l.cost.ram_gb, need / 1.2);
         self.ram_cut_said.insert(l.req.class.clone());
         self.tell_lane(Sev::Warn, line, l);
     }
@@ -10212,12 +11589,16 @@ impl Sched {
         self.live_call_ms.insert(id.to_string(), now);
     }
 
-    /// A live session's call ended: what was said of it is over, and its next call is charged
-    /// afresh.
-    pub fn live_call_ended(&mut self, id: &str) {
+    /// A live session's call ended at `now` (the master's clock, not this scheduler's last look:
+    /// a call that ended before a restarted master's first look was read as ended at its zero, and
+    /// its session parked at once, 11-26): what was said of it is over, and its next call is
+    /// charged afresh. Its last call's end never goes back.
+    pub fn live_call_ended(&mut self, id: &str, now: u64) {
         self.live_overran.remove(id);
+        self.wm_wait.remove(id);
         self.live_call_charge.remove(id);
-        self.live_call_end_ms.insert(id.to_string(), self.clock);
+        let end = self.live_call_end_ms.entry(id.to_string()).or_insert(now);
+        *end = (*end).max(now);
         if let Some(l) = self.leases.iter_mut().find(|l| l.id == id) { l.call_look_due = true; }
     }
 
@@ -10264,7 +11645,7 @@ impl Sched {
     }
 
     pub fn is_live_job(&self, l: &Lease) -> bool {
-        l.req.live || self.live_jobs.contains(&l.id)
+        !l.req.own_build() && (l.req.live || self.live_jobs.contains(&l.id))
     }
 
     /// A live test session between its calls ([`Req::live_test_run`]): its box runs it at the idle
@@ -10362,7 +11743,7 @@ impl Sched {
     /// ([`Self::say_overruns`]), live overrun, or overdue warning ([`Self::say_overdue_holders`]).
     pub fn owner_word(&self, id: &str) -> Option<String> {
         self.get(id).filter(|l| l.state == State::Granted)?;
-        self.hung_word(id).or_else(|| self.yielded.get(id).cloned()).or_else(|| self.live_overran.get(id).map(|(_, word)| word.clone())).or_else(|| self.overdue.get(id).cloned())
+        self.hung_word(id).or_else(|| self.wm_wait_word(id)).or_else(|| self.yielded.get(id).cloned()).or_else(|| self.live_overran.get(id).map(|(_, word)| word.clone())).or_else(|| self.overdue.get(id).cloned())
     }
 
     /// Whether running lease `id` was told to yield ([`Self::say_overruns`]): a run in rounds
@@ -10396,7 +11777,13 @@ impl Sched {
     /// come minutes apart.
     fn idle_live(&self, r: &Lease) -> bool {
         self.is_live_job(r) && self.live_idle.contains(&r.id) && !self.live_joined.contains(&r.id) && !self.live_waiting.contains(&r.id) && r.quiet_s.is_some_and(|q| q > 0)
-            && self.live_call_end_ms.get(&r.id).is_none_or(|t| self.clock.saturating_sub(*t) >= LIVE_IN_USE_MS)
+            && self.last_use(&r.id).is_none_or(|t| self.clock.saturating_sub(t) >= LIVE_IN_USE_MS)
+    }
+
+    /// When a live session was last in use: its last call's end or its last use the live
+    /// subsystem saw ([`Self::live_used`]), whichever is later.
+    fn last_use(&self, id: &str) -> Option<u64> {
+        self.live_call_end_ms.get(id).into_iter().chain(self.live_used.get(id)).copied().max()
     }
 
     /// A live session idle by use: [`Self::idle_live`] without its look at the CPU, for timed work
@@ -10408,7 +11795,7 @@ impl Sched {
     /// for none: W6515's measurement was voided by that.
     fn idle_by_use(&self, r: &Lease) -> bool {
         self.is_live_job(r) && self.live_idle.contains(&r.id) && self.live_called.contains(&r.id) && !self.live_joined.contains(&r.id) && !self.live_waiting.contains(&r.id)
-            && self.live_call_end_ms.get(&r.id).is_some_and(|t| self.clock.saturating_sub(*t) >= LIVE_IN_USE_MS)
+            && self.live_call_end_ms.contains_key(&r.id) && self.last_use(&r.id).is_some_and(|t| self.clock.saturating_sub(t) >= LIVE_IN_USE_MS)
     }
 
     /// Whether live session `r` is idle for `l` to park it: by state ([`Self::idle_live`]), and for
@@ -10417,26 +11804,161 @@ impl Sched {
         self.idle_live(r) || (l.req.kind == Kind::Timed && self.idle_by_use(r))
     }
 
+    /// The leases of `l`'s set ([`Req::set`]), `l` among them: its lane's asks of that set,
+    /// queued or live. Empty for a lease of no set.
+    fn set_members(&self, l: &Lease) -> Vec<&Lease> {
+        let Some(set) = l.req.set.as_deref() else { return Vec::new() };
+        let lane = l.req.cap_lane();
+        self.leases.iter().filter(|r| r.req.set.as_deref() == Some(set) && r.req.cap_lane() == lane && (r.state == State::Queued || r.state.live())).collect()
+    }
+
+    /// The member of `members` whose box `r` goes on: the one it joins ([`Req::joins`]), and so
+    /// on, while that is a member; `r` itself when it joins none of them.
+    fn set_root<'a>(&self, r: &'a Lease, members: &[&'a Lease]) -> &'a Lease {
+        let mut at = r;
+        for _ in 0..members.len() {
+            match at.req.joins.as_deref().and_then(|j| members.iter().copied().find(|m| m.id == j)) {
+                Some(m) if m.id != r.id => at = m,
+                _ => break,
+            }
+        }
+        at
+    }
+
+    /// Whether `l` is a queued member of a set placed in part: its next members go first
+    /// ([`Self::queue_order`]), so what the set was placed for is not taken between its grants.
+    fn set_placing(&self, l: &Lease) -> bool {
+        l.state == State::Queued && l.req.set.is_some() && self.set_members(l).iter().any(|m| m.state.live())
+    }
+
+    /// Where root `g`'s group goes: `g` and the members that join it, on one box apart from
+    /// `taken` (the set's other groups'), at their need: the RAM each member measures at its most
+    /// on the boxes `g` may take, summed (each holds its own), and the cores the one that asks the
+    /// most asks (they share the box's cores, as interactive work does: a member's cold JIT build
+    /// takes them while the others wait for it); its needs and its kind's slot (a screen
+    /// member's) with it. Summed, a Town's and its Fab's 11 cores each asked more than any box
+    /// has, and the set fell back to placing them apart (11-27).
+    fn place_group(&self, g: &Lease, members: &[&Lease], taken: &[String], holds: &Holds, wanted: &HashSet<String>) -> Place {
+        let mut c = g.clone();
+        c.req.set = None;
+        c.req.avoid.extend(taken.iter().filter(|n| !c.req.avoid.contains(n)).cloned().collect::<Vec<_>>());
+        let group: Vec<&Lease> = members.iter().copied().filter(|r| self.set_root(r, members).id == g.id).collect();
+        if group.len() > 1 {
+            let names: Vec<String> = self.candidates(&c).map(|n| n.into_iter().cloned().collect()).unwrap_or_default();
+            let most = |r: &Lease| names.iter().map(|n| self.cost_on(n, r)).fold((0.0f64, 0.0f64), |(a, b), x| (a.max(x.cores), b.max(x.ram_gb)));
+            let (cores, ram) = group.iter().map(|r| most(r)).fold((0.0f64, 0.0), |(a, b), (x, y)| (a.max(x), b + y));
+            (c.req.cores, c.req.ram_gb) = (Some(cores), Some(ram));
+            // each member's own needs, avoid and box bind its group's box
+            for r in &group {
+                for (k, v) in &r.req.needs { if !c.req.needs.iter().any(|(ck, _)| ck == k) { c.req.needs.push((k.clone(), v.clone())); } }
+                for n in &r.req.avoid { if !c.req.avoid.contains(n) { c.req.avoid.push(n.clone()); } }
+                if c.req.node.is_none() { c.req.node = r.req.node.clone(); }
+                if r.req.kind == Kind::Screen { c.req.kind = Kind::Screen; }
+            }
+        }
+        self.place_by(&c, holds, wanted, true)
+    }
+
+    /// A set's member's place ([`Req::set`]), or None to place it as any lease (a set none of
+    /// whose groups any box could hold at once, which degrades to that). Until all its members
+    /// asked, it waits for them. Then the set is placed as one: each group (a member and those
+    /// that join it) on a box of its own, at its summed need; every group fits now or none goes,
+    /// and the one that does not fit holds its box as any ask would. A joiner goes on its
+    /// group's box once that is placed. A set placed in part places the rest the same way.
+    /// Walk 13's Town took a 16 GB Mac its Fab, pinned beside it, could not fit on, and the Fab
+    /// waited 31 min for that box's whole budget, its Towns parked meanwhile (11-27).
+    fn set_place(&self, l: &Lease, holds: &Holds, wanted: &HashSet<String>) -> Option<Place> {
+        let (name, n) = l.req.set_of()?;
+        let members = self.set_members(l);
+        if members.len() < n {
+            return Some(Place::wait(format!("waits for its set {name}: {} of its {n} members asked", members.len()), None, None, Vec::new()));
+        }
+        let root = self.set_root(l, &members);
+        if root.id != l.id {
+            return Some(match root.node.as_deref().filter(|_| root.state.live()) {
+                Some(node) => {
+                    let mut c = l.clone();
+                    c.req.set = None;
+                    c.req.node = Some(node.to_string());
+                    self.place_by(&c, holds, wanted, true)
+                }
+                None => Place::wait(format!("waits for its set {name}: it goes beside {} on its box, once that is placed", root.id), None, None, Vec::new()),
+            });
+        }
+        let roots: Vec<&Lease> = members.iter().copied().filter(|r| self.set_root(r, &members).id == r.id).collect();
+        let mut taken: Vec<String> = roots.iter().filter(|r| r.state.live()).filter_map(|r| r.node.clone()).collect();
+        let group_need = |g: &Lease| members.iter().filter(|r| self.set_root(r, &members).id == g.id).map(|r| r.req.ram_gb.or_else(|| self.measured_ram(&r.req, None, None)).unwrap_or(0.0)).sum::<f64>();
+        let mut queued: Vec<&Lease> = roots.iter().copied().filter(|r| r.state == State::Queued).collect();
+        queued.sort_by(|a, b| group_need(b).total_cmp(&group_need(a)).then_with(|| (a.asked_ms, a.seq).cmp(&(b.asked_ms, b.seq))));
+        let mut mine = None;
+        for g in queued {
+            match self.place_group(g, &members, &taken, holds, wanted) {
+                Place::Grant(node, _) => {
+                    if g.id == l.id { mine = Some(node.clone()); }
+                    taken.push(node);
+                }
+                Place::Wait(reason, hold, reclaim, boxes) => {
+                    let ids: Vec<&str> = members.iter().filter(|r| self.set_root(r, &members).id == g.id).map(|r| r.id.as_str()).collect();
+                    let mine = g.id == l.id;
+                    return Some(Place::Wait(format!("its set {name} waits whole: {} on one box: {reason}", ids.join(" + ")), hold.filter(|_| mine), reclaim.filter(|_| mine), boxes));
+                }
+                Place::Deny(_) => return None,
+            }
+        }
+        let node = mine?;
+        Some(Place::Grant(node.clone(), self.cost_on(&node, l)))
+    }
+
+    /// Whether live session `r` is in a set one of whose other members is still queued or
+    /// starting (no call of it ended since its launch, [`Self::live_called`]): no park takes it
+    /// meanwhile, as none takes a session another one joins ([`Self::live_joined`]). A walk's
+    /// two Towns were parked, one for an overdue timed ask, while its Fab still waited for its box (11-27).
+    fn set_unready(&self, r: &Lease) -> bool {
+        r.req.set.is_some() && self.set_members(r).iter().any(|m| m.id != r.id && (m.state == State::Queued || !self.live_called.contains(&m.id)))
+    }
+
+    /// `leases` with the rest of their sets ([`Self::set_members`]): a set parks whole, or not at
+    /// all. None while a member to add is in a call or one waits ([`Self::live_idle`],
+    /// [`Self::live_waiting`]): it parks at its next call boundary; and None when one is no
+    /// member this park may take (`parks`: a visible one for RAM, [`Self::parks_for`]).
+    fn with_sets(&self, leases: &[String], parks: impl Fn(&Lease) -> bool) -> Option<Vec<String>> {
+        let mut all = leases.to_vec();
+        for id in leases {
+            let Some(r) = self.get(id) else { continue };
+            for m in self.set_members(r) {
+                if all.contains(&m.id) { continue; }
+                if !m.state.live() || !self.live_idle.contains(&m.id) || self.live_waiting.contains(&m.id) || !parks(m) { return None; }
+                all.push(m.id.clone());
+            }
+        }
+        Some(all)
+    }
+
     /// A live launch parks no other session: one waiting a minute would park another lane's. Only
     /// idle sessions park ([`Self::idle_live`]); a busy one ends its work first, or ends by itself
     /// 10 min after its last use. An ask queued 31 min parked a lane's race session 85 s into its
     /// run, in the middle of its world's load, and voided an hour's measurement (W6515, 11-13).
     ///
     /// A timed ask queued [`TIMED_DUE_MS`] parks the sessions in its way in use too, once each has
-    /// held its box as long, at their next call boundary, and they start again by themselves once
+    /// held its box as long, at their next call boundary (none another session joins, while that one is queued or runs), and they start again by themselves once
     /// it ends (`resume_after`): same app,
     /// args, tree and env, without what their app held in memory. A lane that called into its
     /// session every few minutes held a Mac 42 min while two timed series waited behind it, and
     /// only idle sessions parked (11-18). After that long a wait, a dev session's start again
     /// under the JIT costs less than the timed work starved; its in-memory state is the price.
-    fn park_live(&self, l: &Lease) -> Option<Action> {
+    /// It names the box the park frees room on ([`Self::park_room_wait`]).
+    fn park_live(&self, l: &Lease) -> Option<(String, Action)> {
         if !self.drains_box(l) || self.live_launch(l) || self.clock.saturating_sub(l.asked_ms) < LIVE_PARK_MS { return None; }
         let name = self.waiting_box(l, &self.holds, false)?;
         let cost = self.cost_on(&name, l);
         // (a session in use first holds its box as long as the timed ask waited: one that had
         // waited 13 min for its Mac was parked 155 s into its run, W12708, 11-18)
         let overdue = l.req.kind == Kind::Timed && self.clock.saturating_sub(l.asked_ms) >= TIMED_DUE_MS;
-        let parks = |r: &Lease| self.idle_for(r, l) || overdue && r.granted_ms.is_some_and(|g| self.clock.saturating_sub(g) >= TIMED_DUE_MS);
+        // (never a session another one joins while that one is queued or runs ([`Req::joins`]), as
+        // `--joins` promises: a walk's Town was parked in use under the Fab it was waiting on, W25401, 11-27)
+        // (nor a member of a set another member of which is still queued or starting,
+        // [`Self::set_unready`]; a set parks whole, [`Self::with_sets`])
+        let parks = |r: &Lease| !self.set_unready(r) && (self.idle_for(r, l) || overdue && !self.live_joined.contains(&r.id) && r.granted_ms.is_some_and(|g| self.clock.saturating_sub(g) >= TIMED_DUE_MS));
         let mut leases = Vec::new();
         // why-queued reports the first failed condition. Removing it may reveal another
         // conflict or budget blocker; all of them must be live jobs on this box.
@@ -10445,11 +11967,12 @@ impl Sched {
             leases.extend(b.blockers);
         }
         if leases.is_empty() { return None; }
+        let leases = self.with_sets(&leases, |m| Self::parks_for(m, l))?;
         if overdue && leases.iter().any(|id| self.get(id).is_some_and(|r| !self.idle_for(r, l))) {
-            return Some(Action::ParkLive { leases, note: format!("parked for timed {} ({})", l.id, l.req.lane), resume_after: Some(l.id.clone()) });
+            return Some((name, Action::ParkLive { leases, note: format!("parked for timed {} ({})", l.id, l.req.lane), resume_after: Some(l.id.clone()) }));
         }
         let what = if l.req.kind == Kind::Timed { "timed".to_string() } else if l.req.whole { "whole".to_string() } else { format!("{} queued", dur(self.clock.saturating_sub(l.asked_ms))) };
-        Some(Action::ParkLive { leases, note: format!("parked for {what} {}", l.id), resume_after: None })
+        Some((name, Action::ParkLive { leases, note: format!("parked for {what} {}", l.id), resume_after: None }))
     }
 
     /// A queued ask that waits for RAM idle live sessions hold on its box parks them: the longest
@@ -10486,7 +12009,7 @@ impl Sched {
                     Err(_) => continue,
                 }
                 let mut idle: Vec<&Lease> = self.live_on_node(name, &l.id)
-                    .filter(|r| Self::parks_for(r, l) && self.idle_live(r) && !parking.contains(&r.id))
+                    .filter(|r| Self::parks_for(r, l) && self.idle_live(r) && !parking.contains(&r.id) && !self.set_unready(r))
                     .collect();
                 idle.sort_by(|a, b| b.quiet_s.cmp(&a.quiet_s).then_with(|| a.id.cmp(&b.id)));
                 let mut take = Vec::new();
@@ -10500,14 +12023,17 @@ impl Sched {
                 }
             }
             let Some((name, take, asked)) = best else { continue };
+            // (a set parks whole, its members idle elsewhere too, or none of it: [`Self::with_sets`])
+            let Some(take) = self.with_sets(&take, |m| Self::parks_for(m, l) && self.idle_live(m)) else { continue };
             let held: f64 = take.iter().filter_map(|id| self.get(id)).map(|r| self.charged(r).ram_gb).sum();
             // and when it would fit there again: the ask's own run (an ask behind it may come first)
             let note = format!("parked for {} ({} of {}): it waited for {asked:.1} GB of RAM on {name}, and idle sessions held {held:.1} GB; that RAM is free there again when {} ends (it runs ~{})", l.id, l.req.kind.as_str(), l.req.lane, l.id, dur(self.run_ms(l)));
             parking.extend(take.iter().cloned());
-            parks.push((take, note));
+            parks.push((take, note, name, l.id.clone()));
         }
-        for (leases, note) in parks {
+        for (leases, note, name, by) in parks {
             self.parking_ram.extend(leases.iter().cloned());
+            self.park_room.entry(name).or_insert(by);
             self.out.push(Action::ParkLive { leases, note, resume_after: None });
         }
     }
@@ -10563,6 +12089,26 @@ impl Sched {
         (have + cost.cores > total).then_some((have, total))
     }
 
+    /// Where interactive live session `l` would stack its calls on the interactive work at `name`:
+    /// that work's charges, each live session there at its call's ([`Self::call_cores`]) though
+    /// it rests between calls, and `l`'s call past the box's cores. `(interactive there, l's call,
+    /// cores)`; `None` when they fit, or `l` is no interactive live session. Background work yields
+    /// to a call, and an interactive call starts on the cores free beside the rest
+    /// ([`Self::call_start_cores`]); so two sessions placed on one box, each beside the other at
+    /// rest, called at once at 16 + 11 of 16 cores, the box's prebuild and a tests shard beside
+    /// them, at load 70: the shard ran 11-13 times its measure and the prebuild waited (11-26).
+    /// Placement takes a box where they fit first ([`Self::place_by`]): a preference, never a
+    /// refusal; a grant past it is said.
+    fn stacks_interactive(&self, name: &str, l: &Lease, cost: &Cost) -> Option<(f64, f64, f64)> {
+        if l.priority != Priority::Interactive || !self.is_live_job(l) { return None; }
+        let c = self.nodes.get(name)?.caps.as_ref()?;
+        let total = c.cores_for(l.req.kind) as f64;
+        let charge = |r: &Lease| if self.is_live_job(r) { self.call_cores(r).max(self.charged(r).cores) } else { self.charged(r).cores };
+        let have = self.live_on_node(name, &l.id).filter(|r| r.priority == Priority::Interactive).map(charge).sum::<f64>();
+        let call = self.call_cores(l).max(cost.cores).min(total);
+        (have + call > total).then_some((have, call, total))
+    }
+
     /// A foreground grant of `l` on `node` that the ranking without [`Self::past_cores_beside`]
     /// would have put on another box, where it would have gone past the cores: its line for the
     /// master's log, so the day's count of such choices can be read against the 82 of 503
@@ -10595,6 +12141,8 @@ impl Sched {
                 return Place::Deny(format!("lane {} already has timed lease {} ({}): one timed lease per lane; put all its cases in that run, or ask again when it ends{untimed}", l.req.lane, o.id, o.state.as_str()));
             }
         }
+        // a set's member is placed with its set ([`Self::set_place`])
+        if let Some(p) = (!l.req.own_build() && l.req.set.is_some()).then(|| self.set_place(l, holds, wanted)).flatten() { return p; }
         let over = self.lane_block(l);
         let names = match self.candidates(l) { Ok(names) => names, Err(p) => return p };
         // (reason, the boxes that give it)
@@ -10692,8 +12240,8 @@ impl Sched {
         // for 8 min while pool boxes had room and a timed lease queued, 11-02)
         let spares_bench = l.req.kind != Kind::Timed && l.req.node.is_none();
         let foreground = self.foreground(l);
-        let mut best: Option<(&String, Cost, u64, f64, bool, bool, f64, bool, bool, bool, bool, bool, bool, bool)> = None;
-        let loader = l.req.on_node() && (l.req.loader.as_deref().is_some_and(|id| !id.is_empty()) || !l.req.jit_ids().is_empty());
+        let mut best: Option<(&String, Cost, u64, f64, bool, bool, f64, bool, bool, bool, bool, bool, bool, bool, bool, bool, bool)> = None;
+        let loader = l.req.set_up_on_node() && (l.req.loader.as_deref().is_some_and(|id| !id.is_empty()) || !l.req.jit_ids().is_empty());
         let mut why: Vec<(String, String, bool)> = Vec::new();
         for (name, cost) in &fit {
             let fits = self.now_fits_as(name, l, cost, holds, over.is_some());
@@ -10710,6 +12258,7 @@ impl Sched {
                     // the named node when it can take it; else the lane's warm node while it has
                     // room (WARM_BUSY), else the least busy box; a timed lease the first bench box
                     let named = l.req.node.as_deref() == Some(name.as_str());
+                    let watched_bg = l.req.node.is_none() && l.priority == Priority::Background && !l.req.hub_build() && self.watched(name);
                     let busy = self.busy(name);
                     let room = busy < WARM_BUSY;
                     let warm = room && self.warm_on(name, l);
@@ -10746,6 +12295,17 @@ impl Sched {
                     // such grants had another box of their OS with room (11-22). An ask that fits
                     // by the background grants goes first where the box measures enough idle CPU for it.
                     let past = within && (foreground || self.grant_counts(name, l)) && self.past_cores_beside(name, l, cost).is_some();
+                    // an interactive live call takes a box where the interactive work there and
+                    // its own fit the cores, before any box where they would not, its JIT ready
+                    // there or not; after a bench box's turn, a lent one and one a timed run
+                    // waits for, as ever ([`Self::stacks_interactive`])
+                    let stacked = self.stacks_interactive(name, l, cost).is_some();
+                    let launch_short = self.visible_launch_bump(name, l) && {
+                        let used = self.in_use(name, l, true, &[]);
+                        let caps = self.nodes[*name].caps.as_ref().unwrap();
+                        let full = self.call_cores_on(l, Some(name), cost);
+                        used.cost.cores + used.outside + full > caps.cores_for(l.req.kind) as f64
+                    };
                     // Boxes with room first (a full one only when every box is: the least busy),
                     // except that a full box holding the dev JIT still beats building it on one
                     // with room, unless its cores are oversubscribed; then ready JITs; cold boxes
@@ -10756,8 +12316,11 @@ impl Sched {
                         if lent != b.12 { return !lent; }
                         if fg_bench != b.8 { return !fg_bench; }
                         if timed != b.5 { return !timed; }
+                        if launch_short != b.15 { return !launch_short; }
+                        if stacked != b.14 { return !stacked; }
                         // (a box that does not drain, as ready with the launch's JIT, even busier)
                         if draining != b.11 && cold == b.4 { return !draining; }
+                        if watched_bg != b.16 { return !watched_bg; }
                         let (full, other_full) = (!room && !named, b.6 >= WARM_BUSY && l.req.node.as_deref() != Some(b.0.as_str()));
                         let jit_first = cold != b.4 && if cold { b.6 < 1.0 } else { busy < 1.0 };
                         if full != other_full && !jit_first { return !full; }
@@ -10771,7 +12334,7 @@ impl Sched {
                         if cold { eta < b.2 || eta == b.2 && (hot && !other_hot || hot == other_hot && score > b.3) }
                         else { hot && !other_hot || hot == other_hot && (eta < b.2 || eta == b.2 && score > b.3) }
                     }) {
-                        best = Some((name, *cost, eta, score, cold, timed, busy, on_bench, fg_bench, cut, sibling, draining, lent, past));
+                        best = Some((name, *cost, eta, score, cold, timed, busy, on_bench, fg_bench, cut, sibling, draining, lent, past, stacked, launch_short, watched_bg));
                     }
                 }
                 Err(b) => why.push(((*name).clone(), b.reason, b.disk)),
@@ -10798,7 +12361,9 @@ impl Sched {
         // and what keeps each other box, its reason's first clause: "(+1 nodes)" left a box a timed
         // run held for 14 min unsaid (L1620862, 11-23)
         let others: Vec<String> = why.iter().filter(|w| w.0 != first.0).map(|w| format!("{} {}", w.0, first_clause(&w.1))).collect();
-        let reason = if fit.len() == 1 { first.1.clone() } else if others.is_empty() { format!("{}: {} (+{} nodes)", first.0, first.1, fit.len() - 1) } else { format!("{}: {} (+{} nodes: {})", first.0, first.1, fit.len() - 1, others.join("; ")) };
+        // (one box among others, not one it named, is named too: "no display (...)" alone left
+        // which box went dark unsaid, L1938631, 11-27)
+        let reason = if fit.len() == 1 && (self.nodes.len() == 1 || l.req.node.as_deref() == Some(first.0.as_str())) { first.1.clone() } else if fit.len() == 1 { format!("{}: {}", first.0, first.1) } else if others.is_empty() { format!("{}: {} (+{} nodes)", first.0, first.1, fit.len() - 1) } else { format!("{}: {} (+{} nodes: {})", first.0, first.1, fit.len() - 1, others.join("; ")) };
         // (a box left for its link: said, and its blocker kept)
         let reason = match shaky.first() {
             Some((_, w)) => format!("{reason}; {w}"),
@@ -10934,9 +12499,15 @@ impl Sched {
         let mut order: Vec<_> = (0..self.leases.len()).filter(|&i| self.leases[i].state == State::Queued).collect();
         // the oldest interactive ask past its lane cap ([`Self::capped_rank`])
         let capped_interactive = order.iter().map(|&i| &self.leases[i]).filter(|l| l.priority == Priority::Interactive && self.lane_block(l).is_some()).map(|l| (l.asked_ms, l.seq)).min();
+        // a hub build behind a short timed ask queued before it for its box ranks as the box's
+        // other work, after that ask ([`Self::short_timed_before`])
+        let behind_timed: HashSet<usize> = order.iter().copied().filter(|&i| self.after_short_timed(&self.leases[i])).collect();
+        // an owed CI tree ask that waited one gate's cycle ranks with the landing gates
+        // ([`Self::gate_tree_wait`])
+        let cycle = self.gate_cycle_ms();
         order.sort_by_key(|&i| {
             let l = &self.leases[i];
-            let landing = l.req.landing_gate() || l.req.hand_in;
+            let landing = l.req.landing_gate() || l.req.hand_in || self.ci_past_gates(l, cycle);
             let aged = l.req.prio as i64 - (self.clock.saturating_sub(l.asked_ms) / AGE_STEP_MS) as i64;
             // In a quiet window exclusive work (timed and whole-box) drains in its order
             // ([`Self::exclusive_order`]), before any shared work: the head gets the box when it
@@ -10953,8 +12524,28 @@ impl Sched {
             // newer ask went ahead of it by its lane's last grant (its sibling's), and took the box
             // that freed before the one the shard held (11-07)
             // a box's hub build heads its box's queue with the hot bucket's work (it asks for its box only)
-            (!(l.req.top() || l.req.hub_build()), over, later, l.req.ci() && !owed_ci(l), true, l.req.kind != Kind::Gate && !landing, !landing, l.priority != Priority::Interactive && !owed_leg(l) && !l.req.tests_shard() && !self.long_overdue(l) && !self.cpu_aged.contains(&l.id), aged, self.last_grant.get(&l.req.lane).map_or(0, |t| t + 1), l.asked_ms, l.seq)
+            (!(l.req.top() || l.req.hub_build() && !behind_timed.contains(&i)), over, later, l.req.ci() && !owed_ci(l), true, l.req.kind != Kind::Gate && !landing, !landing, l.priority != Priority::Interactive && !owed_leg(l) && !l.req.tests_shard() && !self.long_overdue(l) && !self.cpu_aged.contains(&l.id), aged, self.last_grant.get(&l.req.lane).map_or(0, |t| t + 1), l.asked_ms, l.seq)
         });
+        // a set's queued members go together, from its first member's place, those that join
+        // another after it: one look places the set whole, and nothing takes the room it was placed
+        // in between its members' grants ([`Self::set_place`])
+        if order.iter().any(|&i| self.leases[i].req.set.is_some()) {
+            let key = |i: usize| (self.leases[i].req.set.as_deref(), self.leases[i].req.cap_lane());
+            let mut done = vec![false; order.len()];
+            let mut grouped = Vec::with_capacity(order.len());
+            for at in 0..order.len() {
+                if done[at] { continue; }
+                let k = key(order[at]);
+                if k.0.is_none() { grouped.push(order[at]); continue; }
+                let mut members = Vec::new();
+                for j in at..order.len() { if !done[j] && key(order[j]) == k { done[j] = true; members.push(order[j]); } }
+                members.sort_by_key(|&i| self.leases[i].req.joins.is_some());
+                grouped.extend(members);
+            }
+            order = grouped;
+        }
+        // a set placed in part places its next members first ([`Self::set_placing`]); the sort is stable
+        order.sort_by_key(|&i| !self.set_placing(&self.leases[i]));
         order
     }
 
@@ -11032,6 +12623,37 @@ impl Sched {
         self.leases.iter().find(|l| l.state == State::Queued && l.req.lane == lane && l.req.node.is_some()).map_or_else(Vec::new, |l| self.free_elsewhere(l, &holds))
     }
 
+    /// In how many ms a queued ask for the box it names can start there at the soonest, by what
+    /// holds it there now: the soonest end among the leases that hold it ([`Block::blockers`]), a
+    /// running one's by its run's estimate ([`Self::expected_end`]), a queued one's no sooner than
+    /// its own run. `u64::MAX`: held only by work with no end of its own (live sessions, which
+    /// run until parked), or a screen ask on a box that shows no display. None: no such bound
+    /// (it fits now, a block no lease holds, a blocker past its estimate or ending). A CI shard
+    /// whose ask cannot start within its wait goes back at once for a box that can run it
+    /// (`orch::ci`): asks sat their 5 min behind a box's live session or a gate's whole run and
+    /// gave up 142 times in a day (11-27).
+    pub fn soonest_start(&mut self, id: &str, now: u64) -> Option<u64> {
+        self.clock = now;
+        let held = self.holds.clone();
+        self.refresh_interactive(&held);
+        let holds = self.valid_holds(held);
+        let l = self.get(id).filter(|l| l.state == State::Queued)?;
+        let name = l.req.node.as_deref().filter(|n| self.nodes.contains_key(*n))?;
+        if l.req.kind == Kind::Screen && self.screen_refusal(name).is_some() { return Some(u64::MAX); }
+        let b = self.now_fits(name, l, &self.cost_on(name, l), &holds).err()?;
+        if b.disk || b.blockers.is_empty() { return None; }
+        let ends = b.blockers.iter().map(|id| {
+            let r = self.get(id)?;
+            match r.state {
+                State::Queued => Some(self.run_ms(r)),
+                _ if r.state.live() && self.is_live_job(r) => Some(u64::MAX),
+                _ if r.state.live() => self.expected_end(r),
+                _ => None,
+            }
+        });
+        ends.collect::<Option<Vec<u64>>>()?.into_iter().min()
+    }
+
     /// Read-only scheduling explanation: one current failed condition and its blockers per box.
     pub fn why_queued(&mut self, id: &str, now: u64) -> Result<Vec<String>, String> {
         self.clock = now;
@@ -11107,6 +12729,9 @@ impl Sched {
         for l in &mut self.leases {
             l.beat_ms = on(l.beat_ms);
         }
+        if let Some(s) = self.serving_ms.as_mut().filter(|s| **s > 0) {
+            *s = on(*s);
+        }
         for n in self.nodes.values_mut() {
             for since in [&mut n.unheard_ms, &mut n.heard_ms, &mut n.gone_ms].into_iter().flatten() {
                 *since = on(*since);
@@ -11142,14 +12767,15 @@ impl Sched {
     /// Expires silent holders, places what fits, recomputes positions and reasons; the actions
     /// for the master (grants, ends, reclaims, one event per change).
     pub fn tick(&mut self, now: u64) -> Vec<Action> {
-        if self.queue_busy_ms == 0 || self.leases.iter().any(|l| l.state == State::Queued && !l.req.devhubs_own() && !l.req.tests_shard() && now.saturating_sub(l.asked_ms) >= QUEUE_BUSY_WAIT_MS) {
+        if self.queue_busy_ms == 0 || self.leases.iter().any(|l| l.state == State::Queued && !l.req.devhubs_own() && now.saturating_sub(l.asked_ms) >= QUEUE_BUSY_WAIT_MS) {
             self.queue_busy_ms = now;
         }
         self.live_joined = self.leases.iter().filter(|l| l.state == State::Queued || l.state.live()).filter_map(|l| l.req.joins.clone()).collect();
-        { let live: HashSet<&String> = self.leases.iter().filter(|l| l.state.live()).map(|l| &l.id).collect(); self.live_idle.retain(|id| live.contains(id)); self.live_called.retain(|id| live.contains(id)); self.live_waiting.retain(|id| live.contains(id)); self.live_call_ms.retain(|id, _| live.contains(id)); self.live_call_end_ms.retain(|id, _| live.contains(id)); self.live_overran.retain(|id, _| live.contains(id)); self.live_call_charge.retain(|id, _| live.contains(id)); self.idle_said.retain(|id| live.contains(id)); self.timed_block_said.retain(|id| live.contains(id)); self.yielded.retain(|id, _| live.contains(id)); self.yield_at.retain(|id, _| live.contains(id)); self.overdue.retain(|id, _| live.contains(id)); self.pin_said.retain(|id| self.leases.iter().any(|l| l.id == *id && l.state == State::Queued)); self.parking_ram.retain(|id| live.contains(id)); self.stalled.retain(|id, _| live.contains(id)); self.stall_runs.retain(|id, _| live.contains(id)); self.overran.retain(|id, _| live.contains(id)); self.captures.retain(|id, _| live.contains(id)); }
+        { let live: HashSet<&String> = self.leases.iter().filter(|l| l.state.live()).map(|l| &l.id).collect(); self.live_idle.retain(|id| live.contains(id)); self.live_called.retain(|id| live.contains(id)); self.live_waiting.retain(|id| live.contains(id)); self.live_call_ms.retain(|id, _| live.contains(id)); self.live_call_end_ms.retain(|id, _| live.contains(id)); self.live_used.retain(|id, _| live.contains(id)); self.live_overran.retain(|id, _| live.contains(id)); self.wm_wait.retain(|id, _| live.contains(id)); self.wm_parking.retain(|id| live.contains(id)); self.live_call_charge.retain(|id, _| live.contains(id)); self.launch_quotas.retain(|id, _| live.contains(id)); self.grant_held.retain(|id, _| live.contains(id)); self.idle_said.retain(|id| live.contains(id)); self.timed_block_said.retain(|id| live.contains(id)); self.yielded.retain(|id, _| live.contains(id)); self.yield_at.retain(|id, _| live.contains(id)); self.overdue.retain(|id, _| live.contains(id)); self.pin_said.retain(|id| self.leases.iter().any(|l| l.id == *id && l.state == State::Queued)); self.parking_ram.retain(|id| live.contains(id)); self.stalled.retain(|id, _| live.contains(id)); self.stall_runs.retain(|id, _| live.contains(id)); self.overran.retain(|id, _| live.contains(id)); self.captures.retain(|id, _| live.contains(id)); }
         // (while the master hears no box, what it hears of their runs is old: [`Self::deaf`])
         let deaf = self.deaf_since.is_some();
         if !deaf {
+            self.watch_wm_drain(now);
             self.say_settling(now);
             self.end_hung_legs(now);
             self.end_panicked(now);
@@ -11183,7 +12809,16 @@ impl Sched {
         self.note_quiet_kept(now);
         // the master's own ask a restart brought back, which its work did not ask again: it leaves
         // the queue, its place kept for a later ask ([`Self::keep_dropped_ask`])
-        let unasked: Vec<String> = self.leases.iter().filter(|l| l.state == State::Queued && l.reask_by.is_some_and(|t| now >= t)).map(|l| l.id.clone()).collect();
+        let unasked: Vec<String> = match self.serving_ms {
+            None => Vec::new(),
+            Some(serving) => {
+                let floor = serving.saturating_add(RESTORE_GRACE_MS);
+                self.leases.iter()
+                    .filter(|l| l.state == State::Queued && l.reask_by.is_some_and(|t| now >= t.max(floor)))
+                    .map(|l| l.id.clone())
+                    .collect()
+            }
+        };
         for id in unasked {
             if let Some(i) = self.leases.iter().position(|l| l.id == id) {
                 let l = &self.leases[i];
@@ -11192,8 +12827,14 @@ impl Sched {
                 self.end_at(i, "unasked", Sev::Info, &format!("its work did not ask again within {} s of the master's restart", RESTORE_GRACE_MS / 1000), now);
             }
         }
-        // a holder watched by its pid ([`Sched::holders_gone`]) is not timed by its beats
-        let expired: Vec<String> = self.leases.iter().filter(|l| l.req.holder.is_none() && now.saturating_sub(l.beat_ms) > BEAT_EXPIRY_MS).map(|l| l.id.clone()).collect();
+        // A watched PID or an in-process hold proves the lease still has a holder.
+        let expired: Vec<String> = match self.serving_ms {
+            None => Vec::new(),
+            Some(serving) => self.leases.iter()
+                .filter(|l| l.req.holder.is_none() && !self.is_locally_held(&l.id) && now.saturating_sub(l.beat_ms.max(serving)) > BEAT_EXPIRY_MS)
+                .map(|l| l.id.clone())
+                .collect(),
+        };
         for id in expired {
             if let Some(i) = self.leases.iter().position(|l| l.id == id) {
                 self.keep_dropped_ask(i, now);
@@ -11294,13 +12935,12 @@ impl Sched {
                         let unquiet = self.unquiet_start(&node, &self.leases[i], now);
                         let why = match &unquiet { Some((beside, _)) => format!("{why}; past its wait for a quiet box, beside {beside}"), None => why };
                         let within = self.within_cores_said(&node, &self.leases[i], &cost, &holds, &wanted);
+                        // (no box of its platform had room for it beside the interactive work there)
+                        let stacks = self.stacks_interactive(&node, &self.leases[i], &cost).map(|(have, call, total)| format!("{} ({} live session, its call {call:.0} cores) overcommits {node}: {have:.1} cores of interactive work there and its {call:.0} pass the box's {total:.0}; no box with room for it ranked first", self.leases[i].id, self.leases[i].req.lane));
                         let passed = self.passed_holder(&node, &self.leases[i], &cost, &holds);
                         let ram_measured = self.measured_ram(&self.leases[i].req, None, None).is_some();
                         // its JIT build is charged while it runs ([`Self::charged`]); its grant is its run's
-                        let build = self.jit_build_charge(&node, &self.leases[i]);
-                        let jit_jobs = self.jit_jobs(&node, &self.leases[i], build, cost.cores);
-                        let cost = if build.is_some() { self.run_cost_on(&node, &self.leases[i]) } else { cost };
-                        let run = self.run_on(&node, &self.leases[i], &cost);
+                        let (cost, run, jit_jobs) = self.commit_grant_width(&node, &self.leases[i], cost);
                         if self.leases[i].req.upkeep() { self.prebuild_since.remove(&node); }
                         // since when it stood in this queue: a leg with its run's place ([`runs_place`])
                         // entered it only when its run's previous leg ended, maybe long after its box's release
@@ -11336,6 +12976,12 @@ impl Sched {
                             }
                         }
                         let (lane, kind, id, passer) = (l.req.lane.clone(), l.req.kind, l.id.clone(), l.priority);
+                        // Charge the quota before placing the next launch on this box in this tick.
+                        if self.is_live_job(&self.leases[i]) && self.os_of(&node) == Some("linux") && self.reports(&node, "launch-cores") {
+                            let short = self.call_start_cores(&id);
+                            if let Some((free, ..)) = short { self.live_call_charged(&id, free); }
+                            self.launch_quotas.insert(id.clone(), short);
+                        }
                         if let Some(o) = passed.and_then(|o| self.leases.iter_mut().find(|r| r.id == o)) { o.passed(passer, now); }
                         self.last_grant.insert(lane.clone(), now);
                         if buildish(kind) {
@@ -11348,6 +12994,7 @@ impl Sched {
                         let l = self.leases[i].clone();
                         self.event(Sev::Info, format!("{} granted to {} after {} ({}){note}", l.tag(), l.req.lane, dur(l.waited_ms(now)), l.grant_why), Some(&l));
                         if let Some(line) = within { self.event(Sev::Info, line, Some(&l)); }
+                        if let Some(line) = stacks { self.event(Sev::Info, line, Some(&l)); }
                         if let Some((_, line)) = unquiet { self.event(Sev::Warn, line, Some(&l)); }
                         self.say_ram_cut(&node, &l);
                         // (an inspect of one app, often granted and done between two ticks: a look at it)
@@ -11425,18 +13072,35 @@ impl Sched {
         }
         // a starved ask's hold is said in the master's log when it takes a box or moves to
         // another: which ask, which box, when it starts there by that box's measure and what it
-        // waits on there. Which box a live launch held in its 210 s wait could only be guessed
-        // afterwards (L678678, 11-08)
+        // waits on there, and why it left its old box. Which box a live launch held in its
+        // 210 s wait could only be guessed afterwards (L678678, 11-08)
         let mut said = Vec::new();
         for (node, h) in &holds {
             if self.held_before.get(node).is_some_and(|o| o.id == h.id) { continue; }
             let Some(l) = self.get(&h.id).filter(|l| self.starved(l)) else { continue };
             let cost = self.cost_on(node, l);
-            let was = self.held_before.iter().find(|(_, o)| o.id == h.id).map_or(String::new(), |(n, _)| format!(" (was {n})"));
-            let starts = match self.remaining_ms(node, l, &cost) { u64::MAX => "at no end known there".to_string(), 0 => "now".to_string(), ms => format!("in {}", dur(ms)) };
+            let old = self.held_before.iter().find_map(|(n, o)| (o.id == h.id).then_some(n));
+            let was = old.map_or_else(String::new, |n| format!(" (was {n})"));
+            let start_time = |ms| match ms { u64::MAX => "at no end known there".to_string(), 0 => "now".to_string(), ms => format!("in {}", dur(ms)) };
+            let remaining = self.remaining_ms(node, l, &cost);
+            let starts = start_time(remaining);
             let on = self.now_fits(node, l, &cost, &holds).err().map_or_else(|| "nothing".to_string(), |b| b.reason);
             let what = if self.live_launch(l) { "live launch".to_string() } else { l.req.kind.as_str().to_string() };
-            said.push(format!("{} ({} {what}, {:.0} cores, queued {}) holds {node}{was}: starts {starts} by its measure; waits there on {on}", l.id, l.req.lane, cost.cores, dur(self.clock.saturating_sub(l.asked_ms))));
+            let mut line = format!("{} ({} {what}, {:.0} cores, queued {}) holds {node}{was}: starts {starts} by its measure; waits there on {on}", l.id, l.req.lane, cost.cores, dur(self.clock.saturating_sub(l.asked_ms)));
+            if let Some(old) = old {
+                let mut without = holds.clone();
+                without.remove(old);
+                if self.can_hold(old, l, &without) {
+                    let old_remaining = self.remaining_ms(old, l, &self.cost_on(old, l));
+                    line.push_str(&format!("; left {old}, where it starts {}", start_time(old_remaining)));
+                    if old_remaining > remaining.saturating_add(HOLD_MOVE_MS) {
+                        line.push_str(&format!(": {node} starts it more than {} min sooner", HOLD_MOVE_MS / 60_000));
+                    }
+                } else {
+                    line.push_str(&format!("; left {old}: {}", self.hold_refusal(old, l, &without)));
+                }
+            }
+            said.push(line);
         }
         // and an older ask that held a box and holds none now, whose hold a newer one took: why
         for (node, o) in &self.held_before {
@@ -11457,10 +13121,15 @@ impl Sched {
         }
         let queued: HashSet<&str> = self.leases.iter().filter(|l| l.state == State::Queued).map(|l| l.id.as_str()).collect();
         self.pin_held.retain(|id, _| queued.contains(id.as_str()));
+        self.park_room.retain(|_, id| queued.contains(id.as_str()));
         self.holds = holds;
         self.pin_updates(now);
         for i in self.queue_order() {
-            if let Some(a) = self.park_live(&self.leases[i]) { self.out.push(a); }
+            if let Some((node, a)) = self.park_live(&self.leases[i]) {
+                let by = self.leases[i].id.clone();
+                self.park_room.entry(node).or_insert(by);
+                self.out.push(a);
+            }
         }
         self.park_idle_live_for_ram();
         // a box whose older hub restarts only between runs: its live sessions park once idle
@@ -11517,6 +13186,9 @@ impl Sched {
                 if said { changes.push((i, warn || own)); }
             }
         }
+        // (after the waits: an interactive ask's boxes are this tick's)
+        let held = self.sync_grant_caps();
+        self.out.extend(held);
         for (i, warn) in changes {
             let note = self.leases[i].take_class_note();
             let l = self.leases[i].clone();
@@ -11725,7 +13397,26 @@ mod tests {
         assert_eq!(events(&mut s), vec![(Sev::Info, "COOL box-a gpu0 79C".into())], "the last sensor cooling clears the alert");
     }
 
+    /// An ask whose cores fit one box of the several its platform has says so at its ask, naming
+    /// the box and what kept the others out; one that fits two, or names its box, says nothing.
     #[test]
+    fn an_ask_whose_cores_fit_one_box_says_so_when_asked() {
+        let mac = |cores| Caps { os: "macos".into(), ..caps(cores, 64.0, Role::Pool) };
+        let mut s = sched(&[("mac-big", mac(16)), ("mac-a", mac(10)), ("mac-b", mac(10)), ("linux-a", caps(16, 64.0, Role::Pool))]);
+        let mut r = req("narrow", Kind::Test, None);
+        r.needs = parse_needs("os=macos");
+        r.cores = Some(12.0);
+        let said = s.narrow_places(&r).expect("twelve cores fit one Mac of three");
+        assert!(said.starts_with("--cores 12 fits only mac-big, so it waits for that box alone (mac-a mac-b: "), "it names the box and the ones its cores kept out: {said}");
+        assert!(!said.contains("linux-a"), "a box its platform need kept out is no news: {said}");
+        let id = s.request(r.clone(), 0);
+        assert!(s.out.iter().any(|a| matches!(a, Action::Note { line, .. } if line.contains(&id) && line.contains("fits only mac-big"))), "its lane hears it at its ask: {:?}", s.out);
+        for (why, r) in [("eight cores fit all three Macs", Req { cores: Some(8.0), ..r.clone() }), ("a named box is the asker's choice", Req { node: Some("mac-big".into()), ..r.clone() }), ("a platform of one box is as narrow unasked", Req { needs: parse_needs("os=linux"), ..r.clone() })] {
+            assert_eq!(s.narrow_places(&r), None, "{why}");
+        }
+    }
+
+        #[test]
     fn exec_size_routes_by_node_limits_and_spills_only_the_script() {
         use crate::os::ExecLimits;
         use super::super::argv::ExecProfile;
@@ -11811,8 +13502,8 @@ mod tests {
     /// A timed lease starts only on a quiet box: not while work outside its leases takes half a
     /// core or more (a desktop left running), its queue line saying why. The box's own leases are
     /// no noise: it holds the box against them as before, however busy they make it, and through
-    /// the first measure after they end (it holds their work); a box noisy in a measure of its own
-    /// takes other work meanwhile. Its load alone holds nothing (it trails the leases that just
+    /// the first measure after they end (it holds their work). A named box stays held through
+    /// outside noise too. Its load alone holds nothing (it trails the leases that just
     /// ended).
     #[test]
     fn a_timed_lease_waits_for_a_quiet_box() {
@@ -11835,11 +13526,8 @@ mod tests {
         assert_eq!(state(&s, &d).1, format!("held for timed {t} (the box drains for it: only work that ends first or fits beside it)"), "the timed lease keeps its hold through it");
         assert!(state(&s, &t).1.contains("the box is not quiet"), "and starts on a quiet measure: {:?}", state(&s, &t));
         s.set_caps("a", desktop(), 2_100);
-        assert_eq!(grants(&s.tick(2_100)), vec![d.clone()], "a box noisy in a measure of its own takes other work meanwhile: {:?}", state(&s, &d));
-        let why = &s.get(&d).unwrap().grant_why;
-        assert!(why.contains(&format!("no hold on a: {t}, asked before it, waits for it and holds none: the box is not quiet")), "its grant says why the timed ask held none: {why}");
-        s.started(&d, "{}");
-        release_clean(&mut s, &d, 2_500);
+        assert!(grants(&s.tick(2_100)).is_empty(), "outside noise keeps the timed ask waiting on its named box");
+        assert!(state(&s, &d).1.contains(&format!("held for timed {t}")), "the newer ask still sees the timed hold: {:?}", state(&s, &d));
         s.set_caps("a", desktop(), 2_500);
         assert!(grants(&s.tick(2_500)).is_empty());
         assert!(state(&s, &t).1.contains("the box is not quiet (144% of a core runs outside its leases: WindowServer pid 407 (0.6 cores))"), "{:?}", state(&s, &t));
@@ -11908,16 +13596,14 @@ mod tests {
         assert!(notes[0].contains(&format!("not quiet at any look for {} ({why})", dur(kept + NEVER_QUIET_MS - free))), "{}", notes[0]);
         let l = s.get(&t).unwrap();
         assert!(l.grant_why.contains(&format!("past its wait for a quiet box, beside a: {why}")), "its grant says what it runs beside: {}", l.grant_why);
-        let start = super::super::master::lease_start_line(l, "null", 1.0, 1.0, None, None, None, None);
+        let start = super::super::master::lease_start_line(l, "null", 1.0, 1.0, None, None, None, None, None);
         assert!(start.contains(&format!(",\"unquiet\":{}", json_str(&format!("a: {why}")))), "its node's start hears it: {start}");
 
-        // A Mac's own indexer at a core outside our leases, and tests asked after a bench series
-        // take its named box at each look (its hold dropped for that noise) and run there between
-        // them: the runs of ours between its looks do not reset its wait, and past it the series
-        // starts at its box's next look (L1553597 headed that queue 25 min, 11-22).
+        // An unpinned timed ask holds no box through outside noise alone. Tests that run between
+        // looks of the box alone do not reset its wait (L1553597, 11-22).
         let indexer = || Caps { busy_outside: vec![("spotlightknowledged".into(), 96_952, 0.9)], ..noisy(2.3, 10.0) };
         let mut s = sched(&[("a", indexer())]);
-        let t = s.request(req("series", Kind::Timed, Some("a")), 0);
+        let t = s.request(req("series", Kind::Timed, None), 0);
         let (mut passed, mut started) = (0, None);
         for k in 0..20u64 {
             // a look that holds the last run's end, then one of the box alone
@@ -11948,7 +13634,7 @@ mod tests {
         let x = s.request(req("lane", Kind::Test, Some("a")), 0);
         assert_eq!(grants(&s.tick(0)), vec![x.clone()]);
         s.started(&x, "{}");
-        let t = s.request(req("bench", Kind::Timed, Some("a")), 1_000);
+        let t = s.request(req("bench", Kind::Timed, None), 1_000);
         assert!(grants(&s.tick(1_000)).is_empty());
         release_clean(&mut s, &x, 2_000);
         s.set_caps("a", noisy(1.0, 2.0), 2_000);
@@ -11969,6 +13655,47 @@ mod tests {
         s.set_caps("a", noisy(1.0, 2.0), 2_500);
         beat_all(&mut s, 2_500);
         assert_eq!(grants(&s.tick(2_500)), vec![t.clone()], "it starts at the box's next quiet look: {:?}", state(&s, &t));
+        invariants(&s);
+    }
+
+    #[test]
+    fn a_timed_ask_holds_its_named_pool_box_through_outside_noise() {
+        let pool = caps(16, 64.0, Role::Pool);
+        let noisy = Caps { cpu_pct: Some(9.0), ..pool.clone() };
+        let mut s = sched(&[("box-a", noisy)]);
+        let mut ask = req("series", Kind::Timed, Some("box-a"));
+        ask.pin_why = Some("the series runs here".into());
+        let timed = s.request(ask, 0);
+        assert!(grants(&s.tick(0)).is_empty(), "outside load keeps the timed run from starting");
+        assert_eq!(s.holds.get("box-a").map(|h| &h.id), Some(&timed), "the timed ask holds the pool box it named while it waits for quiet");
+        let bucket = s.request(req("bucket", Kind::Test, None), 1);
+        assert!(grants(&s.tick(1)).is_empty(), "background work with only the noisy box available waits behind the timed hold");
+        assert!(state(&s, &bucket).1.contains(&format!("held for timed {timed}")), "the bucket's wait names the timed holder: {:?}", state(&s, &bucket));
+        invariants(&s);
+
+        s.add_node("box-b", "192.0.2.2", None);
+        s.set_caps("box-b", pool.clone(), 2);
+        let l = s.get(&bucket).unwrap();
+        let wait = s.ready("box-a", l, &s.cost_on("box-a", l)).expect_err("movable background work must leave the timed ask its box");
+        assert_eq!(wait.blockers, vec![timed.clone()], "the placement refusal names the timed ask");
+        assert_eq!(grants(&s.tick(2)), vec![bucket.clone()], "the bucket starts once another box can take it");
+        assert_eq!(node_of(&s, &bucket).as_deref(), Some("box-b"), "the bucket goes to the other pool box");
+        invariants(&s);
+
+        let mut s = sched(&[("box-a", pool.clone()), ("box-b", pool)]);
+        s.set_down("box-b");
+        let busy = s.request(overlay("busy", Some("box-a"), 16.0), 0);
+        s.tick(0);
+        s.started(&busy, "{}");
+        let land = s.request(overlay("landq-pool", None, 2.0), 1);
+        assert!(grants(&s.tick(1)).is_empty(), "the older land bucket waits while its only box is full");
+        let timed = s.request(req("series", Kind::Timed, Some("box-a")), 2);
+        s.tick(2);
+        let (st, why) = state(&s, &timed);
+        assert!(st == "queued" && why.starts_with(&format!("yields to {land} ")), "the timed wait names the older bucket whose other box is down: {st} {why}");
+        release_clean(&mut s, &busy, 3);
+        assert_eq!(grants(&s.tick(3)), vec![land.clone()], "the older bucket gets the first grant when its last box frees");
+        assert_eq!(node_of(&s, &land).as_deref(), Some("box-a"), "the bucket takes the box the timed ask named");
         invariants(&s);
     }
 
@@ -12055,7 +13782,7 @@ mod tests {
                 s.live_call_end_ms.insert(live.clone(), 0);
             } else {
                 s.live_call_began(&live, 0);
-                s.live_call_ended(&live);
+                s.live_call_ended(&live, s.clock);
             }
             let _timed = s.request(req("bench", Kind::Timed, Some("a")), 1);
             s.tick(1);
@@ -12087,7 +13814,7 @@ mod tests {
             s.live_idle.insert(live.clone());
             if called {
                 s.live_call_began(&live, 0);
-                s.live_call_ended(&live);
+                s.live_call_ended(&live, s.clock);
                 s.live_called.insert(live.clone());
             }
             let timed = s.request(req("bench", Kind::Timed, Some("a")), 1);
@@ -12100,7 +13827,7 @@ mod tests {
                 if in_use {
                     s.clock = at - 1_000;
                     s.live_call_began(&live, at - 2_000);
-                    s.live_call_ended(&live);
+                    s.live_call_ended(&live, s.clock);
                 }
                 let park = s.tick(at).into_iter().find_map(|a| match a { Action::ParkLive { leases, note, resume_after } if leases == vec![live.clone()] => Some((note, resume_after)), _ => None });
                 parked.push(park.as_ref().map(|(_, after)| after.clone()));
@@ -12111,9 +13838,9 @@ mod tests {
         let run = |called: bool, in_use: bool, looks: &[u64]| run_from(0, called, in_use, looks);
         let (parked, _, _) = run(true, false, &[LIVE_PARK_MS + 10, LIVE_IN_USE_MS + 10]);
         assert_eq!(parked, vec![None, Some(None)], "used a minute ago it stays; past the in-use window it parks, busy CPU or not, for its lane to start again");
-        let (parked, _, timed) = run(false, false, &[LIVE_IN_USE_MS + 10, TIMED_DUE_MS + 10]);
+        let (parked, _, timed) = run(false, false, &[TIMED_DUE_MS - 10, TIMED_DUE_MS + 10]);
         assert_eq!(parked, vec![None, Some(Some(timed))], "no call of it ended, still loading: parked only once the timed ask is overdue, and back after it");
-        let (parked, notes, timed) = run(true, true, &[LIVE_IN_USE_MS + 10, TIMED_DUE_MS - 10, TIMED_DUE_MS + 10]);
+        let (parked, notes, timed) = run(true, true, &[LIVE_PARK_MS + 10, TIMED_DUE_MS - 10, TIMED_DUE_MS + 10]);
         assert_eq!(parked, vec![None, None, Some(Some(timed.clone()))], "in use: it stays until the timed ask is overdue, then parks and starts again after it");
         assert_eq!(notes, vec![format!("parked for timed {timed} (bench)")]);
         // granted 5 min after the timed ask came (it was asked first): in use, it holds its box
@@ -12149,6 +13876,49 @@ mod tests {
         assert_eq!(eta_at(0, 1), (Some("a".into()), TIMED_DUE_MS), "parked once the ask has waited TIMED_DUE_MS");
         assert_eq!(eta_at(5 * MIN, 5 * MIN), (Some("a".into()), TIMED_DUE_MS), "granted after the ask came: once it has held its box as long");
         assert_eq!(eta_at(0, TIMED_DUE_MS + MIN), (Some("a".into()), 0), "past its park point: at its next call's end");
+        // a session placed on a box a timed ask waits for says when that ask parks it (a walk's
+        // Town, placed on the one box it could take, was parked 10 min into its run, 11-27)
+        let mut s = sched(&[("a", caps(16, 64.0, Role::Pool))]);
+        let timed = s.request(req("bench", Kind::Timed, Some("a")), 0);
+        let mut r = req("look", Kind::Screen, Some("a"));
+        (r.priority, r.live) = (Priority::Interactive, true);
+        let live = s.request(r, 1);
+        beat_all(&mut s, 2);
+        assert_eq!(grants(&s.tick(2)), vec![live.clone()], "the session first, in the timed ask's yield to interactive work: {:?}", state(&s, &timed));
+        let why = s.get(&live).unwrap().grant_why.clone();
+        assert!(why.contains(&format!("; timed {timed} (bench) waits for a: it parks this session when it is idle, or in use {} from now at a call boundary", dur(TIMED_DUE_MS))), "{why}");
+
+        // the soonest a named ask can start by what holds it there ([`Sched::soonest_start`]): behind
+        // a run, at that run's end by its estimate; behind a live session's screen slot, by no end of
+        // its own; fitting now, no bound (CI's shards sat their 5 min behind such holders, 11-27)
+        let mut s = sched(&[("a", caps(16, 64.0, Role::Pool)), ("b", caps(16, 64.0, Role::Pool)), ("c", caps(16, 64.0, Role::Pool))]);
+        let build = |s: &mut Sched, lane: &str, at: u64| {
+            let mut r = req(lane, Kind::Build, Some("a"));
+            (r.cores, r.est_min) = (Some(16.0), Some(10.0));
+            s.request(r, at)
+        };
+        let run = build(&mut s, "run", 0);
+        beat_all(&mut s, 0);
+        assert_eq!(grants(&s.tick(0)), vec![run.clone()]);
+        s.started(&run, "{}");
+        let ask = build(&mut s, "next", 2 * MIN);
+        beat_all(&mut s, 2 * MIN);
+        s.tick(2 * MIN);
+        let soonest = s.soonest_start(&ask, 2 * MIN);
+        let ends = s.expected_end(&s.get(&run).unwrap().clone());
+        assert!(ends.is_some_and(|e| e > 0 && e <= 8 * MIN) && soonest == ends, "behind the run: at its end by its estimate: {soonest:?} {ends:?} {:?}", state(&s, &ask));
+        let mut r = req("look", Kind::Screen, Some("b"));
+        (r.priority, r.live) = (Priority::Interactive, true);
+        let look = s.request(r, 2 * MIN);
+        beat_all(&mut s, 2 * MIN);
+        assert_eq!(grants(&s.tick(2 * MIN)), vec![look.clone()]);
+        s.started(&look, "{}");
+        let screen = s.request(req("smoke", Kind::Screen, Some("b")), 3 * MIN);
+        beat_all(&mut s, 3 * MIN);
+        s.tick(3 * MIN);
+        assert_eq!(s.soonest_start(&screen, 3 * MIN), Some(u64::MAX), "behind a live session's screen slot: no end of its own: {:?}", state(&s, &screen));
+        let free = s.request(req("free", Kind::Test, Some("c")), 3 * MIN);
+        assert_eq!(s.soonest_start(&free, 3 * MIN), None, "fitting now: no bound");
     }
 
     /// A lease near idle on a box a timed ask has waited [`TIMED_DUE_MS`] for tells its lane
@@ -12280,6 +14050,166 @@ mod tests {
         s.nodes.get_mut("a").unwrap().caps.as_mut().unwrap().wm_dark = "its WM's window is 0x0".into();
         assert_eq!(s.screen_refusal("a").as_deref(), Some("no display (its WM's window is 0x0)"));
         invariants(&s);
+        // nor does an overdue timed ask park it in use while that one is queued or runs, nor
+        // count on its park for its start; once that one is gone it parks as any session in use
+        // (a walk's Town was parked under the Fab it was waiting on, W25401, 11-27)
+        let mut s = sched(&[("a", caps(16, 32.0, Role::Pool))]);
+        let wm2 = live(&mut s, "live-W3", Kind::Test, None);
+        let app2 = live(&mut s, "live-W4", Kind::Screen, Some(wm2.clone()));
+        s.tick(0);
+        s.tick(0);
+        for id in [&wm2, &app2] { s.started(id, "{}"); }
+        let timed = s.request(req("bench", Kind::Timed, Some("a")), 1);
+        let at = 1 + TIMED_DUE_MS + 10;
+        beat_all(&mut s, at);
+        let acts = s.tick(at);
+        assert!(!parked(&acts).concat().contains(&wm2), "the joined session stays for an overdue timed ask: {acts:?}");
+        assert_ne!(s.get(&timed).unwrap().eta_ms, 0, "and the ask's start counts on no park of it: {:?}", state(&s, &timed));
+        release_clean(&mut s, &app2, at + 1);
+        let acts = s.tick(at + 2);
+        assert!(parked(&acts).concat().contains(&wm2), "its joiner gone, it parks: {acts:?} {:?}", state(&s, &timed));
+        invariants(&s);
+    }
+
+    /// A set of live sessions (`live start --set <name>/<n>`) is placed as one and kept as one,
+    /// as walk 13 needed (11-27): its Town took alone a 16 GB Mac whose residents left 3.7 GB, the
+    /// Fab pinned beside it (9.6 GB measured) waited 31 min for that box's whole budget, and both
+    /// Towns were parked meanwhile. Here the set waits until all its members asked, then each
+    /// group (a Town and the Fab that joins it; the other Town) goes on a box of its own that
+    /// holds it whole, in one look. No park takes a member while another is still starting, and
+    /// then a park takes the whole set, at a call boundary of each, to start again after.
+    #[test]
+    fn a_set_of_live_sessions_is_placed_whole_and_parked_whole() {
+        let mut small_mac = caps(10, 16.0, Role::Pool);
+        (small_mac.os, small_mac.ram_resident_gb) = ("macos".into(), 9.7);
+        let mut big_mac = caps(16, 64.0, Role::Pool);
+        // (busier: on its own a Town takes the small Mac, as walk 13's did)
+        (big_mac.os, big_mac.load1) = ("macos".into(), 8.0);
+        let boxes = [("small-mac", small_mac), ("big-mac", big_mac), ("lin", caps(16, 64.0, Role::Pool))];
+        let session = |class: &str, kind: Kind, os: &str| {
+            let mut r = overlay("walk", None, 2.0);
+            (r.kind, r.class, r.live, r.priority, r.needs) = (kind, class.into(), true, Priority::Interactive, vec![("os".into(), os.into())]);
+            r
+        };
+        let measured = |s: &mut Sched| for _ in 0..3 {
+            s.record_resources("town", "test", Some(3.0), None);
+            s.record_resources("fab", "screen", Some(8.0), None);
+        };
+        // alone, as before sets: the Town takes the small Mac, and the Fab pinned beside it never fits
+        let mut s = sched(&boxes);
+        measured(&mut s);
+        let a = s.request(session("town", Kind::Test, "macos"), 0);
+        beat_all(&mut s, 0);
+        s.tick(0);
+        assert_eq!(node_of(&s, &a).as_deref(), Some("small-mac"), "walk 13's placement: {:?}", state(&s, &a));
+        let mut fab = session("fab", Kind::Screen, "macos");
+        fab.node = Some("small-mac".into());
+        let fa = s.request(fab, 1);
+        s.tick(1);
+        assert!(state(&s, &fa).0 == "queued" && state(&s, &fa).1.contains("no box it may take holds its measured 9.6 GB whole"), "{:?}", state(&s, &fa));
+
+        // as a set: it waits for its members, then goes whole in one look
+        let mut s = sched(&boxes);
+        measured(&mut s);
+        let member = |mut r: Req, joins: Option<&String>| { r.set = Some("w13/3".into()); r.joins = joins.cloned(); r };
+        let a = s.request(member(session("town", Kind::Test, "macos"), None), 0);
+        beat_all(&mut s, 0);
+        assert!(grants(&s.tick(0)).is_empty() && state(&s, &a).1 == "waits for its set w13: 1 of its 3 members asked", "{:?}", state(&s, &a));
+        let fa = s.request(member(session("fab", Kind::Screen, "macos"), Some(&a)), 1);
+        let b = s.request(member(session("town", Kind::Test, "linux"), None), 2);
+        let granted = grants(&s.tick(2));
+        assert_eq!(granted.len(), 3, "all three in one look: {granted:?} {:?} {:?} {:?}", state(&s, &a), state(&s, &fa), state(&s, &b));
+        assert_eq!([node_of(&s, &a), node_of(&s, &fa), node_of(&s, &b)].map(|n| n.unwrap_or_default()), ["big-mac", "big-mac", "lin"].map(String::from), "the Town and its Fab on the Mac that holds both whole, the other Town on a box of its own");
+        assert!((s.get(&a).unwrap().cost.ram_gb - 3.6).abs() < 1e-9, "each member granted its own need, not its group's: {:?}", s.get(&a).unwrap().cost);
+        for id in [&a, &fa, &b] { s.started(id, "{}"); }
+        invariants(&s);
+
+        // an overdue timed ask parks no member while the Fab is still starting (no call of it ended)
+        let timed = s.request(req("bench", Kind::Timed, Some("lin")), 3);
+        let parked = |acts: &[Action]| acts.iter().filter_map(|a| if let Action::ParkLive { leases, resume_after, .. } = a { Some((leases.clone(), resume_after.clone())) } else { None }).collect::<Vec<_>>();
+        let at = 3 + TIMED_DUE_MS + 10;
+        beat_all(&mut s, at);
+        let acts = s.tick(at);
+        assert!(parked(&acts).is_empty(), "its Fab still starting, the set stays: {acts:?}");
+        // all of it up, one member in a call: the park waits for that call's end
+        s.live_called.extend([a.clone(), fa.clone(), b.clone()]);
+        s.live_idle.extend([a.clone(), b.clone()]);
+        beat_all(&mut s, at + 1);
+        assert!(parked(&s.tick(at + 1)).is_empty(), "a member in a call: no park before its end");
+        s.live_idle.insert(fa.clone());
+        beat_all(&mut s, at + 2);
+        let acts = s.tick(at + 2);
+        let park = parked(&acts);
+        assert_eq!(park.len(), 1, "{acts:?}");
+        let mut ids = park[0].0.clone();
+        ids.sort();
+        let mut want = vec![a.clone(), fa.clone(), b.clone()];
+        want.sort();
+        assert_eq!((ids, park[0].1.clone()), (want, Some(timed.clone())), "the whole set parks, on both boxes, to start again after the timed run");
+        invariants(&s);
+        // the room the park frees goes to the ask that parked first ([`Sched::park_room_wait`]): a
+        // live launch that waits there for all of the box starts after it, even while the box
+        // cleans up after the set and the timed ask cannot start yet (a walk's Fab took the Mac
+        // its Town's park freed, and the 15-s timed run waited 81 s behind it, 11-27)
+        let mut launch = overlay("other", Some("lin"), 16.0);
+        (launch.priority, launch.live) = (Priority::Interactive, true);
+        let x = s.request(launch, at + 3);
+        beat_all(&mut s, at + 3);
+        assert!(grants(&s.tick(at + 3)).is_empty(), "the set still parking: {:?}", state(&s, &x));
+        let on: Vec<(String, String)> = [&a, &fa, &b].iter().map(|id| (node_of(&s, id).unwrap(), (*id).clone())).collect();
+        for (_, id) in &on { s.release(id, "released", at + 4); }
+        beat_all(&mut s, at + 5);
+        let first = grants(&s.tick(at + 5));
+        assert!(!first.contains(&x), "the launch waits for the timed ask: {first:?} {:?} {:?}", state(&s, &timed), state(&s, &x));
+        for (n, id) in &on { s.cleaned(n, id, 0); }
+        beat_all(&mut s, at + 6);
+        // and with no hold of the timed ask's there, as walk 13's had none on its Mac (its grant: "timed, no
+        // hold on" the Mac): the room is still the parker's
+        let xl = s.get(&x).unwrap().clone();
+        let why = s.now_fits("lin", &xl, &s.cost_on("lin", &xl), &Holds::new()).map_err(|b| b.reason);
+        assert!(why.as_ref().is_err_and(|r| r.contains(&format!("held for timed {timed}")) && r.contains("(the room its park freed on lin goes to it first)")), "with no hold there, the launch still waits for the ask that parked: {why:?}");
+        let next = grants(&s.tick(at + 6));
+        assert!(first.iter().chain(&next).any(|g| *g == timed) && !next.contains(&x), "the timed ask takes lin: {first:?} {next:?} {:?}", state(&s, &timed));
+        release_clean(&mut s, &timed, at + 7);
+        beat_all(&mut s, at + 8);
+        assert_eq!(grants(&s.tick(at + 8)), vec![x.clone()], "then the launch: {:?}", state(&s, &x));
+        invariants(&s);
+
+        // Each member asks for 10 of 16 cores. The group goes to the box that holds both
+        // members' RAM. A Linux launch quota lets Fab start there beside Town on the same tick.
+        let pair = |mut r: Req, joins: Option<&String>| { (r.set, r.joins, r.cores) = (Some("pair/2".into()), joins.cloned(), Some(10.0)); r };
+        for (os, small_name, big_name) in [("linux", "small-lin", "big-lin"), ("macos", "small-mac", "big-mac")] {
+            let small = Caps { os: os.into(), ram_resident_gb: 9.7, ..caps(16, 16.0, Role::Pool) };
+            let big = Caps { os: os.into(), load1: 4.0, ..caps(16, 64.0, Role::Pool) };
+            let mut s = sched(&[(small_name, small), (big_name, big)]);
+            measured(&mut s);
+            let t = s.request(pair(session("town", Kind::Test, os), None), 0);
+            let f = s.request(pair(session("fab", Kind::Screen, os), Some(&t)), 1);
+            beat_all(&mut s, 1);
+            let granted = grants(&s.tick(1));
+            assert_eq!(node_of(&s, &t).as_deref(), Some(big_name), "Town's box must hold Fab too");
+            if os == "linux" {
+                assert_eq!(granted, vec![t.clone(), f.clone()], "Town and Fab start together");
+                let town = s.get(&t).unwrap();
+                assert_eq!(s.call_confined(town), None);
+                assert_eq!(s.charged(town).cores, 10.0);
+                assert_eq!(s.launch_quota(&t), None, "Fab's grant preserves Town's full launch");
+                let fab = s.get(&f).unwrap();
+                assert_eq!(s.call_confined(fab), Some(8.0));
+                assert_eq!(s.charged(fab).cores, 8.0);
+                assert_eq!(s.launch_quota(&f), Some((8.0, 10.0, 10.0)));
+            } else {
+                assert_eq!(granted, vec![t.clone()], "Town starts first on the Mac");
+                let fab = s.get(&f).unwrap();
+                assert!(fab.state == State::Queued && fab.reason.contains("budget cores"), "{}", fab.reason);
+                assert!(s.started(&t, "{}"));
+                s.live_idle.insert(t.clone());
+                beat_all(&mut s, 2);
+                assert_eq!(grants(&s.tick(2)), vec![f.clone()], "Fab starts once Town is idle: {:?}", state(&s, &f));
+            }
+            assert_eq!(node_of(&s, &f).as_deref(), Some(big_name), "Fab joins Town on its box");
+            invariants(&s);
+        }
     }
 
     /// A visible session stays up for a land gate or a lane's test that waits for its RAM, however
@@ -12417,6 +14347,30 @@ mod tests {
         release_clean(&mut s, &sessions[1], 3);
         s.tick(3);
         assert_eq!(node_of(&s, &waits).as_deref(), Some("a"), "{:?}", state(&s, &waits));
+        // a use within the window keeps a session as a call does (its lane's wait on another
+        // session, an inspect routed to it): kept alive, it never parks for RAM (a walk kept its
+        // sessions alive by a call every 45 s and lost them to a 6 GB test, 11-26); used longer
+        // ago, it parks again
+        let late = 2 * LIVE_IN_USE_MS;
+        let ask_late = |s: &mut Sched, sessions: &[String]| {
+            beat_all(s, late);
+            for (id, quiet) in sessions.iter().zip([30, 90]) { s.set_info(id, &format!(r#"{{"running":"makepad","held_mb":12288,"idle_s":{quiet}}}"#), late); }
+            let (_, acts) = ask(s, 8.0, late);
+            parked(&acts).into_iter().map(|(l, _)| l).collect::<Vec<_>>()
+        };
+        for (used, parks, why) in [(late - 60_000, 0, "W1 used a minute ago stays: W0 makes the room"), (late - LIVE_IN_USE_MS, 1, "W1 used the window ago is idle: the longest quiet goes first")] {
+            let (mut s, sessions) = setup();
+            s.live_used.insert(sessions[1].clone(), used);
+            assert_eq!(ask_late(&mut s, &sessions), vec![vec![sessions[parks].clone()]], "{why}");
+        }
+        // a call's end counts at the master's clock, not at the scheduler's last look: a restarted
+        // master's first look read its sessions' calls at its clock's zero and parked both of the
+        // walk's kept-alive sessions (11-26)
+        let (mut s, sessions) = setup();
+        assert_eq!(s.clock, 0, "no look since the restart");
+        s.live_call_ended(&sessions[1], late);
+        s.live_call_ended(&sessions[1], late - 60_000);
+        assert_eq!(ask_late(&mut s, &sessions), vec![vec![sessions[0].clone()]], "W1's call just ended (an older end said later moves it back not): in use, W0 makes the room");
         // 20 asked: both sessions go
         let (mut s, sessions) = setup();
         let (_, acts) = ask(&mut s, 20.0, 1);
@@ -12517,6 +14471,67 @@ mod tests {
         let later = s2.request(later, 100_600);
         assert_ne!(later, queued);
         assert_eq!(s2.get(&later).unwrap().asked_ms, 100_600, "taken over once, by the ask again");
+    }
+
+    #[test]
+    fn no_lease_expires_for_missed_beats_before_master_is_serving() {
+        let nodes = [("a", caps(8, 32.0, Role::Pool))];
+        let mut s = sched(&nodes);
+        let busy = s.request(req("busy", Kind::Build, Some("a")), 0);
+        s.tick(0);
+        assert!(s.started(&busy, "{}"));
+        let own_req = Req { master: true, since_ms: Some(1), ..req("own", Kind::Build, Some("a")) };
+        let own = s.request(own_req.clone(), 1);
+        let remote_q = s.request(req("remote", Kind::Build, Some("a")), 2);
+        s.tick(2);
+        let lines = s.live_lines();
+
+        let mut s2 = sched(&nodes);
+        s2.hold_beat_expiry();
+        let t_restore = 100_000;
+        for line in &lines { s2.restore(line, t_restore); }
+        let t_reask = 101_000;
+        assert_eq!(s2.request(own_req.clone(), t_reask), own);
+        let reasked = s2.get(&own).unwrap();
+        assert_eq!(reasked.reask_by, None);
+        assert!(reasked.beat_ms >= t_restore + RESTORE_GRACE_MS, "the re-ask keeps its restore grace");
+        let fresh = s2.request(Req { master: true, ..req("fresh", Kind::Build, Some("a")) }, 102_000);
+        let tick_alive = |s: &mut Sched, now| {
+            let actions = s.tick(now);
+            assert!(!actions.iter().any(|a| matches!(a, Action::End { .. })), "at {now}: {actions:?}");
+            assert_eq!(s.get(&busy).unwrap().state, State::Granted, "at {now}");
+            for id in [&own, &remote_q, &fresh] {
+                assert_eq!(s.get(id).unwrap().state, State::Queued, "{id} at {now}");
+            }
+        };
+        tick_alive(&mut s2, t_reask + BEAT_EXPIRY_MS + 1);
+        tick_alive(&mut s2, t_restore + RESTORE_GRACE_MS + BEAT_EXPIRY_MS + 1);
+        let serving = 175_000;
+        s2.mark_serving(serving);
+        let deadline = serving + BEAT_EXPIRY_MS;
+        tick_alive(&mut s2, deadline);
+        s2.beat(&busy, deadline);
+        s2.beat(&remote_q, deadline);
+        let expires = |actions: &[Action], lease: &str| actions.iter().any(|a| matches!(a, Action::End { id, how, .. } if id == lease && how == "expired"));
+        let actions = s2.tick(deadline + 1);
+        for id in [&own, &fresh] {
+            assert!(expires(&actions, id), "silent {id} expires after serving: {actions:?}");
+        }
+        assert_eq!(s2.get(&busy).unwrap().state, State::Granted);
+        assert_eq!(s2.get(&remote_q).unwrap().state, State::Queued);
+
+        // A re-ask after startup still has the grace it received at restore.
+        let mut s3 = sched(&nodes);
+        for line in &lines { s3.restore(line, 200_000); }
+        s3.mark_serving(200_000);
+        assert_eq!(s3.request(own_req, 205_000), own);
+        let after_reask = 205_000 + BEAT_EXPIRY_MS + 1;
+        s3.beat(&busy, after_reask);
+        s3.tick(after_reask);
+        assert_eq!(s3.get(&own).unwrap().state, State::Queued, "the re-ask did not shorten restore grace");
+        let after_grace = 200_000 + RESTORE_GRACE_MS + BEAT_EXPIRY_MS + 1;
+        s3.beat(&busy, after_grace);
+        assert!(expires(&s3.tick(after_grace), &own), "restore grace elapsed without another beat");
     }
 
     /// What a queued ask waited on survives a restart, whichever way it comes back: a holder's
@@ -13030,6 +15045,27 @@ mod tests {
     }
 
     #[test]
+    fn behind_overrun_names_cores_blocker_past_its_measure() {
+        // A watched box keeps background asks within its cores even once they have aged.
+        let c = Caps { watched: true, ..caps(16, 64.0, Role::Pool) };
+        let mut s = sched(&[("a", c)]);
+        let class = "test build-units";
+        for _ in 0..3 { s.record_node_cost(class, "test", "a", 600_000); }
+        let holder = s.request(Req { class: class.into(), cores: Some(12.0), ..req("holder", Kind::Test, Some("a")) }, 0);
+        s.tick(0);
+        assert!(s.started(&holder, "{}"));
+        let ask = s.request(overlay("waiting", Some("a"), 8.0), 1);
+        let now = 15 * 60_000;
+        beat_all(&mut s, now);
+        s.tick(now);
+
+        let waiting = s.get(&ask).unwrap();
+        assert!(s.drains_box(waiting) && waiting.reason.starts_with("budget cores 16, in use 12, asked 8"), "{}", waiting.reason);
+        assert!(waiting.eta_late && waiting.eta_ms == 0, "the overdue holder has no expected end: {}", waiting.eta_ms);
+        assert!(waiting.eta_late_by.contains(&holder) && waiting.eta_late_by.contains("15m00s into its 10m00s"), "{}", waiting.eta_late_by);
+    }
+
+    #[test]
     fn a_timed_ask_behind_a_run_names_it_and_tells_no_start_past_its_estimate() {
         let mut s = sched(&[("node-c", caps(16, 64.0, Role::Bench))]);
         let running = s.request(req("holder", Kind::Timed, Some("node-c")), 0);
@@ -13203,12 +15239,14 @@ mod tests {
         }
     }
 
-    /// A long timed run is told to yield from its first minute while its box's catch-up waits on
-    /// it: a timed ask queued for the box needs its deployment ([`Sched::deploy_head`]), and the
-    /// update takes the box's next gap. That ask's length does not matter: the catch-up is short.
-    /// A bench box's catch-up waited 20 min behind back-to-back 16-18 min timed runs (L691645, 11-08).
+    /// A long timed run keeps its box while its box's catch-up waits on it: a timed ask queued for
+    /// the box needs its deployment ([`Sched::deploy_head`]), and the update waits for the run to
+    /// end, as a WM restart waits for its windows (a lane's 55-min series was told to hand its box
+    /// over 3 min in for another lane's catch-up, GFXLEAN, 11-27). Past twice its estimate it is
+    /// told to yield to the ask, as to any timed ask waiting on it, and the catch-up is no part of
+    /// the word.
     #[test]
-    fn a_long_timed_run_yields_to_its_boxs_catch_up() {
+    fn a_long_timed_run_keeps_its_box_through_its_boxs_catch_up() {
         let at = |n: u64| format!("{n}{:039},commercial={n}{:039}", 0, 0);
         let mut c = caps(16, 64.0, Role::Bench);
         c.deploy = at(0);
@@ -13227,15 +15265,18 @@ mod tests {
         let next = s.request(timed("long-too", 15.0), 1_000);
         beat_all(&mut s, 61_000);
         assert!(yields(&s.tick(61_000)).is_empty(), "long behind long");
-        // it needs the box's deployment: the catch-up waits on the run
+        // it needs the box's deployment: the catch-up waits for the run to end
         s.leases.iter_mut().find(|l| l.id == next).unwrap().deploy_pin = Some(at(1));
         beat_all(&mut s, 62_000);
-        let y = yields(&s.tick(62_000));
-        assert_eq!(y.len(), 1, "{y:?}");
-        assert_eq!(y[0].0, long);
-        assert!(y[0].1.contains(&format!("a long run, 1m02s into its 30m00s (its --est-min), while its box's catch-up, which {next} of long-too waits for, waits on it: its $DEVHUB_YIELD file now exists")), "{}", y[0].1);
-        beat_all(&mut s, 63_000);
-        assert!(yields(&s.tick(63_000)).is_empty(), "said once");
+        assert!(yields(&s.tick(62_000)).is_empty(), "the catch-up waits for the timed run, which drains its box");
+        // past twice its estimate it yields to the ask waiting on it, as any overrun does
+        let over = 60 * 60_000 + 1_000;
+        beat_all(&mut s, over);
+        let y = yields(&s.tick(over));
+        assert_eq!(y.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>(), vec![long.clone()], "{y:?}");
+        assert!(y[0].1.contains(&format!("while timed {next} of long-too waits on its box")) && !y[0].1.contains("catch-up"), "the overrun's word names the ask, not the catch-up: {}", y[0].1);
+        beat_all(&mut s, over + 1_000);
+        assert!(yields(&s.tick(over + 1_000)).is_empty(), "said once");
     }
 
     /// A timed run in rounds (`devhub run --rounds`) is told to yield a minute in while a short
@@ -13718,6 +15759,31 @@ mod tests {
                 invariants(&s);
             }
         }
+        // ... but a short timed ask queued before the hub build goes first: a 1-min ask heading a
+        // bench box's timed queue as a long series ended waited for the box's hub build as well
+        // (L1837670, 11-26). Past a long one, one asked after it, or one its box's dev switch keeps
+        // off, the build still goes first.
+        for (est, before, dev, build_first) in [(1.0, true, true, false), (1.0, false, true, true), (30.0, true, true, true), (1.0, true, false, true)] {
+            let mut s = sched(&[("box-a", caps(16, 64.0, Role::Bench))]);
+            let series = s.request(req("series", Kind::Timed, Some("box-a")), 1);
+            assert_eq!(grants(&s.tick(1)), vec![series.clone()]);
+            let short = || Req { est_min: Some(est), ..req("short", Kind::Timed, Some("box-a")) };
+            let hub = || Req { class: HUB_BUILD.into(), master: true, ..devhubs(req("hub-build-box-a", Kind::Build, Some("box-a"))) };
+            let (timed, build) = if before {
+                let t = s.request(short(), 2);
+                (t, s.request(hub(), 3))
+            } else {
+                let b = s.request(hub(), 2);
+                (s.request(short(), 3), b)
+            };
+            if !dev { s.set_dev("box-a", false, 3).unwrap(); }
+            s.tick(3);
+            release_clean(&mut s, &series, 4);
+            let (first, then) = if build_first { (&build, &timed) } else { (&timed, &build) };
+            assert_eq!(grants(&s.tick(4)), vec![first.clone()], "est {est} min, asked before the build {before}, dev {dev}: {:?} {:?}", state(&s, &timed), state(&s, &build));
+            assert_eq!(state(&s, then).0, "queued");
+            invariants(&s);
+        }
         // An upkeep that cannot start must not stop a timed request that can.
         let mut s = sched(&[("box-a", caps(16, 64.0, Role::Bench))]);
         let mut r = req("prebuild-box-a", Kind::Build, Some("box-a"));
@@ -13828,9 +15894,10 @@ mod tests {
         // (an overlay: a build in the box's tree would wait its turn there)
         let mut lane = overlay("lane", Some("box-a"), 4.0);
         (lane.kind, lane.priority) = (Kind::Build, Priority::Interactive);
-        let lane = s.request(lane, 1);
         beat_all(&mut s, 2);
         assert_eq!(grants(&s.tick(2)), vec![own.clone()], "{:?} {:?}", state(&s, &own), state(&s, &other));
+        let lane = s.request(lane, 2);
+        assert!(grants(&s.tick(2)).is_empty());
         assert_eq!(s.get(&own).unwrap().cost.cores, 4.0, "on its charge's jobs");
         assert!(state(&s, &lane).0 == "queued" && state(&s, &lane).1.starts_with("budget cores 16, in use "), "{:?}", state(&s, &lane));
         assert!(state(&s, &other).0 == "queued" && state(&s, &other).1.starts_with("budget cores 16, in use 16"), "{:?}", state(&s, &other));
@@ -13878,25 +15945,43 @@ mod tests {
         release_clean(&mut s, &bg_mac, 8);
         beat_all(&mut s, 8);
         assert_eq!(grants(&s.tick(8)), vec![pre_mac.clone()], "{:?}", state(&s, &pre_mac));
-        // A lease that would start on a box but for its prebuild has the prebuild told to yield at
-        // once: its leg ends after its current step and asks again, and the lease starts ahead of
-        // that ask. A prebuild's listings ran 2m00s against its measured 1m00s while a lane's test
-        // waited 5m40s on its box, told "devhub does not end it" (L1700278, 11-24). While other
-        // work holds the cores too, its yield gains nothing, and none is told.
+        // The prebuild sheds load immediately on the overloaded box, even though removing
+        // it alone would leave the lane waiting beside the two background leases.
         assert!(s.started(&own, "{}"));
         beat_all(&mut s, 8);
+        assert!(!s.starts_without(&lane, "box-a", std::slice::from_ref(&own), 8));
         s.tick(8);
-        assert!(!s.told_to_yield(&own) && state(&s, &lane).0 == "queued", "{:?}", state(&s, &lane));
+        let word = s.owner_word(&own).unwrap_or_default();
+        assert!(s.told_to_yield(&own) && word.contains(&format!("its box is past its cores while {lane} of lane waits")), "{word}");
+        assert_eq!(s.get(&lane).unwrap().state, State::Queued);
         release_clean(&mut s, &bg_a[1], 9);
         s.nodes.get_mut("box-a").unwrap().caps.as_mut().unwrap().busy_leases = vec![(bg_a[0].clone(), 11.0)];
         beat_all(&mut s, 9);
-        assert!(grants(&s.tick(9)).is_empty() && state(&s, &lane).0 == "queued", "its prebuild holds 4 past the cores: {:?}", state(&s, &lane));
-        let word = s.owner_word(&own).unwrap_or_default();
-        assert!(s.told_to_yield(&own) && word.contains(&format!("a warm-up: {lane} of lane would start on its box but for it")), "told to yield: {word} {:?}", state(&s, &lane));
+        assert!(grants(&s.tick(9)).is_empty() && state(&s, &lane).0 == "queued", "{:?}", state(&s, &lane));
         release_clean(&mut s, &own, 10);
         let again = s.request(build(format!("{}box-a", super::super::PREBUILD_LANE_PREFIX), "box-a"), 10);
         beat_all(&mut s, 10);
         assert!(grants(&s.tick(10)).contains(&lane), "one step later, the lease starts ahead of the prebuild's ask again: {:?} {:?}", state(&s, &lane), state(&s, &again));
+
+        // On a box exactly at its budget, shedding four cores helps the four-core waiter.
+        // The earlier eight-core waiter alone gives the prebuild no reason to yield.
+        let mut s = prebuild_box(&["tipjit"], None);
+        grant_peer(&mut s, "box-a", "background", 12.0, 0);
+        let own = s.request(prebuild_req("box-a", 4.0), 1);
+        assert_eq!(grants(&s.tick(1)), [own.clone()]);
+        assert!(s.started(&own, "{}"));
+        assert_eq!(s.box_cores_used("box-a"), 16.0);
+        let wide = s.request(overlay("wide", Some("box-a"), 8.0), 2);
+        assert!(grants(&s.tick(2)).is_empty());
+        assert!(!s.starts_without(&wide, "box-a", std::slice::from_ref(&own), 2));
+        assert!(!s.told_to_yield(&own));
+        s.cancel(&wide, 3);
+        let lane = s.request(overlay("lane", Some("box-a"), 4.0), 3);
+        assert!(s.starts_without(&lane, "box-a", std::slice::from_ref(&own), 3));
+        assert!(grants(&s.tick(3)).is_empty());
+        let word = s.owner_word(&own).unwrap_or_default();
+        assert!(s.told_to_yield(&own) && word.contains(&format!("{lane} of lane would start on its box but for it")), "{word}");
+        invariants(&s);
 
         // The older ask a box's prebuild yields to holds that box, though another box would start
         // it sooner by measure: the prebuild holds nothing there, and a newer ask walked in on the
@@ -14080,7 +16165,7 @@ mod tests {
         const MIN: u64 = 60_000;
         let mut mac = caps(16, 64.0, Role::Pool);
         mac.os = "macos".into();
-        let mut s = sched(&[("a", mac.clone()), ("c", mac)]);
+        let mut s = sched(&[("a", mac.clone()), ("c", mac.clone())]);
         let overlay = |lane: &str, node: Option<&str>, cores: f64| {
             let mut r = overlay(lane, node, cores);
             r.needs = vec![("os".into(), "macos".into())];
@@ -14123,6 +16208,26 @@ mod tests {
         beat_all(&mut s, MIN + 3_000);
         assert!(s.tick(MIN + 3_000).iter().all(|x| !matches!(x, Action::Log(_))), "said once");
         assert!(!s.holds.get("c").is_some_and(|h| h.id == launch));
+        // a leaves rotation for one look. When it returns, c can still hold the launch,
+        // but the small run there keeps it waiting well past the end of a's shard.
+        s.set_caps("a", Caps { sick: "disk repair".into(), ..mac.clone() }, MIN + 4_000);
+        beat_all(&mut s, MIN + 4_000);
+        let away = s.tick(MIN + 4_000);
+        assert_eq!(s.holds["c"].id, launch);
+        s.set_caps("a", mac, MIN + 5_000);
+        beat_all(&mut s, MIN + 5_000);
+        let back = s.tick(MIN + 5_000);
+        assert_eq!(s.holds["a"].id, launch);
+        for (actions, moved, why) in [
+            (away, "holds c (was a)", "; left a: out of rotation: disk repair"),
+            (back, "holds a (was c)", "; left c, where it starts in 8m55s: a starts it more than 2 min sooner"),
+        ] {
+            let line = actions.iter().find_map(|x| match x {
+                Action::Log(line) if line.starts_with(&launch) && line.contains(moved) => Some(line),
+                _ => None,
+            }).expect("the master's log names the head and both boxes");
+            assert!(line.ends_with(why), "{line}");
+        }
         release_clean(&mut s, &shard_c, 3 * MIN);
         beat_all(&mut s, 3 * MIN + 500);
         assert!(grants(&s.tick(3 * MIN + 500)).is_empty(), "{:?}", state(&s, &launch));
@@ -14376,7 +16481,7 @@ mod tests {
 
     /// devhub's own builds that go past a box's cores (a hub build, a deployment's build, the
     /// box's prebuild) go one at a time: the next waits for its room or for that one to end. The
-    /// box's hub build goes past beside another: the box's roll waits for it (L791258, 11-10).
+    /// box's hub build goes past beside the prebuild, which uses a separate checkout.
     #[test]
     fn devhubs_own_builds_go_past_a_boxs_cores_one_at_a_time_but_its_hub_build() {
         let mut s = sched(&[("box-a", caps(16, 64.0, Role::Pool))]);
@@ -14391,24 +16496,55 @@ mod tests {
             if hub { (r.class, r.master) = (HUB_BUILD.into(), true); }
             r
         };
-        let mut asked = vec![
-            s.request(own(format!("{DEPLOY_BUILD}-box-a"), true), 1),
-            s.request(own(format!("{}box-a", super::super::PREBUILD_LANE_PREFIX), false), 1),
-        ];
+        let prebuild = s.request(own(format!("{}box-a", super::super::PREBUILD_LANE_PREFIX), false), 1);
         beat_all(&mut s, 1);
-        let first = grants(&s.tick(1));
-        assert_eq!(first.len(), 1, "one at a time past the box's cores: {first:?}");
-        asked.retain(|id| *id != first[0]);
-        assert!(state(&s, &asked[0]).1.contains("budget cores 16"), "{:?}", state(&s, &asked[0]));
-        let hub = s.request(own(format!("{HUB_BUILD}-box-a"), true), 2);
+        assert_eq!(grants(&s.tick(1)), [prebuild.clone()]);
+        let deploy_req = own(format!("{DEPLOY_BUILD}-box-a"), true);
+        let deploy = s.request(deploy_req.clone(), 2);
         beat_all(&mut s, 2);
-        assert_eq!(grants(&s.tick(2)), vec![hub.clone()], "the box's hub build goes past beside it: {:?}", state(&s, &hub));
+        assert!(grants(&s.tick(2)).is_empty());
+        assert!(state(&s, &deploy).1.contains("budget cores 16"), "{:?}", state(&s, &deploy));
+        let hub = s.request(own(format!("{HUB_BUILD}-box-a"), true), 3);
+        beat_all(&mut s, 3);
+        assert_eq!(grants(&s.tick(3)), [hub.clone()], "the hub build can run beside the prebuild: {:?}", state(&s, &hub));
         assert!(s.charged_on("box-a").cores <= 16.0 + 8.0, "{} cores charged", s.charged_on("box-a").cores);
-        assert!(state(&s, &asked[0]).1.contains("budget cores 16"), "the third waits: {:?}", state(&s, &asked[0]));
-        release_clean(&mut s, &first[0], 3);
-        release_clean(&mut s, &hub, 3);
+        release_clean(&mut s, &prebuild, 4);
         beat_all(&mut s, 4);
-        assert_eq!(grants(&s.tick(4)), asked);
+        assert!(grants(&s.tick(4)).is_empty());
+        assert_eq!(s.get(&deploy).unwrap().state, State::Queued);
+        assert!(state(&s, &deploy).1.contains(&format!("held by {hub}")), "{:?}", state(&s, &deploy));
+        release_clean(&mut s, &hub, 5);
+        beat_all(&mut s, 5);
+        assert_eq!(grants(&s.tick(5)), [deploy.clone()]);
+        let duplicate = s.request(deploy_req, 6);
+        beat_all(&mut s, 6);
+        assert!(grants(&s.tick(6)).is_empty());
+        assert!(state(&s, &duplicate).1.contains(&format!("held by {deploy}")), "{:?}", state(&s, &duplicate));
+        invariants(&s);
+    }
+
+    #[test]
+    fn at_most_one_deploy_build_runs_per_node_even_past_expected_end() {
+        let mut s = sched(&[("box-a", caps(16, 64.0, Role::Pool))]);
+        for _ in 0..3 { s.record_node_cost(HUB_BUILD, "build", "box-a", 5_000); }
+        let work = s.request(overlay("work", Some("box-a"), 12.0), 0);
+        assert_eq!(grants(&s.tick(0)), [work]);
+        let mut room = devhubs(req("deploy-build-box-a", Kind::Build, Some("box-a")));
+        (room.cores, room.class, room.master) = (Some(4.0), HUB_BUILD.into(), true);
+        let first = s.request(room.clone(), 1);
+        assert_eq!(grants(&s.tick(1)), [first.clone()]);
+        assert!(s.started(&first, "{}"));
+        let past = 1 + s.expected_end(s.get(&first).unwrap()).unwrap() + 1;
+        beat_all(&mut s, past);
+        s.tick(past);
+        assert_eq!(s.expected_end(s.get(&first).unwrap()), None, "the first room has outlasted its measure");
+        let second = s.request(room, past);
+        assert!(grants(&s.tick(past)).is_empty());
+        assert_eq!(s.get(&first).unwrap().state, State::Granted);
+        assert_eq!(s.get(&second).unwrap().state, State::Queued);
+        assert!(state(&s, &second).1.contains(&format!("held by {first}")), "{:?}", state(&s, &second));
+        release_clean(&mut s, &first, past + 1);
+        assert_eq!(grants(&s.tick(past + 1)), [second], "the next deployment can start once the room is released");
         invariants(&s);
     }
 
@@ -14422,14 +16558,14 @@ mod tests {
         const MIN: u64 = 60_000;
         let mut s = sched(&[("box-a", caps(16, 64.0, Role::Pool))]);
         let mut work = req("work", Kind::Test, Some("box-a"));
-        (work.cores, work.src, work.est_min, work.priority) = (Some(7.0), Src::Overlay, Some(60.0), Priority::Interactive);
+        (work.cores, work.src, work.est_min, work.priority) = (Some(5.0), Src::Overlay, Some(60.0), Priority::Interactive);
         let work = s.request(work, 0);
         assert_eq!(grants(&s.tick(0)), vec![work]);
         let mut p = devhubs(req(&format!("{}box-a", super::super::PREBUILD_LANE_PREFIX), Kind::Build, Some("box-a")));
         (p.cores, p.est_min) = (Some(11.0), Some(2.0));
         let prebuild = s.request(p, 1);
         beat_all(&mut s, 1);
-        assert_eq!(grants(&s.tick(1)), vec![prebuild.clone()], "the box's prebuild goes past its cores");
+        assert_eq!(grants(&s.tick(1)), vec![prebuild.clone()], "the prebuild fills the remaining cores");
         let mut d = devhubs(req(&format!("{DEPLOY_BUILD}-box-a"), Kind::Build, Some("box-a")));
         (d.cores, d.class, d.master) = (Some(2.0), HUB_BUILD.into(), true);
         let deploy = s.request(d, 2);
@@ -14541,13 +16677,13 @@ mod tests {
         assert!(grants(&s.tick(1)).contains(&hub), "{:?}", state(&s, &hub));
         assert_eq!((cores(&s, &hub), s.hub_build_jobs(&hub)), (5.0, Some(5)), "on five jobs");
         cap(&s);
-        // on a box with all it measured free it takes that, on cargo's own jobs
+        // on an idle box it takes its full job count
         let mut idle = sched(&[("box-a", caps(16, 64.0, Role::Pool))]);
         for _ in 0..3 { idle.record_resources(HUB_BUILD, "build", Some(3.0), Some(7.0)); }
         let hub = idle.request(hub_ask(), 0);
         beat_all(&mut idle, 0);
         assert!(grants(&idle.tick(0)).contains(&hub), "{:?}", state(&idle, &hub));
-        assert_eq!((cores(&idle, &hub), idle.hub_build_jobs(&hub)), (7.0, None));
+        assert_eq!((cores(&idle, &hub), idle.hub_build_jobs(&hub)), (8.0, Some(8)));
         // three free, or none: it builds beside the box's work at once, on four jobs, past its
         // box's cores for the build, with or without `deploy-jobs`; the box's
         // freed cores are its while it waits for nothing
@@ -14578,6 +16714,36 @@ mod tests {
         beat_all(&mut s, 1);
         assert!(grants(&s.tick(1)).contains(&deploy), "{:?}", state(&s, &deploy));
         assert_eq!((cores(&s, &deploy), s.hub_build_jobs(&deploy)), (2.0, Some(2)), "on two jobs");
+        // a measured one first waits for the cores it measured, for about its measured run, its
+        // box taking no new background work: on two jobs beside a busy box, one box's deployment
+        // builds took 5-24 min against a measured 1m15s-1m35s, its WM restart behind each (11-27)
+        let measured = || {
+            let mut s = sched(&[("box-a", caps(16, 64.0, Role::Pool))]);
+            for _ in 0..3 { s.record_resources(HUB_BUILD, "build", Some(3.0), Some(7.0)); s.record_cost(HUB_BUILD, "build", 90_000); }
+            let busy = s.request(ask("a", 14.0), 0);
+            assert_eq!(grants(&s.tick(0)), vec![busy.clone()]);
+            let mut deploy = hub_ask();
+            deploy.lane = format!("{DEPLOY_BUILD}-box-a");
+            let deploy = s.request(deploy, 1);
+            let mut later = ask("later", 1.0);
+            later.priority = Priority::Background;
+            let later = s.request(later, 2);
+            beat_all(&mut s, 2);
+            let granted = grants(&s.tick(2));
+            assert!(!granted.contains(&deploy) && !granted.contains(&later), "it waits for its cores, and new background work waits behind it: {:?} {:?}", state(&s, &deploy), state(&s, &later));
+            (s, busy, deploy, later)
+        };
+        let (mut s, busy, deploy, later) = measured();
+        release_clean(&mut s, &busy, 30_000);
+        beat_all(&mut s, 30_000);
+        assert!(grants(&s.tick(30_000)).contains(&deploy), "the box's work ends within its wait: {:?}", state(&s, &deploy));
+        assert_eq!((cores(&s, &deploy), s.hub_build_jobs(&deploy)), (8.0, Some(8)), "on its full grant");
+        assert_ne!(state(&s, &later).0, "queued", "the box's freed cores fit both: {:?}", state(&s, &later));
+        // past its wait the box is still busy: it starts on what is free, slow and never stuck
+        let (mut s, _, deploy, _) = measured();
+        beat_all(&mut s, 1 + 90_000);
+        assert!(grants(&s.tick(1 + 90_000)).contains(&deploy), "past its measured run it waits no more: {:?}", state(&s, &deploy));
+        assert_eq!((cores(&s, &deploy), s.hub_build_jobs(&deploy)), (2.0, Some(2)), "on what is free, its floor");
         // its RAM by the box's measure: a shard charged past the budget at its class's peak, the
         // box measured mostly free, builds at once; with too little available it waits, saying so
         let mut s = sched(&[("box-a", caps(16, 64.0, Role::Pool))]);
@@ -15020,6 +17186,17 @@ mod tests {
         let mut heard = sched(&[("a", caps(16, 64.0, Role::Pool))]);
         heard.nodes_settle_ms = 60_000;
         assert!(!heard.settling(1), "once every box answered, within the grace too");
+        // the nodes answer names a box it has not heard yet within the grace, one that was up
+        // before the restart: what it takes is not known yet (the tests bucket's pool count waits
+        // for it); a box down before the restart is known down
+        heard.add_node("fresh", "192.0.2.2", None);
+        heard.add_node("gone", "192.0.2.3", None);
+        heard.seed_unheard("gone", 0);
+        let yet = |s: &Sched, now: u64| s.node_view(now).into_iter().filter(|n| n.unheard_yet).map(|n| n.name).collect::<Vec<_>>();
+        assert_eq!(yet(&heard, 1), vec!["fresh".to_string()], "only the box not heard yet that was not down before");
+        assert!(yet(&heard, 60_001).is_empty(), "past the grace it is down, not unknown");
+        let fresh = heard.node_view(1).into_iter().find(|n| n.name == "fresh").unwrap();
+        assert!(NodeView::parse(&makepad_strict_json::parse(fresh.to_json().as_bytes()).unwrap()).is_some_and(|v| v.unheard_yet), "the nodes answer carries it");
     }
 
     /// A master that restarted knows only granted leases: a holder asks again with when it first
@@ -15355,8 +17532,9 @@ mod tests {
     /// A short run is never past its lane's cap, nor counts toward it (Fable's lane share: S is
     /// exempt): a lane's 6-8 s tests waited 5 min each behind its two running units (11-16).
     /// Nor is a look, which also passes a starved head's hold on a box past its cores (11-22).
+    /// Nor is a live app session: a lane's walk drives several together (L1871681, 11-26).
     #[test]
-    fn a_short_run_or_a_look_is_never_past_its_lanes_cap_nor_counts_toward_it() {
+    fn a_short_run_a_look_or_a_live_app_is_never_past_its_lanes_cap_nor_counts_toward_it() {
         let mut c = caps(64, 256.0, Role::Pool);
         c.slots = vec![(Kind::Test, 8)];
         let mut s = sched(&[("a", c)]);
@@ -15422,6 +17600,22 @@ mod tests {
         release_clean(&mut s, &mine[0], at + 3);
         assert!(s.lane_block(s.get(&ask).unwrap()).is_none(), "the running look is no unit of the cap: {:?}", state(&s, &ask));
         invariants(&s);
+        // a live app session (`devhub live start`) is no unit either: a walk's Fab, its lane's third
+        // session, waited 9 min past the cap on its pinned box while newer live asks of other lanes
+        // took it (L1871681, 11-26); a test session's call, leased for its lane, still counts
+        let mut c = caps(64, 256.0, Role::Pool);
+        c.slots = vec![(Kind::Test, 8)];
+        let mut s = sched(&[("a", c)]);
+        let apps: Vec<String> = (0..3).map(|_| { let mut r = overlay("gapx", None, 4.0); r.live = true; s.request(r, 0) }).collect();
+        assert_eq!(grants(&s.tick(0)).len(), 3, "a lane's third live app session is within its cap: {:?}", apps.iter().map(|a| state(&s, a)).collect::<Vec<_>>());
+        let runs: Vec<String> = (0..2).map(|_| s.request(overlay("gapx", None, 4.0), 1)).collect();
+        assert!(runs.iter().all(|r| s.lane_block(s.get(r).unwrap()).is_none()), "running live app sessions are no units of the cap: {:?}", runs.iter().map(|r| state(&s, r)).collect::<Vec<_>>());
+        assert_eq!(grants(&s.tick(1)).len(), 2, "the lane's two runs start beside its three sessions: {:?}", runs.iter().map(|r| state(&s, r)).collect::<Vec<_>>());
+        let mut call = overlay("live-W1", None, 4.0);
+        (call.live, call.for_lane) = (true, Some("gapx".into()));
+        let call = s.request(call, 2);
+        assert_eq!(s.lane_block(s.get(&call).unwrap()).map(|b| b.reason).as_deref(), Some("lane cap 2/2"), "a test session's call counts for its lane: {:?}", state(&s, &call));
+        invariants(&s);
     }
 
     #[test]
@@ -15471,8 +17665,7 @@ mod tests {
         let (ids, granted, said) = ask("check:quick", 70.0, 2);
         assert_eq!(granted, ids[..1], "a short gate starts past its box's cores: {said:?}");
         assert!(said[1].starts_with("budget cores 16, in use 20") && said[1].contains(&format!("{} short hand-in gate 4", ids[0])), "up to the short line, 20 of 16, the one past the cores named: {said:?}");
-        // the box's prebuild goes past the cores beside a short gate there: no lane's lease builds
-        // its JIT cold while short gates take turns (11-16)
+        // The prebuild waits for the short gate to return the box to its core budget.
         {
             let mut c = caps(16, 64.0, Role::Pool);
             c.slots = vec![(Kind::Test, 8), (Kind::Build, 8)];
@@ -15484,12 +17677,17 @@ mod tests {
             (g.hand_in, g.class, g.priority) = (true, "check:quick".to_string(), Priority::Interactive);
             let gate = s.request(g, 1);
             beat_all(&mut s, 10);
-            assert_eq!(grants(&s.tick(10)), vec![gate], "the short gate past the cores");
+            assert_eq!(grants(&s.tick(10)), vec![gate.clone()], "the short gate past the cores");
             let mut r = devhubs(overlay("prebuild-a", Some("a"), 4.0));
             r.kind = Kind::Build;
             let prebuild = s.request(r, 11);
             beat_all(&mut s, 12);
-            assert_eq!(grants(&s.tick(12)), vec![prebuild.clone()], "the prebuild beside it: {:?}", state(&s, &prebuild));
+            assert!(grants(&s.tick(12)).is_empty());
+            assert_eq!(s.get(&prebuild).unwrap().state, State::Queued);
+            assert_eq!(s.charged_on("a").cores, 20.0);
+            release_clean(&mut s, &gate, 13);
+            assert_eq!(s.charged_on("a").cores, 16.0);
+            assert_eq!(grants(&s.tick(13)), vec![prebuild]);
             invariants(&s);
         }
         let (_, granted, said) = ask("check:slow", 70.0, 1);
@@ -15782,6 +17980,47 @@ mod tests {
     }
 
     #[test]
+    fn bisect_probe_past_twice_measure_warns_captures_and_ends_when_output_silent() {
+        let class = "test bash land_gate.sh fast @landq-bisect";
+        let mut s = sched(&[("a", caps(16, 64.0, Role::Pool)), ("b", caps(16, 64.0, Role::Pool))]);
+        for _ in 0..3 { s.record_node_cost(class, "test", "a", 600_000); }
+        let [hung, building] = ["a", "b"].map(|node| s.request(Req {
+            class: class.into(), agent: Some(BUCKET_AGENT.into()), ..req("landq-bisect", Kind::Test, Some(node))
+        }, 0));
+        s.tick(0);
+        for id in [&hung, &building] {
+            assert!(s.started(id, "{}"));
+            s.set_info(id, r#"{"out_bytes":100}"#, 0);
+        }
+        let waiting = s.request(Req { whole: true, ..req("ci", Kind::Ci, Some("a")) }, 1);
+        s.tick(1);
+        assert_eq!(s.get(&waiting).unwrap().state, State::Queued);
+
+        // The overdue warning is suppressed once the same holder has a stall warning.
+        let overdue = 1_260_000;
+        s.say_overdue_holders(overdue);
+        assert!(s.out.iter().any(|a| matches!(a, Action::Event(r) if r.sev == Sev::Warn && r.line.contains(&hung) && r.line.contains(&waiting) && r.line.contains("over 2x"))));
+        s.say_stalled(overdue);
+        for id in [&hung, &building] {
+            assert!(s.out.iter().any(|a| matches!(a, Action::Event(r) if r.sev == Sev::Warn && r.line.contains(id) && r.line.contains("stalled?"))), "missing stall warning for {id}");
+            assert!(s.out.iter().any(|a| matches!(a, Action::Capture { id: captured, why, .. } if captured == id && why.contains("against its measured 10m00s"))), "missing capture for {id}");
+        }
+        s.captured(&building, "stacks");
+        s.end_hung_legs(OUTPUT_SILENT_MS - 1);
+        assert_eq!(s.get(&building).unwrap().state, State::Granted, "a captured overrun still needs the full silence interval");
+        let now = OUTPUT_SILENT_MS + 1;
+        s.built.insert(building.clone(), (now - 1, "rustc".into()));
+        s.end_hung_legs(now);
+        assert_eq!(s.get(&hung).unwrap().state, State::Granted, "capture must finish first");
+        s.captured(&hung, "stacks");
+        s.end_hung_legs(now);
+        let (how, why) = state(&s, &hung);
+        assert_eq!(how, "ended hung");
+        assert!(why.contains("processes spinning") && why.contains("stacks"), "{why}");
+        assert_eq!(s.get(&building).unwrap().state, State::Granted, "fresh compiler activity keeps the other probe running");
+    }
+
+    #[test]
     fn a_lease_past_twice_its_measure_says_stalled_once() {
         let mut s = sched(&[("a", caps(16, 64.0, Role::Pool))]);
         for _ in 0..3 { s.record_node_cost("test", "test", "a", 120_000); }
@@ -15984,12 +18223,15 @@ mod tests {
         let info = |end: u64| format!(r#"{{"class":"test makepad-foo{}","phases":[{{"phase":"jit","blocker":"","boxes":[],"start_ms":1000,"end_ms":{end}}}]}}"#, super::super::JIT_BUILD_RUN);
         s.set_info(&small, &info(0), 1_000);
         assert_eq!(s.charged_on("a").cores, 16.0, "from the beat, before any caps poll measures the build");
+        let row = s.lease_view_line(s.get(&small).unwrap(), 1_000);
+        assert!(row.contains("building its JIT, charged 16 cores (granted 4, measured 0.0)"), "its row says the charge is its build's, not a run past its grant: {row}");
         let second = s.request(overlay("second"), 2_000);
         assert!(grants(&s.tick(2_000)).is_empty());
         assert_eq!(state(&s, &second), ("queued".to_string(), "budget cores 16, in use 16, asked 4".to_string()));
         // built
         s.set_info(&small, &info(60_000), 60_000);
         assert_eq!(s.charged_on("a").cores, 4.0);
+        assert!(!s.lease_view_line(s.get(&small).unwrap(), 60_000).contains("building its JIT"), "built, its row no longer says so");
         beat_all(&mut s, 60_000);
         assert_eq!(grants(&s.tick(60_000)), vec![second.clone()]);
         s.started(&second, "{}");
@@ -16415,7 +18657,7 @@ mod tests {
         assert_eq!(state(&s, &id).0, "granted", "nothing ends it");
         // its call ends; the next one is timed from its own start
         s.live_idle.insert(id.clone());
-        s.live_call_ended(&id);
+        s.live_call_ended(&id, s.clock);
         assert_eq!(s.owner_word(&id), None, "that call is over");
         s.live_idle.remove(&id);
         s.live_call_began(&id, 121 * MIN);
@@ -16423,7 +18665,7 @@ mod tests {
         assert_eq!(said(&at(&mut s, 152 * MIN)), 1, "31 min into it");
         // a session between calls is held to nothing
         s.live_idle.insert(id.clone());
-        s.live_call_ended(&id);
+        s.live_call_ended(&id, s.clock);
         assert_eq!(said(&at(&mut s, 400 * MIN)), 0, "idle");
         assert_eq!(s.live_call_over(&id, 400 * MIN), None, "and its release takes nothing first");
     }
@@ -16563,19 +18805,29 @@ mod tests {
     /// silent while it works at a core, is no hang.
     #[test]
     fn a_slow_silent_lease_is_said_once_with_its_stacks_whatever_its_class() {
-        let mut s = sched(&[("n0", caps(16, 64.0, Role::Pool)), ("n1", caps(16, 64.0, Role::Pool)), ("n2", caps(16, 64.0, Role::Pool))]);
+        let mut s = sched(&[("n0", caps(16, 64.0, Role::Pool)), ("n1", caps(16, 64.0, Role::Pool)), ("n2", caps(16, 64.0, Role::Pool)), ("n3", caps(16, 64.0, Role::Pool)), ("n4", caps(16, 64.0, Role::Pool))]);
         let run = |s: &mut Sched, node: &str| {
             let mut r = req("sweep", Kind::Build, Some(node));
             (r.agent, r.class) = (Some("AGENTX".into()), "build bash sweep.sh @sweep".into());
             s.request(r, 0)
         };
         let (hung, writing, working) = (run(&mut s, "n0"), run(&mut s, "n1"), run(&mut s, "n2"));
-        assert_eq!(grants(&s.tick(0)).len(), 3);
-        let all = [&hung, &writing, &working];
+        // a screen lease devhub runs (CI's live replay) waits for no one; a lane's own screen
+        // session waits for its user (L1922848 sat 19 min on a parked app unsaid, 11-27)
+        let screen = |s: &mut Sched, lane: &str, node: &str| {
+            let mut r = req(lane, Kind::Screen, Some(node));
+            r.est_min = Some(112.0);
+            s.request(r, 0)
+        };
+        let (replay, session) = (screen(&mut s, CI_LANE, "n3"), screen(&mut s, "look", "n4"));
+        assert_eq!(grants(&s.tick(0)).len(), 5);
+        let all = [&hung, &writing, &working, &replay, &session];
         for id in all { s.started(id, "{}"); }
         let look = |s: &mut Sched, at: u64, out: u64| {
             // (its output never grew past nothing: silent since its grant)
-            s.set_info(&hung, &format!(r#"{{"idle_s":0,"slow_s":{},"out_bytes":0}}"#, at / 1000), at);
+            for id in [&hung, &replay, &session] {
+                s.set_info(id, &format!(r#"{{"idle_s":0,"slow_s":{},"out_bytes":0}}"#, at / 1000), at);
+            }
             s.set_info(&writing, &format!(r#"{{"idle_s":0,"slow_s":{},"out_bytes":{out}}}"#, at / 1000), at);
             s.set_info(&working, r#"{"idle_s":0,"slow_s":0,"out_bytes":100}"#, at);
             beat_all(s, at);
@@ -16590,6 +18842,7 @@ mod tests {
         assert!(line.contains("under 50% of a core for 10m10s and its output grown none for 10m10s") && line.contains(&format!("`devhub job result {hung}`")) && line.contains("devhub does not end it"), "{line}");
         assert_eq!(said(&a, &writing), 0, "its output grows: it works");
         assert_eq!(said(&a, &working), 0, "at a core: it works");
+        assert_eq!((said(&a, &replay), said(&a, &session)), (1, 0), "devhub's own screen lease is said within its declared run (its parked JIT then ends it), a lane's own screen session is its user's");
         let a = look(&mut s, 900_000, 400);
         assert_eq!(said(&a, &hung), 0, "said once");
         assert_eq!(state(&s, &hung).0, "granted", "only said: its lane decides");
@@ -16635,6 +18888,34 @@ mod tests {
         look(&mut s, 41 * 60_000, 50, 400);
         assert!(s.output_silent_rows(41 * 60_000).is_empty(), "its output grew: off the list");
         invariants(&s);
+    }
+
+    #[test]
+    fn output_silence_clock_survives_master_restart() {
+        let nodes = [("a", caps(16, 64.0, Role::Pool)), ("b", caps(16, 64.0, Role::Pool))];
+        let mut s = sched(&nodes);
+        let [silent, writing] = ["a", "b"].map(|node| s.request(req("output", Kind::Test, Some(node)), 0));
+        s.tick(0);
+        for id in [&silent, &writing] {
+            assert!(s.started(id, "{}"));
+            s.set_info(id, r#"{"out_bytes":512}"#, 1_000);
+        }
+
+        let restart = 10 * 60_000;
+        let mut restored = sched(&nodes);
+        for line in s.live_lines() { restored.restore(&line, restart); }
+        for id in [&silent, &writing] {
+            let l = restored.get(id).unwrap();
+            assert_eq!((l.out_bytes, l.out_grew_ms), (512, Some(1_000)), "both parts of the output sample survive");
+        }
+        restored.set_info(&writing, r#"{"out_bytes":513}"#, restart + 5_000);
+        assert_eq!(restored.get(&writing).unwrap().out_grew_ms, Some(restart + 5_000));
+        let now = OUTPUT_SILENT_MS + 2_000;
+        restored.set_info(&silent, r#"{"out_bytes":512}"#, now);
+        restored.say_output_silent(now);
+        let warned = |id: &str| restored.out.iter().any(|a| matches!(a, Action::Event(r) if r.sev == Sev::Warn && r.line.contains(id) && r.line.contains("its output grown none")));
+        assert!(warned(&silent), "an unchanged count preserves the pre-restart silence");
+        assert!(!warned(&writing), "a new byte starts a new silence interval");
     }
 
     #[test]
@@ -17726,6 +20007,28 @@ mod tests {
     }
 
     #[test]
+    fn stop_by_ends_granted_lease_without_excluding_node_and_preserves_reason() {
+        let mut s = sched(&[("a", caps(16, 64.0, Role::Pool))]);
+        let id = s.request(req("lane", Kind::Test, None), 0);
+        let reason = "stopped by user: stalled";
+        assert_eq!(s.stop_by(&id, reason, 0), None, "queued");
+        assert_eq!(grants(&s.tick(1)), [id.clone()]);
+        assert_eq!(s.stop_by(&id, reason, 1), None, "still starting");
+        s.started(&id, "{}");
+        assert_eq!(s.stop_by(&id, reason, 2).as_deref(), Some("a"));
+        assert_eq!(state(&s, &id), ("ended stopped".into(), reason.into()));
+        assert_eq!(s.stop_by(&id, reason, 3), None, "already ended");
+        assert!(s.excluded.is_empty());
+        s.cleaned("a", &id, 0);
+        let next = s.request(req("lane", Kind::Test, None), 4);
+        assert_eq!(grants(&s.tick(5)), [next.clone()], "the same lane can use its box again");
+        let ledger = s.get(&id).unwrap().ledger_line();
+        assert!(ledger.contains(r#""how":"stopped""#) && ledger.contains(r#""reason":"stopped by user: stalled""#), "{ledger}");
+        s.stop("lane", 6);
+        assert!(!s.get(&next).unwrap().ledger_line().contains(r#""reason":"#), "an ordinary lane stop has no manual reason");
+    }
+
+    #[test]
     fn cancel_ends_one_lease_and_keeps_the_lane_off_that_node() {
         let mut s = sched(&[("a", caps(64, 256.0, Role::Pool)), ("b", caps(64, 256.0, Role::Pool)), ("c", caps(64, 256.0, Role::Pool))]);
         let x = s.request(req("lane-x", Kind::Build, Some("a")), 0);
@@ -17755,6 +20058,28 @@ mod tests {
         let later = s.request(req("lane-x", Kind::Build, None), CANCEL_EXCLUDE_MS + 100);
         s.tick(CANCEL_EXCLUDE_MS + 101);
         assert!(s.get(&later).unwrap().state.live());
+    }
+
+    #[test]
+    fn a_pending_keep_survives_rotation_of_the_recent_lease_history() {
+        let mut s = sched(&[("a", caps(16, 64.0, Role::Pool))]);
+        let mut r = req("keeper", Kind::Test, Some("a"));
+        let dst = std::env::temp_dir().join("kept").display().to_string();
+        r.keep_dir = Some(dst.clone());
+        let id = s.request(r, 0);
+        assert_eq!(grants(&s.tick(1)), [id.clone()]);
+        s.started(&id, "{}");
+        s.release(&id, "released", 2);
+        for _ in 0..KEEP_ENDED {
+            let queued = s.request(Req::new("queued", Kind::Test), 3);
+            s.release(&queued, "unasked", 3);
+        }
+        assert!(!s.recent_ended(KEEP_ENDED).iter().any(|l| l.id == id));
+        assert_eq!(s.get(&id).unwrap().req.keep_dir.as_ref(), Some(&dst), "teardown can still find its source and destination");
+        s.end_for_memory(&id, "memory", 4);
+        assert!(matches!(&s.get(&id).unwrap().state, State::Ended(how) if how == "memory"));
+        assert_eq!(s.finish_keep(&id, false), Some(dst));
+        assert!(s.get(&id).is_none(), "the extra record lives only through copy completion");
     }
 
     #[test]
@@ -17823,6 +20148,7 @@ mod tests {
         r.exec_profile = super::super::argv::ExecProfile::of(&["makepad".into()]);
         r.warms = Some("warm-lane".into());
         r.joins = Some("L42".into());
+        r.set = Some("walk/3".into());
         r.series = Some("series-a".into());
         r.pin_why = Some("its files are in that home".into());
         r.avoid = vec!["box-b".into(), "box-c".into()];
@@ -17844,6 +20170,7 @@ mod tests {
         r.jit = Some("app-a".into());
         r.cpu_target = Some("generic".into());
         r.hint = vec!["loader-id".into()];
+        r.tree_jit = vec!["tree-id-a".into(), "tree-id-b".into()];
         r.own_jit = vec!["own-id".into()];
         r.holder = Some(42);
         r.master = true;
@@ -17856,10 +20183,12 @@ mod tests {
         r.since_ms = Some(123);
         r.place_ms = Some(99);
         r.run_ms = Some(100);
+        r.then_timed = Some(parse_needs("arch=x64,os=linux"));
+        r.keep_dir = Some(if cfg!(windows) { r"C:\devhub-keep" } else { "/devhub-keep" }.into());
         r.cores_default = true;
         r.lost_on = vec!["box-a".into(), "box-b".into()];
         let json = r.to_json();
-        assert_eq!(Req::parse(&json).unwrap(), r);
+        assert_eq!(Req::parse(&json).unwrap(), r, "the saved request keeps all fields including its tree keys in compiler order");
         let makepad_strict_json::Value::Obj(fields) = makepad_strict_json::parse(json.as_bytes()).unwrap() else { panic!("request is an object") };
         for (k, _) in &fields { assert!(REQ_KEYS.contains(&k.as_str()), "written lease field {k} is accepted"); }
         for k in REQ_KEYS { assert!(fields.iter().any(|(key, _)| key == k), "accepted lease field {k} is written"); }
@@ -18009,7 +20338,7 @@ mod tests {
         let a = at(&mut s, 10 * min, 30.0, desktop(9.0, false));
         assert_eq!(grants(&a), vec![g.clone()], "past its wait it starts beside its GPU's use: {:?}", state(&s, &g));
         assert_eq!(said(&a), vec![format!("{g} timed, its GPU's timing, of fabxr (GPUAGENT) has waited 10m00s for a quiet box, and what keeps it is no lease's work: box-a not quiet at any look for 10m00s (its GPU is 30% busy outside its leases: what uses it, helper pid 403 at 30% of the GPU). It starts there all the same: its timings carry that load, which its release measures. Clean ones need box-a with its GPU under 10% busy outside its leases: stop or pause those processes there, or ask it of another box")]);
-        let start = super::super::master::lease_start_line(s.get(&g).unwrap(), "null", 1.0, 1.0, None, None, None, None);
+        let start = super::super::master::lease_start_line(s.get(&g).unwrap(), "null", 1.0, 1.0, None, None, None, None, None);
         assert!(start.contains(",\"gpu\":true,") && start.contains(",\"unquiet\":\"box-a: its GPU is 30% busy outside its leases: what uses it, helper pid 403 at 30% of the GPU\""), "its node's start hears it is a GPU timing, and what it starts beside: {start}");
         s.started(&g, "{}");
         for m in 11..14 {
@@ -18024,7 +20353,7 @@ mod tests {
         let g2 = s.request(Req::parse(r#"{"lane":"fabxr2","kind":"gpu","needs":{"os":"macos"}}"#).unwrap(), 15 * min);
         assert_eq!(grants(&at(&mut s, 15 * min + 1, 2.0, desktop(9.0, false))), vec![g2.clone()], "{:?}", state(&s, &g2));
         assert_eq!(node_of(&s, &g2).as_deref(), Some("box-a"));
-        assert!(!super::super::master::lease_start_line(s.get(&g2).unwrap(), "null", 1.0, 1.0, None, None, None, None).contains("unquiet"), "a start on a quiet GPU is beside nothing");
+        assert!(!super::super::master::lease_start_line(s.get(&g2).unwrap(), "null", 1.0, 1.0, None, None, None, None, None).contains("unquiet"), "a start on a quiet GPU is beside nothing");
     }
 
     /// A session is charged the RAM its node measured, not its kind's default, and a new one asks
@@ -18923,12 +21252,37 @@ mod tests {
         let settling = gone.request(huge.clone(), 1);
         assert_eq!((grants(&gone.tick(1)), node_of(&gone, &settling).as_deref()), (vec![settling.clone()], Some("small")), "big settling: {:?}", state(&gone, &settling));
 
-        let mut only_small = sched(&[("small", small)]);
+        let mut only_small = sched(&[("small", small.clone())]);
         only_small.record_resources("huge", "test", Some(24.0), None);
         let only = only_small.request(huge.clone(), 0);
         assert_eq!(grants(&only_small.tick(0)), vec![only.clone()], "a sole undersized box still grants the request");
         assert_eq!(node_of(&only_small, &only).as_deref(), Some("small"), "the sole box takes the cut");
         assert_eq!(only_small.get(&only).unwrap().cost.ram_gb, 23.0, "the cut takes the sole box's whole budget");
+        // ... and no more than the box measures available beside none of its leases: charged the
+        // whole budget of a Mac that measured 9.7 GB available idle under its 9.8 GB budget, a
+        // test never started there, and held its drained box 29 min (L1818679, 11-26). Beside a
+        // lease the box has measured, it waits for that one to end, and runs alone.
+        let mut short = small.clone();
+        short.ram_avail_gb = 20.0;
+        let mut s2 = sched(&[("small", short.clone())]);
+        s2.record_resources("huge", "test", Some(24.0), None);
+        let mut other = overlay("other", Some("small"), 1.0);
+        other.ram_gb = Some(4.0);
+        let other = s2.request(other, 0);
+        assert_eq!(grants(&s2.tick(0)), vec![other.clone()]);
+        s2.leases.iter_mut().find(|r| r.id == other).unwrap().ram_held_gb = Some(4.0);
+        short.ram_avail_gb = 16.0;
+        s2.set_caps("small", short.clone(), 0);
+        let cut = s2.request(huge.clone(), 1);
+        assert!(grants(&s2.tick(1)).is_empty(), "it runs alone: {:?}", state(&s2, &cut));
+        assert!(state(&s2, &cut).1.starts_with("budget ram 23.0 GB, in use 4.0 GB, asked 20.0 GB"), "{:?}", state(&s2, &cut));
+        release_clean(&mut s2, &other, 2);
+        short.ram_avail_gb = 20.0;
+        s2.set_caps("small", short, 2);
+        let out = s2.tick(2);
+        assert_eq!(grants(&out), vec![cut.clone()], "the box free, it starts: {:?}", state(&s2, &cut));
+        assert_eq!(s2.get(&cut).unwrap().cost.ram_gb, 20.0, "on all the box measures available");
+        assert!(out.iter().any(|a| matches!(a, Action::Event(r) if r.line.contains("runs on small on 20.0 GB, all the box measures available beside none of its leases (its budget there is 23.0 GB), under its class's measured need of 28.8 GB"))), "said so");
         huge.node = Some("small".into());
         let named = s.request(huge, 3);
         assert_eq!(grants(&s.tick(3)), vec![named.clone()], "naming the small box still grants a cut");
@@ -19076,6 +21430,21 @@ mod tests {
         s.tick(5);
         assert_eq!(node_of(&s, &timed).as_deref(), Some("bench"), "{:?}", state(&s, &timed));
         release_clean(&mut s, &timed, 6);
+        // a timed run that opens windows asks gui=1 and gets the bench box's WM display; a screen
+        // lease is no timed series, and its refusal names the timed path: a lane's timed GUI
+        // measurement asked a screen lease there, and moved to a pool box knowing no other (11-26)
+        assert!(BENCH_PIN.contains("ask timed (with --needs gui=1 when it opens windows"), "{BENCH_PIN}");
+        let mut shown = caps(16, 64.0, Role::Bench);
+        shown.display = Some("wm:makepad-wm-0".into());
+        s.set_caps("bench", shown, 6);
+        let mut gui = req("timed-gui", Kind::Timed, Some("bench"));
+        gui.needs = vec![("gui".into(), "1".into())];
+        assert_eq!(s.never_places(&Req { kind: Kind::Screen, ..gui.clone() }).as_deref(), Some(BENCH_PIN));
+        let gui = s.request(gui, 6);
+        beat_all(&mut s, 6);
+        s.tick(6);
+        assert_eq!(node_of(&s, &gui).as_deref(), Some("bench"), "{:?}", state(&s, &gui));
+        release_clean(&mut s, &gui, 6);
         // the pool box down: the bench box takes what waits
         s.nodes.get_mut("pool").unwrap().up = false;
         beat_all(&mut s, 7);
@@ -19204,6 +21573,19 @@ mod tests {
             c.audio_out = out;
             assert_eq!((meets(&c, "audio", "1"), meets(&c, "audio", ""), meets(&c, "audio", "0")), (yes, yes, !yes), "{out:?}");
         }
+        // placed: a Linux box whose hub heard its output run takes audio work, past a Mac whose
+        // output stopped (only Macs were measured, and audio=1 work queued for them alone while
+        // every Linux box's output ran, 11-26)
+        let mut mac = caps(16, 64.0, Role::Pool);
+        (mac.os, mac.audio_out) = ("macos".into(), Some(false));
+        let mut linux = caps(16, 64.0, Role::Pool);
+        linux.audio_out = Some(true);
+        let mut s = sched(&[("mac", mac), ("linux", linux)]);
+        let mut tune = req("x", Kind::Test, None);
+        tune.needs = vec![("audio".into(), "1".into())];
+        let tune = s.request(tune, 0);
+        assert_eq!(grants(&s.tick(0)), vec![tune.clone()]);
+        assert_eq!(node_of(&s, &tune).as_deref(), Some("linux"));
     }
 
     /// `gpu=1` asks for a GPU: read as part of a name, it denied most and passed any with a 1 in it.
@@ -19363,6 +21745,39 @@ mod tests {
         beat_all(&mut s, late);
         s.tick(late);
         assert!(node_of(&s, &more).is_none() && state(&s, &more).1.contains(&format!("held for whole {screen}")), "passed for its own run, the whole-box ask keeps its box: {:?}", state(&s, &more));
+        invariants(&s);
+        // A whole-box ask that names its box (a series) runs nowhere else: land work another box
+        // could take waits for that box, and passes the series only where no other box could take
+        // it. A lane's 2-h series pinned to its box stood first in queue 30 min while post-land
+        // tests shards took that box one after another (L1834214, 11-26).
+        let mut s = sched(&[("solo", big()), ("other", big())]);
+        let pinned = |lane: &str, node: &str, cores: f64| Req { node: Some(node.into()), pin_why: Some("its box".into()), cores: Some(cores), ..on_mac(lane) };
+        let (busy, full) = (s.request(pinned("busy", "solo", 2.0), 0), s.request(pinned("full", "other", 16.0), 0));
+        beat_all(&mut s, 0);
+        s.tick(0);
+        s.started(&busy, "{}");
+        s.started(&full, "{}");
+        let mut series = req("beading", Kind::Screen, Some("solo"));
+        (series.needs, series.whole, series.est_min, series.series) = (vec![("os".into(), "macos".into())], true, Some(120.0), Some("beading-m".into()));
+        series.priority = Priority::Background;
+        let series = s.request(series, 1);
+        beat_all(&mut s, 1);
+        s.tick(1);
+        assert!(s.holds.get("solo").is_some_and(|h| h.id == series), "the series drains its box: {:?}", s.holds);
+        let mut shard = on_mac("landq-mac");
+        shard.agent = Some("devhub-bucket".into());
+        let shard = s.request(shard, 2);
+        beat_all(&mut s, 2);
+        s.tick(2);
+        assert!(node_of(&s, &shard).is_none(), "the shard another box can take keeps off the series' box: {:?}", state(&s, &shard));
+        release_clean(&mut s, &full, 3);
+        beat_all(&mut s, 3);
+        s.tick(3);
+        assert_eq!(node_of(&s, &shard).as_deref(), Some("other"), "{:?}", state(&s, &shard));
+        release_clean(&mut s, &busy, 4);
+        beat_all(&mut s, 4);
+        s.tick(4);
+        assert_eq!(node_of(&s, &series).as_deref(), Some("solo"), "{:?}", state(&s, &series));
         invariants(&s);
     }
 
@@ -20149,6 +22564,35 @@ mod tests {
         assert!(node_of(&s, &late).is_none(), "{:?}", state(&s, &late));
         beat_all(&mut s, 8 + 7 * 60_000);
         assert_eq!(grants(&s.tick(8 + 7 * 60_000)), vec![late.clone()], "{:?}", state(&s, &late));
+
+        // Gates back to back with a landing in each: one gate's cycle (its run, 5 min by its
+        // declared measure) bounds the wait, and then it takes the tree as the running gate ends,
+        // before the next gate's ask. CI's 10 s tree asks waited 82-100 min so (11-27).
+        release_clean(&mut s, &late, 8 + 8 * 60_000);
+        let t0 = 8 + 9 * 60_000;
+        let mut gate = s.request(in_tree("landq-fast", Kind::Gate, None, 8.0, 5.0), t0);
+        beat_all(&mut s, t0);
+        assert_eq!(grants(&s.tick(t0)), vec![gate.clone()]);
+        let starved = s.request(owed_build(t0), t0 + 1);
+        let mut t = t0 + 1;
+        for i in 0..3 {
+            s.landed.push((format!("tip-{}", 3 + i), t + 1));
+            beat_all(&mut s, t + 2);
+            assert!(grants(&s.tick(t + 2)).is_empty() && state(&s, &starved).1.contains("leaves its tree to landq-fast's next landing gate"), "inside a gate's cycle it waits: {:?}", state(&s, &starved));
+            t += 2 * 60_000;
+            release_clean(&mut s, &gate, t);
+            if t < t0 + 1 + 5 * 60_000 {
+                gate = s.request(in_tree("landq-fast", Kind::Gate, None, 8.0, 5.0), t);
+                beat_all(&mut s, t);
+                assert_eq!(grants(&s.tick(t)), vec![gate.clone()], "a gate within the cycle goes first: {:?}", state(&s, &starved));
+            }
+        }
+        // past it: the gate that ends now leaves the tree to the build, and the next gate waits for it
+        let next = s.request(in_tree("landq-fast", Kind::Gate, None, 8.0, 5.0), t);
+        beat_all(&mut s, t);
+        assert_eq!(grants(&s.tick(t)), vec![starved.clone()], "past one gate's cycle it takes the tree first: {:?} {:?}", state(&s, &starved), state(&s, &next));
+        assert_eq!(state(&s, &next).0, "queued", "the next gate goes after it");
+        invariants(&s);
     }
 
     /// A land queue's gate holds its box while it waits, as an owed leg does: lane work that would
@@ -21123,6 +23567,14 @@ mod tests {
         let a = s.tick(late + 1);
         assert_eq!(grants(&a), vec![leg.clone()]);
         assert!(a.iter().any(|a| matches!(a, Action::Event(r) if r.line.starts_with(&format!("{leg} ")) && r.line.contains("granted to jitlegs-arm64 after 10m00s"))), "{a:?}");
+        // so is an owed CI shard's, placed at its run's start: asked a second ago, it waited a
+        // second, its run's age said beside it (two read 4h18m first in queue, 82 s asked, 11-27)
+        let mut c = req(CI_LANE, Kind::Ci, Some("a"));
+        (c.agent, c.prio, c.since_ms, c.place_ms) = (Some("devhub-ci".into()), DEFAULT_PRIO - 1, Some(late + 2), Some(0));
+        let ci = s.request(c, late + 2);
+        let l = s.get(&ci).unwrap();
+        assert_eq!((l.asked_ms, l.waited_ms(late + 1_002)), (0, 1_000), "placed at its run's start, it waited its own second");
+        assert!(l.owed_age(late + 2).contains("(its run owed a box for 1h05m)"), "{}", l.owed_age(late + 2));
     }
 
     /// A box back from an outage (its reservations went with it) goes to the leg owed it before
@@ -21344,7 +23796,7 @@ mod tests {
         s.set_caps("box-a", measured.clone(), 20_000);
         assert_eq!(charge(&s), 2.0, "two looks measured it: the most of them");
         // its next call: the looks of its launch are not its call's
-        s.live_call_ended(&live);
+        s.live_call_ended(&live, s.clock);
         s.live_call_began(&live, 30_000);
         s.live_call_charged(&live, 12.0);
         measured.busy_leases = vec![(live.clone(), 6.0)];
@@ -21371,7 +23823,7 @@ mod tests {
         assert_eq!(grants(&s.tick(0)), vec![whole.clone()]);
         let l = s.get(&whole).unwrap().clone();
         assert_eq!(s.start_cores(&l), 16.0, "the box's, not its cost's {}", l.run_cores());
-        assert!(super::super::master::lease_start_line(&l, "null", s.start_cores(&l), 0.0, None, None, None, None).contains("\"cost\":{\"cores\":16,"), "its start says so");
+        assert!(super::super::master::lease_start_line(&l, "null", s.start_cores(&l), 0.0, None, None, None, None, None).contains("\"cost\":{\"cores\":16,"), "its start says so");
         let small = s.request(overlay("small", Some("box-b"), 2.0), 2);
         assert_eq!(grants(&s.tick(2)), vec![small.clone()]);
         let l = s.get(&small).unwrap().clone();
@@ -21384,7 +23836,7 @@ mod tests {
         assert_eq!(grants(&s.tick(4)), vec![three.clone()], "the box drains for it all the same: {:?}", state(&s, &beside));
         let mut l = s.get(&three).unwrap().clone();
         assert_eq!(s.start_cores(&l), 3.0, "`--whole --cores 3`: told its 3");
-        assert!(super::super::master::lease_start_line(&l, "null", s.start_cores(&l), 0.0, None, None, None, None).contains("\"cost\":{\"cores\":3,"), "its start says so");
+        assert!(super::super::master::lease_start_line(&l, "null", s.start_cores(&l), 0.0, None, None, None, None, None).contains("\"cost\":{\"cores\":3,"), "its start says so");
         l.req.cores = Some(64.0);
         assert_eq!(s.start_cores(&l), 16.0, "at most its box's");
         l.req.cores_default = true;
@@ -21410,7 +23862,7 @@ mod tests {
         s.started(&live, "{}");
         let l = s.get(&live).unwrap().clone();
         assert_eq!(s.live_threads(&l), Some(4), "its box sizes its threads to its ask");
-        assert!(super::super::master::lease_start_line(&l, "null", l.run_cores(), 0.0, None, s.live_threads(&l), None, None).contains("\"threads\":4"), "its start says so");
+        assert!(super::super::master::lease_start_line(&l, "null", l.run_cores(), 0.0, None, s.live_threads(&l), None, None, None).contains("\"threads\":4"), "its start says so");
         let mut none = l.clone();
         none.req.cores = None;
         assert_eq!(s.live_threads(&none), None, "one that asked none: its JIT sizes its own");
@@ -21454,7 +23906,7 @@ mod tests {
         let metered = start(&mut s, r.clone(), 1);
         assert!(metered.run_cores() < 6.0, "{}", metered.run_cores());
         assert_eq!(s.pool_cores(&metered), Some(6), "its class's call p90 5.6, rounded up");
-        let line = super::super::master::lease_start_line(&metered, "null", metered.run_cores(), 0.0, None, None, s.pool_cores(&metered), None);
+        let line = super::super::master::lease_start_line(&metered, "null", metered.run_cores(), 0.0, None, None, s.pool_cores(&metered), None, None);
         assert!(line.contains(",\"pool_cores\":6}"), "its start says so: {line}");
         for _ in 0..9 { s.record_call("live:test:fab", "test", false, 100.0); }
         assert_eq!(s.pool_cores(&metered), Some(64), "at most its box's");
@@ -21576,7 +24028,7 @@ mod tests {
         let row = s.lease_view_line(s.get(&live).unwrap(), 1);
         assert!(row.contains("cores 2 (its call's charge, measured 10.0)"), "its row says it: {row}");
         // its call over, the idle session is charged what it measures: nothing is past a charge
-        s.live_call_ended(&live);
+        s.live_call_ended(&live, s.clock);
         s.live_idle.insert(live.clone());
         assert!(grants(&s.tick(2)).is_empty());
         assert_eq!(state(&s, &ask).1, "budget cores 16, in use 10 (outside its leases 1), asked 8: 10 charged + 1 measured past the charges + 8 asked = 19 of 16");
@@ -21636,6 +24088,8 @@ mod tests {
         release_clean(&mut s, &hub, t);
         // so is its deployment's prebuild under that deployment's room: a lease of the hub
         // build's class (room only, nothing set up on the box), named by its own
+        busy.cpu_pct = Some(87.5);
+        s.set_caps("a", busy.clone(), t);
         let mut deploy = req(&format!("{DEPLOY_BUILD}-a"), Kind::Build, Some("a"));
         (deploy.class, deploy.master) = (HUB_BUILD.into(), true);
         assert!(deploy.hub_build() && deploy.deploy_build() && !deploy.set_up_on_node() && deploy.hub_work() == Some(DEPLOY_BUILD));
@@ -21644,6 +24098,7 @@ mod tests {
         // (a deployment's build runs at background weight for its room's cores, and the ask counts
         // it at that grant, [`Sched::grant_counts`]: 4 tasks waiting for a CPU outside every lease
         // keep it waiting here)
+        busy.cpu_pct = Some(90.0);
         (busy.busy_leases, busy.cpu_wait) = (vec![(first.clone(), 4.5), (DEPLOY_BUILD.to_string(), 6.0)], Some(4.0));
         s.set_caps("a", busy.clone(), t);
         assert!(grants(&s.tick(t)).is_empty(), "{:?}", state(&s, &second));
@@ -21821,7 +24276,7 @@ mod tests {
         s.live_idle.remove(&large);
         assert_eq!(s.charged(s.get(&large).unwrap()).cores, 14.0, "charged what was free while its call runs");
         s.live_idle.insert(large.clone());
-        s.live_call_ended(&large);
+        s.live_call_ended(&large, s.clock);
         s.live_idle.remove(&large);
         assert_eq!(s.charged(s.get(&large).unwrap()).cores, 15.0, "its next call is charged afresh");
         s.live_idle.insert(large.clone());
@@ -21831,6 +24286,271 @@ mod tests {
         assert!(why.contains("(2 of 16 in use)") && why.contains("(live, in a call, 2)"), "{why}");
         assert_eq!(s.call_start_cores(&large), None);
         invariants(&s);
+    }
+
+    /// Interactive calls stacked on one another start on their share of their box when their full
+    /// charges do not fit (the cores free, or their share after background tests keep their floors), and where
+    /// their box holds them to it (`call-cores`, its scopes' CPU quota) they are charged no more,
+    /// whatever they measure: calls charged their measure past their start held 131 cores of the
+    /// Linux pool's 64, one box 61 of its 16 (11-26). A box that cannot hold a call to its share (a
+    /// hub without `call-cores`) charges it its measure, as before.
+    #[test]
+    fn calls_stacked_on_calls_start_on_their_share_and_are_held_to_it() {
+        let mut a = caps(16, 64.0, Role::Pool);
+        let mut s = sched(&[("a", a.clone())]);
+        for launch in [false, true] { s.record_call("live:test:x:lib", "test", launch, 12.0); }
+        let mut ids = Vec::new();
+        for (t, lane) in ["s1", "s2", "s3"].into_iter().enumerate() {
+            let mut r = overlay(lane, Some("a"), 1.0);
+            (r.cores, r.live, r.priority, r.class) = (None, true, Priority::Interactive, "live:test:x:lib".into());
+            let id = s.request(r, t as u64);
+            assert_eq!(grants(&s.tick(t as u64)), vec![id.clone()], "{:?}", state(&s, &id));
+            // (its launch done, it rests until its first call)
+            s.live_idle.insert(id.clone());
+            s.live_called.insert(id.clone());
+            ids.push(id);
+        }
+        let call = |s: &mut Sched, id: &String, t: u64| {
+            let short = s.call_start_cores(id);
+            if let Some((cores, _, _)) = short { s.live_call_charged(id, cores); }
+            s.live_idle.remove(id);
+            s.live_call_began(id, t);
+            short
+        };
+        let mut shard = overlay(TESTS_LANE, Some("a"), 12.0);
+        (shard.priority, shard.class) = (Priority::Background, "tests shard".into());
+        let shard = s.request(shard, 3);
+        assert_eq!(grants(&s.tick(3)), vec![shard.clone()], "the shard starts beside the idle calls");
+        assert!(s.started(&shard, "{}"), "the shard is running when the calls resume");
+        s.record_resources("tests shard", "test", None, Some(6.0));
+        s.leases.iter_mut().find(|l| l.id == ids[0]).unwrap().priority = Priority::Background;
+        let why = s.live_room(&ids[0]).expect_err("a background call waits for its full twelve cores");
+        assert!(why.contains("6 of 16 in use") && why.contains(&format!("{shard} (test, 6)")), "its wait names the shard and its floor: {why}");
+        s.leases.iter_mut().find(|l| l.id == ids[0]).unwrap().priority = Priority::Interactive;
+        assert_eq!(s.live_room(&ids[0]), Ok(()), "the floor lets an interactive call start short");
+        assert_eq!(call(&mut s, &ids[0], 4), Some((10.0, 12.0, 6.0)), "the first call's share leaves the shard six cores");
+        assert_eq!(s.call_start_cores(&ids[1]), Some((5.0, 12.0, 16.0)), "two calls share the ten cores left by the shard");
+        s.live_idle.insert(ids[0].clone());
+        s.live_call_ended(&ids[0], s.clock);
+        release_clean(&mut s, &shard, 5);
+        assert_eq!(call(&mut s, &ids[0], 10), None, "the first call's 12 cores fit");
+        assert_eq!(call(&mut s, &ids[1], 10), Some((8.0, 12.0, 12.0)), "the second starts on its half of the box, more than the 4 free");
+        assert_eq!(call(&mut s, &ids[2], 10), Some((5.0, 12.0, 20.0)), "the third on its third, none free");
+        assert_eq!(s.call_confined(s.get(&ids[1]).unwrap()), Some(8.0), "its box holds it to its share");
+        a.cpu_pct = Some(95.0);
+        a.busy_leases = vec![(ids[1].clone(), 12.5)];
+        for t in [11, 12] { s.set_caps("a", a.clone(), t); }
+        assert_eq!(s.charged(s.get(&ids[1]).unwrap()).cores, 8.0, "measured past its share, it is charged its share");
+        a.features.retain(|f| f != "call-cores");
+        for t in [13, 14] { s.set_caps("a", a.clone(), t); }
+        assert_eq!(s.call_confined(s.get(&ids[1]).unwrap()), None);
+        assert_eq!(s.charged(s.get(&ids[1]).unwrap()).cores, 12.5, "a hub that cannot hold it there charges its measure");
+        invariants(&s);
+    }
+
+    #[test]
+    fn direct_outside_work_survives_yielding_lease_wait_subtraction() {
+        let mut c = caps(16, 64.0, Role::Pool);
+        let mut s = sched(&[("box-a", c.clone())]);
+        let ask = |lane, priority, cores| Req { priority, ..overlay(lane, Some("box-a"), cores) };
+        let shard = s.request(ask("shard", Priority::Background, 6.0), 0);
+        assert_eq!(grants(&s.tick(0)), vec![shard.clone()]);
+        assert!(s.started(&shard, "{}"));
+        c.cpu_pct = Some(100.0);
+        c.busy_leases = vec![(shard.clone(), 16.0)];
+        c.cpu_wait = Some(10.0);
+        c.wait_leases = vec![(shard, 10.0)];
+        c.outside_cores = 4.0;
+        s.set_caps("box-a", c, 1);
+
+        for priority in [Priority::Background, Priority::Interactive] {
+            let id = s.request(ask("large", priority, 8.0), 1);
+            s.tick(1);
+            let l = s.get(&id).unwrap();
+            assert_eq!(l.state, State::Queued, "six granted cores and four outside leave only six free");
+            assert!(l.reason.contains("budget cores") && l.reason.contains("outside its leases 4"), "{}", l.reason);
+            assert!(s.cancel(&id, 1));
+        }
+        let fits = s.request(ask("fits", Priority::Background, 6.0), 1);
+        assert_eq!(grants(&s.tick(1)), vec![fits], "six more cores fit exactly");
+    }
+
+    #[test]
+    fn watched_wm_outside_work_counts_under_oversubscription_and_confines_background_work() {
+        let mut a = caps(16, 64.0, Role::Pool);
+        a.slots = vec![(Kind::Test, 8)];
+        let mut b = a.clone();
+        let mut s = sched(&[("a", a.clone()), ("b", b.clone())]);
+        let background = |lane, node, cores| Req { priority: Priority::Background, ..overlay(lane, node, cores) };
+        let shard = s.request(background("landq-tests", Some("a"), 8.0), 0);
+        let other = s.request(background("other", Some("b"), 8.0), 0);
+        assert_eq!(grants(&s.tick(0)).len(), 2);
+        for id in [&shard, &other] { assert!(s.started(id, "{}")); }
+
+        let hold = |actions: &[Action], expected| matches!(actions,
+            [Action::HoldGrant { node, id, cores }] if node == "a" && id == &shard && *cores == expected);
+        a.watched = true;
+        a.cpu_pct = Some(100.0);
+        a.outside_cores = 4.0;
+        a.busy_leases = vec![(shard.clone(), 16.0)];
+        s.set_caps("a", a.clone(), 1);
+        assert_eq!(s.charged(s.get(&shard).unwrap()).cores, 16.0);
+        for yielding in [false, true] {
+            assert_eq!(s.outside_cores("a", yielding), 4.0, "a fully charged box still measures the WM");
+        }
+        assert!(hold(&s.sync_grant_caps(), Some(8.0)), "the watched WM confines the shard to its grant");
+        a.watched = false;
+        s.set_caps("a", a.clone(), 2);
+        assert!(hold(&s.sync_grant_caps(), None), "leaving the desktop releases the quota");
+
+        // After the burst the shard uses its grant. The WM can confine it even before another overrun.
+        let now = MEASURE_WINDOW_MS + 3;
+        a.busy_leases[0].1 = 8.0;
+        a.cpu_pct = Some(75.0);
+        a.watched = true;
+        b.busy_leases = vec![(other, 8.0)];
+        b.cpu_pct = Some(50.0);
+        b.load1 = 14.0;
+        beat_all(&mut s, now);
+        s.set_caps("a", a.clone(), now);
+        s.set_caps("b", b.clone(), now);
+        assert!(hold(&s.sync_grant_caps(), Some(8.0)));
+        assert!(s.busy("a") < s.busy("b"), "the watched box has the lower load");
+        let next = s.request(background("next", None, 2.0), now);
+        s.tick(now);
+        assert_eq!(node_of(&s, &next).as_deref(), Some("b"), "unpinned work prefers the unwatched desktop");
+        let pinned = s.request(background("pinned", Some("a"), 4.0), now);
+        s.tick(now);
+        assert_eq!(node_of(&s, &pinned).as_deref(), Some("a"), "pinned work can use the watched box's remaining cores");
+        assert!(s.started(&pinned, "{}"));
+        assert!(s.started(&next, "{}"));
+
+        let mut quick = background("quick", Some("a"), 2.0);
+        quick.class = "check:quick".into();
+        for _ in 0..LEND_MIN_RUNS { s.record_node_cost(&quick.class, "test", "a", 5_000); }
+        let quick = s.request(quick, now);
+        let aged = now + STARVED_MS + 1;
+        beat_all(&mut s, aged);
+        s.set_caps("a", a, aged);
+        s.set_caps("b", b, aged);
+        s.tick(aged);
+        let ask = s.get(&quick).unwrap();
+        assert_eq!(ask.state, State::Queued, "short and aged background work waits at a watched box's core limit");
+        assert!(!s.short_on("a", ask) && !s.age_starts("a", ask));
+        assert!(s.short_on("b", ask) && s.age_starts("b", ask), "the same ask otherwise qualifies for each exception");
+    }
+
+    /// A lease past its grant is held to it while interactive work on its box wants the cores it
+    /// borrowed, and let go once none does: a land queue's fast gate measured 9.8 cores on a grant
+    /// of 8 and a tests shard 6.3 on 4 beside a person's 3-core screen session, which waited at
+    /// "in use 17.6" of 16 (11-27). Nobody attended's work borrows idle cores freely; a yielding
+    /// shard's floor is never past its grant; calls share what firm work leaves. A Mac, or a box
+    /// that cannot hold a lease to its grant, holds none and counts its measure.
+    #[test]
+    fn an_overrun_lease_is_held_to_its_grant_for_interactive_work_and_lifted_after() {
+        let holds = |a: &[Action]| { let mut h: Vec<(String, String, Option<f64>)> = a.iter().filter_map(|a| match a { Action::HoldGrant { id, node, cores } => Some((id.clone(), node.clone(), *cores)), _ => None }).collect(); h.sort_by(|a, b| a.0.cmp(&b.0)); h };
+        let setup = |os: &str, grant_cores: bool| {
+            let mut c = caps(16, 64.0, Role::Pool);
+            c.os = os.into();
+            if !grant_cores { c.features.retain(|f| f != "grant-cores"); }
+            let mut s = sched(&[("a", c.clone())]);
+            let mut gate = overlay("landq-fast", Some("a"), 8.0);
+            (gate.kind, gate.priority) = (Kind::Gate, Priority::Interactive);
+            let gate = s.request(gate, 0);
+            let mut shard = overlay(TESTS_LANE, Some("a"), 4.0);
+            (shard.priority, shard.class) = (Priority::Background, "tests shard".into());
+            let shard = s.request(shard, 0);
+            let mut granted = grants(&s.tick(0));
+            granted.sort();
+            let mut both = vec![gate.clone(), shard.clone()];
+            both.sort();
+            assert_eq!(granted, both, "{:?} {:?}", state(&s, &gate), state(&s, &shard));
+            for id in [&gate, &shard] { assert!(s.started(id, "{}")); }
+            s.record_resources("tests shard", "test", None, Some(6.0));
+            (c.cpu_pct, c.busy_leases) = (Some(100.0), vec![(gate.clone(), 9.8), (shard.clone(), 6.3)]);
+            for t in [1, 2] { s.set_caps("a", c.clone(), t); }
+            (s, gate, shard)
+        };
+        let (mut s, gate, shard) = setup("linux", true);
+        assert_eq!(s.yield_floor(s.get(&shard).unwrap()), 4.0, "a yielding shard's floor is at most its grant, not its class's 6");
+        beat_all(&mut s, 3);
+        assert!(holds(&s.tick(3)).is_empty(), "with no interactive work there the gate borrows idle cores");
+        // a person's visible screen session asks the box: it fits at the grants (8 + 4 + 3 of 16),
+        // and the work past them is held to them in the same tick
+        let mut town = req("workdemo", Kind::Screen, Some("a"));
+        (town.src, town.rev, town.cores) = (Src::Overlay, Some(format!("work@{}", "a".repeat(40))), Some(3.0));
+        (town.live, town.priority) = (true, Priority::Interactive);
+        let town = s.request(town, 4);
+        beat_all(&mut s, 4);
+        let out = s.tick(4);
+        assert_eq!(grants(&out), vec![town.clone()], "{:?}", state(&s, &town));
+        assert_eq!(holds(&out), [(gate.clone(), "a".to_string(), Some(8.0)), (shard.clone(), "a".to_string(), Some(4.0))]);
+        assert!(s.started(&town, "{}"));
+        assert!(s.overruns_said("a", "", true).contains(&format!("{gate} past its grant of 8 cores, held to its grant (measured 9.8)")), "{}", s.overruns_said("a", "", true));
+        assert!(s.lease_view_line(s.get(&gate).unwrap(), 5).contains("held to 8"), "{}", s.lease_view_line(s.get(&gate).unwrap(), 5));
+        // held, the gate measures its grant: still held while the session runs, between its calls too
+        let mut c = s.nodes["a"].caps.clone().unwrap();
+        c.busy_leases = vec![(gate.clone(), 8.0), (shard.clone(), 4.0), (town.clone(), 2.5)];
+        for t in [5, 6] { s.set_caps("a", c.clone(), t); }
+        beat_all(&mut s, 6);
+        assert!(holds(&s.tick(6)).is_empty(), "no let go on its own lower measure");
+        s.live_idle.insert(town.clone());
+        beat_all(&mut s, 7);
+        assert!(holds(&s.tick(7)).is_empty(), "a person's visible session holds the box between its calls");
+        // the session ends: both let go, once
+        release_clean(&mut s, &town, 8);
+        beat_all(&mut s, 9);
+        assert_eq!(holds(&s.tick(9)), [(gate.clone(), "a".to_string(), None), (shard.clone(), "a".to_string(), None)]);
+        beat_all(&mut s, 10);
+        assert!(holds(&s.tick(10)).is_empty(), "said once");
+        invariants(&s);
+        // a call beside the gate and the shard's floor starts on what they leave, not past the gate
+        let (mut s, gate, shard) = setup("linux", true);
+        for launch in [false, true] { s.record_call("live:test:x:lib", "test", launch, 12.0); }
+        let mut live = overlay("caller", Some("a"), 1.0);
+        (live.live, live.priority, live.class) = (true, Priority::Interactive, "live:test:x:lib".into());
+        let live = s.request(live, 3);
+        beat_all(&mut s, 3);
+        let out = s.tick(3);
+        assert_eq!(grants(&out), vec![live.clone()], "{:?}", state(&s, &live));
+        assert_eq!(holds(&out), [(gate.clone(), "a".to_string(), Some(8.0)), (shard.clone(), "a".to_string(), Some(4.0))], "its launch holds them");
+        assert!(s.started(&live, "{}"));
+        // (its calls now charged its class's 12)
+        s.leases.iter_mut().find(|l| l.id == live).unwrap().req.cores = None;
+        s.live_idle.insert(live.clone());
+        s.live_called.insert(live.clone());
+        assert_eq!(s.call_start_cores(&live), Some((4.0, 12.0, 12.0)), "the gate at its grant of 8 and the shard's floor of 4 leave 4: its share is no more");
+        // between its calls a headless session wants nothing, though the box's charges pass its cores
+        assert_eq!(holds(&s.sync_grant_caps()), [(gate.clone(), "a".to_string(), None), (shard.clone(), "a".to_string(), None)], "let go while it is idle");
+        // a restarted master knows the holds its boxes keep
+        s.live_idle.remove(&live);
+        assert_eq!(holds(&s.sync_grant_caps()).len(), 2, "held again by its call");
+        let lines = s.live_lines();
+        let mut back = sched(&[("a", s.nodes["a"].caps.clone().unwrap())]);
+        for line in &lines { back.restore(line, 20); }
+        assert_eq!(back.grant_held_cores(&gate), Some(8.0), "{lines:?}");
+        assert_eq!(back.grant_held_cores(&shard), Some(4.0));
+        invariants(&s);
+        // a Mac, and a box that cannot hold a lease to its grant: no hold, the gate's measure counts
+        for (os, grant_cores) in [("macos", true), ("linux", false)] {
+            let (mut s, _, _) = setup(os, grant_cores);
+            let mut town = req("workdemo", Kind::Screen, Some("a"));
+            (town.src, town.rev, town.cores) = (Src::Overlay, Some(format!("work@{}", "a".repeat(40))), Some(3.0));
+            (town.live, town.priority) = (true, Priority::Interactive);
+            let town = s.request(town, 4);
+            beat_all(&mut s, 4);
+            let out = s.tick(4);
+            assert!(holds(&out).is_empty(), "{os} grant-cores {grant_cores}: no grant hold");
+            if os == "macos" {
+                assert!(grants(&out).is_empty() && state(&s, &town).1.contains("budget cores 16"), "{:?}", state(&s, &town));
+            } else {
+                assert_eq!(grants(&out), [town.clone()], "{:?}", state(&s, &town));
+                let why = &s.get(&town).unwrap().grant_why;
+                assert!(why.contains("a visible live session, starts at once"), "{why}");
+                assert!(why.contains("in use 13.8,"), "the gate's measured 9.8 and the shard's floor of 4: {why}");
+            }
+            invariants(&s);
+        }
     }
 
     /// An idle session keeps a share of its box for its next call, not all of it: none from an ask
@@ -21929,8 +24649,8 @@ mod tests {
         invariants(&s);
     }
 
-    /// On a box that weighs CPU a live launch goes ahead of background shared work: its charges and
-    /// the box's measure don't count, and a launch past the box's cores says by how much. Launches
+    /// On a box that weighs CPU a live launch goes ahead of background shared work. Running tests
+    /// keep their measured floors, and a launch past the box's cores says by how much. Launches
     /// waited 7 min at the median on boxes charged full and half used, and held 75% of what queued
     /// behind holds (11-09). What comes after it waits as ever.
     #[test]
@@ -21968,6 +24688,36 @@ mod tests {
         s.tick(5);
         assert!(s.get(&session).unwrap().state_line(5, "").contains("\"past_budget\":0"));
         invariants(&s);
+
+        // A measured launch would take all 16. A running shard keeps its class's median.
+        for measured in [false, true] {
+            let mut s = sched(&[("a", caps(16, 64.0, Role::Pool))]);
+            if measured {
+                for cores in [12.0, 2.0, 6.0] { s.record_resources("tests shard", "test", None, Some(cores)); }
+            }
+            let mut shard = background(TESTS_LANE, 12.0);
+            shard.class = "tests shard?apps".into();
+            let shard = s.request(shard, 0);
+            assert_eq!(grants(&s.tick(0)), vec![shard.clone()], "the 12-core background shard is admitted");
+            assert_eq!(s.yield_floor(s.get(&shard).unwrap()), 0.0, "a shard still starting has no floor");
+            assert!(s.started(&shard, "{}"), "the shard is running before the launch");
+
+            let mut live = overlay("live-W1", Some("a"), 1.0);
+            (live.cores, live.live, live.priority, live.class) = (None, true, Priority::Interactive, "live:test:x:lib".into());
+            s.record_call(live.class(), "test", true, 16.0);
+            let id = s.request(live, 1);
+            let charge = if measured { 10.0 } else { 16.0 };
+            assert_eq!(grants(&s.tick(1)), vec![id.clone()], "the live test is admitted on its first tick");
+            assert_eq!(s.get(&id).unwrap().cost.cores, charge, "admission counts only the running shard's floor");
+            let short = s.call_start_cores(&id);
+            assert_eq!(short, measured.then_some((10.0, 16.0, 6.0)), "only a measured shard cuts the launch short, by its base class's median");
+            if let Some((cores, ..)) = short { s.live_call_charged(&id, cores); }
+            assert!(s.started(&id, "{}"), "the admitted live test starts");
+            let live = s.get(&id).unwrap();
+            assert_eq!(s.call_confined(live), measured.then_some(10.0), "the call-cores box confines only the short launch");
+            assert_eq!(s.charged(live).cores, charge, "the running launch is charged what it started on");
+        }
+
         // A launch with a choice of boxes takes one it fits within the cores beside the background
         // work there, and the master's log says it chose so: its lane's warm box (a) runs 10 cores
         // of background work, b 4. On a it would stand at 18 of 16, and that box's background run
@@ -22004,6 +24754,189 @@ mod tests {
         assert_eq!(node_of(&s, &again).as_deref(), Some("a"));
         assert_eq!(said(&acts), Vec::<String>::new(), "no box within the cores: no choice to say");
         invariants(&s);
+        // Two live test sessions with two boxes free take a box each, the second leaving the box
+        // that holds its JIT warm: beside the first, which rests between its calls and is charged
+        // none, its calls and the first's would pass the box's cores together, and background work
+        // there yields to both. Two sessions placed so called at once at 16 + 11 of 16 cores while a
+        // tests shard there ran 11-13 times its measure (11-26). With one box free, the second goes
+        // past them all the same, and that is said.
+        let call = |s: &mut Sched, lane: &str, cores: f64, t: u64| {
+            let mut live = overlay(lane, None, cores);
+            (live.live, live.priority) = (true, Priority::Interactive);
+            live.class = format!("live:test:{}:lib", lane.to_ascii_lowercase());
+            s.sticky.insert(lane.to_ascii_lowercase(), "a".into());
+            s.warm.insert((lane.to_ascii_lowercase(), "a".into()));
+            let id = s.request(live, t);
+            beat_all(s, t);
+            let acts = s.tick(t);
+            // its first call ran: it rests until its next
+            s.started(&id, "{}");
+            s.live_idle.insert(id.clone());
+            (id, acts)
+        };
+        let over = |acts: &[Action]| acts.iter().filter_map(|a| match a { Action::Event(r) if r.line.contains(" overcommits ") => Some(r.line.clone()), _ => None }).collect::<Vec<_>>();
+        let mut s = sched(&[("a", caps(16, 64.0, Role::Pool)), ("b", caps(16, 64.0, Role::Pool))]);
+        let (first, acts) = call(&mut s, "live-W4", 10.0, 1);
+        assert_eq!((node_of(&s, &first).as_deref(), over(&acts).len()), (Some("a"), 0), "the first takes its warm box");
+        assert!(s.rests(s.get(&first).unwrap()), "it rests between its calls, charged none");
+        let (second, acts) = call(&mut s, "live-W5", 10.0, 2);
+        assert_eq!(node_of(&s, &second).as_deref(), Some("b"), "the second takes the box with room, not its warm one beside the first");
+        assert!(over(&acts).is_empty(), "{:?}", over(&acts));
+        let mut s = sched(&[("a", caps(16, 64.0, Role::Pool))]);
+        let (_, _) = call(&mut s, "live-W6", 10.0, 1);
+        let (third, acts) = call(&mut s, "live-W7", 10.0, 2);
+        assert_eq!(node_of(&s, &third).as_deref(), Some("a"), "no box with room: it goes past the cores, as before");
+        assert_eq!(over(&acts), vec![format!("{third} (live-w7 live session, its call 10 cores) overcommits a: 10.0 cores of interactive work there and its 10 pass the box's 16; no box with room for it ranked first")]);
+        invariants(&s);
+    }
+
+    #[test]
+    fn a_visible_live_launch_starts_at_once_short_of_its_cores_on_a_full_screen_box() {
+        let screen = Caps { display: Some("wm".into()), cpu_pct: Some(0.0), ..caps(16, 64.0, Role::Pool) };
+        let visible = |lane: &str, node: Option<&str>| {
+            let mut r = overlay(lane, node, 3.0);
+            (r.kind, r.live, r.priority, r.ram_gb) = (Kind::Screen, true, Priority::Interactive, Some(4.0));
+            r
+        };
+        // Each shard's grant, median and current use. Both four-core grants fit beside the gate.
+        let full = [(TESTS_LANE, 4.0, 6.0, 6.3), ("landq-bisect", 4.0, 4.0, 4.0)];
+        let occupied = |mut c: Caps, shards: &[(&str, f64, f64, f64)]| {
+            let mut s = sched(&[("screen", c.clone())]);
+            let mut gate = overlay("landq-fast", Some("screen"), 8.0);
+            (gate.kind, gate.priority, gate.ram_gb) = (Kind::Gate, Priority::Interactive, Some(2.0));
+            let gate = s.request(gate, 0);
+            let mut busy = vec![(gate.clone(), 9.8)];
+            for &(lane, grant, _, measured) in shards {
+                let mut r = overlay(lane, Some("screen"), grant);
+                (r.class, r.priority, r.ram_gb) = (lane.into(), Priority::Background, Some(2.0));
+                busy.push((s.request(r, 0), measured));
+            }
+            assert_eq!(grants(&s.tick(0)).len(), busy.len(), "the gate and shards fit at their grants");
+            for (id, _) in &busy { assert!(s.started(id, "{}"), "{id}"); }
+            for &(lane, _, median, _) in shards { s.record_resources(lane, "test", None, Some(median)); }
+            c.cpu_pct = Some(100.0);
+            c.busy_leases = busy;
+            for t in [1, 2] { s.set_caps("screen", c.clone(), t); }
+            (s, gate)
+        };
+
+        let (mut s, gate) = occupied(screen.clone(), &full);
+        let first = s.request(visible("workdemo", Some("screen")), 3);
+        let second = s.request(visible("second", Some("screen")), 3);
+        let out = s.tick(3);
+        let launches = grants(&out);
+        assert_eq!(launches.len(), 2, "{:?}, {:?}", state(&s, &first), state(&s, &second));
+        assert!(launches.contains(&first) && launches.contains(&second));
+        for (id, used) in launches.iter().zip(["in use 16.0,", "in use 17.0,"]) {
+            let l = s.get(id).unwrap();
+            assert_eq!(l.waited_ms(3), 0);
+            assert_eq!(s.call_confined(l), Some(1.0));
+            assert_eq!(s.charged(l).cores, 1.0);
+            assert!(l.grant_why.contains("starts at once on 1 of its 3 cores (confined by CPU quota)"), "{}", l.grant_why);
+            assert!(l.grant_why.contains(used), "the next grant sees the committed quota: {}", l.grant_why);
+        }
+        assert!(out.iter().any(|a| matches!(a, Action::HoldGrant { id, node, cores: Some(8.0) } if id == &gate && node == "screen")), "the overrun gate yields to its grant");
+        invariants(&s);
+
+        let (mut s, _) = occupied(screen.clone(), &[(TESTS_LANE, 6.0, 6.0, 6.0)]);
+        let id = s.request(visible("workdemo", Some("screen")), 3);
+        assert_eq!(grants(&s.tick(3)), [id.clone()], "{:?}", state(&s, &id));
+        assert_eq!(s.call_confined(s.get(&id).unwrap()), Some(2.0), "8 firm cores and the shard's floor of 6 leave 2");
+        invariants(&s);
+
+        // The roomy screen has an idle interactive session. A full launch fits there today,
+        // even though the two sessions' full calls would exceed that box's cores.
+        let two_screens = |gate_cores, peer_cores| {
+            let mut s = sched(&[("s1", screen.clone()), ("s2", screen.clone())]);
+            let mut work = overlay("landq-fast", Some("s1"), gate_cores);
+            (work.kind, work.priority) = (Kind::Gate, Priority::Background);
+            let gate = s.request(work, 0);
+            let mut idle = overlay("idle", Some("s2"), 12.0);
+            (idle.live, idle.priority) = (true, Priority::Interactive);
+            let idle = s.request(idle, 0);
+            s.tick(0);
+            for id in [&gate, &idle] { assert!(s.started(id, "{}"), "{id}"); }
+            s.live_idle.insert(idle);
+            let mut work = overlay("peer", Some("s2"), peer_cores);
+            work.priority = Priority::Interactive;
+            let peer = s.request(work, 1);
+            assert_eq!(grants(&s.tick(1)), [peer]);
+            s
+        };
+        let mut s = two_screens(16.0, 6.0);
+        let id = s.request(visible("workdemo", None), 2);
+        assert_eq!(grants(&s.tick(2)), [id.clone()]);
+        assert_eq!(node_of(&s, &id).as_deref(), Some("s2"), "room for its full launch comes before stacked calls");
+        assert_eq!(s.call_confined(s.get(&id).unwrap()), None);
+        invariants(&s);
+
+        // An unpinned launch with no explicit cores takes its full measured peak where it fits.
+        let mut s = two_screens(10.0, 2.0);
+        let mut town = visible("workdemo", None);
+        town.cores = None;
+        town.class = "live:screen:town".into();
+        s.record_call(&town.class, "screen", true, 12.0);
+        s.warm.insert((town.lane.clone(), "s1".into()));
+        s.sticky.insert(town.lane.clone(), "s1".into());
+        let id = s.request(town, 2);
+        assert_eq!(s.cost_on("s1", s.get(&id).unwrap()).cores, 6.0, "the warm box admits only six cores of the peak");
+        assert_eq!(grants(&s.tick(2)), [id.clone()]);
+        assert_eq!((node_of(&s, &id).as_deref(), s.call_confined(s.get(&id).unwrap())), (Some("s2"), None), "s2 has room for the full 12-core launch");
+        invariants(&s);
+
+        let waits = |mut s: Sched, r: Req, why: &str| {
+            let id = s.request(r, 3);
+            assert!(grants(&s.tick(3)).is_empty(), "{:?}", state(&s, &id));
+            let l = s.get(&id).unwrap();
+            assert!(l.state == State::Queued && l.reason.contains(why), "expected {why}: {:?}", state(&s, &id));
+            invariants(&s);
+        };
+        let town = visible("workdemo", Some("screen"));
+        let mut hungry = town.clone();
+        hungry.ram_gb = Some(51.0);
+        waits(occupied(screen.clone(), &full).0, hungry, "budget ram");
+        let mut cold = town.clone();
+        cold.hint = vec!["coldjit".into()];
+        waits(occupied(screen.clone(), &full).0, cold, "budget cores");
+        let mut headless = town.clone();
+        headless.kind = Kind::Test;
+        waits(occupied(screen.clone(), &full).0, headless, "budget cores");
+        let mac = Caps { os: "macos".into(), ..screen.clone() };
+        waits(occupied(mac, &full).0, town.clone(), "budget cores");
+        let mut older = screen.clone();
+        older.features.retain(|f| f != "launch-cores");
+        waits(occupied(older, &full).0, town.clone(), "budget cores");
+        let mut s = sched(&[("screen", screen.clone())]);
+        let timed = s.request(req("timed", Kind::Timed, Some("screen")), 0);
+        assert_eq!(grants(&s.tick(0)), [timed.clone()]);
+        assert!(s.started(&timed, "{}"));
+        waits(s, town.clone(), "held by");
+
+        for (reserved_ram, fits) in [(4.0, true), (32.0, false)] {
+            let mut s = sched(&[("screen", screen.clone())]);
+            let mut work = overlay("peer", Some("screen"), 16.0);
+            (work.priority, work.ram_gb) = (Priority::Interactive, Some(20.0));
+            let peer = s.request(work, 0);
+            assert_eq!(grants(&s.tick(0)), [peer.clone()]);
+            assert!(s.started(&peer, "{}"));
+            let mut gate = overlay("landq-fast", Some("screen"), 16.0);
+            (gate.kind, gate.priority, gate.ram_gb) = (Kind::Gate, Priority::Interactive, Some(reserved_ram));
+            let holder = s.request(gate, 1);
+            s.tick(1);
+            assert_eq!(s.holds["screen"].id, holder);
+            let id = s.request(town.clone(), 2);
+            let out = s.tick(2);
+            let l = s.get(&id).unwrap();
+            if fits {
+                assert_eq!(grants(&out), [id.clone()], "{:?}", state(&s, &id));
+                assert!(l.grant_why.contains("a person's visible session starts on its screen box beside the land queue's hold; the holder keeps its place"), "{}", l.grant_why);
+                assert_eq!(s.call_confined(l), Some(1.0));
+            } else {
+                assert!(grants(&out).is_empty() && l.state == State::Queued && l.reason.contains(&holder), "the hold keeps its RAM: {:?}", state(&s, &id));
+            }
+            assert_eq!(s.holds["screen"].id, holder);
+            invariants(&s);
+        }
     }
 
     /// What a live launch does not go ahead of still counts: interactive work, gates, GPU runs,
@@ -22023,7 +24956,7 @@ mod tests {
             assert!(grants(&s.tick(1)).is_empty(), "{line}: {:?}", state(&s, &session));
             assert!(state(&s, &session).1.starts_with(line), "{:?}", state(&s, &session));
         };
-        let in_use_8 = "budget cores 16, in use 8 (background work not counted), asked 13";
+        let in_use_8 = "budget cores 16, in use 8 (only test floors count from yielding background work), asked 13";
         let mut interactive = overlay("interactive", Some("a"), 8.0);
         interactive.priority = Priority::Interactive;
         waits(interactive, in_use_8);
@@ -22113,6 +25046,75 @@ mod tests {
     }
 
 
+    #[test]
+    fn a_yielding_lease_is_shown_charged_what_is_left_and_its_yielded_minutes_are_kept() {
+        let mut c = caps(16, 64.0, Role::Pool);
+        let mut s = sched(&[("a", c.clone())]);
+        let mut live = overlay("live-W1", Some("a"), 10.0);
+        (live.live, live.priority) = (true, Priority::Interactive);
+        let session = s.request(live, 0);
+        assert_eq!(grants(&s.tick(0)), vec![session.clone()], "the live session gets the empty box");
+        s.started(&session, "{}");
+        s.live_idle.insert(session.clone());
+        let mut shard = overlay(TESTS_LANE, Some("a"), 12.0);
+        shard.priority = Priority::Background;
+        let shard = s.request(shard, 1);
+        assert_eq!(grants(&s.tick(1)), vec![shard.clone()], "the shard starts beside the idle session");
+        s.started(&shard, "{}");
+
+        c.cpu_pct = Some(75.0);
+        c.busy_leases = vec![(shard.clone(), 12.0)];
+        s.set_caps("a", c.clone(), 1);
+        let r = s.get(&shard).unwrap();
+        assert_eq!((r.cost.cores, r.peak_cores), (12.0, Some(12.0)), "the shard was granted and measured at twelve cores");
+        assert!(!s.lease_view_line(r, 1).contains(" core-min"), "the row omits yielded minutes before the first core-minute");
+        s.live_idle.remove(&session);
+        s.live_call_began(&session, 1);
+        assert_eq!(s.charged_on("a").cores, 22.0, "admission counts the shard's 12 and the call's 10");
+        assert_eq!(s.charged_shown("a").cores, 16.0, "the shard is shown at the six cores the call leaves");
+        s.set_caps("a", c.clone(), 10_001);
+        assert_eq!(s.last_sample("a").unwrap().res_cores, 16.0, "the box history uses the shown charge");
+        let r = s.get(&shard).unwrap();
+        assert_eq!(r.yielded_core_ms, 60_000.0, "the shard yielded six cores for ten seconds");
+        assert!(s.lease_view_line(r, 10_001).contains(" yielded 1 core-min"), "the row shows the first whole yielded core-minute");
+        for now in [20_001, 40_001, 70_001] { s.set_caps("a", c.clone(), now); }
+        let r = s.get(&shard).unwrap();
+        assert!(s.lease_view_line(r, 70_001).contains(" yielded 7 core-min"), "the granted shard's row shows its yielded minutes");
+        assert!(r.cost_line("released", "", None, Some("linux"), None, 70_001).contains("\"yielded_core_min\":7.0,"), "the cost record keeps yielded core-minutes to one decimal");
+
+        s.live_idle.insert(session.clone());
+        s.live_call_ended(&session, 70_001);
+        s.set_caps("a", c.clone(), 80_001);
+        assert_eq!(s.charged_shown("a").cores, 12.0, "the shard gets its full charge between calls");
+        assert_eq!(s.get(&shard).unwrap().yielded_core_ms, 420_000.0, "an idle interval adds no yielded time");
+
+        // Past twice its run, having yielded, the shard yields no more: its floor is its whole
+        // charge, the next call starts short on the four cores beside it, and it adds no minutes.
+        let r = s.get(&shard).unwrap();
+        assert!(!s.yield_aged(r), "within twice its run the shard still yields");
+        let aged = r.granted_ms.unwrap() + YIELD_AGE_RUNS * s.run_ms(r) + 1;
+        s.clock = aged;
+        let r = s.get(&shard).unwrap();
+        assert!(s.yield_aged(r), "past twice its run, having yielded, the shard is past its age bound");
+        assert_eq!(s.yield_floor(r), 12.0, "an aged lease keeps its whole charge as its floor");
+        assert_eq!(s.call_start_cores(&session), Some((4.0, 10.0, 12.0)), "the next call starts on the four cores the aged shard leaves");
+        s.live_idle.remove(&session);
+        s.live_call_began(&session, aged);
+        s.live_call_charged(&session, 4.0);
+        assert_eq!(s.charged_shown("a").cores, 16.0, "the aged shard is shown at its whole charge beside the short call");
+        s.set_caps("a", c.clone(), aged + 10_000);
+        assert_eq!(s.get(&shard).unwrap().yielded_core_ms, 420_000.0, "an aged shard yields no more minutes");
+        s.live_idle.insert(session.clone());
+        s.live_call_ended(&session, aged + 10_000);
+
+        c.os = "macos".into();
+        s.set_caps("a", c, 80_001);
+        s.live_idle.remove(&session);
+        s.live_call_began(&session, 80_001);
+        assert_eq!(s.charged_on("a").cores, 22.0, "the same shard and call overlap on the Mac");
+        assert_eq!(s.charged_shown("a"), s.charged_on("a"), "macOS shows every charge in full");
+    }
+
     /// A live launch goes past a busy box's waiting tasks only while background work that yields
     /// to it runs there; with none, the tasks are the box's own or interactive work's, and it
     /// waits for them like any ask (live launches beside load 47-56 of 16, 11-18).
@@ -22160,12 +25162,17 @@ mod tests {
 
     #[test]
     fn a_background_ask_counts_background_work_at_its_grant_where_the_box_weighs_cpu() {
-        let box_with = |os: &str, priority: Priority, full_ram: bool| {
+        let box_with_as = |os: &str, priority: Priority, full_ram: bool, what: &str| {
             let mut c = caps(16, 64.0, Role::Pool);
             c.os = os.into();
             let mut s = sched(&[("a", c.clone())]);
             let mut work = overlay("burst", Some("a"), 6.0);
             work.priority = priority;
+            match what {
+                "gate" => work.kind = Kind::Gate,
+                "owed leg" => (work.prio, work.agent) = (DEFAULT_PRIO - 1, Some("devhub-verify".into())),
+                _ => {}
+            }
             if full_ram { work.ram_gb = Some(work.ram_budget(&c)); }
             let work = s.request(work, 0);
             assert_eq!(grants(&s.tick(0)), vec![work.clone()], "the six-core lease must start before its burst");
@@ -22176,6 +25183,7 @@ mod tests {
             s.set_caps("a", c, 1);
             s
         };
+        let box_with = |os: &str, priority: Priority, full_ram: bool| box_with_as(os, priority, full_ram, "");
         let ask = |s: &mut Sched, node: Option<&str>| {
             let mut next = overlay("next", node, 4.0);
             next.priority = Priority::Background;
@@ -22188,6 +25196,16 @@ mod tests {
         let mut s = box_with("linux", Priority::Background, false);
         let next = ask(&mut s, Some("a"));
         assert_eq!(node_of(&s, &next).as_deref(), Some("a"), "6 granted + 2 outside + 4 asked fits 16: {:?}", state(&s, &next));
+        // a gate and an owed leg weigh as background work there too, though they go ahead of live
+        // work: counted at their grant, their burst is borrowed idle CPU ([`Sched::counts_at_grant`])
+        for what in ["gate", "owed leg"] {
+            let mut s = box_with_as("linux", Priority::Background, false, what);
+            let next = ask(&mut s, Some("a"));
+            assert_eq!(node_of(&s, &next).as_deref(), Some("a"), "beside a {what} past its grant: {:?}", state(&s, &next));
+            let mut s = box_with_as("macos", Priority::Background, false, what);
+            let next = ask(&mut s, Some("a"));
+            assert_eq!(state(&s, &next).0, "queued", "a Mac counts a {what}'s full burst: {:?}", state(&s, &next));
+        }
 
         for (os, priority, why) in [
             ("macos", Priority::Background, "a Mac counts the full burst"),
@@ -22363,7 +25381,7 @@ mod tests {
         // of its next call, which waited 9 min for its box to empty (W18087, 11-24)
         let ram = |s: &Sched| s.charged(s.get(&session).unwrap()).ram_gb;
         s.set_info(&session, r#"{"held_mb":7168,"held_peak_mb":7168}"#, 7);
-        s.live_call_ended(&session);
+        s.live_call_ended(&session, s.clock);
         s.live_idle.insert(session.clone());
         s.set_info(&session, r#"{"held_mb":6144,"held_peak_mb":7168}"#, 8);
         s.set_info(&session, r#"{"held_mb":8192,"held_peak_mb":16384}"#, 9);
@@ -22373,7 +25391,7 @@ mod tests {
         assert_eq!(s.get(&session).unwrap().ram_peak_gb, Some(16.0), "its cost record still counts its peak");
         // what it held in a call, and at the look right after one, its next call weighs
         s.set_info(&session, r#"{"held_mb":11264,"held_peak_mb":16384}"#, 10);
-        s.live_call_ended(&session);
+        s.live_call_ended(&session, s.clock);
         s.live_idle.insert(session.clone());
         s.set_info(&session, r#"{"held_mb":8192,"held_peak_mb":16384}"#, 11);
         s.live_idle.remove(&session);
@@ -22522,7 +25540,8 @@ mod tests {
     /// nor a new rev of a lane whose last new rev built nothing.
     #[test]
     fn a_tree_lease_that_builds_its_jit_is_admitted_at_its_builds_cores() {
-        let mut s = sched(&[("x", caps(16, 64.0, Role::Pool))]);
+        let pool = Caps { jit_store: jit_store(&["warm-key"]), ..caps(16, 64.0, Role::Pool) };
+        let mut s = sched(&[("x", pool)]);
         for c in [10.2, 10.6, 9.8] { s.record_jit_build_cores("linux", c); }
         let class = "test makepad test makepad-foo";
         let built = format!("{class}{}", super::super::JIT_BUILD_RUN);
@@ -22535,6 +25554,17 @@ mod tests {
             (r.class, r.rev, r.cores) = (class.to_string(), Some(format!("rc-{lane}@{rev}")), Some(4.0));
             r
         };
+        for (lane, rev, key, cores, build_ms, why) in [
+            ("lane", "b", "warm-key", 4.0, 0, "the store holds the key even though the lane last built"),
+            ("app", "c", "cold-key", 11.0, s.jit_build_ms("x"), "the store lacks the new rev even though the lane last ran warm"),
+            ("app", "b", "cold-key", 4.0, 0, "the tree's target already ran that rev despite the store miss"),
+        ] {
+            let mut r = tree(lane, rev);
+            r.tree_jit = vec![key.into()];
+            let l = s.proposed(String::new(), r, 0);
+            assert_eq!(s.cost_on("x", &l).cores, cores, "admission cores when {why}");
+            assert_eq!(s.build_ms("x", &l), build_ms, "time added before the run when {why}");
+        }
         let cores = |s: &Sched, id: &str| { let l = s.leases.iter().find(|l| l.id == id).unwrap(); (l.cost.cores, s.charged(l).cores) };
         let mut busy = req("busy", Kind::Build, Some("x"));
         busy.cores = Some(8.0);
@@ -22558,6 +25588,32 @@ mod tests {
         let next = s.request(tree("lane", "b"), 4);
         s.tick(4);
         assert_eq!(cores(&s, &next), (4.0, 4.0), "{:?}", state(&s, &next));
+        // a lane with no JIT run recorded, its class new and never measured building: its words
+        // call the run's `makepad`, so it is charged its build all the same (L1862047, 11-26);
+        // a class that calls no `makepad` builds no JIT and is charged its run's cores alone
+        let fresh = |lane: &str, class: &str| {
+            let mut r = tree(lane, "a");
+            r.class = class.to_string();
+            r
+        };
+        for id in [&new, &next] { release_clean(&mut s, id, 5); }
+        beat_all(&mut s, 5);
+        let cargo = s.request(fresh("other", "test cargo test -p makepad-foo @other"), 5);
+        s.tick(5);
+        assert_eq!(cores(&s, &cargo), (4.0, 4.0), "a command that runs no JIT is charged its run alone: {:?}", state(&s, &cargo));
+        #[cfg(feature = "checkout")]
+        {
+            let audio = "test sh -c export CARGO_NET_OFFLINE=true; exec makepad test makepad-script --test limits @audio";
+            let shell = s.request(fresh("audio", audio), 5);
+            s.tick(5);
+            assert_eq!(cores(&s, &shell), (4.0, 11.0), "a new lane's run that calls makepad is charged its build: {:?}", state(&s, &shell));
+            // once its lane's run there is recorded at that rev, the next run of it builds nothing
+            release_clean(&mut s, &shell, 6);
+            s.note_tree_run("audio", "x", "rc-audio@a", &format!("{audio}{}", super::super::JIT_BUILD_RUN), "test");
+            let again = s.request(fresh("audio", audio), 7);
+            s.tick(7);
+            assert_eq!(cores(&s, &again), (4.0, 4.0), "the box's tree ran its rev: no build ({:?})", state(&s, &again));
+        }
     }
 
     /// A lease whose JIT build was admitted on fewer cores than such builds measure (its box's
@@ -22591,16 +25647,533 @@ mod tests {
             assert_eq!(state(&s, &new).0, "starting", "past its wait, on the 8 free: {:?}", state(&s, &new));
             if told {
                 assert_eq!((l.cost.cores, l.jit_jobs, s.charged(&l).cores), (4.0, Some(8), 8.0), "told the 8 it was admitted on, charged them");
-                assert!(super::super::master::lease_start_line(&l, "null", l.run_cores(), 0.0, None, None, None, None).contains("\"jit_jobs\":8"), "its start says so");
+                assert!(super::super::master::lease_start_line(&l, "null", l.run_cores(), 0.0, None, None, None, None, None).contains("\"jit_jobs\":8"), "its start says so");
                 let line = s.live_lines().into_iter().find(|x| x.contains(&format!("\"id\":\"{new}\""))).unwrap();
                 let mut s2 = sched(&[("x", caps(16, 64.0, Role::Pool))]);
                 s2.restore(&line, 3 * min);
                 assert_eq!(s2.get(&new).unwrap().jit_jobs, Some(8), "a master restart keeps its jobs");
             } else {
                 assert_eq!((l.jit_jobs, s.charged(&l).cores), (None, 11.0), "cargo's own jobs: charged its measure");
-                assert!(!super::super::master::lease_start_line(&l, "null", l.run_cores(), 0.0, None, None, None, None).contains("jit_jobs"));
+                assert!(!super::super::master::lease_start_line(&l, "null", l.run_cores(), 0.0, None, None, None, None, None).contains("jit_jobs"));
             }
         }
+    }
+
+    fn prebuild_req(node: &str, cores: f64) -> Req {
+        let mut r = overlay(&format!("prebuild-{node}"), Some(node), cores);
+        (r.kind, r.priority, r.class) = (Kind::Build, Priority::Background, "build jit prebuild".into());
+        r.hint = vec!["tipjit".into()];
+        r
+    }
+
+    fn build_room_req(node: &str, lane: &str) -> Req {
+        let mut r = req(&format!("{lane}-{node}"), Kind::Build, Some(node));
+        (r.class, r.master, r.priority) = (HUB_BUILD.into(), true, Priority::Background);
+        r.agent = Some(if lane == DEPLOY_BUILD { "devhub-sync" } else { "devhub-roll" }.into());
+        r
+    }
+
+    fn record_linux_build(s: &mut Sched) {
+        for cores in [10.2, 10.6, 9.8] { s.record_jit_build_cores("linux", cores); }
+    }
+
+    fn prebuild_box(keys: &[&str], measured_run: Option<f64>) -> Sched {
+        let mut s = sched(&[("box-a", Caps { jit_store: jit_store(keys), ..caps(16, 64.0, Role::Pool) })]);
+        record_linux_build(&mut s);
+        if let Some(cores) = measured_run {
+            for _ in 0..3 { s.record_resources("build jit prebuild", "build", Some(3.0), Some(cores)); }
+        }
+        s
+    }
+
+    fn grant_peer(s: &mut Sched, node: &str, lane: &str, cores: f64, at: u64) -> String {
+        let r = Req { priority: Priority::Background, ram_gb: Some(2.0), ..overlay(lane, Some(node), cores) };
+        let id = s.request(r, at);
+        assert_eq!(grants(&s.tick(at)), [id.clone()], "{:?}", state(s, &id));
+        id
+    }
+
+    fn check_prebuild_width(s: &Sched, id: &str, cost: f64, run: f64, jobs: Option<u32>, charge: f64) {
+        let l = s.get(id).unwrap();
+        assert!(l.state.live());
+        assert_eq!((l.cost.cores, l.run_cores(), s.start_cores(l)), (cost, run, run));
+        assert_eq!(s.lease_jit_jobs(id), jobs);
+        assert_eq!((s.charged(l).cores, s.granted_take(l)), (charge, charge));
+    }
+
+    fn enter_run(s: &mut Sched, id: &str, at: u64) {
+        s.set_info(id, r#"{"phases":[{"phase":"jit","blocker":"","boxes":[],"start_ms":1,"end_ms":2},{"phase":"run","blocker":"","boxes":[],"start_ms":2,"end_ms":0}]}"#, at);
+        let l = s.get(id).unwrap();
+        assert_eq!(s.jit_build_charge(l.node.as_deref().unwrap(), l), None);
+    }
+
+    fn restored_box(s: &Sched) -> Sched {
+        let mut restored = sched(&[("box-a", s.nodes["box-a"].caps.as_ref().unwrap().clone())]);
+        for line in s.live_lines() { restored.restore(&line, s.clock); }
+        restored
+    }
+
+    #[test]
+    fn prebuild_yields_on_oversubscribed_box_even_when_removing_it_does_not_immediately_start_waiter() {
+        let mut s = prebuild_box(&["tipjit"], None);
+        let mut busy = Vec::new();
+        for (lane, measured) in [("first", 8.0), ("second", 9.0)] {
+            let id = s.request(Req { priority: Priority::Interactive, ..overlay(lane, Some("box-a"), 6.0) }, 0);
+            assert_eq!(grants(&s.tick(0)), [id.clone()]);
+            assert!(s.started(&id, "{}"));
+            busy.push((id, measured));
+        }
+        let pre = s.request(prebuild_req("box-a", 4.0), 1);
+        assert_eq!(grants(&s.tick(1)), [pre.clone()]);
+        assert!(s.started(&pre, "{}"));
+        assert_eq!(s.box_cores_used("box-a"), 16.0);
+        s.nodes.get_mut("box-a").unwrap().caps.as_mut().unwrap().busy_leases = busy;
+        assert_eq!(s.box_cores_used("box-a"), 21.0);
+        let q = s.request(Req { priority: Priority::Background, ..overlay("lane", None, 4.0) }, 2);
+        assert!(!s.starts_without(&q, "box-a", std::slice::from_ref(&pre), 2));
+        assert!(grants(&s.tick(2)).is_empty());
+        assert_eq!(s.get(&q).unwrap().state, State::Queued);
+        // An unpinned waiter also counts on the next look, after placement names this box.
+        s.tick(3);
+        let word = s.owner_word(&pre).unwrap_or_default();
+        assert!(s.told_to_yield(&pre) && word.contains(&format!("its box is past its cores while {q} of lane waits")), "{word}");
+        invariants(&s);
+    }
+
+    #[test]
+    fn prebuild_does_not_bump_on_overloaded_or_queue_blocked_box() {
+        let mut s = prebuild_box(&[], None);
+        grant_peer(&mut s, "box-a", "background", 12.0, 0);
+        let peer = grant_peer(&mut s, "box-a", "peer", 4.0, 0);
+        s.nodes.get_mut("box-a").unwrap().caps.as_mut().unwrap().busy_leases = vec![(peer.clone(), 5.0)];
+        let pre = s.request(prebuild_req("box-a", 4.0), 1);
+        assert_eq!(s.box_cores_used("box-a"), 17.0);
+        assert!(grants(&s.tick(1)).is_empty());
+        assert_eq!(s.get(&pre).unwrap().state, State::Queued);
+
+        s.nodes.get_mut("box-a").unwrap().caps.as_mut().unwrap().busy_leases.clear();
+        let waiter = s.request(Req { priority: Priority::Interactive, ..overlay("lane", Some("box-a"), 4.0) }, 2);
+        assert_eq!(s.box_cores_used("box-a"), 16.0);
+        assert!(grants(&s.tick(2)).is_empty());
+        assert!(state(&s, &waiter).1.starts_with("budget cores"));
+        assert_eq!(s.get(&pre).unwrap().state, State::Queued);
+        // Keep bumps off while the waiter takes the returning peer's four cores.
+        s.nodes.get_mut("box-a").unwrap().caps.as_mut().unwrap().cpu_wait = Some(BUILD_BUMP_MAX_WAIT);
+        release_clean(&mut s, &peer, 3);
+        assert_eq!(grants(&s.tick(3)), [waiter.clone()]);
+        release_clean(&mut s, &waiter, 4);
+        s.nodes.get_mut("box-a").unwrap().caps.as_mut().unwrap().cpu_wait = None;
+        assert_eq!(s.box_cores_used("box-a"), 12.0);
+        assert_eq!(grants(&s.tick(4)), [pre.clone()]);
+        check_prebuild_width(&s, &pre, 4.0, 4.0, Some(4), 4.0);
+        invariants(&s);
+    }
+
+    #[test]
+    fn prebuild_bump_on_uncongested_full_box_caps_jobs_and_charge_to_four() {
+        let mut s = prebuild_box(&[], None);
+        let peer = grant_peer(&mut s, "box-a", "background", 16.0, 0);
+        assert_eq!(s.box_cores_used("box-a"), 16.0);
+        let pre = s.request(prebuild_req("box-a", 4.0), 1);
+        assert_eq!(grants(&s.tick(1)), [pre.clone()]);
+        check_prebuild_width(&s, &pre, 4.0, 4.0, Some(4), 4.0);
+        assert!(s.get(&pre).unwrap().grant_why.contains("its box's own build, past the cores"));
+        release_clean(&mut s, &pre, 2);
+        release_clean(&mut s, &peer, 2);
+        let idle = s.request(prebuild_req("box-a", 4.0), 3);
+        assert_eq!(grants(&s.tick(3)), [idle.clone()]);
+        check_prebuild_width(&s, &idle, 4.0, 4.0, Some(11), 11.0);
+        invariants(&s);
+    }
+
+    #[test]
+    fn prebuild_bump_cold_jit_caps_recorded_run_cost_to_four() {
+        let mut s = prebuild_box(&[], Some(8.0));
+        let peer = grant_peer(&mut s, "box-a", "background", 16.0, 0);
+        let pre = s.request(prebuild_req("box-a", 4.0), 1);
+        let l = s.get(&pre).unwrap();
+        assert_eq!(s.jit_build_charge("box-a", l), Some(11.0));
+        assert_eq!((s.run_cost_on("box-a", l).cores, s.cost_on("box-a", l).cores), (8.0, 4.0));
+        assert_eq!(grants(&s.tick(1)), [pre.clone()]);
+        check_prebuild_width(&s, &pre, 4.0, 4.0, Some(4), 4.0);
+        assert_eq!(s.charged_on("box-a").cores, 20.0);
+        enter_run(&mut s, &pre, 2);
+        check_prebuild_width(&s, &pre, 4.0, 4.0, Some(4), 4.0);
+        assert_eq!(s.charged_on("box-a").cores, 20.0);
+        release_clean(&mut s, &pre, 3);
+        release_clean(&mut s, &peer, 3);
+        let idle = s.request(prebuild_req("box-a", 4.0), 4);
+        assert_eq!(grants(&s.tick(4)), [idle.clone()]);
+        check_prebuild_width(&s, &idle, 8.0, 4.0, Some(11), 11.0);
+        enter_run(&mut s, &idle, 5);
+        check_prebuild_width(&s, &idle, 8.0, 4.0, Some(11), 8.0);
+        check_prebuild_width(&restored_box(&s), &idle, 8.0, 4.0, Some(11), 8.0);
+        invariants(&s);
+    }
+
+    #[test]
+    fn prebuild_bump_warm_jit_caps_recorded_run_cost_to_four() {
+        let mut s = prebuild_box(&["tipjit"], Some(8.0));
+        for (busy, placed) in [(16.0, 4.0), (10.0, 6.0)] {
+            let at = s.clock + 1;
+            let peer = grant_peer(&mut s, "box-a", "busy", busy, at);
+            let pre = s.request(prebuild_req("box-a", 4.0), at + 1);
+            let l = s.get(&pre).unwrap();
+            assert_eq!(s.jit_build_charge("box-a", l), None);
+            assert_eq!((s.run_cost_on("box-a", l).cores, s.cost_on("box-a", l).cores), (8.0, placed));
+            assert_eq!(grants(&s.tick(at + 1)), [pre.clone()]);
+            check_prebuild_width(&s, &pre, placed, 4.0, Some(placed as u32), placed);
+            assert_eq!(s.charged_on("box-a").cores, busy + placed);
+            release_clean(&mut s, &pre, at + 2);
+            release_clean(&mut s, &peer, at + 2);
+        }
+        invariants(&s);
+    }
+
+    #[test]
+    fn prebuild_placed_equal_to_measured_charge_clamps_run_width_to_placed() {
+        let mut s = prebuild_box(&[], Some(2.0));
+        grant_peer(&mut s, "box-a", "background", 14.0, 0);
+        for (at, build) in [(1, Some(11.0)), (4, None)] {
+            let mut r = prebuild_req("box-a", 4.0);
+            r.agent = Some("devhub-warm".into());
+            let pre = s.request(r, at);
+            let l = s.get(&pre).unwrap();
+            assert_eq!(s.jit_build_charge("box-a", l), build);
+            assert_eq!((s.run_cost_on("box-a", l).cores, s.cost_on("box-a", l).cores), (2.0, 2.0));
+            assert_eq!(grants(&s.tick(at)), [pre.clone()]);
+            check_prebuild_width(&s, &pre, 2.0, 2.0, Some(2), 2.0);
+            assert_eq!(s.charged_on("box-a").cores, 16.0);
+            let l = s.get(&pre).unwrap();
+            let start = super::super::master::lease_start_line(l, "null", s.start_cores(l), 0.0, None, None, None, None, None);
+            assert!(start.contains("\"cost\":{\"cores\":2,") && start.contains("\"jit_jobs\":2"), "{start}");
+            enter_run(&mut s, &pre, at + 1);
+            check_prebuild_width(&s, &pre, 2.0, 2.0, Some(2), 2.0);
+            assert_eq!(s.charged_on("box-a").cores, 16.0);
+            check_prebuild_width(&restored_box(&s), &pre, 2.0, 2.0, Some(2), 2.0);
+            release_clean(&mut s, &pre, at + 2);
+            s.nodes.get_mut("box-a").unwrap().caps.as_mut().unwrap().jit_store = jit_store(&["tipjit"]);
+        }
+        invariants(&s);
+    }
+
+    #[test]
+    fn prebuild_fractional_ask_rounds_up_to_whole_cores_at_least_one() {
+        let mut s = prebuild_box(&["tipjit"], None);
+        for (at, ask, width) in [(0, 0.5, 1.0), (2, 1.6, 2.0)] {
+            let r = Req::parse(&prebuild_req("box-a", ask).to_json()).unwrap();
+            let pre = s.request(r, at);
+            let l = s.get(&pre).unwrap();
+            assert_eq!(s.jit_build_charge("box-a", l), None);
+            assert_eq!((s.run_cost_on("box-a", l).cores, s.cost_on("box-a", l).cores), (width, width));
+            assert_eq!(grants(&s.tick(at)), [pre.clone()]);
+            check_prebuild_width(&s, &pre, width, width, Some(width as u32), width);
+            check_prebuild_width(&restored_box(&s), &pre, width, width, Some(width as u32), width);
+            assert_eq!(s.charged_on("box-a").cores, width);
+            release_clean(&mut s, &pre, at + 1);
+        }
+        s.add_node("mac-a", "192.0.2.1", None);
+        s.set_caps("mac-a", Caps { os: "macos".into(), arch: "aarch64".into(), jit_store: jit_store(&["tipjit"]), ..caps(16, 64.0, Role::Pool) }, 4);
+        grant_peer(&mut s, "mac-a", "busy", 15.5, 4);
+        let pre = s.request(Req { ram_gb: Some(2.0), ..prebuild_req("mac-a", 0.5) }, 5);
+        assert_eq!(s.cost_on("mac-a", s.get(&pre).unwrap()).cores, 1.0);
+        assert!(grants(&s.tick(5)).is_empty());
+        assert_eq!(s.get(&pre).unwrap().state, State::Queued);
+        for _ in 0..3 { s.record_resources("build jit whole", "build", Some(3.0), Some(2.0)); }
+        let whole = s.request(Req { whole: true, cores: None, class: "build jit whole".into(), ..prebuild_req("box-a", 4.0) }, 6);
+        assert_eq!(grants(&s.tick(6)), [whole.clone()]);
+        check_prebuild_width(&s, &whole, 2.0, 2.0, Some(2), 2.0);
+        invariants(&s);
+    }
+
+    fn overrunning_peers(s: &mut Sched) -> (String, String) {
+        let a = grant_peer(s, "box-a", "background-a", 4.0, 0);
+        let b = grant_peer(s, "box-a", "background-b", 4.0, 0);
+        let c = s.nodes.get_mut("box-a").unwrap().caps.as_mut().unwrap();
+        c.cpu_pct = Some(100.0);
+        c.busy_leases = vec![(a.clone(), 10.0), (b.clone(), 10.0)];
+        assert_eq!(s.box_cores_used("box-a"), 20.0);
+        (a, b)
+    }
+
+    #[test]
+    fn prebuild_bump_under_measured_outside_load_caps_jobs_and_charge_to_four() {
+        let mut s = prebuild_box(&[], None);
+        s.nodes.get_mut("box-a").unwrap().caps.as_mut().unwrap().cpu_pct = Some(90.0);
+        let first = s.request(Req { priority: Priority::Interactive, ..overlay("first", Some("box-a"), 4.0) }, 0);
+        assert_eq!(grants(&s.tick(0)), [first.clone()]);
+        assert!((s.box_cores_used("box-a") - 14.4).abs() < 1e-9);
+        let r = prebuild_req("box-a", 4.0);
+        let pre = s.request(r.clone(), 1);
+        assert_eq!(s.cost_on("box-a", s.get(&pre).unwrap()).cores, 4.0);
+        assert_eq!(grants(&s.tick(1)), [pre.clone()]);
+        check_prebuild_width(&s, &pre, 4.0, 4.0, Some(4), 4.0);
+        assert!(s.get(&pre).unwrap().grant_why.contains("its box's own build, past the cores"));
+        release_clean(&mut s, &pre, 2);
+        let lane = s.request(overlay("lane", Some("box-a"), 4.0), 2);
+        assert!(grants(&s.tick(2)).is_empty());
+        assert!(state(&s, &lane).1.starts_with("budget cores"));
+        let pre = s.request(r.clone(), 3);
+        assert!(grants(&s.tick(3)).is_empty());
+        assert_eq!(s.get(&pre).unwrap().state, State::Queued);
+        s.cancel(&lane, 4);
+        s.nodes.get_mut("box-a").unwrap().caps.as_mut().unwrap().cpu_pct = Some(80.0);
+        assert!((s.box_cores_used("box-a") - 12.8).abs() < 1e-9);
+        assert_eq!(grants(&s.tick(4)), [pre.clone()]);
+        check_prebuild_width(&s, &pre, 3.0, 3.0, Some(3), 3.0);
+        assert!(!s.get(&pre).unwrap().grant_why.contains("past the cores"));
+        release_clean(&mut s, &first, 5);
+        release_clean(&mut s, &pre, 5);
+        invariants(&s);
+
+        let mut s = prebuild_box(&[], None);
+        overrunning_peers(&mut s);
+        let pre = s.request(r, 1);
+        assert!(grants(&s.tick(1)).is_empty());
+        assert_eq!(s.get(&pre).unwrap().state, State::Queued);
+        invariants(&s);
+    }
+
+    #[test]
+    fn prebuild_late_jit_estimate_stays_capped_on_jit_jobs_hub_and_tracks_uncapped_old_hub() {
+        for (node, jobs, learned) in [("box-a", Some(4), 4.0), ("old-a", None, 11.0)] {
+            let mut c = caps(16, 64.0, Role::Pool);
+            c.jit_store = jit_store(&[]);
+            if jobs.is_none() { c.features.retain(|f| f != "jit-jobs"); }
+            let mut s = sched(&[(node, c)]);
+            let r = prebuild_req(node, 4.0);
+            let pre = s.request(r.clone(), 0);
+            assert_eq!(s.jit_build_charge(node, s.get(&pre).unwrap()), None);
+            assert_eq!(grants(&s.tick(0)), [pre.clone()]);
+            check_prebuild_width(&s, &pre, 4.0, 4.0, jobs, 4.0);
+            record_linux_build(&mut s);
+            assert_eq!(s.jit_build_charge(node, s.get(&pre).unwrap()), Some(11.0));
+            check_prebuild_width(&s, &pre, 4.0, 4.0, jobs, learned);
+            enter_run(&mut s, &pre, 1);
+            check_prebuild_width(&s, &pre, 4.0, 4.0, jobs, 4.0);
+            release_clean(&mut s, &pre, 2);
+            if jobs.is_none() {
+                grant_peer(&mut s, node, "busy", 16.0, 3);
+                let pre = s.request(r, 4);
+                assert_eq!(s.cost_on(node, s.get(&pre).unwrap()).cores, 11.0);
+                assert!(grants(&s.tick(4)).is_empty());
+                assert_eq!(s.get(&pre).unwrap().state, State::Queued);
+            }
+            invariants(&s);
+        }
+    }
+
+    #[test]
+    fn own_build_ignores_live_hand_in_and_look_bypass_shapes() {
+        let mut s = prebuild_box(&["tipjit"], None);
+        let c = s.nodes.get_mut("box-a").unwrap().caps.as_mut().unwrap();
+        c.display = Some("wm".into());
+        c.temps.push(super::super::Temp { sensor: "cpu".into(), c: 70.0, limit: Some(90.0) });
+        for kind in ["build", "screen"] {
+            for _ in 0..3 { s.record_node_cost("build jit quick", kind, "box-a", 5_000); }
+        }
+        let (a, b) = overrunning_peers(&mut s);
+        for (at, live, class) in [(1, true, "build jit quick"), (2, false, "live:test:demo:lib")] {
+            let pre = s.request(Req { priority: Priority::Interactive, live, class: class.into(), ..prebuild_req("box-a", 4.0) }, at);
+            let l = s.get(&pre).unwrap();
+            let u = s.in_use("box-a", l, true, &[]);
+            assert_eq!(u.cost.cores + u.outside, 20.0);
+            assert!(!s.is_live_job(l) && !s.ahead_of_background("box-a", l) && !s.live_test_ahead("box-a", l));
+            assert!(grants(&s.tick(at)).is_empty());
+            assert_eq!(s.get(&pre).unwrap().state, State::Queued);
+            s.cancel(&pre, at);
+        }
+        release_clean(&mut s, &a, 3);
+        release_clean(&mut s, &b, 3);
+        let busy = grant_peer(&mut s, "box-a", "busy", 16.0, 3);
+        s.nodes.get_mut("box-a").unwrap().caps.as_mut().unwrap().busy_leases = vec![(busy, 17.0)];
+        assert_eq!(s.box_cores_used("box-a"), 17.0);
+        let pre = prebuild_req("box-a", 2.0);
+        let deploy = build_room_req("box-a", DEPLOY_BUILD);
+        for r in [
+            Req { hand_in: true, class: "build jit quick".into(), ..pre.clone() },
+            Req { look: true, ..pre },
+            Req { look: true, ..deploy.clone() },
+            Req { kind: Kind::Screen, live: true, hand_in: true, priority: Priority::Interactive, ..deploy.clone() },
+            Req { kind: Kind::Inspect, src: Src::Tree, ..deploy },
+        ] {
+            let id = s.request(r, 4);
+            let l = s.get(&id).unwrap();
+            let cost = s.cost_on("box-a", l);
+            assert!(l.req.on_node() && cost.cores >= 1.0);
+            assert!(!s.is_live_job(l) && !s.visible_launch_bump("box-a", l));
+            assert!(!s.short_run(l) && !s.short_on("box-a", l) && !s.room("box-a", l, &cost, true, &[], true).short_bump);
+            let u = s.in_use("box-a", l, true, &[]);
+            assert_eq!(u.cost.cores + u.outside, 17.0);
+            assert!(grants(&s.tick(4)).is_empty());
+            assert_eq!(s.get(&id).unwrap().state, State::Queued);
+            s.cancel(&id, 4);
+        }
+        invariants(&s);
+    }
+
+    #[test]
+    fn deploy_build_does_not_bump_on_overloaded_or_waiting_box_while_hub_update_still_does() {
+        let d = build_room_req("box-a", DEPLOY_BUILD);
+        let mut s = prebuild_box(&[], None);
+        grant_peer(&mut s, "box-a", "busy", 16.0, 0);
+        let waiter = s.request(overlay("lane", Some("box-a"), 4.0), 1);
+        assert!(grants(&s.tick(1)).is_empty());
+        assert!(state(&s, &waiter).1.starts_with("budget cores"));
+        let deploy = s.request(d.clone(), 2);
+        assert!(grants(&s.tick(2)).is_empty());
+        let hub = s.request(build_room_req("box-a", HUB_BUILD), 3);
+        assert_eq!(grants(&s.tick(3)), [hub.clone()]);
+        assert_eq!(s.get(&deploy).unwrap().state, State::Queued);
+        release_clean(&mut s, &hub, 4);
+        s.cancel(&waiter, 4);
+        assert_eq!(grants(&s.tick(4)), [deploy.clone()]);
+        assert_eq!(s.charged_on("box-a").cores, 18.0);
+        invariants(&s);
+
+        for priority in [Priority::Background, Priority::Interactive] {
+            let mut s = prebuild_box(&[], None);
+            let (a, b) = overrunning_peers(&mut s);
+            let deploy = s.request(Req { priority, cores: Some(2.0), ..d.clone() }, 1);
+            let l = s.get(&deploy).unwrap();
+            let u = s.in_use("box-a", l, true, &[]);
+            assert_eq!(u.cost.cores + u.outside, s.box_cores_used("box-a"));
+            assert_eq!(s.cost_on("box-a", l).cores, 2.0);
+            assert!(grants(&s.tick(1)).is_empty());
+            assert_eq!(s.get(&deploy).unwrap().state, State::Queued);
+            assert!(state(&s, &deploy).1.starts_with("budget cores 16, in use 20"), "{:?}", state(&s, &deploy));
+            let hub = s.request(build_room_req("box-a", HUB_BUILD), 2);
+            assert_eq!(grants(&s.tick(2)), [hub.clone()]);
+            release_clean(&mut s, &hub, 3);
+            release_clean(&mut s, &a, 3);
+            release_clean(&mut s, &b, 3);
+            assert_eq!(s.box_cores_used("box-a"), 0.0);
+            assert_eq!(grants(&s.tick(3)), [deploy]);
+            invariants(&s);
+        }
+    }
+
+    fn check_room_width(s: &Sched, id: &str, width: f64, jobs: Option<u32>) {
+        let l = s.get(id).unwrap();
+        assert!(l.state.live());
+        assert_eq!((l.cost.cores, l.run_cores(), s.start_cores(l)), (width, width, width));
+        assert_eq!(s.hub_build_jobs(id), jobs);
+        assert_eq!(l.jit_jobs, None);
+        assert_eq!((s.charged(l).cores, s.granted_take(l)), (width, width));
+    }
+
+    #[test]
+    fn deploy_build_unmeasured_runs_at_granted_jobs() {
+        let mut s = sched(&[("box-a", Caps { cpu_pct: Some(100.0), ..caps(16, 64.0, Role::Pool) })]);
+        let busy = grant_peer(&mut s, "box-a", "busy", 16.0, 0);
+        let d = build_room_req("box-a", DEPLOY_BUILD);
+        let deploy = s.request(d.clone(), 1);
+        let l = s.get(&deploy).unwrap();
+        assert_eq!(s.measured_cores(&l.req), None);
+        assert_eq!(s.cost_on("box-a", l).cores, 2.0);
+        assert_eq!(grants(&s.tick(1)), [deploy.clone()]);
+        check_room_width(&s, &deploy, 2.0, Some(2));
+        assert_eq!(s.charged_on("box-a").cores, 18.0);
+        check_room_width(&restored_box(&s), &deploy, 2.0, Some(2));
+        release_clean(&mut s, &deploy, 2);
+        release_clean(&mut s, &busy, 2);
+        let idle = s.request(d.clone(), 2);
+        assert_eq!(grants(&s.tick(2)), [idle.clone()]);
+        check_room_width(&s, &idle, 8.0, Some(8));
+        release_clean(&mut s, &idle, 3);
+        let busy = grant_peer(&mut s, "box-a", "busy", 16.0, 3);
+        let hub = s.request(build_room_req("box-a", HUB_BUILD), 4);
+        assert_eq!(grants(&s.tick(4)), [hub.clone()]);
+        check_room_width(&s, &hub, 4.0, Some(4));
+        release_clean(&mut s, &hub, 5);
+        release_clean(&mut s, &busy, 5);
+        for _ in 0..3 { s.record_resources(HUB_BUILD, "build", Some(3.0), Some(3.0)); }
+        let low = s.request(d, 5);
+        assert_eq!(grants(&s.tick(5)), [low.clone()]);
+        check_room_width(&s, &low, 8.0, Some(8));
+        invariants(&s);
+
+        let mut c = caps(16, 64.0, Role::Pool);
+        c.features.retain(|f| f != "deploy-jobs");
+        let mut s = sched(&[("old-a", c)]);
+        for _ in 0..3 { s.record_resources(HUB_BUILD, "build", Some(3.0), Some(7.0)); }
+        let busy = grant_peer(&mut s, "old-a", "busy", 16.0, 0);
+        let deploy = s.request(build_room_req("old-a", DEPLOY_BUILD), 1);
+        assert_eq!(s.cost_on("old-a", s.get(&deploy).unwrap()).cores, 7.0);
+        assert!(grants(&s.tick(1)).is_empty());
+        assert_eq!(s.get(&deploy).unwrap().state, State::Queued);
+        release_clean(&mut s, &busy, 2);
+        assert_eq!(grants(&s.tick(2)), [deploy.clone()]);
+        check_room_width(&s, &deploy, 7.0, None);
+        invariants(&s);
+    }
+
+    #[test]
+    fn deploy_build_overlay_hint_stays_at_floor_and_never_widens() {
+        let mut s = prebuild_box(&[], None);
+        s.nodes.get_mut("box-a").unwrap().caps.as_mut().unwrap().cpu_pct = Some(100.0);
+        let busy = grant_peer(&mut s, "box-a", "busy", 16.0, 0);
+        let d = build_room_req("box-a", DEPLOY_BUILD);
+        let pin = format!("work@{}", "a".repeat(40));
+        let id = s.request(Req { src: Src::Overlay, rev: Some(pin.clone()), hint: vec!["coldjit".into()], ..d.clone() }, 1);
+        let l = s.get(&id).unwrap();
+        assert!(!l.req.set_up_on_node() && !s.cold_on("box-a", l));
+        assert_eq!(s.jit_build_charge("box-a", l), None);
+        assert_eq!((s.run_cost_on("box-a", l).cores, s.cost_on("box-a", l).cores), (2.0, 2.0));
+        assert!(!s.own_build_allows_bump("box-a", l, 11.0, true, &[]));
+        let hub = s.request(build_room_req("box-a", HUB_BUILD), 1);
+        assert!(!s.own_build_allows_bump("box-a", s.get(&hub).unwrap(), 11.0, true, &[]));
+        s.cancel(&hub, 1);
+        assert_eq!(grants(&s.tick(1)), [id.clone()]);
+        check_room_width(&s, &id, 2.0, Some(2));
+        assert_eq!(s.jit_build_charge("box-a", s.get(&id).unwrap()), None);
+        assert_eq!(s.charged_on("box-a").cores, 18.0);
+        let lane = s.request(Req { hint: vec!["coldjit".into()], ..overlay("lane", Some("box-a"), 4.0) }, 2);
+        let l = s.get(&lane).unwrap();
+        assert!(s.jit_building("box-a", l).is_none());
+        assert_eq!(s.jit_build_charge("box-a", l), Some(11.0));
+        s.cancel(&lane, 2);
+        release_clean(&mut s, &id, 2);
+        s.record_cost(&format!("{HUB_BUILD}{}", super::super::JIT_BUILD_RUN), "build", 60_000);
+        let tree = s.request(Req { rev: Some(pin.clone()), ..d.clone() }, 3);
+        let l = s.get(&tree).unwrap();
+        assert!(!s.tree_builds("box-a", l));
+        assert_eq!(s.jit_build_charge("box-a", l), None);
+        assert_eq!(s.cost_on("box-a", l).cores, 2.0);
+        assert_eq!(grants(&s.tick(3)), [tree.clone()]);
+        s.set_info(&tree, &format!(r#"{{"class":"test makepad{}","phases":[{{"phase":"jit","blocker":"","boxes":[],"start_ms":1000,"end_ms":0}}]}}"#, super::super::JIT_BUILD_RUN), 4);
+        let l = s.get(&tree).unwrap();
+        assert_eq!(l.req.class, HUB_BUILD);
+        assert!(l.req.hub_build() && l.req.deploy_build() && !l.req.set_up_on_node());
+        assert!(!l.building_jit() && l.node_phases.0.is_empty());
+        check_room_width(&s, &tree, 2.0, Some(2));
+        assert_eq!(s.charged_on("box-a").cores, 18.0);
+        release_clean(&mut s, &tree, 5);
+        release_clean(&mut s, &busy, 5);
+        let pre = s.request(Req { master: true, class: String::new(), ..prebuild_req("box-a", 4.0) }, 5);
+        assert_eq!(grants(&s.tick(5)), [pre.clone()]);
+        s.set_info(&pre, r#"{"class":"hub-build"}"#, 6);
+        let l = s.get(&pre).unwrap();
+        assert!(l.req.class.is_empty() && !l.req.hub_build() && l.req.upkeep() && l.req.set_up_on_node());
+        invariants(&s);
+
+        let mut s = prebuild_box(&[], None);
+        s.nodes.get_mut("box-a").unwrap().caps.as_mut().unwrap().features.retain(|f| f != "jit-jobs");
+        grant_peer(&mut s, "box-a", "background", 8.0, 0);
+        let room = s.request(Req { cores: Some(2.0), rev: Some(pin.clone()), warms: Some("prebuild-box-a".into()), ..d }, 1);
+        assert_eq!(grants(&s.tick(1)), [room.clone()]);
+        check_room_width(&s, &room, 2.0, Some(2));
+        let pre = s.request(Req { src: Src::Tree, rev: Some(pin), class: format!("build tree{}", super::super::JIT_BUILD_RUN), ..prebuild_req("box-a", 4.0) }, 2);
+        let l = s.get(&pre).unwrap();
+        assert!(s.tree_builds("box-a", l));
+        assert_eq!(s.jit_build_charge("box-a", l), Some(11.0));
+        assert_eq!(s.cost_on("box-a", l).cores, 11.0);
+        assert_eq!(s.charged_on("box-a").cores, 10.0);
+        assert!(grants(&s.tick(2)).is_empty());
+        assert_eq!(s.get(&pre).unwrap().state, State::Queued);
+        assert!(state(&s, &pre).1.starts_with("budget cores"));
+        assert_eq!(s.charged_on("box-a").cores, 10.0);
+        invariants(&s);
     }
 
     /// A box's prebuild keeps to its grant: its build is told the cores it was granted to take
@@ -22630,7 +26203,7 @@ mod tests {
             assert_eq!(l.jit_jobs, want, "held {held}, told {told}: the jobs its build takes ({})", l.grant_why);
             if let Some(jobs) = want {
                 assert_eq!(s.charged(&l).cores, f64::from(jobs), "held {held}: charged the jobs it was told");
-                assert!(super::super::master::lease_start_line(&l, "null", l.run_cores(), 0.0, None, None, None, None).contains(&format!("\"jit_jobs\":{jobs}")), "its start says so");
+                assert!(super::super::master::lease_start_line(&l, "null", l.run_cores(), 0.0, None, None, None, None, None).contains(&format!("\"jit_jobs\":{jobs}")), "its start says so");
             }
             if told && !held {
                 let mut r = overlay("lane", Some("box-b"), 2.0);
@@ -22709,6 +26282,698 @@ mod tests {
         r.rev = Some(format!("work@{}", "a".repeat(40)));
         r.cores = Some(cores);
         r
+    }
+
+    fn master_held(mut r: Req, agent: Option<&str>) -> Req {
+        r.master = true;
+        r.agent = agent.map(str::to_owned);
+        r
+    }
+
+    fn tick_with_beats(s: &mut Sched, now: u64) -> Vec<Action> {
+        beat_all(s, now);
+        s.tick(now)
+    }
+
+    #[test]
+    fn devhubs_own_and_lane_agent_distinguish_master_held_lane_work_from_devhub_work() {
+        let live_test = Req { live: true, for_lane: Some("lane-a".into()), ..req("live-W7", Kind::Test, None) };
+        let live_app = Req { live: true, ..req("live-W8", Kind::Screen, None) };
+        for r in [req("job", Kind::Test, None), live_test, live_app, req("adopted", Kind::Timed, None)] {
+            for agent in [Some("agent-a"), None, Some(""), Some("main"), Some("devhub-test")] {
+                let held = master_held(r.clone(), agent);
+                let owner = agent.filter(|a| *a == "agent-a");
+                assert_eq!((held.devhubs_own(), held.lane_agent()), (false, owner), "{} is lane work with inbox {owner:?} for {agent:?}", r.lane);
+            }
+        }
+        for (r, subsystem) in [
+            (build_room_req("a", HUB_BUILD), "devhub-roll"),
+            (build_room_req("a", DEPLOY_BUILD), "devhub-sync"),
+            (prebuild_req("a", 4.0), "devhub-warm"),
+            (req("warm-lane-a", Kind::Build, None), "devhub-warm"),
+            (req(CI_LANE, Kind::Build, None), "devhub-ci-sweep"),
+            (req("ci-leg", Kind::Ci, None), "devhub-ci"),
+            (req(TESTS_LANE, Kind::Test, None), BUCKET_AGENT),
+            (req("landq-fast", Kind::Gate, None), BUCKET_AGENT),
+            (req(LANDING_LANE, Kind::Gate, None), BUCKET_AGENT),
+        ] {
+            for agent in [None, Some(subsystem), Some("agent-a")] {
+                let held = master_held(r.clone(), agent);
+                assert_eq!((held.devhubs_own(), held.lane_agent()), (true, None), "{} identifies devhub work even with agent {agent:?}", r.lane);
+            }
+        }
+        for agent in ["devhub-verify", "devhub-jitlegs", "devhub-allapps", DOCKBUILD_AGENT, "devhub-show", "devhub-shadow"] {
+            let r = master_held(req("leg", Kind::Test, None), Some(agent));
+            assert_eq!((r.devhubs_own(), r.lane_agent()), (true, None), "{agent} identifies a devhub subsystem");
+        }
+    }
+
+    #[test]
+    fn bench_pin_refuses_master_held_lane_jobs_and_live_sessions_but_allows_devhub_and_live_joins() {
+        let fleet = || sched(&[("bench", caps(16, 64.0, Role::Bench)), ("pool", caps(16, 64.0, Role::Pool))]);
+        let pinned = |lane| overlay(lane, Some("bench"), 2.0);
+        let lane_agent = Some("agent-a");
+        let live_test = Req { live: true, for_lane: Some("lane-a".into()), ..pinned("live-W7") };
+        let live_app = Req { live: true, kind: Kind::Screen, ..pinned("live-W8") };
+        for (r, agent) in [(pinned("managed"), lane_agent), (live_test, lane_agent), (live_app, lane_agent), (pinned("shadow"), Some("devhub-test"))] {
+            let mut s = fleet();
+            let r = master_held(r, agent);
+            assert_eq!(s.never_places(&r).as_deref(), Some(BENCH_PIN), "{} rejects the named bench at submission", r.lane);
+            let id = s.request(r, 0);
+            s.tick(0);
+            let (st, why) = state(&s, &id);
+            assert!(st == "ended denied" && why.contains(BENCH_PIN), "placement must refuse the bench pin: {st} {why}");
+        }
+        for (r, agent) in [
+            (req("timed", Kind::Timed, Some("bench")), lane_agent),
+            (prebuild_req("bench", 4.0), None),
+            (pinned("dock"), Some(DOCKBUILD_AGENT)),
+            (pinned("shadow"), Some("devhub-shadow")),
+            (req(CI_LANE, Kind::Ci, Some("bench")), Some("devhub-ci")),
+            (build_room_req("bench", HUB_BUILD), None),
+        ] {
+            let mut s = fleet();
+            let r = master_held(r, agent);
+            assert_eq!(s.never_places(&r), None, "{} may name the bench", r.lane);
+            let id = s.request(r, 0);
+            s.tick(0);
+            assert_eq!(node_of(&s, &id).as_deref(), Some("bench"), "allowed bench pin must start there: {:?}", state(&s, &id));
+        }
+
+        let mut s = fleet();
+        let pool = s.request(Req { ram_gb: Some(54.0), ..overlay("busy", Some("pool"), 16.0) }, 0);
+        s.tick(0);
+        let session = |lane, node| master_held(Req { live: true, ram_gb: Some(2.0), ..overlay(lane, node, 2.0) }, lane_agent);
+        let partner = s.request(session("live-W1", None), 1);
+        s.tick(1);
+        assert_eq!(node_of(&s, &partner).as_deref(), Some("bench"), "the unpinned partner overflows the pool: {:?}", state(&s, &partner));
+        assert!(s.started(&partner, "{}"), "the lent live session must be running before the join");
+        let join = |id: &str| Req { joins: Some(id.into()), ..session("live-W2", Some("bench")) };
+        assert_eq!(s.never_places(&join(&partner)), None, "a live partner on the bench permits the join");
+        let joined = s.request(join(&partner), 2);
+        s.tick(2);
+        assert_eq!(node_of(&s, &joined).as_deref(), Some("bench"), "joiner must start beside its partner: {:?}", state(&s, &joined));
+        for id in ["L999", pool.as_str()] {
+            assert_eq!(s.never_places(&join(id)).as_deref(), Some(BENCH_PIN), "missing or off-box partner {id} cannot authorize the pin");
+            let refused = s.request(join(id), 3);
+            s.tick(3);
+            let (st, why) = state(&s, &refused);
+            assert!(st == "ended denied" && why.contains(BENCH_PIN), "placement must reject a join with partner {id}: {st} {why}");
+        }
+    }
+
+    #[test]
+    fn warm_up_yields_to_master_held_managed_jobs_and_live_sessions_but_not_devhub_legs() {
+        let ask = |lane, kind| Req { kind, ram_gb: Some(30.0), ..overlay(lane, Some("a"), 8.0) };
+        let live = Req { live: true, for_lane: Some("lane-a".into()), ..ask("live-W7", Kind::Test) };
+        for (r, agent, yields) in [
+            (ask("dock", Kind::Build), DOCKBUILD_AGENT, false),
+            (ask(CI_LANE, Kind::Ci), "devhub-ci", false),
+            (ask("managed", Kind::Test), "agent-a", true),
+            (live, "agent-a", true),
+            (ask("shadow", Kind::Test), "devhub-test", true),
+            (ask("landq-fast", Kind::Gate), BUCKET_AGENT, true),
+            (ask(TESTS_LANE, Kind::Test), BUCKET_AGENT, true),
+        ] {
+            let mut s = sched(&[("a", caps(16, 64.0, Role::Pool))]);
+            // The live test can share CPU with a prebuild, so keep it queued on RAM as well.
+            let pre = Req { ram_gb: Some(30.0), ..prebuild_req("a", 12.0) };
+            let pre = s.request(master_held(pre, Some("devhub-warm")), 0);
+            s.tick(0);
+            assert!(s.started(&pre, "{}"), "the prebuild must be running before {agent} asks");
+            let id = s.request(master_held(r, Some(agent)), 1);
+            let actions = s.tick(1);
+            assert_eq!(state(&s, &id).0, "queued", "the waiter must need the prebuild's room: {:?}", state(&s, &id));
+            assert_eq!(s.told_to_yield(&pre), yields, "warm-up yield decision for {} ({agent})", s.get(&id).unwrap().req.lane);
+            assert_eq!(actions.iter().any(|a| matches!(a, Action::Log(line) if line.contains("a warm-up:"))), yields, "warm-up yield log for {agent}");
+        }
+    }
+
+    #[test]
+    fn yield_unheard_notifies_owner_and_main_for_master_held_and_adopted_timed_jobs_only() {
+        for (lane, agent, adopted, lent) in [
+            ("managed", "agent-a", false, false),
+            ("adopted", "agent-a", true, false),
+            ("own", "devhub-jitlegs", false, false),
+            (TESTS_LANE, BUCKET_AGENT, false, true),
+            ("shadow", "devhub-test", false, true),
+        ] {
+            let mut s = sched(&[("bench", caps(16, 64.0, Role::Bench)), ("pool", caps(16, 64.0, Role::Pool))]);
+            let r = if lent {
+                s.request(Req { est_min: Some(30.0), ram_gb: Some(54.0), ..overlay("busy", Some("pool"), 16.0) }, 0);
+                s.tick(0);
+                Req { yields: true, ram_gb: Some(2.0), ..overlay(lane, None, 2.0) }
+            } else {
+                Req { est_min: Some(5.0), ..req(lane, Kind::Timed, Some("bench")) }
+            };
+            let r = Req { master: !adopted, holder: adopted.then_some(42), agent: Some(agent.into()), ..r };
+            let run = s.request(r, 0);
+            s.tick(0);
+            assert_eq!(node_of(&s, &run).as_deref(), Some("bench"), "{lane} must run on the bench: {:?}", state(&s, &run));
+            assert!(s.started(&run, "{}"), "{lane} must be running before it can yield");
+            if adopted {
+                s.adopt(&run, 42).expect("the original holder may hand its run to the master");
+                let r = &s.get(&run).unwrap().req;
+                assert!(r.master && r.agent.as_deref() == Some(agent), "adoption preserves the lane's inbox");
+            }
+            let due = if lent { 1 } else { 6 * 60_000 + 15_000 };
+            s.request(req("wait", Kind::Timed, Some("bench")), due);
+            let actions = tick_with_beats(&mut s, due);
+            assert!(actions.iter().any(|a| matches!(a, Action::Yield { id, .. } if id == &run)), "{lane} must receive a yield at its deadline");
+            let unheard = format!("{} of {lane} on bench: told to yield ", s.get(&run).unwrap().tag());
+            for (time, first) in [(due + TIMED_DUE_MS, true), (due + TIMED_DUE_MS + 1, false)] {
+                let actions = tick_with_beats(&mut s, time);
+                let recipients: Vec<_> = actions.iter().filter_map(|a| match a {
+                    Action::Note { agent, line } if line.starts_with(&unheard) => Some(agent.as_str()),
+                    _ => None,
+                }).collect();
+                let expected: &[&str] = if !first { &[] } else if agent == "agent-a" { &["agent-a", "main"] } else { &["main"] };
+                assert_eq!(recipients, expected, "unheard yield for {lane} must reach each inbox once");
+                let warnings = actions.iter().filter(|a| matches!(a, Action::Event(e) if e.sev == Sev::Warn && e.line.starts_with(&unheard))).count();
+                assert_eq!(warnings, usize::from(first), "unheard yield for {lane} must warn once");
+            }
+        }
+    }
+
+    #[test]
+    fn master_held_unreasoned_pin_warns_hints_and_drops_hold_while_live_joins_keeps_hold_and_stays_silent() {
+        let named = Some("pool-a");
+        let pin = |lane| Req { ram_gb: Some(30.0), est_min: Some(10.0), ..overlay(lane, named, 8.0) };
+        let live = Req { live: true, ..pin("live-W2") };
+        for (r, agent, join, warn) in [
+            (pin("managed"), "agent-a", false, true),
+            (live.clone(), "agent-a", false, true),
+            (live, "agent-a", true, false),
+            (pin("dock"), DOCKBUILD_AGENT, false, false),
+            (pin("warm-lane"), "devhub-warm", false, false),
+        ] {
+            let mut s = sched(&[("pool-a", caps(16, 64.0, Role::Pool)), ("pool-b", caps(16, 64.0, Role::Pool))]);
+            let busy = Req { ram_gb: Some(30.0), est_min: Some(30.0), ..overlay("busy", named, 12.0) };
+            s.request(busy, 0);
+            s.tick(0);
+            let mut r = master_held(r, Some(agent));
+            if join {
+                let partner = Req { live: true, ram_gb: Some(2.0), ..overlay("live-W1", named, 2.0) };
+                let id = s.request(master_held(partner, Some(agent)), 0);
+                s.tick(0);
+                assert!(s.started(&id, "{}"), "the join partner must be running on pool-a");
+                r.joins = Some(id);
+            }
+            let partner = r.joins.clone();
+            let id = s.request(r, 1);
+            let warnings = |a: &[Action]| a.iter().filter_map(|a| match a {
+                Action::Event(e) if e.sev == Sev::Warn && e.line.contains(" pinned to ") => Some(e.line.clone()),
+                _ => None,
+            }).collect::<Vec<_>>();
+            assert!(warnings(&s.tick(1)).is_empty(), "a new pin gets time to start");
+            let actions = tick_with_beats(&mut s, 1 + PIN_WAIT_MS);
+            let (st, why) = state(&s, &id);
+            assert_eq!(st, "queued", "the busy box keeps the pin queued: {why}");
+            let said = warnings(&actions);
+            assert_eq!(said.len(), usize::from(warn), "pin warnings for {id} of {agent}: {said:?}");
+            let holds = s.holds.get("pool-a").is_some_and(|h| h.id == id);
+            if warn {
+                assert!(!holds, "an unreasoned lane pin must leave the busy box free");
+                assert!(said[0].contains("(agent-a)") && said[0].contains("unpin it"), "the warning must name the owner and action: {said:?}");
+                assert!(why.ends_with(": unpin it (`--needs os=linux,arch=x86_64` in place of --node), or say why it needs pool-a (--pin-why \"<reason>\")"), "the queue line must give the unpin alternatives: {why}");
+            } else {
+                assert!(!why.contains("unpin it"), "a joined or internal pin needs no unpin hint: {why}");
+            }
+            if let Some(partner) = partner {
+                assert!(holds, "the joiner must keep its partner's box: {why}");
+                assert!(why.ends_with(&format!("; it waits for pool-a, the box of {partner} (--joins)")), "the queue line must identify the partner: {why}");
+            }
+            assert!(warnings(&s.tick(2 + PIN_WAIT_MS)).is_empty(), "a waiting pin warns only once");
+        }
+    }
+
+    #[test]
+    fn master_held_reasoned_pin_bounds_its_hold_to_its_run_measure() {
+        let pin = || Req { est_min: Some(1.0), ram_gb: Some(30.0), ..overlay("pin", Some("a"), 13.0) };
+        for (r, keeps_hold) in [
+            (Req { series: Some("s1".into()), ..pin() }, false),
+            (Req { kind: Kind::Timed, ..pin() }, true),
+            (Req { live: true, pin_why: Some("same GPU".into()), ..pin() }, true),
+        ] {
+            let mut s = sched(&[("a", caps(16, 64.0, Role::Pool))]);
+            let busy = Req { est_min: Some(30.0), ram_gb: Some(30.0), ..overlay("busy", Some("a"), 12.0) };
+            s.request(busy, 0);
+            s.tick(0);
+            let id = s.request(master_held(r, Some("agent-a")), 1);
+            s.tick(1);
+            let measure = s.run_ms(s.get(&id).unwrap());
+            let holds = |s: &Sched| s.holds.get("a").is_some_and(|h| h.id == id);
+            assert!(holds(&s), "the pin must initially hold its box: {:?}", state(&s, &id));
+            tick_with_beats(&mut s, measure);
+            assert!(holds(&s), "the queued pin must hold a within its run measure: {:?}", state(&s, &id));
+            tick_with_beats(&mut s, measure + 2);
+            assert_eq!(state(&s, &id).0, "queued", "a drain cap must preserve the ask's place");
+            assert_eq!(holds(&s), keeps_hold, "only timed and live pins keep holding past their run measure: {:?}", state(&s, &id));
+        }
+    }
+
+    #[test]
+    fn land_queue_passes_and_takes_hold_of_master_held_background_managed_job() {
+        let noon = 12 * 60 * 60_000;
+        for (full, agent) in [(false, "agent-a"), (true, "agent-a"), (false, DOCKBUILD_AGENT)] {
+            let mut s = sched(&[("a", caps(16, 64.0, Role::Pool))]);
+            let work = Req { est_min: Some(20.0), ram_gb: Some(12.0), ..overlay("run", Some("a"), 14.0) };
+            let work = s.request(work, noon);
+            s.tick(noon);
+            let job = Req { est_min: Some(30.0), class: "test:job".into(), ram_gb: full.then_some(50.0), ..overlay("job", None, 6.0) };
+            if full {
+                // A measured eight-minute bound leaves time to pass the hold before starvation
+                // protects it. With only the thirty-minute estimate both boundaries coincide.
+                s.record_cost(job.class(), "test", 8 * 60_000);
+            }
+            let owner = s.request(master_held(job, Some(agent)), noon + 1);
+            s.tick(noon + 1);
+            let holds = |s: &Sched, id: &str| s.holds.get("a").is_some_and(|h| h.id == id);
+            assert!(holds(&s, &owner), "the queued background ask must own the first hold: {:?}", state(&s, &owner));
+            assert_eq!(s.land_passable("a", s.get(&owner).unwrap()), agent == "agent-a", "only lane work may be passed by the bucket");
+            let age_bound = s.age_bound("a", s.get(&owner).unwrap());
+            let at = if full { noon + age_bound } else { noon + 2 };
+            let shard = Req { class: shard_class(12, full), run_ms: Some(noon), ..overlay(TESTS_LANE, None, 12.0) };
+            let shard = s.request(master_held(shard, Some(BUCKET_AGENT)), at);
+            tick_with_beats(&mut s, at);
+            if full {
+                assert!(holds(&s, &owner), "a full shard must wait for the RAM-blocked owner's age bound");
+                tick_with_beats(&mut s, at + 2);
+            }
+            let (first, second) = if agent == "agent-a" { (&shard, &owner) } else { (&owner, &shard) };
+            assert!(holds(&s, first), "the rightful ask must hold a before release (full={full}, {agent}): {:?}", s.holds);
+            if !full {
+                release_clean(&mut s, &work, at + 3);
+                tick_with_beats(&mut s, at + 3);
+                assert_eq!(node_of(&s, first).as_deref(), Some("a"), "the hold owner must start first when the running job ends");
+                assert_eq!(state(&s, second).0, "queued", "the other ask must still be waiting for room");
+            }
+        }
+    }
+
+    #[test]
+    fn master_held_lane_pin_runs_on_shaky_box_while_devhub_background_waits() {
+        let now = 10 * 60_000;
+        let pinned = |lane| overlay(lane, Some("node-a"), 4.0);
+        for (r, agent, waits) in [
+            (pinned("job"), Some("agent-a"), false),
+            (prebuild_req("node-a", 4.0), None, true),
+            (pinned("dockbuild-node-a"), Some(DOCKBUILD_AGENT), true),
+            (build_room_req("node-a", HUB_BUILD), None, false),
+        ] {
+            let mut s = sched(&[("node-a", caps(16, 64.0, Role::Pool)), ("node-b", caps(16, 64.0, Role::Pool))]);
+            let link = s.links.entry("node-a".into()).or_default();
+            link.ups.push_back(3 * 60_000);
+            link.back_ms = Some(now);
+            let id = s.request(master_held(Req { est_min: Some(10.0), ..r }, agent), now);
+            s.tick(now);
+            if waits {
+                let (st, why) = state(&s, &id);
+                assert!(st == "queued" && why.starts_with("shaky link:"), "devhub background work waits for the link: {st} {why}");
+                assert!(s.holds.is_empty(), "devhub work must leave the shaky box unreserved");
+            } else {
+                assert_eq!(node_of(&s, &id).as_deref(), Some("node-a"), "lane pins and hub updates must start immediately: {:?}", state(&s, &id));
+            }
+        }
+    }
+
+    #[test]
+    fn master_held_lane_job_and_live_session_mark_queue_busy_while_devhub_work_leaves_it_quiet() {
+        let mut s = sched(&[("a", caps(16, 64.0, Role::Pool))]);
+        s.request(Req { ram_gb: Some(54.0), ..overlay("busy", Some("a"), 16.0) }, 0);
+        s.tick(1_000);
+        assert_eq!(s.queue_busy_ms, 1_000, "the first tick sets the quiet baseline");
+        let ask = |lane| Req { ram_gb: Some(8.0), ..overlay(lane, None, 8.0) };
+        let mut own = Vec::new();
+        for (r, agent) in [
+            (prebuild_req("a", 8.0), None),
+            (Req { kind: Kind::Ci, ..ask(CI_LANE) }, Some("devhub-ci")),
+            (ask(TESTS_LANE), Some(BUCKET_AGENT)),
+            (ask("dock"), Some(DOCKBUILD_AGENT)),
+        ] {
+            own.push(s.request(master_held(r, agent), 2_000));
+        }
+        tick_with_beats(&mut s, 120_000);
+        for id in own {
+            assert_eq!(state(&s, &id).0, "queued", "internal control must actually be waiting: {:?}", state(&s, &id));
+        }
+        assert_eq!(s.queue_busy_ms, 1_000, "internal work waiting over a minute leaves the queue quiet");
+        let job = s.request(master_held(ask("job"), Some("agent-a")), 130_000);
+        tick_with_beats(&mut s, 150_000);
+        assert_eq!(s.queue_busy_ms, 1_000, "twenty seconds of managed job wait leaves the queue quiet");
+        tick_with_beats(&mut s, 190_000);
+        assert_eq!(s.queue_busy_ms, 190_000, "a minute of managed job wait marks the queue busy");
+        s.cancel(&job, 190_000);
+        let live = Req { live: true, for_lane: Some("lane-a".into()), ..ask("live-W7") };
+        let id = s.request(master_held(live, Some("agent-a")), 200_000);
+        tick_with_beats(&mut s, 260_000);
+        assert_eq!(state(&s, &id).0, "queued", "the live test must still be waiting on a");
+        assert_eq!(s.queue_busy_ms, 260_000, "a minute of live test wait marks the queue busy on its own");
+    }
+
+    /// A granted lease as it comes off leases.live. Tests start after placement and exercise
+    /// caps, beats, captures and note receipts through their scheduler entry points.
+    fn wm_granted(s: &mut Sched, id: &str, node: &str, r: &Req, measured: Option<u64>) {
+        let ms = measured.map_or("null".into(), |n| n.to_string());
+        let line = format!(r#"{{"id":"{id}","state":"granted","node":"{node}","granted_ms":0,"measured_ms":{ms},"req":{}}}"#, r.to_json());
+        assert_eq!(s.restore(&line, 0).as_deref(), Some(id), "{line}");
+    }
+
+    fn wm_drain(s: &mut Sched, node: &str, ids: &[&str], now: u64) {
+        let mut c = s.nodes[node].caps.clone().unwrap();
+        c.wm_drain = ids.iter().map(|id| {
+            let r = &s.get(id).unwrap().req;
+            format!("{} lease {id} of {} (its windows)", r.kind.as_str(), r.lane)
+        }).collect::<Vec<_>>().join("; ");
+        s.set_caps(node, c, now);
+    }
+
+    fn wm_tick(s: &mut Sched, now: u64) -> Vec<Action> {
+        let ids: Vec<_> = s.leases.iter().map(|l| l.id.clone()).collect();
+        for id in ids {
+            s.beat(&id, now);
+            s.set_info(&id, &format!(r#"{{"out_bytes":{now}}}"#), now);
+        }
+        let actions = s.tick(now);
+        assert!(!actions.iter().any(|a| matches!(a, Action::End { .. })), "a working holder must keep its lease: {actions:?}");
+        actions
+    }
+
+    fn wm_captures(actions: &[Action], id: &str, node: &str) -> usize {
+        actions.iter().filter(|a| matches!(a, Action::Capture { id: lease, node: n, .. } if lease == id && n == node)).count()
+    }
+
+    /// Each owed note and the warning carry the owner's exact line. The fleet row gives the
+    /// same end instruction. The concise lease tag only reports capture status.
+    fn wm_assert_notice(s: &Sched, actions: &[Action], id: &str, now: u64, recipients: &[&str], cmd: &str) -> String {
+        let l = s.get(id).unwrap();
+        let node = l.node.as_deref().unwrap();
+        let line = s.owner_word(id).unwrap();
+        let ending = format!("if it hangs, {cmd}; that frees {node}");
+        assert!(line.contains(&format!("Nothing ends it on time; {ending}")), "{line}");
+        let notes: Vec<_> = actions.iter().filter_map(|a| match a {
+            Action::Note { agent, line: note } if note == &line => Some(agent.as_str()),
+            _ => None,
+        }).collect();
+        assert_eq!(notes, recipients, "{actions:?}");
+        assert!(actions.iter().any(|a| matches!(a, Action::Event(r) if r.sev == Sev::Warn && r.line == line)), "{actions:?}");
+        let row = s.wm_wait_rows(now).into_iter().find(|row| row.contains(&l.tag())).unwrap();
+        assert!(row.contains(&ending), "{row}");
+        let tag = s.lease_wm_wait_tag(l, now);
+        for surface in [&line, &row, &tag] {
+            assert!(!surface.contains("devhub cancel") && !surface.contains("devhub lease release"), "{surface}");
+            if s.is_live_job(l) { assert!(!surface.contains("devhub release"), "{surface}"); }
+        }
+        line
+    }
+
+    fn wm_live_test(lane: &str, owner: Option<&str>) -> Req {
+        let mut r = Req::new(lane, Kind::Test);
+        r.for_lane = owner.map(str::to_owned);
+        r.class = "live:test:pkg".into();
+        r.master = true;
+        r.live = true;
+        r.agent = Some("agent-a".into());
+        r
+    }
+
+    #[test]
+    fn wm_drain_captures_and_notifies_owner_and_main_past_2x_without_ending_lease() {
+        let mut s = sched(&[("a", caps(16, 64.0, Role::Pool))]);
+        let mut r = Req::new("lane-a", Kind::Test);
+        r.agent = Some("agent-a".into());
+        r.class = "test:ui-suite".into();
+        s.record_cost(r.class(), "test", 403_000);
+        let id = s.request(r.clone(), 0);
+        assert_eq!(id, "L1");
+        s.tick(0);
+        assert!(s.started(&id, "{}"));
+        for minute in 1..=13 {
+            let now = minute * 60_000;
+            if minute >= 4 { wm_drain(&mut s, "a", &[&id], now); }
+            let acts = wm_tick(&mut s, now);
+            assert_eq!(wm_captures(&acts, &id, "a"), 0);
+            if minute == 9 {
+                assert!(acts.iter().any(|a| matches!(a, Action::Note { agent, line } if agent == "agent-a" && line.contains("Nothing ends it") && line.contains("2x its measured 6m43s") && line.contains("capture its state and notify you and main"))), "{acts:?}");
+            }
+        }
+        assert_eq!(wm_captures(&wm_tick(&mut s, 806_000), &id, "a"), 0);
+        let t = 807_000;
+        assert_eq!(wm_captures(&wm_tick(&mut s, t), &id, "a"), 1);
+        assert!(s.lease_view_line(s.get(&id).unwrap(), t).contains("past 2x, capturing"));
+        assert!(!s.stalled.contains_key(&id) && !s.overran.contains_key(&id));
+        let detail = "JIT 42: blocked: main waits (capture a:/c/x.txt, flight a:/c/x.mkpf); stacks and processes: `devhub job result L1`";
+        s.wm_captured(&id, detail, t);
+        let acts = std::mem::take(&mut s.out);
+        let line = wm_assert_notice(&s, &acts, &id, t, &["agent-a", "main"], "end your lease with `devhub release L1`");
+        assert!(line.starts_with("a's WM update waits on you") && line.contains(detail), "{line}");
+        assert!(s.lease_view_line(s.get(&id).unwrap(), t).contains("captured: `devhub job result L1`"));
+        let late = 70 * 60_000;
+        for (offset, blocking) in [true, false, true].into_iter().enumerate() {
+            let now = late + offset as u64;
+            let blockers = [id.as_str()];
+            wm_drain(&mut s, "a", if blocking { &blockers } else { &[] }, now);
+            let acts = wm_tick(&mut s, now);
+            assert_eq!(wm_captures(&acts, &id, "a"), 0);
+            assert!(!acts.iter().any(|a| matches!(a, Action::Note { line, .. } if line.contains("WM update"))), "{acts:?}");
+            assert_eq!(s.owner_word(&id).is_some(), blocking);
+            assert_eq!(s.wm_wait_rows(now).is_empty(), !blocking);
+            assert_eq!(s.get(&id).unwrap().state, State::Granted);
+        }
+
+        r.master = true;
+        wm_granted(&mut s, "L2", "a", &r, Some(60_000));
+        s.job_ids.insert("L2".into(), "J1".into());
+        wm_drain(&mut s, "a", &["L2"], late + 3);
+        assert_eq!(wm_captures(&wm_tick(&mut s, late + 3), "L2", "a"), 1);
+        s.wm_captured("L2", "JIT 42: blocked", late + 3);
+        wm_assert_notice(&s, &s.out, "L2", late + 3, &["agent-a", "main"], "end your job with `devhub job cancel J1`");
+    }
+
+    #[test]
+    fn wm_drain_notifies_timed_lease_past_2x_without_capturing_and_skips_unmeasured_and_exempt() {
+        let t = 610_000;
+        for (lane, kind, agent, cmd) in [
+            ("lane-a", Kind::Timed, "agent-a", "end your lease with `devhub release L1`"),
+            (TESTS_LANE, Kind::Test, BUCKET_AGENT, "end your shard with `devhub bucket stop 1000 \"<unit>\" <why>` (or `devhub release L1`)"),
+            (CI_LANE, Kind::Ci, "devhub-ci", "end your lease with `devhub release L1`"),
+            ("lane-a", Kind::Build, DOCKBUILD_AGENT, "end your lease with `devhub release L1`"),
+        ] {
+            let mut s = sched(&[("a", caps(16, 64.0, Role::Pool))]);
+            let mut r = Req::new(lane, kind);
+            r.agent = Some(agent.into());
+            r.master = true;
+            if lane == TESTS_LANE { r.run_ms = Some(1000); }
+            wm_granted(&mut s, "L1", "a", &r, Some(60_000));
+            wm_drain(&mut s, "a", &["L1"], t);
+            let mut acts = wm_tick(&mut s, t);
+            assert_eq!(wm_captures(&acts, "L1", "a"), usize::from(kind != Kind::Timed), "{acts:?}");
+            if kind != Kind::Timed {
+                s.wm_captured("L1", "JIT 42: blocked", t);
+                acts.append(&mut s.out);
+            }
+            let owed: &[&str] = if kind == Kind::Timed { &["agent-a", "main"] } else { &["main"] };
+            let line = wm_assert_notice(&s, &acts, "L1", t, owed, cmd);
+            if kind == Kind::Timed { assert!(line.contains("No capture taken (timed lease)"), "{line}"); }
+        }
+
+        for case in ["unmeasured", "script", "user", "watched", "hand-held", "dev-off", "screen", "live app", "overlay jit", "native guess", "inspect", "hub build"] {
+            let mut c = caps(16, 64.0, if case == "user" { Role::UserWm } else { Role::Pool });
+            c.watched = case == "watched";
+            if case == "hand-held" { c.hand_held = Some(super::super::HandHeld { app: "app".into(), pid: 42, how: "headset".into() }); }
+            let mut s = sched(&[("a", c)]);
+            let mut r = Req::new("lane-a", match case { "screen" => Kind::Screen, "inspect" => Kind::Inspect, "hub build" => Kind::Build, _ => Kind::Test });
+            r.class = match case { "script" => "test bash suite.sh @lane-a", "native guess" => "native:test:pkg", "hub build" => HUB_BUILD, _ => "test:ui-suite" }.into();
+            r.master = case == "hub build";
+            r.live = case == "live app";
+            if case == "overlay jit" {
+                r.src = Src::Overlay;
+                r.rev = Some(format!("work@{}", "a".repeat(40)));
+            }
+            if case == "inspect" { r.node = Some("a".into()); r.jit = Some("app".into()); }
+            wm_granted(&mut s, "L1", "a", &r, (case != "unmeasured").then_some(60_000));
+            if case == "dev-off" { s.set_dev("a", false, 0).unwrap(); }
+            if case == "overlay jit" { s.set_info("L1", r#"{"phases":[{"phase":"jit","start_ms":1,"end_ms":0}]}"#, 1); }
+            wm_drain(&mut s, "a", &["L1"], t);
+            // An active live app has its own overrun detector. Exercise the WM pass while
+            // it is in a call, then tick between calls on the same long-held lease.
+            if case == "live app" {
+                s.watch_wm_drain(t);
+                assert_eq!(wm_captures(&s.out, "L1", "a"), 0);
+                s.live_idle.insert("L1".into());
+            }
+            if case == "inspect" { s.note_progress("L1", "inspecting", t); }
+            let acts = wm_tick(&mut s, t);
+            assert_eq!(wm_captures(&acts, "L1", "a"), 0, "{case}: {acts:?}");
+            assert!(!s.wm_wait.contains_key("L1") && !acts.iter().any(|a| matches!(a, Action::Note { line, .. } if line.contains("waits on you"))), "{case}: {acts:?}");
+        }
+    }
+
+    #[test]
+    fn wm_drain_parks_idle_unkept_live_session_and_captures_overrunning_live_test_call() {
+        for (kind, watched, count) in [(Kind::Screen, false, 1), (Kind::Timed, false, 0), (Kind::Screen, true, 0)] {
+            let mut c = caps(16, 64.0, Role::Pool);
+            c.watched = watched;
+            let mut s = sched(&[("a", c.clone())]);
+            let mut r = Req::new("lane-a", kind);
+            r.live = true;
+            wm_granted(&mut s, "L1", "a", &r, None);
+            s.live_idle.insert("L1".into());
+            s.set_info("L1", r#"{"idle_s":1}"#, 1);
+            c.wm_drain = format!("{} lease L1 of lane-a ({})", kind.as_str(), super::super::exec::LIVE_UNKEPT);
+            s.set_caps("a", c, 1);
+            for (t, n) in [(1, count), (2, 0)] {
+                let acts = s.tick(t);
+                assert_eq!(acts.iter().filter(|a| matches!(a, Action::ParkLive { leases, .. } if leases.as_slice() == ["L1"])).count(), n, "{acts:?}");
+                assert!(!acts.iter().any(|a| matches!(a, Action::End { .. })));
+            }
+        }
+        let mut s = sched(&[("a", caps(16, 64.0, Role::Pool))]);
+        let r = wm_live_test("live-W7", Some("lane-a"));
+        assert_eq!(r.lane, "live-w7");
+        wm_granted(&mut s, "L1", "a", &r, Some(60_000));
+        s.live_session_ids.insert("L1".into(), "W7".into());
+        wm_drain(&mut s, "a", &["L1"], 1);
+        for t in [120_001, 240_003] {
+            assert_eq!(wm_captures(&wm_tick(&mut s, t), "L1", "a"), 1);
+            s.wm_captured("L1", "JIT 42: blocked", t);
+            wm_assert_notice(&s, &s.out, "L1", t, &["agent-a", "main"], "end your live session with `devhub live release W7 --lane lane-a`");
+            s.live_call_ended("L1", t);
+            assert!(!s.wm_wait.contains_key("L1"));
+            s.live_call_began("L1", t + 1);
+        }
+    }
+
+    fn wm_saved(s: &Sched, id: &str) -> String {
+        s.live_lines().into_iter().find(|line| {
+            makepad_strict_json::parse(line.as_bytes()).ok().is_some_and(|v| v.get("id").and_then(|v| v.as_str()) == Some(id))
+        }).unwrap()
+    }
+
+    #[test]
+    fn wm_wait_survives_master_restart_after_notify_and_retries_if_restarted_mid_capture() {
+        let t = 120_001;
+        for kind in [Kind::Test, Kind::Timed] {
+            let mut r = Req::new("lane-a", kind);
+            r.agent = Some("agent-a".into());
+            let c = caps(16, 64.0, Role::Pool);
+            let mut s = sched(&[("a", c.clone())]);
+            wm_granted(&mut s, "L1", "a", &r, Some(60_000));
+            wm_drain(&mut s, "a", &["L1"], 0);
+            let restart = |s: &Sched, delivered: bool| {
+                let saved = wm_saved(s, "L1");
+                assert_eq!(saved.contains("\"wm_wait\""), delivered, "{saved}");
+                let mut fresh = sched(&[("a", c.clone())]);
+                assert_eq!(fresh.restore(&saved, t).as_deref(), Some("L1"));
+                wm_drain(&mut fresh, "a", &["L1"], t);
+                let acts = wm_tick(&mut fresh, t);
+                let notes: Vec<_> = acts.iter().filter_map(|a| match a { Action::Note { agent, .. } => Some(agent.as_str()), _ => None }).collect();
+                assert_eq!(wm_captures(&acts, "L1", "a"), usize::from(!delivered && kind != Kind::Timed), "{acts:?}");
+                if !delivered && kind == Kind::Timed { assert_eq!(notes, ["agent-a", "main"]); } else { assert!(notes.is_empty(), "{notes:?}"); }
+                if delivered {
+                    assert_eq!(fresh.owner_word("L1"), s.owner_word("L1"));
+                    assert!(fresh.lease_view_line(fresh.get("L1").unwrap(), t).contains(if kind == Kind::Timed { ", told" } else { ", captured:" }));
+                }
+            };
+            let acts = wm_tick(&mut s, t);
+            if kind == Kind::Test {
+                assert_eq!(wm_captures(&acts, "L1", "a"), 1);
+                restart(&s, false); // capture outstanding
+                s.wm_captured("L1", "JIT 42: blocked", t);
+            }
+            let line = s.owner_word("L1").unwrap();
+            s.out.clear();
+            restart(&s, false); // neither note written
+            s.wm_captured("L1", "other capture", t);
+            assert!(s.out.is_empty() && s.owner_word("L1").as_ref() == Some(&line));
+            assert!(!s.wm_note_written("agent-a", &line));
+            restart(&s, false); // only the owner's note written
+            s.wm_note_failed("main", &line);
+            assert!(matches!(s.out.as_slice(), [Action::Note { agent, line: retry }] if agent == "main" && retry == &line));
+            assert!(!wm_saved(&s, "L1").contains("\"wm_wait\""));
+            assert!(s.wm_note_written("main", &line));
+            restart(&s, true);
+        }
+    }
+
+    #[test]
+    fn wm_wait_master_held_live_test_and_job_notify_owner_and_main_before_persisting() {
+        let t = 120_001;
+        let nodes = [("a", caps(16, 64.0, Role::Pool)), ("b", caps(16, 64.0, Role::Pool))];
+        let mut s = sched(&nodes);
+        let live = wm_live_test("live-W7", Some("lane-a"));
+        assert_eq!(live.lane, "live-w7");
+        wm_granted(&mut s, "L1", "a", &live, Some(60_000));
+        s.live_session_ids.insert("L1".into(), "W7".into());
+        for (id, lane, node, kind, class, job) in [
+            ("L2", "lane-a", "a", Kind::Test, "test:ui-suite", "J1"),
+            ("L3", "lane-b", "b", Kind::Timed, "timed:bench", "J2"),
+        ] {
+            let mut r = Req::new(lane, kind);
+            r.master = true;
+            r.agent = Some("agent-a".into());
+            r.class = class.into();
+            wm_granted(&mut s, id, node, &r, Some(60_000));
+            s.job_ids.insert(id.into(), job.into());
+        }
+        wm_drain(&mut s, "a", &["L1", "L2"], 0);
+        wm_drain(&mut s, "b", &["L3"], 0);
+        let mut acts = wm_tick(&mut s, t);
+        assert_eq!(wm_captures(&acts, "L1", "a"), 1);
+        assert_eq!(wm_captures(&acts, "L2", "a"), 1);
+        assert_eq!(wm_captures(&acts, "L3", "b"), 0);
+        assert_eq!(acts.iter().filter(|a| matches!(a, Action::Note { .. })).count(), 2, "{acts:?}");
+        s.wm_captured("L1", "JIT 42: blocked", t);
+        s.wm_captured("L2", "JIT 43: blocked", t);
+        acts.append(&mut s.out);
+        for (id, cmd) in [
+            ("L1", "end your live session with `devhub live release W7 --lane lane-a`"),
+            ("L2", "end your job with `devhub job cancel J1`"),
+            ("L3", "end your job with `devhub job cancel J2`"),
+        ] {
+            let line = wm_assert_notice(&s, &acts, id, t, &["agent-a", "main"], cmd);
+            assert!(!wm_saved(&s, id).contains("\"wm_wait\""), "{id}: both notes outstanding");
+            assert!(!s.wm_note_written("agent-a", &line));
+            assert!(!wm_saved(&s, id).contains("\"wm_wait\""), "{id}: main still outstanding");
+            assert!(s.wm_note_written("main", &line));
+            assert!(wm_saved(&s, id).contains("\"wm_wait\""), "{id}: both delivered");
+        }
+        let mut fresh = sched(&nodes);
+        for id in ["L2", "L3"] { assert_eq!(fresh.restore(&wm_saved(&s, id), t).as_deref(), Some(id)); }
+        wm_drain(&mut fresh, "a", &["L2"], t);
+        wm_drain(&mut fresh, "b", &["L3"], t);
+        let acts = wm_tick(&mut fresh, t);
+        assert!(!acts.iter().any(|a| matches!(a, Action::Capture { .. } | Action::Note { .. })), "{acts:?}");
+    }
+
+    #[test]
+    fn wm_wait_live_fallback_rebuilds_upper_w_from_normalized_lane_and_falls_back_to_live_list() {
+        let t = 120_001;
+        let mut s = sched(&[("a", caps(16, 64.0, Role::Pool))]);
+        let cases = [
+            ("L1", "live-W7", Some("lane-a"), "JIT 42: blocked", "end your live session with `devhub live release W7 --lane lane-a`"),
+            ("L2", "live-w7x", Some("lane-a"), "JIT 43: blocked", "find your live session with `devhub live list`, then end it with `devhub live release <W> --lane lane-a`"),
+            ("L3", "live-W7", None, "JIT 44: blocked", "find your live session with `devhub live list`, then end it with `devhub live release <W> --lane live-w7`"),
+        ];
+        for (id, lane, owner, _, _) in cases {
+            let r = wm_live_test(lane, owner);
+            if lane == "live-W7" { assert_eq!(r.lane, "live-w7"); }
+            wm_granted(&mut s, id, "a", &r, Some(60_000));
+        }
+        wm_drain(&mut s, "a", &["L1", "L2", "L3"], 0);
+        let acts = wm_tick(&mut s, t);
+        for (id, _, _, detail, cmd) in cases {
+            assert!(s.live_session_ids.is_empty());
+            assert_eq!(wm_captures(&acts, id, "a"), 1);
+            s.wm_captured(id, detail, t);
+            let notes = std::mem::take(&mut s.out);
+            let line = wm_assert_notice(&s, &notes, id, t, &["agent-a", "main"], cmd);
+            assert!(line.contains(&format!("Capture: {detail}. Nothing ends it on time; if it hangs, {cmd}; that frees a")), "{line}");
+            assert!(!line.contains("live release w7") && !line.contains("live release W7x"), "{line}");
+            if id == "L1" { assert!(line.contains("of live-w7 (agent-a)"), "{line}"); }
+            if id == "L3" { assert!(!line.contains("devhub live release W7"), "{line}"); }
+        }
+        assert!(s.live_session_ids.is_empty());
     }
 
     /// A box whose WM restart waits only on leases drains: a stream of screen work never starves
@@ -22821,6 +27086,37 @@ mod tests {
         assert_eq!(restarted("").len(), 1, "a master that took nothing back tells it at its next landing's apply");
         assert!(stale(&mut s, "d3", "", 11).is_empty() && s.stale_rows(11).is_empty(), "its WM restarted: nothing left to say");
         assert_eq!(s.stale_told_text(), "", "its spell goes once its caps answer without it");
+        // a live session its WM cannot restart around (it keeps no apps over a restart) holds the
+        // box's update until it ends: its lane hears so at once, once while it holds; one in a call
+        // on a keeping WM is no such hold (the restart runs once it is idle). A demo copy held a
+        // box's WM update 13 min, and would have for its life (11-27)
+        let mut r = screen("lane-demo", Some("a"));
+        r.live = true;
+        let demo = s.request(r, 12);
+        s.tick(12);
+        assert_eq!(node_of(&s, &demo).as_deref(), Some("a"), "{:?}", state(&s, &demo));
+        let told = |s: &mut Sched, waits_on: &str, t: u64| -> Vec<String> {
+            let mut c = s.nodes["a"].caps.clone().unwrap();
+            c.wm_drain = waits_on.to_string();
+            // (its holder beats, as a live session's does)
+            s.beat(&demo, t);
+            s.set_caps("a", c, t);
+            s.tick(t).into_iter().filter_map(|x| match x { Action::Note { line, .. } if line.contains("WM update") => Some(line), _ => None }).collect()
+        };
+        let held = format!("screen lease {demo} of lane-demo ({})", super::super::exec::LIVE_UNKEPT);
+        assert!(told(&mut s, &format!("screen lease {demo} of lane-demo (a live session in a call or its launch)"), 13).is_empty(), "a call holds it only until the session is idle");
+        let said = told(&mut s, &format!("{held}; test lease L1 of lane-gui (its windows)"), 14);
+        assert!(said.len() == 1 && said[0].starts_with(&format!("a's WM update waits on {demo}, a live session of lane-demo there: its WM keeps no apps over a restart")), "its lane hears it at once: {said:?}");
+        assert!(told(&mut s, &held, 15).is_empty(), "once while it holds");
+        assert!(told(&mut s, "", 16).is_empty() && told(&mut s, &held, 17).len() == 1, "a new hold is told again");
+        // any lease that holds it past a few minutes is told so once, with the wait so far, and
+        // runs on: a 40-min test's windows held a box's WM update with nobody told (11-27)
+        let call = format!("screen lease {demo} of lane-demo (a live session in a call or its launch)");
+        assert!(told(&mut s, "", 18).is_empty() && told(&mut s, &call, 19).is_empty() && told(&mut s, &call, 19 + 4 * 60_000).is_empty(), "a hold of under {WM_HOLD_TOLD_MS} ms is not told");
+        let said = told(&mut s, &call, 19 + WM_HOLD_TOLD_MS);
+        assert!(said.len() == 1 && said[0].starts_with(&format!("a's WM update has waited 5m00s on {call}: the restart waits for it to end")), "past it, its lane hears it once with the wait so far: {said:?}");
+        assert!(told(&mut s, &call, 19 + 6 * 60_000).is_empty(), "once while it holds");
+        assert!(s.get(&demo).is_some_and(|l| l.state.live()), "told, never ended: {:?}", state(&s, &demo));
         invariants(&s);
     }
 
@@ -23369,8 +27665,37 @@ mod tests {
         s.beat(&pinned, 110_000);
         s.tick(110_000);
         let (st, why) = state(&s, &pinned);
-        assert!(st == "queued" && why.starts_with("its box node-a is off the network for 1m00s (link lost") && why.contains("keeps its place and starts once the box is back; it is refused only if the box stays gone 30m00s"), "{st}: {why}");
+        assert!(st == "queued" && why.starts_with("waits for node-a to come back, away 1m49s: it is off the network (link lost") && why.contains("the lease keeps its place and is ranked again once node-a is heard"), "{st}: {why}");
         assert_eq!(crate::lease::prof::blocker(&why), "node down", "it counts as a down box's wait");
+        // A box whose hub restarts for its update at the roll's word is a host that answers, though
+        // a connect to it times out while it does (a Windows box's to a port nothing listens on):
+        // no drop, its lease rides on. Each such restart of 70-100 s on a Windows box read as a drop,
+        // and the box settled 10 min after its second in an hour (11-26). Past the roll's wait for
+        // the hub it is an outage again, counted from then.
+        let mut r = sched(&[("node-a", caps(16, 64.0, Role::Pool))]);
+        let rides = r.request(req("lane-x", Kind::Test, None), 0);
+        assert_eq!(grants(&r.tick(0)), vec![rides.clone()]);
+        r.started(&rides, "{}");
+        let timed_out = "link lost: cannot reach fleet hub `node-a` at 192.0.2.1:8797: connection timed out";
+        r.hub_restarting("node-a", true, 1_000);
+        for t in [1_000, 31_000, 61_000, 91_000, 120_000] {
+            assert!(r.caps_missed("node-a", timed_out, t).is_empty(), "at {t}");
+            r.beat(&rides, t);
+        }
+        r.set_caps("node-a", caps(16, 64.0, Role::Pool), 121_000);
+        r.hub_restarting("node-a", false, 121_000);
+        assert!(r.links.get("node-a").is_none_or(|k| k.drops.is_empty()), "a restart is no drop");
+        assert_eq!(state(&r, &rides).0, "granted", "its lease rode it");
+        r.hub_restarting("node-a", true, 200_000);
+        let back_by = 200_000 + HUB_RESTART_MS;
+        for t in [200_000, 260_000, back_by - 1_000] {
+            assert!(r.caps_missed("node-a", timed_out, t).is_empty(), "at {t}");
+            r.beat(&rides, t);
+        }
+        assert!(r.caps_missed("node-a", timed_out, back_by).is_empty(), "past the roll's wait: an outage from now");
+        r.beat(&rides, back_by);
+        assert_eq!(r.caps_missed("node-a", timed_out, back_by + HOST_GONE_MS), vec![rides.clone()], "a minute on, as any box off the network");
+        assert_eq!(r.links["node-a"].drops.len(), 1);
         // so does one asked while it is gone
         let late = s.request(req("lane-y", Kind::Test, Some("node-a")), 115_000);
         s.tick(115_000);
@@ -23383,31 +27708,91 @@ mod tests {
         s.cleaned("node-a", &run, 0);
         assert_eq!(grants(&s.tick(130_000)), vec![pinned.clone()], "{:?}", state(&s, &pinned));
         assert_eq!(state(&s, &late), ("queued".to_string(), format!("held by {pinned} (test of lane-y)")), "the next in its place");
-        // Gone past its grace, an ask pinned to it is refused, saying so (the grace is twice the
-        // box's longest recorded outage when that is longer: none here)
+        // However long it is gone, an ask pinned to it waits for it, its queue line saying how long
+        // it is away, and is ranked again once it is heard (a grace of 30 min was one more limit)
         let mut far = sched(&[("node-a", caps(16, 64.0, Role::Pool))]);
         far.caps_missed("node-a", gone, 1_000);
         far.caps_missed("node-a", gone, 31_000);
         let held = far.request(req("lane-y", Kind::Test, Some("node-a")), 31_000);
-        for t in [31_000, 61_000, 30 * 60_000] {
+        let hours = 3 * 60 * MIN + 1_000;
+        for t in [31_000, 61_000, 30 * MIN + 1_000, hours] {
             assert!(far.caps_missed("node-a", gone, t).is_empty());
-            // (its holder beats all along: a master that ticks once a minute here)
+            // (its holder beats all along: a master that ticks seldom here)
             far.beat(&held, t.saturating_sub(5_000).max(31_000));
             far.beat(&held, t);
             far.tick(t);
             assert_eq!(state(&far, &held).0, "queued", "{t}: {:?}", state(&far, &held));
         }
-        far.caps_missed("node-a", gone, 30 * 60_000 + 1_000);
-        far.beat(&held, 30 * 60_000 + 1_000);
-        far.tick(30 * 60_000 + 1_000);
-        let (st, why) = state(&far, &held);
-        assert!(st.starts_with("ended") && why.contains("its box node-a has been off the network for 30m00s") && why.contains("past the 30m00s a lease pinned to it waits for it: it cannot start"), "{st}: {why}");
+        assert!(state(&far, &held).1.starts_with("waits for node-a to come back, away 3h00m: "), "{:?}", state(&far, &held));
+        // Only a box that left the fleet refuses it: a master started without it
+        let mut left = sched(&[("node-b", caps(16, 64.0, Role::Pool))]);
+        for line in far.live_lines() { left.restore(&line, hours); }
+        left.beat(&held, hours);
+        left.tick(hours);
+        assert_eq!(state(&left, &held), ("ended denied".to_string(), "no node `node-a` (devhub nodes lists them)".to_string()));
+        far.set_caps("node-a", caps(16, 64.0, Role::Pool), hours + 10_000);
+        far.beat(&held, hours + 10_000);
+        assert_eq!(grants(&far.tick(hours + 10_000)), vec![held.clone()], "back: {:?}", state(&far, &held));
+        // A box whose outages end keeps its running leases through one, while their holders beat,
+        // up to twice its longest recorded outage: its hub keeps them for the master and their runs
+        // go on, their results coming back once it is heard. A timed lease ends at the drop, a
+        // sleep inside its run spoiling its timings. A bench Mac's 27 leases lost in a morning were
+        // runs that went on there, ended when it woke (11-26).
+        const MIN: u64 = 60_000;
+        let boxes = ["node-a", "node-b", "node-d"];
+        let mut s = sched(&[("node-a", caps(16, 64.0, Role::Pool)), ("node-b", caps(16, 64.0, Role::Pool)), ("node-c", caps(16, 64.0, Role::Pool)), ("node-d", caps(16, 64.0, Role::Pool))]);
+        // (node-c answers all along: the master hears its network)
+        let mut t = 0;
+        let step = |s: &mut Sched, t: u64, off: &[&str], said: &mut Vec<String>| -> Vec<String> {
+            let mut lost = Vec::new();
+            for b in ["node-a", "node-b", "node-c", "node-d"] {
+                if off.contains(&b) { lost.extend(s.caps_missed(b, gone, t)); } else { s.set_caps(b, caps(16, 64.0, Role::Pool), t); }
+            }
+            beat_all(s, t);
+            said.extend(s.tick(t).into_iter().filter_map(|x| match x { Action::Event(r) => Some(r.line), _ => None }));
+            lost
+        };
+        let mut said = Vec::new();
+        // one outage of 10 min on record
+        while t < 10 * MIN { t += 10_000; assert!(step(&mut s, t, &boxes, &mut said).is_empty(), "nothing on them"); }
+        t += 10_000;
+        step(&mut s, t, &[], &mut said);
+        assert_eq!(s.links["node-a"].outs, VecDeque::from([10 * MIN]));
+        let rides = s.request(req("lane-x", Kind::Test, Some("node-a")), t);
+        let timed = s.request(req("lane-t", Kind::Timed, Some("node-b")), t);
+        let past = s.request(req("lane-y", Kind::Test, Some("node-d")), t);
+        let mut g = grants(&s.tick(t));
+        g.sort();
+        let mut want = vec![rides.clone(), timed.clone(), past.clone()];
+        want.sort();
+        assert_eq!(g, want);
+        for id in &want { s.started(id, "{}"); }
+        // they drop again: node-a for 15 min, node-b and node-d for longer
+        let drop = t + 10_000;
+        let mut lost_at: HashMap<String, u64> = HashMap::new();
+        while t < drop + 25 * MIN {
+            t += 10_000;
+            let off: Vec<&str> = boxes.iter().copied().filter(|b| *b != "node-a" || t < drop + 15 * MIN).collect();
+            for id in step(&mut s, t, &off, &mut said) { lost_at.insert(id, t); }
+            if t == drop + 15 * MIN + 10_000 {
+                assert_eq!(state(&s, &rides).0, "granted", "back: its run went on there");
+                assert!(s.release(&rides, "released", t), "its holder has its result");
+            }
+        }
+        assert_eq!(state(&s, &rides).0, "ended released");
+        assert_eq!(lost_at.get(&timed), Some(&(drop + HOST_GONE_MS)), "a timed lease ends at the drop");
+        assert!(state(&s, &timed).1.contains("a timed lease ends at a drop"), "{:?}", state(&s, &timed));
+        assert_eq!(lost_at.get(&past), Some(&(drop + 20 * MIN)), "past twice its longest outage");
+        let (st, why) = state(&s, &past);
+        assert!(st == "ended lost" && why.starts_with("its box node-d is off the network for 20m00s (link lost") && why.ends_with("past the 20m00s a running lease rides an outage (twice its longest recorded outage, 10m00s): no verdict, ask again"), "{st}: {why}");
+        assert!(lost_at.get(&rides).is_none());
+        let ride = format!("node-a is off the network ({}): its running lease(s) {rides} ride the outage up to 20m00s away (twice its longest recorded outage, 10m00s), their runs going on there; past that they end as lost", s.nodes["node-b"].miss);
+        assert_eq!(said.iter().filter(|l| **l == ride).count(), 1, "said once: {said:?}");
         // A box whose runs up end in losses takes no run it would more likely than not drop
         // before the end of while a box that stays up could take it (one up 1.5-3 min between
         // outages took 60 leases in a day, all lost, 11-21); a run shorter than its runs up still
         // goes, and devhub's own background work pinned there waits holding nothing until the box
         // has stayed up longer than any run it recorded. A restart keeps what it measured.
-        const MIN: u64 = 60_000;
         let mut s = sched(&[("node-a", caps(16, 64.0, Role::Pool)), ("node-b", caps(16, 64.0, Role::Pool))]);
         assert!(s.caps_missed("node-a", gone, 3 * MIN).is_empty());
         assert!(s.caps_missed("node-a", gone, 3 * MIN + 31_000).is_empty());
@@ -23442,11 +27827,17 @@ mod tests {
         // nothing; other work goes to the other box, and one only it could take waits for it; its
         // node line and the master's log say so, once as it starts and once as it ends (a box that
         // slept between minute-long wakes lost 14 of its 28 grants in a day, 11-22).
-        assert!(s.caps_missed("node-a", gone, 14 * MIN).is_empty());
-        assert!(s.caps_missed("node-a", gone, 14 * MIN + 31_000).is_empty());
-        assert!(s.caps_missed("node-a", gone, 15 * MIN + 1_000).contains(&dock), "lost with its box");
+        // (its dock build rides the 6 min outage, under twice the 7 min one on record: its run
+        // goes on there, and it is released once the box is back)
+        for at in [14 * MIN, 14 * MIN + 31_000, 15 * MIN + 1_000] {
+            s.beat(&dock, at);
+            assert!(s.caps_missed("node-a", gone, at).is_empty(), "at {at}: it rides the outage");
+        }
         s.set_caps("node-a", caps(16, 64.0, Role::Pool), 20 * MIN);
         s.set_caps("node-b", caps(16, 64.0, Role::Pool), 20 * MIN);
+        s.beat(&dock, 20 * MIN);
+        assert!(!state(&s, &dock).0.starts_with("ended"), "back: its run went on there: {:?}", state(&s, &dock));
+        assert!(s.release(&dock, "released", 20 * MIN));
         let settling = |a: &[Action], what: &str| a.iter().filter_map(|a| match a { Action::Event(r) if r.line.starts_with(&format!("node-a: {what}")) => Some(r.line.clone()), _ => None }).collect::<Vec<_>>();
         let pinned = s.request(Req { cores: Some(2.0), est_min: Some(1.0), src: Src::Overlay, ..req("lane-p", Kind::Test, Some("node-a")) }, 20 * MIN);
         let free = s.request(Req { cores: Some(2.0), est_min: Some(1.0), src: Src::Overlay, ..req("lane-f", Kind::Test, None) }, 20 * MIN);
@@ -23523,9 +27914,11 @@ mod tests {
                     }
                 }
             }
-            // (a timed ask keeps its box through a measure that still holds work of ours that ended
-            // there, and starts on a quiet one: [`Sched::measure_holds_ours`])
-            let quieting = l.req.kind == Kind::Timed && s.measure_holds_ours(name) && s.ready(name, l, &cost).is_err();
+            // A timed ask can hold a quieting box it named, that bounced its start, or whose last
+            // measure still holds work of ours.
+            let quieting = l.req.kind == Kind::Timed
+                && (l.req.node.as_ref() == Some(name) || l.bounced_on.as_ref() == Some(name) || s.measure_holds_ours(name))
+                && s.ready(name, l, &cost).is_err_and(|b| b.reason.starts_with("the box is not quiet"));
             assert!(quieting || s.resources(name, l, &cost, true).is_err(), "{} holds an available box {name}", h.id);
             let names = s.candidates(l).ok().unwrap();
             assert!(names.contains(&name));
@@ -24130,12 +28523,16 @@ mod tests {
             (r.class, r.master) = (HUB_BUILD.into(), true);
             s.request(r, at)
         };
+        // (each first waits its measured run for the cores it measured, which the test holds)
+        const W: u64 = 134 * S;
         let first = deploy(&mut s, MIN);
         beat_all(&mut s, MIN);
-        assert_eq!(grants(&s.tick(MIN)), vec![first.clone()], "{:?}", state(&s, &first));
-        assert_eq!(s.get(&pre).unwrap().passed_ms, Some(MIN), "the deployment build passed the prebuild");
+        assert!(grants(&s.tick(MIN)).is_empty(), "it waits for its measured cores first: {:?}", state(&s, &first));
+        beat_all(&mut s, MIN + W);
+        assert_eq!(grants(&s.tick(MIN + W)), vec![first.clone()], "{:?}", state(&s, &first));
+        assert_eq!(s.get(&pre).unwrap().passed_ms, Some(MIN + W), "the deployment build passed the prebuild");
         s.started(&first, "{}");
-        release_clean(&mut s, &first, 3 * MIN);
+        release_clean(&mut s, &first, 3 * MIN + W);
         // past the prebuild's own run since it was first passed: it takes the box next, but the
         // next deployment build ends long before the test frees the prebuild's RAM
         let at = 6 * MIN + 30 * S;
@@ -24143,22 +28540,22 @@ mod tests {
         (long.class, long.cores, long.src) = (long_class.into(), Some(2.0), Src::Overlay);
         let long = s.request(long, at);
         let second = deploy(&mut s, at);
-        beat_all(&mut s, at);
-        assert_eq!(grants(&s.tick(at)), vec![second.clone()], "{:?} {:?}", state(&s, &second), state(&s, &long));
+        beat_all(&mut s, at + W);
+        assert_eq!(grants(&s.tick(at + W)), vec![second.clone()], "{:?} {:?}", state(&s, &second), state(&s, &long));
         assert!(s.get(&second).unwrap().grant_why.contains(&format!("passed {pre}'s hold on a: backfill: it ends in 2m14s by its class's measure")), "{}", s.get(&second).unwrap().grant_why);
         // what would delay it stays off: a 100-min build that fits beside the test alone
         assert!(state(&s, &long).1.starts_with(&format!("held for {pre}: passed 5m30s")), "{:?}", state(&s, &long));
         s.started(&second, "{}");
-        release_clean(&mut s, &second, 9 * MIN);
+        release_clean(&mut s, &second, 9 * MIN + W);
         invariants(&s);
         // and again: each pass past the held prebuild admits by its own measure, walking no other
         // admission (the master's lease thread overflowed its stack on 11-17; a backfill past a
         // passed holder was a suspect)
         let third = deploy(&mut s, 12 * MIN);
-        beat_all(&mut s, 12 * MIN);
-        assert_eq!(grants(&s.tick(12 * MIN)), vec![third.clone()], "{:?} {:?}", state(&s, &third), state(&s, &long));
+        beat_all(&mut s, 12 * MIN + W);
+        assert_eq!(grants(&s.tick(12 * MIN + W)), vec![third.clone()], "{:?} {:?}", state(&s, &third), state(&s, &long));
         s.started(&third, "{}");
-        release_clean(&mut s, &third, 15 * MIN);
+        release_clean(&mut s, &third, 15 * MIN + W);
         invariants(&s);
         // the test ends: the prebuild starts
         release_clean(&mut s, &test, 85 * MIN);
@@ -24287,7 +28684,7 @@ mod tests {
         // bound, [`Sched::cpu_aged`])
         let mut r = overlay("long", Some("pool"), 16.0);
         (r.est_min, r.ram_gb) = (Some(120.0), Some(54.0));
-        s.request(r, 0);
+        let long = s.request(r, 0);
         s.tick(0);
         // unmeasured, at once, more than three of them, and a live session
         let runs: Vec<String> = ["a", "b", "c", "d"].iter().map(|lane| ask(&mut s, lane, 0)).collect();
@@ -24356,6 +28753,30 @@ mod tests {
         s.held_branches.clear();
         at(&mut s, 27 * MIN);
         assert_eq!(node_of(&s, &second).as_deref(), Some("bench"), "{:?}", state(&s, &second));
+        // a run whose holder asks a timed lease as it ends ([`Req::then_timed`]: an owed jitlegs
+        // run's leg before its warm leg) keeps the bench's lends to runs that end before it, or
+        // yield: a lane's live session lent there held the warm leg 13 min (L1938597, 11-27). What
+        // is lent already runs on to its end, and the timed ask's line says so.
+        release_clean(&mut s, &second, 28 * MIN);
+        s.leases.iter_mut().find(|r| r.id == long).unwrap().req.then_timed = Some(parse_needs("os=linux"));
+        let lend = |s: &mut Sched, lane: &str, est: f64, live: bool, yields: bool| {
+            let mut r = overlay(lane, None, 2.0);
+            (r.class, r.ram_gb, r.est_min, r.live, r.yields) = (format!("test {lane}"), Some(2.0), Some(est), live, yields);
+            s.request(r, 115 * MIN)
+        };
+        let (session, short, shard) = (lend(&mut s, "session", 16.0, true, false), lend(&mut s, "short", 2.0, false, false), lend(&mut s, "shard2", 30.0, false, true));
+        at(&mut s, 115 * MIN);
+        assert_eq!(node_of(&s, &session), None, "{:?}", state(&s, &session));
+        let why = s.why_queued(&session, 115 * MIN).unwrap();
+        assert!(why.iter().any(|w| w.contains(&format!("a bench box, lent between timed series only: {long} (long on pool) asks timed work (os=linux) that runs here as it ends, in ~5m00s by its measure; a run of 16m00s (its --est-min) would hold the box past it"))), "{why:?}");
+        assert_eq!(node_of(&s, &short).as_deref(), Some("bench"), "it ends first: {:?}", state(&s, &short));
+        assert_eq!(node_of(&s, &shard).as_deref(), Some("bench"), "it yields: {:?}", state(&s, &shard));
+        release_clean(&mut s, &long, 116 * MIN);
+        let warm = s.request(req("legs", Kind::Timed, None), 116 * MIN);
+        at(&mut s, 116 * MIN);
+        assert_eq!(node_of(&s, &warm), None, "{:?}", state(&s, &warm));
+        assert!(state(&s, &warm).1.contains(&format!("held by {short} (test of short, lent there 1m00s ago, its run 2m00s (its --est-min): it runs on to its end, and no new lend starts there meanwhile)")) || state(&s, &warm).1.contains(&format!("held by {shard} (test of shard2, lent there 1m00s ago")), "{:?}", state(&s, &warm));
+        assert_eq!(node_of(&s, &session).as_deref(), Some("pool"), "the pool box took it: {:?}", state(&s, &session));
         invariants(&s);
     }
 
@@ -24387,7 +28808,7 @@ mod tests {
     #[test]
     fn a_live_test_goes_past_its_boxs_prebuild_and_background_work() {
         let mut s = sched(&[("box-a", caps(16, 64.0, Role::Pool))]);
-        let mut bg = overlay("bg", Some("box-a"), 8.0);
+        let mut bg = overlay("bg", Some("box-a"), 16.0);
         bg.priority = Priority::Background;
         s.request(bg, 0);
         s.tick(0);
@@ -24404,7 +28825,7 @@ mod tests {
         let test = s.request(test, 3);
         beat_all(&mut s, 4);
         assert_eq!(grants(&s.tick(4)), vec![test.clone()], "{:?} {:?}", state(&s, &test), state(&s, &build));
-        assert!(state(&s, &build).1.contains(&format!("{pre} prebuild 10")), "{:?}", state(&s, &build));
+        assert!(state(&s, &build).1.contains(&format!("{pre} prebuild 4")), "{:?}", state(&s, &build));
         invariants(&s);
 
         // A box full of a background tests shard (12 of 16, every core busy, 22 tasks waiting):
@@ -25226,6 +29647,14 @@ mod tests {
         assert_eq!(node_of(&s, &screen).as_deref(), Some("b"), "{:?}", state(&s, &screen));
         assert_ne!(node_of(&s, &gui).as_deref(), Some("a"), "{:?}", state(&s, &gui));
         assert_eq!(node_of(&s, &plain).as_deref(), Some("a"), "work without windows still goes there: {:?}", state(&s, &plain));
+        // the one box it fits among others, not one it named, is named in its line: "no display
+        // (...)" alone left which box went dark unsaid (L1938631, 11-27)
+        let mut r = req("lane-f", Kind::Screen, None);
+        r.avoid = vec!["b".into()];
+        let avoids = s.request(r, 0);
+        s.tick(0);
+        assert!(state(&s, &avoids).1.starts_with("a: no display (its WM's window is 0x0"), "{:?}", state(&s, &avoids));
+        assert!(!state(&s, &pinned).1.starts_with("a: "), "a box it named is not named again: {:?}", state(&s, &pinned));
         let line = s.node_view(0).into_iter().find(|v| v.name == "a").unwrap().caps_line();
         assert!(line.contains("no display (its WM's window is 0x0: no output shows it)"), "{line}");
         // a box that refused a screen lease's start (its WM down or restarting) takes none until
@@ -25407,8 +29836,8 @@ mod tests {
         assert!((ram(&s, &o) - 4.7 * 1.2).abs() < 1e-9, "{}", ram(&s, &o));
         // and a measured ask throttles nothing: only an asked RAM is a scope's MemoryHigh, and no
         // ask is a cap that kills
-        assert!(!crate::os::lease_argv(vec!["x".into()], Some("u"), 10, "", Some(4), None).iter().any(|a| a.starts_with("MemoryHigh")));
-        let asked = crate::os::lease_argv(vec!["x".into()], Some("u"), 10, "", Some(4), Some(2.0));
+        assert!(!crate::os::lease_argv(vec!["x".into()], Some("u"), 10, "", Some(4), None, None).iter().any(|a| a.starts_with("MemoryHigh")), "a measured RAM charge sets no scope throttle");
+        let asked = crate::os::lease_argv(vec!["x".into()], Some("u"), 10, "", Some(4), Some(2.0), None);
         assert_eq!(asked.iter().any(|a| a == "MemoryHigh=3G"), cfg!(target_os = "linux"));
         assert!(!asked.iter().any(|a| a.starts_with("MemoryMax")), "{asked:?}");
     }
@@ -25708,7 +30137,7 @@ mod tests {
         // fewer than a third of its peak free (14 / 3, 5): it waits for them
         let more = s.request(r, 2);
         s.tick(2);
-        assert_eq!(state(&s, &more), ("queued".to_string(), "budget cores 16, in use 16 (background work not counted), asked 5".to_string()));
+        assert_eq!(state(&s, &more), ("queued".to_string(), "budget cores 16, in use 16 (only test floors count from yielding background work), asked 5".to_string()));
         // an asked count stands as asked
         let mut asked = req("livey", Kind::Test, None);
         (asked.live, asked.class, asked.cores) = (true, "live tray?restart_process".into(), Some(8.0));

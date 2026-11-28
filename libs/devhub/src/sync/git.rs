@@ -8,9 +8,9 @@
 
 use makepad_git::{Index, IndexEntry, ObjectId, Repository, TreeChangeRecord};
 use makepad_git::text_clean::{self, Conversion};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, File};
-use std::io::Write;
+use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
@@ -71,7 +71,8 @@ pub fn run(dir: Option<&Path>, git_dir: Option<&Path>, env: &[(&str, &Path)], ar
 #[track_caller]
 fn run_with(dir: Option<&Path>, git_dir: Option<&Path>, env: &[(&str, &Path)], args: &[&str], input: Option<&[u8]>) -> Result<String, String> {
     let mut cmd = crate::git_exec::command();
-    cmd.arg("-c").arg("core.hooksPath=/dev/null").arg("-c").arg("advice.detachedHead=false");
+    cmd.arg("-c").arg("core.hooksPath=/dev/null").arg("-c").arg("advice.detachedHead=false")
+        .arg("-c").arg("core.fsync=reference");
     if let Some(g) = git_dir {
         cmd.arg("--git-dir").arg(g);
     }
@@ -120,6 +121,96 @@ pub fn failure(status: std::process::ExitStatus, stderr: &[u8]) -> String {
 /// One repo's store on a node.
 pub struct Store {
     pub git_dir: PathBuf,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RefState {
+    SoundOrAbsent,
+    Broken,
+    Inconclusive,
+}
+
+struct RefLock {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl RefLock {
+    fn acquire(target: &Path) -> Option<(Self, File)> {
+        let mut name = target.as_os_str().to_owned();
+        name.push(".lock");
+        let path = PathBuf::from(name);
+        let file = File::options().write(true).create_new(true).open(&path).ok()?;
+        Some((Self { path, armed: true }, file))
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for RefLock {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+fn valid_devhub_component(comp: &str) -> bool {
+    !comp.is_empty() && !comp.starts_with('.') && !comp.contains("..") && !comp.ends_with(".lock")
+        && comp.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+fn valid_devhub_ref(r: &str) -> bool {
+    r.len() <= 256 && !r.ends_with('.')
+        && r.strip_prefix("refs/devhub/").is_some_and(|tail| tail.split('/').all(valid_devhub_component))
+}
+
+fn parse_oid_bytes(raw: &[u8]) -> Option<ObjectId> {
+    if raw.len() != 40 || !raw.iter().all(u8::is_ascii_hexdigit) || raw.iter().all(|&b| b == b'0') {
+        return None;
+    }
+    ObjectId::from_hex(std::str::from_utf8(raw).ok()?).ok()
+}
+
+fn parse_packed_line(line: &[u8]) -> Option<(&[u8], &str)> {
+    let line = line.trim_ascii_end();
+    if matches!(line.first(), None | Some(b'#' | b'^')) {
+        return None;
+    }
+    let at = line.iter().position(|&b| b == b' ')?;
+    Some((&line[..at], std::str::from_utf8(&line[at + 1..]).ok()?))
+}
+
+enum LooseEntry {
+    Symlink,
+    File(Vec<u8>),
+    Unreadable,
+}
+
+impl LooseEntry {
+    fn read(path: &Path) -> Option<Self> {
+        match fs::symlink_metadata(path) {
+            Ok(meta) if meta.is_dir() => None,
+            Ok(meta) if meta.is_symlink() => Some(Self::Symlink),
+            Ok(meta) if meta.is_file() => match fs::read(path) {
+                Ok(bytes) => Some(Self::File(bytes)),
+                Err(e) if e.kind() == ErrorKind::NotFound => None,
+                Err(_) => Some(Self::Unreadable),
+            },
+            Err(e) if e.kind() == ErrorKind::NotFound => None,
+            _ => Some(Self::Unreadable),
+        }
+    }
+
+    fn state(&self) -> RefState {
+        match self {
+            Self::Unreadable => RefState::Inconclusive,
+            Self::File(b) if parse_oid_bytes(b.trim_ascii_end()).is_some() => RefState::SoundOrAbsent,
+            _ => RefState::Broken,
+        }
+    }
 }
 
 /// What a checkout move did.
@@ -409,8 +500,28 @@ impl Store {
         static FETCH: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _one = FETCH.lock().unwrap_or_else(|e| e.into_inner());
         let b = bundle.to_string_lossy();
-        self.git(&["bundle", "verify", "-q", &b])?;
-        // (git reads no ref of the store's for it: one it cannot read refuses nothing)
+        // The master uses Git's prerequisite diagnostic to choose its retry. -q can suppress it.
+        let verify = || self.git(&["bundle", "verify", &b]);
+        if let Err(first) = verify() {
+            let candidates = self.broken_refs();
+            let dropped = self.drop_broken_refs(&candidates);
+            if dropped.is_empty() {
+                // A concurrent writer may have repaired a candidate before we took its lock.
+                if candidates.is_empty() || verify().is_err() {
+                    self.log_unreadable_devhub_commits();
+                    return Err(first);
+                }
+            } else {
+                let dropped = dropped.join(", ");
+                if let Err(again) = verify() {
+                    self.log_unreadable_devhub_commits();
+                    eprintln!("sync: {}: dropped {dropped}, which it could not read; bundle verify still failed: {again}", self.git_dir.display());
+                    return Err(format!("{again} (after dropping {dropped}, which it could not read: {first})"));
+                }
+                eprintln!("sync: {}: dropped {dropped}, which it could not read, and verified again", self.git_dir.display());
+            }
+        }
+        // Unbundling reads no ref of the store's.
         let heads = self.git(&["bundle", "unbundle", &b])?;
         let head = format!("refs/heads/{branch}");
         let sha = heads.lines().find_map(|l| l.split_once(' ').filter(|(_, r)| r.trim() == head).map(|(s, _)| s.to_string())).filter(|s| valid_sha(s)).ok_or_else(|| format!("the bundle holds no branch {branch}"))?;
@@ -419,47 +530,270 @@ impl Store {
         }
         let dst = format!("{PUSHED}{branch}");
         if let Err(e) = self.set_ref(&dst, &sha) {
-            // A ref of the store's own it cannot read (a crash mid-write) is only its copy of a
-            // master's branch: dropped, and named again. A box's store that could not resolve one
-            // refused a lane's lease start ("cannot lock ref ... unable to resolve reference", 11-13).
-            // Unnamed otherwise (a prune holds its lock): its commit is in the store all the same.
-            if self.broken_ref(&dst) {
-                self.drop_ref(&dst);
-                if self.set_ref(&dst, &sha).is_ok() {
-                    eprintln!("sync: {}: dropped {dst}, which it could not read, and named it again", self.git_dir.display());
-                    return Ok(sha);
-                }
-            }
             eprintln!("sync: {}: {branch} {} stored, not named {dst}: {e}", self.git_dir.display(), &sha[..10]);
         }
         Ok(sha)
     }
 
-    /// Whether `r` is there but names no commit the store holds: a loose ref file that is empty,
-    /// not a sha, or a sha of a missing object (a crash mid-write), or a packed one of a missing
-    /// object.
-    fn broken_ref(&self, r: &str) -> bool {
-        let loose = self.git_dir.join(r);
-        let packed = std::fs::read_to_string(self.git_dir.join("packed-refs")).is_ok_and(|t| t.lines().any(|l| l.split_once(' ').is_some_and(|(_, n)| n == r)));
-        (loose.is_file() || packed) && self.rev(r).is_none()
+    fn checked_devhub_ref_path(&self, r: &str) -> Option<PathBuf> {
+        if !valid_devhub_ref(r) {
+            return None;
+        }
+        let mut path = self.git_dir.clone();
+        let mut parts = r.split('/').peekable();
+        while let Some(part) = parts.next() {
+            path.push(part);
+            if parts.peek().is_some() {
+                match fs::symlink_metadata(&path) {
+                    Ok(m) if m.is_dir() => {}
+                    Err(e) if e.kind() == ErrorKind::NotFound => {}
+                    _ => return None,
+                }
+            }
+        }
+        Some(path)
     }
 
-    /// Drops `r` whatever it holds: its loose file, then its packed line (git refuses to delete a
-    /// ref it cannot read).
-    fn drop_ref(&self, r: &str) {
-        let _ = std::fs::remove_file(self.git_dir.join(r));
-        let _ = self.git(&["update-ref", "--no-deref", "-d", r]);
+    fn collect_devhub_loose(&self) -> BTreeMap<String, LooseEntry> {
+        let mut loose = BTreeMap::new();
+        let root = "refs/devhub";
+        if !["refs", root].iter().all(|p| fs::symlink_metadata(self.git_dir.join(p)).is_ok_and(|m| m.is_dir())) {
+            return loose;
+        }
+        let mut stack = vec![root.to_string()];
+        while let Some(prefix) = stack.pop() {
+            let Ok(entries) = fs::read_dir(self.git_dir.join(&prefix)) else { continue };
+            for entry in entries.flatten() {
+                let Ok(name) = entry.file_name().into_string() else { continue };
+                if !valid_devhub_component(&name) {
+                    continue;
+                }
+                let full = format!("{prefix}/{name}");
+                if full.len() > 256 {
+                    continue;
+                }
+                let path = entry.path();
+                if fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir()) {
+                    stack.push(full);
+                } else if valid_devhub_ref(&full) {
+                    if let Some(value) = LooseEntry::read(&path) {
+                        loose.insert(full, value);
+                    }
+                }
+            }
+        }
+        loose
+    }
+
+    fn packed_ref_bytes(&self) -> io::Result<Vec<u8>> {
+        let path = self.git_dir.join("packed-refs");
+        if !fs::symlink_metadata(&path)?.is_file() {
+            return Err(io::Error::other("packed-refs is not a regular file"));
+        }
+        fs::read(path)
+    }
+
+    fn ref_state(&self, r: &str) -> RefState {
+        if !valid_devhub_ref(r) {
+            return RefState::SoundOrAbsent;
+        }
+        let Some(path) = self.checked_devhub_ref_path(r) else { return RefState::Inconclusive };
+        if let Some(entry) = LooseEntry::read(&path) {
+            let state = entry.state();
+            if state != RefState::SoundOrAbsent {
+                return state;
+            }
+        }
+        match self.packed_ref_bytes() {
+            Ok(bytes) => {
+                for (hex, name) in bytes.split(|&b| b == b'\n').filter_map(parse_packed_line) {
+                    if name == r && parse_oid_bytes(hex).is_none() {
+                        return RefState::Broken;
+                    }
+                }
+                RefState::SoundOrAbsent
+            }
+            Err(e) if e.kind() == ErrorKind::NotFound => RefState::SoundOrAbsent,
+            Err(_) => RefState::Inconclusive,
+        }
+    }
+
+    /// Sorted devhub names with a leaf symlink or a loose or packed target of invalid syntax.
+    fn broken_refs(&self) -> Vec<String> {
+        let mut broken: BTreeSet<_> = self.collect_devhub_loose().into_iter()
+            .filter(|(_, value)| value.state() == RefState::Broken).map(|(r, _)| r).collect();
+        if let Ok(bytes) = self.packed_ref_bytes() {
+            for (hex, name) in bytes.split(|&b| b == b'\n').filter_map(parse_packed_line) {
+                if valid_devhub_ref(name) && parse_oid_bytes(hex).is_none() {
+                    broken.insert(name.to_owned());
+                }
+            }
+        }
+        broken.into_iter().collect()
+    }
+
+    fn drop_broken_loose_in(&self, r: &str) -> bool {
+        let Some(path) = self.checked_devhub_ref_path(r) else { return false };
+        if !fs::symlink_metadata(&path).is_ok_and(|m| m.is_file() || m.is_symlink()) {
+            return false;
+        }
+        let Some((_lock, file)) = RefLock::acquire(&path) else { return false };
+        drop(file);
+        LooseEntry::read(&path).is_some_and(|entry| entry.state() == RefState::Broken)
+            && fs::remove_file(&path).is_ok()
+    }
+
+    fn drop_broken_packed_in(&self, targets: &BTreeSet<String>) -> Vec<String> {
+        let broken_target = |line: &[u8]| {
+            let (hex, name) = parse_packed_line(line)?;
+            if parse_oid_bytes(hex).is_none() { targets.get(name) } else { None }
+        };
+        if targets.is_empty() || !self.packed_ref_bytes().is_ok_and(|bytes| {
+            bytes.split(|&b| b == b'\n').any(|line| broken_target(line).is_some())
+        }) {
+            return Vec::new();
+        }
+        let path = self.git_dir.join("packed-refs");
+        let Some((mut lock, mut file)) = RefLock::acquire(&path) else { return Vec::new() };
+        let Ok(bytes) = self.packed_ref_bytes() else { return Vec::new() };
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut dropped = BTreeSet::new();
+        let mut skip_peeled = false;
+        for line in bytes.split_inclusive(|&b| b == b'\n') {
+            if skip_peeled && line.starts_with(b"^") {
+                skip_peeled = false;
+                continue;
+            }
+            if let Some(name) = broken_target(line) {
+                dropped.insert(name.clone());
+                skip_peeled = true;
+            } else {
+                skip_peeled = false;
+                out.extend_from_slice(line);
+            }
+        }
+        if dropped.is_empty() || file.write_all(&out).and_then(|_| file.sync_all()).is_err() {
+            return Vec::new();
+        }
+        drop(file);
+        if fs::rename(&lock.path, &path).is_err() {
+            return Vec::new();
+        }
+        lock.disarm();
+        let _ = sync_dir(&self.git_dir);
+        dropped.into_iter().collect()
+    }
+
+    /// Drops each syntax-broken `refs/devhub/...` ref in `refs` (a leaf symlink, or a loose ref
+    /// file / `packed-refs` line whose bytes are not a valid non-zero 40-char ASCII hex SHA),
+    /// preserving any ref outside `refs/devhub/`, any valid-SHA ref (even if its commit cannot be
+    /// read), any concurrently repaired or currently locked ref, and any unreadable ref file.
+    /// Every decision is made solely from the locked ref file or `packed-refs` bytes with no
+    /// object-store reads. Returns sorted ref names actually dropped.
+    fn drop_broken_refs(&self, refs: &[String]) -> Vec<String> {
+        let targets: BTreeSet<_> = refs.iter().filter(|r| valid_devhub_ref(r)).cloned().collect();
+        let mut dropped: BTreeSet<_> = targets.iter().filter(|r| self.drop_broken_loose_in(r)).cloned().collect();
+        dropped.extend(self.drop_broken_packed_in(&targets));
+        dropped.into_iter().collect()
+    }
+
+    fn drop_broken_ref(&self, r: &str) -> bool {
+        !self.drop_broken_refs(&[r.to_string()]).is_empty()
+    }
+
+    fn log_unreadable_targets(&self, targets: &BTreeMap<String, ObjectId>) -> Vec<String> {
+        static LOGGED: std::sync::Mutex<Option<BTreeSet<(PathBuf, String)>>> = std::sync::Mutex::new(None);
+        if targets.is_empty() {
+            return Vec::new();
+        }
+        let key_dir = self.git_dir.canonicalize().unwrap_or_else(|_| self.git_dir.clone());
+        crate::gitread::with_common(&self.git_dir, |repo| {
+            let mut lines = Vec::new();
+            for (r, oid) in targets {
+                if let Err(err) = repo.read_commit(oid) {
+                    let first = LOGGED.lock().unwrap_or_else(|e| e.into_inner())
+                        .get_or_insert_with(BTreeSet::new).insert((key_dir.clone(), r.clone()));
+                    if first {
+                        let line = format!("sync: {}: keeping {r} ({}), whose commit could not be read: {err}", self.git_dir.display(), oid.to_hex());
+                        eprintln!("{line}");
+                        lines.push(line);
+                    }
+                }
+            }
+            lines
+        }).unwrap_or_default()
+    }
+
+    fn log_unreadable_devhub_commits(&self) -> Vec<String> {
+        let loose = self.collect_devhub_loose();
+        let mut targets = BTreeMap::new();
+        if let Ok(packed) = self.packed_ref_bytes() {
+            for (hex, name) in packed.split(|&b| b == b'\n').filter_map(parse_packed_line) {
+                if valid_devhub_ref(name) && !loose.contains_key(name) {
+                    if let Some(oid) = parse_oid_bytes(hex) {
+                        targets.insert(name.to_string(), oid);
+                    }
+                }
+            }
+        }
+        for (r, entry) in loose {
+            if let LooseEntry::File(bytes) = entry {
+                if let Some(oid) = parse_oid_bytes(bytes.trim_ascii_end()) {
+                    targets.insert(r, oid);
+                }
+            }
+        }
+        self.log_unreadable_targets(&targets)
+    }
+
+    fn log_unreadable_commit_ref(&self, r: &str) -> Vec<String> {
+        let Some(path) = self.checked_devhub_ref_path(r) else { return Vec::new() };
+        let oid = match LooseEntry::read(&path) {
+            Some(LooseEntry::File(bytes)) => parse_oid_bytes(bytes.trim_ascii_end()),
+            Some(_) => None,
+            None => self.packed_ref_bytes().ok().and_then(|bytes| {
+                bytes.split(|&b| b == b'\n').filter_map(parse_packed_line)
+                    .find(|(_, name)| *name == r).and_then(|(hex, _)| parse_oid_bytes(hex))
+            }),
+        };
+        match oid {
+            Some(oid) => self.log_unreadable_targets(&BTreeMap::from([(r.to_string(), oid)])),
+            None => Vec::new(),
+        }
     }
 
     /// Drops `refs/devhub/pushed/<branch>` of each branch, in one git process: the master's word
     /// for branches that landed or went away (a node holds no state of its own).
     pub fn prune_pushed(&self, branches: &[&str]) -> Result<(), String> {
         let input: String = branches.iter().map(|b| format!("delete {PUSHED}{b}\n")).collect();
-        run_with(None, Some(&self.git_dir), &[], &["update-ref", "--stdin"], Some(input.as_bytes())).map(|_| ())
+        run_with(None, Some(&self.git_dir), &[], &["update-ref", "--no-deref", "--stdin"], Some(input.as_bytes())).map(|_| ())
     }
 
     pub fn set_ref(&self, r: &str, sha: &str) -> Result<(), String> {
-        self.git(&["update-ref", r, sha]).map(|_| ())
+        if r.starts_with('-') || sha.starts_with('-') || sha.bytes().all(|b| b == b'0') {
+            return Err(format!("invalid ref update: {r} {sha}"));
+        }
+        if r.starts_with("refs/devhub/") && self.checked_devhub_ref_path(r).is_none() {
+            return Err(format!("invalid devhub ref: {r}"));
+        }
+        let update = || self.git(&["update-ref", "--no-deref", r, sha]);
+        let err = match update() {
+            Ok(_) => return Ok(()),
+            Err(_) if valid_sha(sha) && valid_devhub_ref(r) && self.ref_state(r) == RefState::Broken && self.drop_broken_ref(r) => {
+                match update() {
+                    Ok(_) => {
+                        eprintln!("sync: {}: dropped {r}, which it could not read, and named it again", self.git_dir.display());
+                        return Ok(());
+                    }
+                    Err(e) => e,
+                }
+            }
+            Err(e) => e,
+        };
+        if valid_devhub_ref(r) {
+            self.log_unreadable_commit_ref(r);
+        }
+        Err(err)
     }
 
     /// The repo's name (`makepad.git` -> `makepad`).
@@ -874,6 +1208,47 @@ impl Store {
 
     /// Changes to tracked files in the tree. Untracked files do not count here: [`Store::clean_tree`]
     /// takes those.
+    /// A worktree with no index reads as every file staged for deletion, and a lease start's
+    /// recovery of its "edits" failed on `git add -u` ("pathspec '.' did not match any file(s)
+    /// known to git": a nested checkout on a Linux node took no lease for five hours, 11-26; a
+    /// tree on another, 11-25). One a `git worktree add` left half made (still `locked`, as git
+    /// marks an add while it runs, "initializing": devhub never locks a worktree itself) holds no
+    /// one's work: it is checked out whole at its HEAD and unlocked, or removed for a fresh add if
+    /// git had yet to write HEAD. One whose index alone is gone
+    /// gets it back from its HEAD, its files as they were, so what a lease left in them is still
+    /// recovered. What it did, if anything.
+    pub fn repair_worktree(&self, work: &Path) -> Result<Option<String>, String> {
+        let Some(admin) = self.admin_of(work) else { return Ok(None) };
+        // an index that holds no file is as lost as a missing one (git reads its HEAD's every file
+        // as deleted), unless HEAD holds none either; one git cannot read is git's to say. Its
+        // header's count says (`DIRC`, version, entries), not a parse of this repository's index
+        let mut header = [0u8; 12];
+        let lost = match File::open(admin.join("index")) {
+            Ok(mut f) => std::io::Read::read_exact(&mut f, &mut header).is_ok() && &header[..4] == b"DIRC" && header[8..] == [0; 4]
+                && !run(Some(work), None, &[], &["ls-tree", "--name-only", "HEAD"])?.trim().is_empty(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+            Err(e) => return Err(format!("{}: {e}", admin.join("index").display())),
+        };
+        if !lost {
+            return Ok(None);
+        }
+        let locked = admin.join("locked");
+        if locked.exists() {
+            if !admin.join("HEAD").exists() {
+                let _admin = self.admin();
+                fs::remove_dir_all(&admin).map_err(|e| format!("{}: {e}", admin.display()))?;
+                let link = work.join(".git");
+                fs::remove_file(&link).map_err(|e| format!("{}: {e}", link.display()))?;
+                return Ok(Some("its `git worktree add` was cut short before it wrote its HEAD (locked, no HEAD, no index): removed, to be added again from scratch".into()));
+            }
+            run(Some(work), None, &[], &["reset", "-q", "--hard", "HEAD"])?;
+            fs::remove_file(&locked).map_err(|e| format!("{}: {e}", locked.display()))?;
+            return Ok(Some("its `git worktree add` was cut short (still locked, no index): checked out whole at its HEAD and unlocked".into()));
+        }
+        run(Some(work), None, &[], &["read-tree", "HEAD"])?;
+        Ok(Some("its index was gone or empty: read again from its HEAD, its files as they were".into()))
+    }
+
     pub fn tree_dirty(&self, work: &Path) -> Result<bool, String> {
         run(Some(work), None, &[], &["status", "--porcelain", "--untracked-files=no", "--ignore-submodules=all"]).map(|o| !o.trim().is_empty())
     }
@@ -1017,6 +1392,415 @@ mod tests {
         store.link(work, at).unwrap();
         makepad_git::refs::write_ref_durable(&store.git_dir, CHECKOUT_REF, &ObjectId::from_hex(at).unwrap()).unwrap();
         store
+    }
+
+    const MISSING: &str = "0123456789012345678901234567890123456789";
+
+    fn bare_store(base: &Path) -> Store {
+        let git_dir = base.join("store.git");
+        run(None, None, &[], &["init", "--bare", "-q", &git_dir.to_string_lossy()]).unwrap();
+        Store { git_dir }
+    }
+
+    fn loose_commit(store: &Store, message: &str, parents: Vec<ObjectId>) -> String {
+        crate::gitread::with_common(&store.git_dir, |repo| {
+            let tree = repo.write_tree(&makepad_git::Tree { entries: vec![] }).unwrap();
+            let author = makepad_git::Signature {
+                name: "Test".into(), email: "test@example.org".into(), timestamp: 1, tz_offset: "+0000".into(),
+            };
+            repo.write_commit(&makepad_git::Commit {
+                tree, parents, author: author.clone(), committer: author, message: message.to_string(),
+            }).unwrap().to_hex()
+        }).unwrap()
+    }
+
+    fn repair_fixture() -> (makepad_git::test_support::TempDir, Store, String, String) {
+        let base = makepad_git::test_support::tempdir().unwrap();
+        let store = bare_store(base.path());
+        let one = loose_commit(&store, "one", vec![]);
+        let two = loose_commit(&store, "two", vec![ObjectId::from_hex(&one).unwrap()]);
+        store.set_ref(CHECKOUT_REF, &two).unwrap();
+        store.set_ref(SYNCED_REF, &one).unwrap();
+        store.set_ref("refs/devhub/pushed/work", &one).unwrap();
+        (base, store, one, two)
+    }
+
+    fn ref_bytes(store: &Store, name: &str, bytes: impl AsRef<[u8]>) {
+        let path = store.git_dir.join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn broken_refs_finds_unreadable_loose_and_packed_refs_and_keeps_sound_and_locks() {
+        let (_base, store, one, two) = repair_fixture();
+        let missing = format!("{MISSING}\n");
+        let utf8 = format!("aé{}", "0".repeat(37));
+        let signed = "+0".repeat(20);
+        let zero = "0".repeat(40);
+        let blob = crate::gitread::with_common(&store.git_dir, |repo| repo.write_blob(b"blob").unwrap().to_hex()).unwrap();
+        let tag = crate::gitread::with_common(&store.git_dir, |repo| {
+            let tag = format!("object {one}\ntype commit\ntag v1\ntagger Test <test@example.org> 1 +0000\n\nv1\n");
+            repo.write_object(makepad_git::ObjectKind::Tag, tag.as_bytes()).unwrap().to_hex()
+        }).unwrap();
+        let mut expected = BTreeSet::new();
+        let broken: &[(&str, &[u8])] = &[
+            ("empty", b""), ("garbage", b"garbage\n"), ("truncated", b"0123456789abcdef\n"),
+            ("nonutf8", &[0xff, 0xfe]), ("utf8-40b", utf8.as_bytes()), ("plus-40b", signed.as_bytes()),
+            ("zero-oid", zero.as_bytes()), ("nested/bad", b""), ("sym-bad", b"ref: refs/heads/bad..ref\n"),
+            ("shadowed", b""),
+            #[cfg(not(windows))]
+            ("topic./work", b""),
+        ];
+        for &(name, bytes) in broken {
+            let r = format!("{PUSHED}{name}");
+            ref_bytes(&store, &r, bytes);
+            expected.insert(r);
+        }
+        for name in ["packed-bad", "packed-utf8", "packed-nonutf8", "packed-zero", "topic./packed-bad"] {
+            expected.insert(format!("{PUSHED}{name}"));
+        }
+        ref_bytes(&store, "refs/devhub/pushed/in-flight.lock", b"");
+        ref_bytes(&store, "refs/devhub/pushed/missing", &missing);
+        ref_bytes(&store, "refs/devhub/pushed/non-commit", format!("{blob}\n"));
+        #[cfg(not(windows))]
+        ref_bytes(&store, "refs/devhub/pushed/topic./sound", format!("{one}\n"));
+        let header = "# pack-refs with: peeled\n";
+        let kept = format!("{one} {PUSHED}packed-ok\n{MISSING} {PUSHED}packed-missing\n{one} {PUSHED}shadowed\n{tag} refs/tags/v1\n^{one}\n");
+        let mut packed = format!("{header}garbage {PUSHED}packed-bad\n^{one}\n{utf8} {PUSHED}packed-utf8\n").into_bytes();
+        packed.extend_from_slice(b"\xff\xfe refs/devhub/pushed/packed-nonutf8\n");
+        packed.extend_from_slice(format!("{zero} {PUSHED}packed-zero\ngarbage {PUSHED}topic./packed-bad\n{kept}").as_bytes());
+        ref_bytes(&store, "packed-refs", packed);
+
+        let expected: Vec<_> = expected.into_iter().collect();
+        assert_eq!(store.broken_refs(), expected);
+        assert_eq!(store.drop_broken_refs(&expected), expected);
+        assert!(store.broken_refs().is_empty());
+        assert_eq!(fs::read(store.git_dir.join("packed-refs")).unwrap(), format!("{header}{kept}").as_bytes());
+        for r in [SYNCED_REF, "refs/devhub/pushed/work", "refs/devhub/pushed/shadowed", "refs/devhub/pushed/packed-ok"] {
+            assert_eq!(store.rev(r).as_deref(), Some(one.as_str()), "{r}");
+        }
+        assert_eq!(store.rev(CHECKOUT_REF).as_deref(), Some(two.as_str()));
+        #[cfg(not(windows))]
+        assert_eq!(store.rev("refs/devhub/pushed/topic./sound").as_deref(), Some(one.as_str()));
+        assert!(store.git_dir.join("refs/devhub/pushed/in-flight.lock").is_file());
+        assert_eq!(fs::read(store.git_dir.join("refs/devhub/pushed/missing")).unwrap(), missing.as_bytes());
+        assert_eq!(fs::read(store.git_dir.join("refs/devhub/pushed/non-commit")).unwrap(), format!("{blob}\n").as_bytes());
+    }
+
+    #[test]
+    fn an_incremental_bundle_drops_broken_refs_that_block_verify() {
+        let (base, src) = source();
+        let store = bare_store(base.path());
+        let bundle = |name: &str, head: &str, parent: Option<&str>| {
+            let path = base.path().join(name);
+            let path_arg = path.to_string_lossy();
+            let exclude = parent.map(|sha| format!("^{sha}"));
+            let mut args = vec!["bundle", "create", "-q", path_arg.as_ref(), head];
+            args.extend(exclude.as_deref());
+            sh(&src, &args);
+            path
+        };
+        let work = "refs/heads/work";
+        let pushed = "refs/devhub/pushed/work";
+        let advance = |label: &str| {
+            put(&src, &[("file", label)]);
+            revision(&src, label)
+        };
+        let one = advance("one");
+        assert_eq!(store.fetch_bundle(&bundle("base", work, None), "work").unwrap(), one);
+        store.set_ref(CHECKOUT_REF, &one).unwrap();
+        store.set_ref(SYNCED_REF, &one).unwrap();
+        let two = advance("two");
+        let inc_two = bundle("inc-two", work, Some(&one));
+        let three = advance("three");
+        let inc_three = bundle("inc-three", work, Some(&two));
+        let four = advance("four");
+        let inc_four = bundle("inc-four", work, Some(&three));
+
+        let empty = "refs/devhub/pushed/etool-kp1";
+        let lock = "refs/devhub/pushed/in-flight.lock";
+        ref_bytes(&store, empty, b"");
+        ref_bytes(&store, lock, b"");
+        let verify_failed = store.git(&["bundle", "verify", "-q", &inc_two.to_string_lossy()]).is_err();
+        assert_eq!(store.fetch_bundle(&inc_two, "work").unwrap(), two);
+        assert!(store.git_dir.join(lock).is_file());
+        if verify_failed {
+            assert!(!store.git_dir.join(empty).exists());
+        }
+
+        ref_bytes(&store, "packed-refs", format!("# pack-refs with: peeled\ngarbage {PUSHED}packed-bad\n{one} {PUSHED}packed-ok\n"));
+        ref_bytes(&store, "refs/devhub/pushed/empty", b"");
+        #[cfg(not(windows))]
+        {
+            assert!(valid_branch("topic./work"));
+            ref_bytes(&store, "refs/devhub/pushed/topic./work", b"");
+        }
+        assert!(store.git(&["bundle", "verify", "-q", &inc_three.to_string_lossy()]).is_err());
+        assert_eq!(store.fetch_bundle(&inc_three, "work").unwrap(), three);
+        assert!(!store.git_dir.join("refs/devhub/pushed/empty").exists());
+        #[cfg(not(windows))]
+        assert!(!store.git_dir.join("refs/devhub/pushed/topic./work").exists());
+        assert_eq!(fs::read_to_string(store.git_dir.join("packed-refs")).unwrap(), format!("# pack-refs with: peeled\n{one} {PUSHED}packed-ok\n"));
+        assert_eq!(store.rev(pushed).as_deref(), Some(three.as_str()));
+        for r in ["refs/devhub/pushed/packed-ok", CHECKOUT_REF, SYNCED_REF] {
+            assert_eq!(store.rev(r).as_deref(), Some(one.as_str()), "{r}");
+        }
+        assert!(store.git_dir.join(lock).is_file());
+
+        let dangling = "refs/devhub/pushed/dangling";
+        ref_bytes(&store, dangling, format!("{MISSING}\n"));
+        assert!(store.broken_refs().is_empty());
+        assert_eq!(store.ref_state(dangling), RefState::SoundOrAbsent);
+        assert!(!store.drop_broken_ref(dangling));
+        assert!(store.fetch_bundle(&inc_four, "work").is_err());
+        assert_eq!(fs::read_to_string(store.git_dir.join(dangling)).unwrap(), format!("{MISSING}\n"));
+        assert!(store.log_unreadable_devhub_commits().is_empty());
+        let second = "refs/devhub/pushed/dangling-two";
+        ref_bytes(&store, second, format!("{MISSING}\n"));
+        let lines = store.log_unreadable_devhub_commits();
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains(&format!("keeping {second} ({MISSING}), whose commit could not be read: object not found")));
+        assert!(store.log_unreadable_devhub_commits().is_empty());
+        for r in [dangling, second] {
+            fs::remove_file(store.git_dir.join(r)).unwrap();
+        }
+
+        sh(&src, &["checkout", "-q", "-b", "orphan", &one]);
+        advance("side parent");
+        let orphan = advance("orphan");
+        sh(&src, &["checkout", "-q", "-b", "side"]);
+        advance("side");
+        let inc_side = bundle("inc-side", "refs/heads/side", Some(&orphan));
+        let refs = store.refs();
+        let err = store.fetch_bundle(&inc_side, "side").unwrap_err();
+        assert!(err.contains("lacks these prerequisite commits") && !err.contains("after dropping"), "{err}");
+        assert_eq!(store.refs(), refs);
+
+        // The prerequisite commit exists, but its side-only parent and tree are missing.
+        // Git can accept a complete orphan history even when no store ref names it.
+        let loose = Path::new("objects").join(&orphan[..2]).join(&orphan[2..]);
+        ref_bytes(&store, loose.to_str().unwrap(), fs::read(src.join(".git").join(&loose)).unwrap());
+        let bad = "refs/devhub/pushed/bad-other";
+        ref_bytes(&store, bad, b"");
+        let err = store.fetch_bundle(&inc_side, "side").unwrap_err();
+        assert!(err.contains("not connected to the repository's history"), "{err}");
+        assert!(err.contains(&format!("(after dropping {bad}, which it could not read:")), "{err}");
+        assert!(!store.git_dir.join(bad).exists());
+
+        assert_eq!(store.fetch_bundle(&inc_four, "work").unwrap(), four);
+        for (r, bytes) in [(SYNCED_REF, String::new()), (CHECKOUT_REF, format!("aé{}\n", "0".repeat(37))),
+            #[cfg(not(windows))]
+            ("refs/devhub/pushed/topic./work", format!("{}\n", "0".repeat(40))),
+        ] {
+            ref_bytes(&store, r, bytes);
+            store.set_ref(r, &four).unwrap();
+            assert_eq!(store.rev(r).as_deref(), Some(four.as_str()), "{r}");
+        }
+    }
+
+    #[test]
+    fn inconclusive_reads_never_drop_sound_refs() {
+        let (_base, store, one, two) = repair_fixture();
+        let alt_file = store.git_dir.join("objects/info/alternates");
+        fs::write(&alt_file, [0xff, 0xfe]).unwrap();
+        let missing = "1".repeat(40);
+        assert!(store.rev(CHECKOUT_REF).is_none());
+        assert!(store.broken_refs().is_empty());
+        for (r, sha) in [(CHECKOUT_REF, &two), (SYNCED_REF, &one)] {
+            assert_eq!(store.ref_state(r), RefState::SoundOrAbsent);
+            assert!(!store.drop_broken_ref(r));
+            assert!(store.set_ref(r, &missing).is_err());
+            assert_eq!(fs::read_to_string(store.git_dir.join(r)).unwrap(), format!("{sha}\n"));
+        }
+        fs::remove_file(alt_file).unwrap();
+        assert_eq!(store.rev(CHECKOUT_REF).as_deref(), Some(two.as_str()));
+        assert_eq!(store.rev(SYNCED_REF).as_deref(), Some(one.as_str()));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            struct Restore(PathBuf);
+            impl Restore {
+                fn restrict(path: PathBuf) -> Self {
+                    let guard = Self(path);
+                    fs::set_permissions(&guard.0, fs::Permissions::from_mode(0o000)).unwrap();
+                    guard
+                }
+            }
+            impl Drop for Restore {
+                fn drop(&mut self) {
+                    fs::set_permissions(&self.0, fs::Permissions::from_mode(0o644)).unwrap();
+                }
+            }
+            let synced = store.git_dir.join(SYNCED_REF);
+            let restore = Restore::restrict(synced.clone());
+            if fs::read(&synced).is_err_and(|e| e.kind() == ErrorKind::PermissionDenied) {
+                assert_eq!(store.ref_state(SYNCED_REF), RefState::Inconclusive);
+                assert!(store.broken_refs().is_empty());
+                assert!(!store.drop_broken_ref(SYNCED_REF));
+                assert!(store.set_ref(SYNCED_REF, &missing).is_err());
+                assert!(synced.is_file());
+            }
+            drop(restore);
+            assert_eq!(fs::read_to_string(synced).unwrap(), format!("{one}\n"));
+
+            let three = loose_commit(&store, "three", vec![ObjectId::from_hex(&two).unwrap()]);
+            store.set_ref(CHECKOUT_REF, &three).unwrap();
+            let object = store.git_dir.join("objects").join(&three[..2]).join(&three[2..]);
+            let restore = Restore::restrict(object.clone());
+            if fs::read(object).is_err_and(|e| e.kind() == ErrorKind::PermissionDenied) {
+                assert!(store.rev(CHECKOUT_REF).is_none());
+                assert_eq!(store.ref_state(CHECKOUT_REF), RefState::SoundOrAbsent);
+                assert!(store.broken_refs().is_empty());
+                assert!(!store.drop_broken_ref(CHECKOUT_REF));
+                assert!(store.set_ref(CHECKOUT_REF, &missing).is_err());
+                assert_eq!(fs::read_to_string(store.git_dir.join(CHECKOUT_REF)).unwrap(), format!("{three}\n"));
+            }
+            drop(restore);
+            assert_eq!(store.rev(CHECKOUT_REF).as_deref(), Some(three.as_str()));
+
+            let r = "refs/devhub/pushed/packed-ok";
+            ref_bytes(&store, "packed-refs", format!("{one} {r}\n"));
+            let packed = store.git_dir.join("packed-refs");
+            let restore = Restore::restrict(packed.clone());
+            if fs::read(&packed).is_err_and(|e| e.kind() == ErrorKind::PermissionDenied) {
+                assert_eq!(store.ref_state(r), RefState::Inconclusive);
+                assert!(store.broken_refs().is_empty());
+                assert!(!store.drop_broken_ref(r));
+                assert!(packed.is_file());
+            }
+            drop(restore);
+            assert_eq!(fs::read_to_string(packed).unwrap(), format!("{one} {r}\n"));
+        }
+    }
+
+    #[test]
+    fn set_ref_never_dereferences_symbolic_refs_or_escapes_devhub() {
+        let (_base, store, one, two) = repair_fixture();
+        let outside = "refs/heads/outside";
+        store.set_ref(outside, &one).unwrap();
+        for (r, target) in [("refs/devhub/pushed/work", outside),
+            ("refs/devhub/pushed/dangling-sym", "refs/heads/never-create"), ("refs/devhub/pushed/bad-sym", "refs/heads/bad..ref")] {
+            ref_bytes(&store, r, format!("ref: {target}\n"));
+            store.set_ref(r, &two).unwrap();
+            assert_eq!(fs::read_to_string(store.git_dir.join(r)).unwrap(), format!("{two}\n"));
+            assert_eq!(store.rev(r).as_deref(), Some(two.as_str()));
+        }
+        assert_eq!(store.rev(outside).as_deref(), Some(one.as_str()));
+        assert!(!store.git_dir.join("refs/heads/never-create").exists());
+        let prune = "refs/devhub/pushed/sym-prune";
+        ref_bytes(&store, prune, format!("ref: {outside}\n"));
+        store.prune_pushed(&["sym-prune"]).unwrap();
+        assert!(!store.git_dir.join(prune).exists());
+        assert_eq!(store.rev(outside).as_deref(), Some(one.as_str()));
+        for invalid in ["", &"0".repeat(40)] {
+            assert!(store.set_ref(CHECKOUT_REF, invalid).is_err());
+            assert_eq!(store.rev(CHECKOUT_REF).as_deref(), Some(two.as_str()));
+        }
+        #[cfg(unix)]
+        {
+            let dir = _base.path().join("outside");
+            fs::create_dir(&dir).unwrap();
+            std::os::unix::fs::symlink(&dir, store.git_dir.join("refs/devhub/escape")).unwrap();
+            assert!(store.set_ref("refs/devhub/escape/victim", &two).is_err());
+            assert!(!dir.join("victim").exists());
+        }
+    }
+
+    #[test]
+    fn drop_stays_inside_devhub_namespace_and_preserves_concurrent_repairs() {
+        for r in [CHECKOUT_REF, SYNCED_REF, "refs/devhub/pushed/work", "refs/devhub/pushed/lane/x.y",
+            "refs/devhub/pushed/rc-1_2", "refs/devhub/pushed/topic./work", "refs/devhub/pushed/a./b./c", "refs/devhub/pushed/a/-b"] {
+            assert!(valid_devhub_ref(r), "{r:?}");
+        }
+        let long = format!("{PUSHED}{}", "a".repeat(260 - PUSHED.len()));
+        for r in ["", "refs/devhub", "refs/devhub/", "refs/heads/work", "refs/devhub/../../HEAD",
+            "refs/devhub/pushed/../../config", "refs/devhub/./checkout", "refs/devhub/pushed/.hidden",
+            "refs/devhub/pushed/.topic/work", "refs/devhub/pushed/foo.", "refs/devhub/pushed/topic../work",
+            "refs/devhub/pushed/a..b", "refs/devhub/pushed/a//b", "refs/devhub/pushed/foo/",
+            "refs/devhub/pushed/x.lock", "refs/devhub/pushed/a.lock/b", "/etc/passwd", "refs/devhub//etc/passwd",
+            "refs/devhub/a\\..\\HEAD", "refs/devhub/C:/x", "refs/devhub/pushed/a\0b", "refs/devhub/pushed/a b",
+            "refs/devhub/pushed/é", &long] {
+            assert!(!valid_devhub_ref(r), "{r:?}");
+        }
+        let (_base, store, one, _) = repair_fixture();
+        let traversal = ["refs/devhub/../../HEAD", "refs/devhub/pushed/../../config"];
+        let original: Vec<_> = ["HEAD", "config"].iter().map(|p| fs::read(store.git_dir.join(p)).unwrap()).collect();
+        let packed = store.git_dir.join("packed-refs");
+        let bad_names = format!("garbage {}\ngarbage {}\n", traversal[0], traversal[1]);
+        fs::write(&packed, &bad_names).unwrap();
+        assert!(store.broken_refs().is_empty());
+        for r in traversal {
+            assert!(!store.drop_broken_ref(r));
+        }
+        assert_eq!(fs::read_to_string(&packed).unwrap(), bad_names);
+        for (p, bytes) in ["HEAD", "config"].iter().zip(original) {
+            assert_eq!(fs::read(store.git_dir.join(p)).unwrap(), bytes);
+        }
+        fs::remove_file(&packed).unwrap();
+        #[cfg(unix)]
+        {
+            let dir = _base.path().join("outside");
+            fs::create_dir(&dir).unwrap();
+            let victim = dir.join("victim");
+            fs::write(&victim, "keep").unwrap();
+            let link = store.git_dir.join("refs/devhub/escape");
+            std::os::unix::fs::symlink(&dir, &link).unwrap();
+            let r = "refs/devhub/escape/victim";
+            assert!(!store.broken_refs().contains(&r.to_string()));
+            assert!(!store.drop_broken_ref(r));
+            assert!(store.drop_broken_ref("refs/devhub/escape"));
+            assert_eq!(fs::read(victim).unwrap(), b"keep");
+        }
+
+        let raced = "refs/devhub/pushed/raced";
+        ref_bytes(&store, raced, b"");
+        let candidates = store.broken_refs();
+        assert_eq!(candidates, [raced]);
+        ref_bytes(&store, raced, format!("{one}\n"));
+        assert!(store.drop_broken_refs(&candidates).is_empty());
+        assert_eq!(store.rev(raced).as_deref(), Some(one.as_str()));
+
+        let locked = "refs/devhub/pushed/locked";
+        let lock_path = store.git_dir.join(format!("{locked}.lock"));
+        ref_bytes(&store, locked, b"");
+        fs::write(&lock_path, b"in-flight").unwrap();
+        assert!(!store.drop_broken_ref(locked));
+        assert!(store.git_dir.join(locked).is_file());
+        assert_eq!(fs::read(&lock_path).unwrap(), b"in-flight");
+        fs::remove_file(lock_path).unwrap();
+        assert!(store.drop_broken_ref(locked));
+        assert!(!store.git_dir.join(locked).exists());
+
+        let packed_raced = "refs/devhub/pushed/packed-raced";
+        fs::write(&packed, format!("garbage {packed_raced}\n")).unwrap();
+        let candidates = store.broken_refs();
+        assert_eq!(candidates, [packed_raced]);
+        fs::write(&packed, format!("{one} {packed_raced}\n")).unwrap();
+        assert!(store.drop_broken_refs(&candidates).is_empty());
+        assert_eq!(store.rev(packed_raced).as_deref(), Some(one.as_str()));
+
+        let packed_lock = store.git_dir.join("packed-refs.lock");
+        let invalid = format!("garbage {packed_raced}\n");
+        fs::write(&packed, &invalid).unwrap();
+        fs::write(&packed_lock, b"in-flight").unwrap();
+        assert!(!store.drop_broken_ref(packed_raced));
+        assert_eq!(fs::read_to_string(&packed).unwrap(), invalid);
+        assert_eq!(fs::read(&packed_lock).unwrap(), b"in-flight");
+        fs::remove_file(packed_lock).unwrap();
+        assert!(store.drop_broken_ref(packed_raced));
+        assert!(fs::read(&packed).unwrap().is_empty());
+
+        let shadowed = "refs/devhub/pushed/packed-then-loose";
+        fs::write(&packed, format!("garbage {shadowed}\n")).unwrap();
+        ref_bytes(&store, shadowed, format!("{one}\n"));
+        let candidates = store.broken_refs();
+        assert_eq!(candidates, [shadowed]);
+        assert_eq!(store.drop_broken_refs(&candidates), candidates);
+        assert!(fs::read(&packed).unwrap().is_empty());
+        assert_eq!(fs::read_to_string(store.git_dir.join(shadowed)).unwrap(), format!("{one}\n"));
+        assert_eq!(store.rev(shadowed).as_deref(), Some(one.as_str()));
     }
 
     #[test]
@@ -1204,6 +1988,48 @@ mod tests {
         assert_eq!(fs::read(work.join("file")).unwrap(), b"after\n", "the move after index recovery succeeds");
         assert!(sh(&work, &["status", "--porcelain"]).is_empty(), "recovered index matches the final tree");
         assert!(!admin.join("devhub-move").exists(), "recovery removes the marker");
+        // A worktree with no index outside a move: one a `git worktree add` cut short (still
+        // locked, files missing) is checked out whole and unlocked; one whose index alone went
+        // keeps its files, so a lease's edit in them is still recovered (`git add -u` refused the
+        // whole tree on its empty index, and a lease start failed on it for hours, 11-26)
+        fs::remove_file(admin.join("index")).unwrap();
+        fs::write(admin.join("locked"), "initializing\n").unwrap();
+        fs::remove_file(work.join("untouched")).unwrap();
+        let said = store.repair_worktree(&work).unwrap();
+        assert!(said.as_deref().is_some_and(|s| s.contains("cut short")), "{said:?}");
+        assert_eq!(fs::read(work.join("untouched")).unwrap(), b"stay\n", "the half-made checkout is whole");
+        assert!(!admin.join("locked").exists() && !store.tree_dirty(&work).unwrap(), "unlocked and clean");
+        assert_eq!(store.repair_worktree(&work).unwrap(), None, "a whole worktree is left alone");
+        fs::write(work.join("file"), b"edited\n").unwrap();
+        fs::remove_file(admin.join("index")).unwrap();
+        let said = store.repair_worktree(&work).unwrap();
+        assert!(said.as_deref().is_some_and(|s| s.contains("index was gone")), "{said:?}");
+        assert_eq!(fs::read(work.join("file")).unwrap(), b"edited\n", "its files as they were");
+        assert!(store.tree_dirty(&work).unwrap(), "the edit shows");
+        // ... and so does one whose index is there but holds no file
+        makepad_git::index::write_index_durable(&admin, &Index { version: 2, entries: Vec::new() }).unwrap();
+        assert!(store.repair_worktree(&work).unwrap().as_deref().is_some_and(|s| s.contains("gone or empty")), "an empty index is repaired");
+        assert_eq!(fs::read(work.join("file")).unwrap(), b"edited\n", "its files as they were");
+        store.recover_tree(&work, &to, "L1", &base.path().join("recovered"), "x-L1").unwrap();
+        assert_eq!(fs::read(work.join("file")).unwrap(), b"after\n", "recovered, the tree is back at its commit");
+
+        // An add interrupted before HEAD has linked the worktree but has checked out no files.
+        let interrupted = base.path().join("interrupted");
+        linked(&src, &interrupted, &from);
+        let admin = store.admin_of(&interrupted).unwrap();
+        fs::remove_file(interrupted.join("file")).unwrap();
+        fs::remove_file(interrupted.join("untouched")).unwrap();
+        fs::remove_file(admin.join("HEAD")).unwrap();
+        fs::remove_file(admin.join("index")).unwrap();
+        fs::write(admin.join("locked"), "initializing\n").unwrap();
+        let said = store.repair_worktree(&interrupted).expect("repair of the locked worktree without HEAD succeeds");
+        assert!(said.as_deref().is_some_and(|s| s.contains("cut short before it wrote its HEAD")), "the repair reports the interrupted add: {said:?}");
+        assert!(!admin.exists(), "the incomplete admin directory is gone");
+        assert!(!interrupted.join(".git").exists(), "the incomplete worktree's .git link is gone");
+        assert!(interrupted.is_dir(), "the worktree directory remains for the next add");
+        assert_eq!(store.repair_worktree(&interrupted), Ok(None), "the interrupted add is reported only once");
+        run(None, Some(&store.git_dir), &[], &["worktree", "add", "--detach", &interrupted.to_string_lossy(), &from])
+            .expect("the store can add the worktree again at the same path");
     }
 
     /// A first move of a shipped tree (no .git, dotfiles missing) links it as a worktree of the
@@ -1252,7 +2078,7 @@ mod tests {
             pushed
         });
         assert!(pushed.iter().all(|p| p.as_ref() == Ok(&lane)), "a push beside a prune of its ref: {pushed:?}");
-        // a ref the store cannot read (empty, not a sha, a missing object) is dropped and fetched again
+        // Empty and garbage refs can be dropped and named again. A missing-object SHA is overwritten directly.
         for broken in ["", "garbage\n", "0123456789012345678901234567890123456789\n"] {
             std::fs::write(stores.join("makepad.git/refs/devhub/pushed/rc-x"), broken).unwrap();
             assert_eq!(store.fetch_bundle(&bundle, "rc-x").unwrap(), lane, "{broken:?}");

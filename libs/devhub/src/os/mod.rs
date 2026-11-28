@@ -12,6 +12,22 @@ mod windows;
 #[cfg(windows)]
 pub use self::windows::*;
 
+/// How a run's wrapper begins its line when the run's command never started (its program not on
+/// the run's PATH, or not one it may start): the run ends 127 with it, and `devhub run`'s last line
+/// says so ([`never_started_said`]).
+pub const NEVER_STARTED: &str = "devhub: the command never started: ";
+
+/// Why a run's command never started, from its first output: the Windows wrapper's
+/// [`NEVER_STARTED`] line, or a Unix wrapper's shell failing its `exec` (`devhub-usage` is the
+/// wrapper's `$0`, so no line of the command's own reads so). None: it started.
+pub fn never_started_said(output: &str) -> Option<String> {
+    output.lines().map(|l| l.trim_end_matches('\r')).find_map(|l| {
+        if let Some(why) = l.strip_prefix(NEVER_STARTED) { return Some(why.to_string()); }
+        let (_, why) = l.strip_prefix("devhub-usage:")?.split_once("exec: ")?;
+        Some(why.trim().to_string())
+    })
+}
+
 /// Whether this box's background builds (`background`) keep to its efficiency cores: a Mac a
 /// person uses, where a master runs (the person's own Mac) or whose lease role is a person's.
 pub fn clamps_background() -> bool {

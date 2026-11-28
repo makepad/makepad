@@ -353,6 +353,28 @@ pub fn beside_pin<'a>(landed: &'a [Entry], repo: &Path, dir: &Path, name: &str, 
     (at, false)
 }
 
+/// Of `landed` (landings, any order), the newest landing in makepad and nested repository `name`
+/// (checked out at `dir`) that makepad commit `work` and `name`'s commit `head` split: it, and
+/// whether the makepad side is the one that holds it. A landing both hold ends the look. A lane's
+/// `--rev rc-<lane>@<a work commit>` paired its old makepad/apps half with the newer makepad and
+/// built it: two E0277 in Synth (11-27).
+pub fn nested_split<'a>(landed: &'a [Entry], repo: &Path, dir: &Path, name: &str, work: &str, head: &str) -> Option<(&'a Entry, bool)> {
+    let mut both: Vec<(&Entry, &str, String)> = landed.iter().filter(|e| e.state == St::Landed && !e.proof).filter_map(|e| {
+        let side = e.nested.iter().find(|s| s.name == name && !s.landed.is_empty())?;
+        let (pre, done) = (pair_sides(&e.pre)?, pair_sides(&e.landed)?);
+        (pre.0 != done.0).then(|| (e, side.landed.as_str(), done.0))
+    }).collect();
+    both.sort_by_key(|(e, ..)| std::cmp::Reverse((e.changed_ms, e.id)));
+    for (e, merged, done) in both {
+        match (is_ancestor(repo, &done, work), is_ancestor(dir, merged, head)) {
+            (true, true) => return None,
+            (false, false) => {}
+            (makepad, _) => return Some((e, makepad)),
+        }
+    }
+    None
+}
+
 /// A landing's recorded pair (`work <sha> main <sha>`): its work and main commits.
 fn pair_sides(text: &str) -> Option<(String, String)> {
     match text.split_whitespace().collect::<Vec<_>>()[..] {
@@ -907,6 +929,10 @@ pub fn failure_lines(log: &str) -> Vec<String> {
             || l.starts_with("GATE ")
             || l.starts_with("GATEUNIT ")
             || l.starts_with("GATESTEP ")
+            || l.starts_with("GATEKEEP ")
+            || l.starts_with("GATEFAIL ")
+            || l.starts_with("GATEHUNG ")
+            || l.starts_with("GATEBUSY ")
             || l.starts_with("GATEOUT ")
             || l.starts_with("GATEKEPT ")
             || l.starts_with("GATEPROOF ")
@@ -915,7 +941,10 @@ pub fn failure_lines(log: &str) -> Vec<String> {
             || t.ends_with(": 0 errors")
             || t.ends_with(" present: 1"))
     };
-    let v: Vec<String> = log.lines().filter(keep).map(|l| crate::proto::clean(l, 300)).collect();
+    let v: Vec<String> = log.lines().filter(keep).map(|l| {
+        let pointer = l.starts_with("  full output") || l.starts_with("  unit log: ") || l.starts_with("  full --list output: ");
+        crate::proto::clean(l, if pointer { crate::proto::MAX_LINE } else { crate::proto::MAX_FIELD })
+    }).collect();
     v[v.len().saturating_sub(MAX_DETAIL)..].to_vec()
 }
 
@@ -3098,7 +3127,15 @@ mod tests {
         let at = |work: &str, main: &str| { let (at, held) = beside_pin(&both, &r, &x, "x", work, main, &x2); (at.map(|(c, e)| (c, e.id)), held) };
         assert_eq!(at(&w0, &m0), (Some((x0.clone(), 3)), false), "a pin before the landing: x before it and the later one in x alone, the pin older than every landing asked about");
         assert_eq!(at(&work, &main), (None, true), "a pin that holds it: x at its tip");
-        assert_eq!(at(&w0, ""), (Some((x0, 3)), false), "a pin with no commercial side, by its makepad half");
+        assert_eq!(at(&w0, ""), (Some((x0.clone(), 3)), false), "a pin with no commercial side, by its makepad half");
+        // a pin's makepad commit and a nested half's HEAD that split a landing in both, either
+        // way: a run on that pair is made whole or refused (a lane's old makepad/apps half beside a
+        // newer makepad built Synth: two E0277, 11-27); a landing in x alone splits none
+        let split = |work: &str, head: &str| nested_split(&both, &r, &x, "x", work, head).map(|(l, makepad)| (l.id, makepad));
+        assert_eq!(split(&work, &x1), None, "both hold it");
+        assert_eq!(split(&work, &x0), Some((e.id, true)), "makepad holds it and x's head does not");
+        assert_eq!(split(&w0, &x2), Some((e.id, false)), "x's head holds it and makepad does not");
+        assert_eq!(split(&w0, &x0), None, "neither holds it");
         // a landing in x alone stands beside the makepad tip it landed on: a pin from before that
         // tip has x before it (#8817 in apps alone used #8815's makepad half: E0599, 11-24); one
         // whose makepad half holds that tip has x at its tip, whatever its commercial side

@@ -21,8 +21,11 @@ use crate::proto::{wall_ms, Record, Sev};
 use crate::state::{Job, JobPanic};
 use makepad_remote::json_str;
 use makepad_remote::link::{Client, Target};
-use makepad_strict_json::Value;
-use std::sync::{mpsc, Arc, Mutex};
+use makepad_strict_json::{obj, s, Value};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::io::{self, BufRead};
+use std::path::Path;
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 /// A paused job with no agent action for this long releases its box: past the JIT's own 600 s
@@ -134,36 +137,211 @@ pub fn start(ctx: Arc<Ctx>) {
             let c = ctx.clone();
             let _ = std::thread::Builder::new().name("devhub-job".into()).spawn(move || reattach(&c, &j));
         }
+        let mut last_prune = std::time::Instant::now();
         loop {
             dispatch(&ctx);
             idle(&ctx);
+            if last_prune.elapsed() >= PRUNE_INTERVAL {
+                last_prune = std::time::Instant::now();
+                prune_lease_artifacts_for(&ctx, wall_ms(), LEASE_ARTIFACTS_AGE_MS);
+            }
             ctx.store.wait(TICK);
         }
     });
 }
 
-/// What lease ends keep (lease/master.rs), and how many of them stay.
+/// What lease ends keep (lease/master.rs).
 pub(crate) const LEASE_LOGS: &str = "lease-logs";
-const LEASE_LOGS_KEPT: usize = 500;
+/// Minimum age for unreferenced artifact directories. Logs, memory records and kept indices stay forever.
+const LEASE_ARTIFACTS_AGE_MS: u64 = 7 * 86_400_000;
+const PRUNE_INTERVAL: Duration = Duration::from_secs(3600);
 
-/// Removes the logs and snapshots of jobs the state no longer keeps, and all but the newest lease logs.
-fn prune_logs(ctx: &Ctx) {
-    if let Ok(rd) = std::fs::read_dir(ctx.logs(LEASE_LOGS)) {
-        let mut logs: Vec<_> = rd.flatten().filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path()))).collect();
-        logs.sort_by(|a, b| b.0.cmp(&a.0));
-        // (a lease's test artifacts are a folder beside its log, [`crate::lease::master::artifacts_dir`])
-        for (_, old) in logs.iter().skip(LEASE_LOGS_KEPT) {
-            let _ = if old.is_dir() { std::fs::remove_dir_all(old) } else { std::fs::remove_file(old) };
+fn lease_id(s: &str) -> bool {
+    s.strip_prefix('L').is_some_and(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))
+}
+
+fn old_artifacts(home: &Path, now_ms: u64, max_age_ms: u64) -> Vec<(String, u64)> {
+    let mut old = Vec::new();
+    let Ok(dir) = std::fs::read_dir(home.join(LEASE_LOGS)) else { return old };
+    for entry in dir.flatten() {
+        let name = entry.file_name();
+        let Some(id) = name.to_str().and_then(|n| n.strip_suffix(".artifacts")).filter(|id| lease_id(id)) else { continue };
+        let Ok(meta) = entry.path().symlink_metadata() else { continue };
+        if !meta.is_dir() { continue; }
+        let Ok(modified) = meta.modified() else { continue };
+        let ms = modified.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
+        if ms <= u128::from(now_ms) {
+            let age = now_ms.saturating_sub(ms as u64);
+            if age >= max_age_ms { old.push((id.to_owned(), age)); }
         }
     }
-    let snaps: Vec<String> = ctx.store.read(|d| d.jobs.iter().map(|j| j.snap.clone()).filter(|s| !s.is_empty()).collect());
-    if let Ok(rd) = std::fs::read_dir(ctx.logs("jobs").join("snap")) {
-        for e in rd.flatten() {
-            let name = e.file_name().to_string_lossy().into_owned();
-            if name.starts_with('S') && name[1..].bytes().all(|b| b.is_ascii_digit()) && !snaps.contains(&name) {
-                let _ = std::fs::remove_dir_all(snap_dir(ctx, &name));
+    old
+}
+
+/// Sum regular file lengths without following links. Skip the removal if sizing fails.
+fn artifact_bytes(dir: &Path) -> io::Result<u64> {
+    let mut bytes = 0;
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        let meta = path.symlink_metadata()?;
+        if meta.is_dir() { bytes += artifact_bytes(&path)?; }
+        else if meta.is_file() { bytes += meta.len(); }
+    }
+    Ok(bytes)
+}
+
+/// Remove only real, old L<id>.artifacts directories whose lease has no remaining reference.
+pub(crate) fn prune_lease_artifacts(home: &Path, now_ms: u64, max_age_ms: u64, protected: &BTreeSet<String>) -> (usize, u64) {
+    let (mut removed, mut freed) = (0, 0);
+    for (id, age) in old_artifacts(home, now_ms, max_age_ms) {
+        if protected.contains(&id) { continue; }
+        let dir = crate::lease::master::artifacts_dir(home, &id);
+        match artifact_bytes(&dir).and_then(|n| std::fs::remove_dir_all(&dir).map(|()| n)) {
+            Ok(bytes) => {
+                removed += 1;
+                freed += bytes;
+                eprintln!("devhub lease-logs: pruned {} (freed {bytes} bytes; age {}d >= 7d, unreferenced)", dir.display(), age / 86_400_000);
             }
+            Err(e) => eprintln!("devhub lease-logs: {}: {e}", dir.display()),
         }
+    }
+    if removed > 0 { eprintln!("devhub lease-logs: pruned {removed} artifact dir(s), freed {freed} bytes"); }
+    (removed, freed)
+}
+
+fn lease_tokens(text: &str, out: &mut BTreeSet<String>) {
+    out.extend(text.split(|c: char| !c.is_alphanumeric()).filter(|s| lease_id(s)).map(str::to_owned));
+}
+
+fn row_leases(v: &Value, out: &mut BTreeSet<String>) {
+    match v {
+        Value::Str(text) => lease_tokens(text, out),
+        Value::Arr(items) => items.iter().for_each(|v| row_leases(v, out)),
+        Value::Obj(fields) => for (k, v) in fields {
+            lease_tokens(k, out);
+            row_leases(v, out);
+        },
+        _ => {}
+    }
+}
+
+/// Missing guard files are empty. An unreadable guard makes the entire pass unsafe.
+fn read_guard(home: &Path, name: &str, mut visit: impl FnMut(&str) -> io::Result<()>) -> Option<()> {
+    let path = home.join(name);
+    let mut read = || -> io::Result<()> {
+        let file = match std::fs::File::open(&path) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+            other => other?,
+        };
+        for line in io::BufReader::new(file).lines() {
+            let line = line?;
+            if !line.trim().is_empty() { visit(&line)?; }
+        }
+        Ok(())
+    };
+    match read() {
+        Ok(()) => Some(()),
+        Err(e) => { eprintln!("devhub lease-logs: skipping artifact prune: {}: {e}", path.display()); None }
+    }
+}
+
+fn guard_row(line: &str) -> io::Result<Value> {
+    makepad_strict_json::parse(line.as_bytes()).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{e:?}")))
+}
+
+fn protected_artifact_leases(ctx: &Ctx, candidates: &[String]) -> Option<BTreeSet<String>> {
+    if candidates.is_empty() { return Some(BTreeSet::new()); }
+    let mut protected: BTreeSet<_> = ctx.leases.view().into_iter()
+        .filter(|l| !matches!(l.state, crate::lease::sched::State::Ended(_))).map(|l| l.id).collect();
+    protected.extend(ctx.store.read(|d| d.jobs.iter().map(|j| &j.lease).filter(|l| !l.is_empty()).cloned().collect::<Vec<_>>()));
+    read_guard(&ctx.home, "agent-notes.jsonl", |line| {
+        match makepad_strict_json::parse(line.as_bytes()) {
+            Ok(v) => row_leases(&v, &mut protected),
+            Err(_) => lease_tokens(line, &mut protected),
+        }
+        Ok(())
+    })?;
+    let mut intermittent = BTreeMap::new();
+    read_guard(&ctx.home, "intermittent.jsonl", |line| {
+        let row = guard_row(line)?;
+        if let Some(key) = row.get("cleared").and_then(Value::as_str) {
+            intermittent.retain(|(_, k), _| k != key);
+        } else if let (Some(bucket), Some(key)) = (row.get("bucket").and_then(Value::as_str), row.get("key").and_then(Value::as_str)) {
+            intermittent.insert((bucket.to_owned(), key.to_owned()), row);
+        }
+        Ok(())
+    })?;
+    for row in intermittent.values() { row_leases(row, &mut protected); }
+
+    // A reopened bisect can resume from its earlier tip-red probe. Keep that probe's references too.
+    let mut bisects = BTreeMap::new();
+    let mut done = BTreeSet::new();
+    read_guard(&ctx.home, "bisects.jsonl", |line| {
+        let row = guard_row(line)?;
+        let field = |k| row.get(k).and_then(Value::as_str);
+        let (Some(bucket), Some(key), Some(work)) = (field("bucket"), field("key"), row.get("from").and_then(|v| v.get("work")).and_then(Value::as_str)) else { return Ok(()) };
+        let key = (bucket.to_owned(), key.to_owned(), work.to_owned());
+        if field("state") == Some("done") { done.insert(key); }
+        else {
+            if field("state") == Some("queued") && row.get("reopened").is_some() { done.remove(&key); }
+            row_leases(&row, bisects.entry(key).or_default());
+        }
+        Ok(())
+    })?;
+    for (key, ids) in bisects {
+        if !done.contains(&key) { protected.extend(ids); }
+    }
+    Some(protected)
+}
+
+fn prune_lease_artifacts_for(ctx: &Ctx, now_ms: u64, max_age_ms: u64) -> (usize, u64) {
+    let candidates: Vec<_> = old_artifacts(&ctx.home, now_ms, max_age_ms).into_iter().map(|(id, _)| id).collect();
+    if candidates.is_empty() { return (0, 0); }
+    let Some(protected) = protected_artifact_leases(ctx, &candidates) else { return (0, 0) };
+    prune_lease_artifacts(&ctx.home, now_ms, max_age_ms, &protected)
+}
+
+/// Only collect through the ID seen with the owners. A copy allocated by this image
+/// can finish its manifest before its job is registered.
+fn prune_snaps(dir: &Path, jobs: &HashSet<String>, upto: u64, live_trees: &HashSet<String>, first: Option<u64>) -> (usize, usize) {
+    let (mut removed, mut kept) = (0, 0);
+    let Ok(entries) = std::fs::read_dir(dir) else { return (0, 0) };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Some(id) = name.strip_prefix('S').filter(|s| s.bytes().all(|b| b.is_ascii_digit())).and_then(|s| s.parse::<u64>().ok()) else { continue };
+        if !entry.file_type().is_ok_and(|ty| ty.is_dir()) { continue; }
+        if id > upto || jobs.contains(name) || first.is_some_and(|first| id >= first) {
+            kept += 1;
+            continue;
+        }
+        let path = entry.path();
+        // An earlier image's live start is still named by its tree.
+        let manifest = std::fs::read(path.join("manifest.json")).ok().and_then(|bytes| makepad_strict_json::parse(&bytes).ok());
+        let tree = manifest.as_ref().and_then(|v| v.get("tree")?.as_str());
+        if tree.is_some_and(|tree| live_trees.contains(tree)) {
+            kept += 1;
+            continue;
+        }
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => removed += 1,
+            Err(_) => kept += 1,
+        }
+    }
+    (removed, kept)
+}
+
+/// Startup also collects unreferenced snapshots and logs for jobs no longer in state.
+fn prune_logs(ctx: &Ctx) {
+    prune_lease_artifacts_for(ctx, wall_ms(), LEASE_ARTIFACTS_AGE_MS);
+    let (jobs, upto, live_trees) = ctx.store.read(|d| {
+        let jobs = d.jobs.iter().filter(|j| !j.snap.is_empty()).map(|j| j.snap.clone()).collect();
+        let trees = d.lives.iter().filter(|x| x.active()).map(|x| x.tree.clone()).collect();
+        (jobs, d.snaps_next, trees)
+    });
+    let (removed, kept) = prune_snaps(&ctx.logs("jobs").join("snap"), &jobs, upto, &live_trees, FIRST_SNAP.get().copied());
+    if removed > 0 {
+        event(ctx, Sev::Info, format!("job snapshots: removed {removed} that no job or live session names; kept {kept}"), None);
     }
     let dir = ctx.logs("jobs");
     let Ok(rd) = std::fs::read_dir(&dir) else { return };
@@ -273,6 +451,11 @@ fn try_set(ctx: &Ctx, id: &str, f: impl FnOnce(&mut Job)) -> Result<Option<Job>,
 /// last: what its tests panicked with, they asked for (a result led with `injected part job panic`
 /// from one, the failing program's assertion further down, 11-04).
 pub fn digest(text: &str) -> (Vec<String>, Vec<String>) {
+    let (errors, _, tail) = digest_with_counts(text);
+    (errors, tail)
+}
+
+fn digest_with_counts(text: &str) -> (Vec<String>, usize, Vec<String>) {
     let is_err = |l: &str| {
         let t = l.trim_start();
         t.starts_with("error") || t.contains("panicked at") || t.starts_with("FAILED") || t.contains(" FAILED") || t.contains("-FAIL") || t.starts_with("test result: FAILED") || t.contains(": error:")
@@ -289,10 +472,11 @@ pub fn digest(text: &str) -> (Vec<String>, Vec<String>) {
     }
     errors.append(&mut block);
     errors.append(&mut passed);
+    let omitted = errors.len().saturating_sub(ERRORS);
     errors.truncate(ERRORS);
     let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
     let tail = lines[lines.len().saturating_sub(TAIL)..].iter().map(|l| crate::proto::clean(l, 240)).collect();
-    (errors, tail)
+    (errors, omitted, tail)
 }
 
 /// A JIT's report of a panic or fault (`  report: {"kind":"panic","message":..,"location":..}`):
@@ -957,6 +1141,59 @@ fn told_idle(ctx: &Ctx, ids: &[String], word: &dyn Fn(&str) -> Option<String>, b
     Ok(format!("[{}]", told.join(",")))
 }
 
+struct LeaseKept {
+    unit: String,
+    test: String,
+    path: String,
+    unit_log: String,
+}
+
+/// Read the master-written index. Test output in the human-readable log can itself contain headers.
+fn lease_log_kept(logs: &Path, lease: &str) -> (Option<String>, Vec<LeaseKept>) {
+    let path = logs.join(format!("{lease}.kept.json"));
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            if e.kind() != io::ErrorKind::NotFound { eprintln!("devhub lease-logs: {}: {e}", path.display()); }
+            return Default::default();
+        }
+    };
+    let parse = || {
+        let index = makepad_strict_json::parse(&bytes).ok()?;
+        if index.get("version")?.as_u64()? != 1 { return None; }
+        let dir = match index.get("keep_dir")? {
+            Value::Null => None,
+            v => Some(v.as_str()?.to_owned()),
+        };
+        let mut kept = Vec::new();
+        for item in index.get("kept")?.as_arr()? {
+            let field = |k| item.get(k)?.as_str().map(str::to_owned);
+            if item.get("kind")?.as_str()? == "missing" { continue; }
+            kept.push(LeaseKept { unit: field("unit")?, test: field("test")?, path: field("path")?, unit_log: field("unit_log").unwrap_or_default() });
+        }
+        Some((dir, kept))
+    };
+    parse().unwrap_or_else(|| {
+        eprintln!("devhub lease-logs: {}: invalid or unsupported kept index", path.display());
+        Default::default()
+    })
+}
+
+fn missing_lease_log(ctx: &Ctx, lease: &str, path: &Path) -> String {
+    if ctx.leases.view().iter().any(|l| l.id == lease && !matches!(l.state, crate::lease::sched::State::Ended(_))) {
+        return format!("{lease} is still running and has not written a lease log yet ({})", path.display());
+    }
+    if let Some(job) = ctx.store.read(|d| d.jobs.iter().rev().find(|j| j.lease == lease).map(|j| j.id.clone())) {
+        return format!("{lease} was job {job}'s lease (its output lives in jobs/{job}.log): run `devhub job result {job}`");
+    }
+    let mut extra = String::new();
+    let memory = path.with_extension("memory.log");
+    if memory.is_file() { extra.push_str(&format!("; memory record: {}", memory.display())); }
+    let artifacts = crate::lease::master::artifacts_dir(&ctx.home, lease);
+    if artifacts.is_dir() { extra.push_str(&format!("; test artifacts: {}", artifacts.display())); }
+    format!("{lease}: no lease log at {} (either {lease} released cleanly with no failure, stall, or failed bucket unit, or its log is gone — e.g. pruned before lease logs were kept without a count cap, or removed manually){extra}", path.display())
+}
+
 /// `job …` requests from the CLI.
 pub fn serve(ctx: &Ctx, line: &str) -> Result<String, String> {
     let mut w = line.splitn(3, ' ');
@@ -973,18 +1210,35 @@ pub fn serve(ctx: &Ctx, line: &str) -> Result<String, String> {
             let (work, head) = (w.next().ok_or("job landed-main <makepad sha> [<commercial HEAD>]")?, w.next());
             paired_main(ctx, work, head).map(|(main, note)| format!("{{\"main\":{},\"note\":{}}}", json_str(&main), json_str(&note)))
         }
-        // what a lease's end kept (`job result L<id>`): it outlives the lease, not the prune below
+        // `job landed-side <name> <makepad sha> <its HEAD>`: the commit of nested repository `name`
+        // a client's `--rev` naming no side of it pins ([`paired_side`])
+        "landed-side" => {
+            let usage = "job landed-side <name> <makepad sha> <its HEAD>";
+            let mut w = rest.split_whitespace();
+            let (name, work, head) = (w.next().ok_or(usage)?, w.next().ok_or(usage)?, w.next().ok_or(usage)?);
+            paired_side(ctx, name, work, head).map(|(side, note)| format!("{{\"side\":{},\"note\":{}}}", json_str(&side), json_str(&note)))
+        }
+        // What a lease's end kept (`job result L<id>`).
         "lease-log" => {
-            if rest.len() < 2 || !rest.starts_with('L') || !rest[1..].bytes().all(|b| b.is_ascii_digit()) {
+            if !lease_id(rest) {
                 return Err("job lease-log L<id>".into());
             }
-            let path = ctx.logs(LEASE_LOGS).join(format!("{rest}.log"));
-            let bytes = std::fs::read(&path).map_err(|_| format!("{rest} kept no output: a lease released normally keeps none, unless it stalled, a run failed, a bucket's test unit failed, or a run ended abnormally"))?;
+            let logs = ctx.logs(LEASE_LOGS);
+            let path = logs.join(format!("{rest}.log"));
+            let bytes = std::fs::read(&path).map_err(|e| match e.kind() {
+                io::ErrorKind::NotFound => missing_lease_log(ctx, rest, &path),
+                _ => format!("{}: {e}", path.display()),
+            })?;
             // its error lines and last lines, said here: a failed run's whole output (MBs of a
             // long test run, lease/master.rs keep_failed_runs) is read at its path
-            let (errors, tail) = digest(&String::from_utf8_lossy(&bytes));
-            let list = |v: &[String]| v.iter().map(|l| json_str(l)).collect::<Vec<_>>().join(",");
-            Ok(format!("{{\"errors\":[{}],\"tail\":[{}],\"bytes\":{},\"path\":{}}}", list(&errors), list(&tail), bytes.len(), json_str(&path.display().to_string())))
+            let (errors, omitted, tail) = digest_with_counts(&String::from_utf8_lossy(&bytes));
+            let (keep_dir, kept) = lease_log_kept(&logs, rest);
+            let list = |v: Vec<String>| Value::Arr(v.into_iter().map(s).collect());
+            let outputs = kept.into_iter().map(|k| obj(vec![("unit", s(k.unit)), ("test", s(k.test)),
+                ("path", s(k.path)), ("unit_log", s(k.unit_log))])).collect();
+            Ok(obj(vec![("errors", list(errors)), ("errors_omitted", Value::Int(omitted as i64)), ("tail", list(tail)),
+                ("bytes", Value::Int(bytes.len() as i64)), ("path", s(path.display().to_string())),
+                ("keep_dir", keep_dir.map_or(Value::Null, s)), ("kept", Value::Arr(outputs))]).to_json())
         }
         "output" => {
             use std::io::{Read, Seek};
@@ -1247,6 +1501,38 @@ fn live_landings(ctx: &Ctx) -> Vec<crate::land::Entry> {
     ctx.store.read(|d| d.land.iter().filter_map(|v| crate::land::Entry::parse(&v.to_json())).collect())
 }
 
+/// The commit of nested repository `name` (not the paired one) a `--rev` naming no side of it pins
+/// beside makepad commit `work`, and a line that says why when it is not the checkout's HEAD
+/// `head`: the HEAD, unless the two split a landing in both ([`crate::land::nested_split`]); then,
+/// when the HEAD has no commits of its own (all on `name`'s landed tip), where `name` stood beside
+/// `work` ([`crate::land::beside_pin`]); refused when it has, naming the merge that joins the
+/// halves. A run on a torn pair is refused or made whole, never built: a lane's
+/// `--rev rc-<lane>@<a work commit>` paired its old makepad/apps half with the newer makepad, two
+/// E0277 in Synth (11-27).
+pub(crate) fn paired_side(ctx: &Ctx, name: &str, work: &str, head: &str) -> Result<(String, String), String> {
+    let Some(dir) = crate::nested::checkout(&ctx.repo, name) else { return Ok((head.to_string(), String::new())) };
+    let live = live_landings(ctx);
+    let Some((e, makepad)) = crate::land::nested_split(&live, &ctx.repo, &dir, name, work, head) else { return Ok((head.to_string(), String::new())) };
+    let split = if makepad {
+        format!("makepad {work:.10} holds #{} {} ({}) and the {name} HEAD {head:.10} does not", e.id, e.label(), e.agent)
+    } else {
+        format!("the {name} HEAD {head:.10} holds #{} {} ({}) and makepad {work:.10} does not", e.id, e.label(), e.agent)
+    };
+    let tip = crate::nested::tips(&ctx.repo).into_iter().find(|(n, _, _)| n == name).map(|(_, branch, sha)| (branch, sha));
+    let Some((branch, tip)) = tip.filter(|(_, tip)| crate::gitread::is_ancestor(&dir, head, tip)) else {
+        return Err(format!("{split}: a run would build a pair that never landed together, and the {name} HEAD has commits of its own; run `makepad devhub lanes merge <your lane's branch>` (every half takes its tip in one step), or name the side in the rev (`<rev>,{name}=<branch>@<sha>`)"));
+    };
+    let (at, held) = crate::land::beside_pin(&live, &ctx.repo, &dir, name, work, "", &tip);
+    let mut at = at.map(|(c, _)| c);
+    // (a pin older than every landing of the queue: how far back it goes is the whole history's)
+    if at.is_some() && !held {
+        let all: Vec<crate::land::Entry> = ctx.store.history("land").map(|h| h.iter().filter_map(|v| crate::land::Entry::parse(&v.to_json())).collect()).unwrap_or_default();
+        if let Some((c, _)) = crate::land::beside_pin(&all, &ctx.repo, &dir, name, work, "", &tip).0 { at = Some(c); }
+    }
+    let at = at.unwrap_or(tip);
+    Ok((at.clone(), format!("{split}: {name} runs at {at:.10}, where its {branch} stood beside makepad {work:.10}, not at its HEAD")))
+}
+
 /// The commercial commit a `--rev` naming no commercial side pins beside makepad commit `work`, and
 /// a line that says why when it is not the checkout's: on work, the main it landed beside
 /// ([`landed_main`]); else the checkout's commercial HEAD `head`, or that main when the HEAD holds a
@@ -1300,10 +1586,16 @@ fn dirty_set(ctx: &Ctx, tree: &std::path::Path, lane: &str) -> Result<(String, V
     Ok((rev, changed, deleted))
 }
 
+/// The first snapshot allocated by this exec'd master image. Restart uses exec and keeps the
+/// PID, so keying on the PID would be wrong. Exec resets this static OnceLock for the new image.
+static FIRST_SNAP: OnceLock<u64> = OnceLock::new();
+
 pub(super) fn copy_snapshot(ctx: &Ctx, tree: &std::path::Path, rev: String, changed: Vec<String>, deleted: Vec<String>) -> Result<(String, String, u32), String> {
     let snap = ctx.store.update(|d| {
         d.snaps_next += 1;
-        format!("S{}", d.snaps_next)
+        let n = d.snaps_next;
+        FIRST_SNAP.get_or_init(|| n);
+        format!("S{n}")
     })?;
     let dir = snap_dir(ctx, &snap);
     let files = dir.join("files");
@@ -1477,6 +1769,8 @@ fn submit(ctx: &Ctx, json: &str) -> Result<String, String> {
         }
         let cwd = s(r, "cwd");
         if !cwd.is_empty() && (std::path::Path::new(&cwd).is_absolute() || cwd.contains(char::is_whitespace) || std::path::Path::new(&cwd).components().any(|c| matches!(c, std::path::Component::ParentDir))) { return Err("job cwd must be a relative directory without spaces".into()); }
+        // (a file of the lane's `local/` the job does not ship: its box would find nothing)
+        if let Some(p) = crate::lease::ship::named_unshipped(&tree, &cwd, &cmd, &list(&v, "also")) { return Err(format!("job {}: {}", i + 1, crate::lease::ship::unshipped_refusal(&p))); }
         let shadow = r.get("shadow").and_then(|v| v.as_bool()).unwrap_or(false) && kind == "test" && crate::lease::loaders::cargo_run_args(&cmd).is_some_and(|a| a.first().is_some_and(|a| a == "test")) && ctx.store.read(|d| d.devhub_shadow);
         let holder = r.get("holder").and_then(Value::as_u64).and_then(|p| u32::try_from(p).ok()).filter(|p| *p > 1);
         let cost = s(r, "cost");
@@ -1505,6 +1799,7 @@ fn submit(ctx: &Ctx, json: &str) -> Result<String, String> {
         req.check_series().map_err(|e| format!("job {}: {e}", i + 1))?;
         req.normalize_kind();
         if let Some(never) = ctx.leases.never_places(&req) { return Err(format!("job {}: no box could ever take it: {never}", i + 1)); }
+        if let Some(narrow) = ctx.leases.narrow_places(&req) { notes.push(format!("job {}: {narrow}", i + 1)); }
     }
     // the base and the snapshot: one for the whole request
     let lane = jobs[0].lane.clone();
@@ -1532,7 +1827,7 @@ fn submit(ctx: &Ctx, json: &str) -> Result<String, String> {
         r if r.is_empty() => snapshot(ctx, &tree, &lane)?,
         // `--rev` with DEVHUB_ALSO: the commits alone, with only the named files they do not track
         r if !list(&v, "also").is_empty() => {
-            let rev = crate::lease::client::pin_lane_rev(&tree, &r, &lane, Some(&|w: &str, head: Option<&str>| paired_main(ctx, w, head).map(|(main, _)| main)))?;
+            let rev = crate::lease::client::pin_lane_rev(&tree, &r, &lane, Some(&|w: &str, head: Option<&str>| paired_main(ctx, w, head).map(|(main, _)| main)), Some(&|name: &str, w: &str, head: &str| paired_side(ctx, name, w, head).map(|(side, _)| side)))?;
             let pin = crate::lease::Pin::of_rev(&rev).ok_or_else(|| format!("rev `{rev}` is not pinned"))?;
             let mut named = Vec::new();
             for p in list(&v, "also") {
@@ -1547,7 +1842,7 @@ fn submit(ctx: &Ctx, json: &str) -> Result<String, String> {
             if !tracked.is_empty() { return Err(crate::lease::ship::also_with_rev(&tracked, &r)); }
             copy_snapshot(ctx, &tree, rev, named, Vec::new())?
         }
-        r => (crate::lease::client::pin_lane_rev(&tree, &r, &lane, Some(&|w: &str, head: Option<&str>| paired_main(ctx, w, head).map(|(main, _)| main)))?, String::new(), 0),
+        r => (crate::lease::client::pin_lane_rev(&tree, &r, &lane, Some(&|w: &str, head: Option<&str>| paired_main(ctx, w, head).map(|(main, _)| main)), Some(&|name: &str, w: &str, head: &str| paired_side(ctx, name, w, head).map(|(side, _)| side)))?, String::new(), 0),
     };
     whole_pair(ctx, &rev)?;
     let (changed, deleted) = if snap.is_empty() { Default::default() } else { snap_paths(ctx, &snap)? };
@@ -1976,6 +2271,183 @@ mod tests {
         Ctx { store: Store::open(&home, "mac", Arc::new(|_| 0)).expect("workflow state must open before services start"), leases, machine: "mac".into(), monitor: crate::monitor::Monitor::start(&[]), repo: home.join("tree"), home }
     }
 
+    #[test]
+    fn lease_log_returns_kept_paths_keep_dir_and_omitted_count() {
+        let c = ctx("lease-log-index");
+        let logs = c.logs(LEASE_LOGS);
+        std::fs::create_dir_all(&logs).unwrap();
+        let text = format!("== KEEP-DIR /fake\n== KEPT-TEST fake :: decoy :: /fake/decoy.fail\n{}", (1..=15).map(|i| format!("error: {i}\n")).collect::<String>());
+        std::fs::write(logs.join("L42.log"), &text).unwrap();
+        let sidecar = logs.join("L42.kept.json");
+        let dir = c.home.join("run space.keep");
+        let path = |f: &str| dir.join(f).display().to_string();
+        let item = |kind, unit, test, file, unit_log| obj(vec![("kind", s(kind)), ("unit", s(unit)), ("test", s(test)), ("path", s(path(file))), ("unit_log", unit_log)]);
+        let index = obj(vec![("version", Value::Int(1)), ("keep_dir", s(dir.display().to_string())), ("kept", Value::Arr(vec![
+            item("test", "test a", "failed", "a.fail ", s(path("a"))),
+            item("hung", "test b", "stuck", "b.hung", Value::Null),
+            item("missing", "test c", "", "missing", Value::Null),
+        ]))]);
+        std::fs::write(&sidecar, index.to_json()).unwrap();
+        let result = || makepad_strict_json::parse(serve(&c, "job lease-log L42").unwrap().as_bytes()).unwrap();
+        let v = result();
+        let errors = v.get("errors").unwrap().as_arr().unwrap();
+        assert_eq!((errors.len(), errors[11].as_str()), (12, Some("error: 12")));
+        assert_eq!(v.get("errors_omitted").unwrap().as_u64(), Some(3));
+        assert_eq!(v.get("bytes").unwrap().as_u64(), Some(text.len() as u64));
+        assert_eq!(v.get("keep_dir"), index.get("keep_dir"));
+        let kept = v.get("kept").unwrap().as_arr().unwrap();
+        assert_eq!(kept, &[
+            obj(vec![("unit", s("test a")), ("test", s("failed")), ("path", s(path("a.fail "))), ("unit_log", s(path("a")))]),
+            obj(vec![("unit", s("test b")), ("test", s("stuck")), ("path", s(path("b.hung"))), ("unit_log", s(""))]),
+        ]);
+        for bad in ["{", r#"{"version":2,"keep_dir":"/fake","kept":[]}"#] {
+            std::fs::write(&sidecar, bad).unwrap();
+            let v = result();
+            assert_eq!(v.get("keep_dir"), Some(&Value::Null));
+            assert!(v.get("kept").unwrap().as_arr().unwrap().is_empty());
+        }
+        std::fs::remove_dir_all(c.home).unwrap();
+    }
+
+    fn age_path(path: &Path, now: u64, days: u64) {
+        let at = std::time::UNIX_EPOCH + Duration::from_millis(now - days * 86_400_000);
+        std::fs::File::open(path).unwrap().set_modified(at).unwrap();
+    }
+
+    #[test]
+    fn prune_lease_artifacts_never_deletes_logs_and_guards_referenced_artifacts() {
+        let c = ctx("lease-artifact-guards");
+        let logs = c.logs(LEASE_LOGS);
+        std::fs::create_dir_all(&logs).unwrap();
+        let now = wall_ms();
+        let files: Vec<_> = (1..=520).map(|i| logs.join(format!("L{i}.log")))
+            .chain([logs.join("L1.memory.log"), logs.join("L1.kept.json")]).collect();
+        for file in &files {
+            std::fs::write(file, "kept").unwrap();
+            age_path(file, now, 30);
+        }
+        let artifacts = |id: &str| crate::lease::master::artifacts_dir(&c.home, id);
+        for (id, age) in [("L10", 10), ("L11", 3), ("L12", 10)] {
+            let dir = artifacts(id);
+            std::fs::create_dir(&dir).unwrap();
+            std::fs::write(dir.join("grab.png"), [0; 1024]).unwrap();
+            age_path(&dir, now, age);
+        }
+        c.store.update(|d| d.jobs.push(Job { id: "J5".into(), lease: "L13".into(), ..Default::default() })).unwrap();
+        let notes = c.home.join("agent-notes.jsonl");
+        std::fs::write(&notes, r#"{"line":"see L10.log, not xL12 or L12x; also\nL14.artifacts"}"#).unwrap();
+        let intermittent = c.home.join("intermittent.jsonl");
+        std::fs::write(&intermittent, concat!(
+            "{\"bucket\":\"tests\",\"key\":\"a\",\"lease\":\"L12\"}\n",
+            "{\"cleared\":\"a\"}\n",
+            "{\"bucket\":\"tests\",\"key\":\"b\",\"lease\":\"L15\"}\n",
+        )).unwrap();
+        let bisects = c.home.join("bisects.jsonl");
+        let mut rows = String::new();
+        for (rev, state, lease, extra) in [("a", "queued", "L12", ""), ("a", "done", "L12", ""),
+            ("b", "queued", "L16", ""), ("b", "tip-red", "L17", ""), ("b", "done", "", ""),
+            ("b", "queued", "L18", ",\"reopened\":true")] {
+            rows.push_str(&format!("{{\"bucket\":\"tests\",\"key\":\"same\",\"from\":{{\"work\":\"{rev}\"}},\"state\":\"{state}\",\"lease\":\"{lease}\"{extra}}}\n"));
+        }
+        let candidates: Vec<_> = (10..=18).map(|i| format!("L{i}")).collect();
+        std::fs::write(&bisects, format!("{rows}{{")).unwrap();
+        assert!(protected_artifact_leases(&c, &candidates).is_none());
+        assert_eq!(prune_lease_artifacts_for(&c, now, LEASE_ARTIFACTS_AGE_MS), (0, 0));
+        assert!(artifacts("L12").is_dir());
+        std::fs::write(&bisects, rows).unwrap();
+        let protected = protected_artifact_leases(&c, &candidates).unwrap();
+        for id in ["L10", "L13", "L14", "L15", "L16", "L17", "L18"] {
+            assert!(protected.contains(id), "{id} still referenced");
+        }
+        assert!(!protected.contains("L12"), "closed, cleared, and only substrings in notes");
+        assert_eq!(prune_lease_artifacts_for(&c, now, LEASE_ARTIFACTS_AGE_MS), (1, 1024));
+        assert!(files.iter().all(|p| p.is_file()));
+        assert!(artifacts("L10").is_dir() && artifacts("L11").is_dir() && !artifacts("L12").exists());
+        std::fs::write(&intermittent, "[").unwrap();
+        assert!(protected_artifact_leases(&c, &candidates).is_none());
+        std::fs::remove_dir_all(c.home).unwrap();
+    }
+
+    #[test]
+    fn lease_log_missing_reports_job_lease_and_gone_log_truthfully() {
+        let c = ctx("lease-log-missing");
+        c.store.update(|d| d.jobs.push(Job { id: "J5".into(), lease: "L99".into(), ..Default::default() })).unwrap();
+        assert!(serve(&c, "job lease-log L99").unwrap_err().contains("run `devhub job result J5`"));
+        let logs = c.logs(LEASE_LOGS);
+        std::fs::create_dir_all(logs.join("L98.artifacts")).unwrap();
+        std::fs::write(logs.join("L98.memory.log"), "").unwrap();
+        for id in ["L98", "L97"] {
+            let msg = serve(&c, &format!("job lease-log {id}")).unwrap_err();
+            assert!(msg.contains(&format!("no lease log at {}", logs.join(format!("{id}.log")).display())));
+            assert!(msg.contains("released cleanly") && msg.contains("pruned before lease logs were kept"));
+            assert_eq!(msg.contains("; memory record:"), id == "L98");
+            assert_eq!(msg.contains("; test artifacts:"), id == "L98");
+            if id == "L98" {
+                assert!(msg.contains(&logs.join("L98.memory.log").display().to_string()));
+                assert!(msg.contains(&logs.join("L98.artifacts").display().to_string()));
+            }
+        }
+        std::fs::remove_dir_all(c.home).unwrap();
+    }
+
+    #[test]
+    fn hourly_maintenance_keeps_live_snapshots_and_job_logs_while_pruning_old_lease_artifacts() {
+        let c = ctx("hourly-artifacts");
+        let rev = format!("rc-t@{}", g(&c.repo, &["rev-parse", "HEAD"]));
+        std::fs::write(c.repo.join("a.rs"), "live source").unwrap();
+        let (_, snap, _) = copy_snapshot(&c, &c.repo, rev, vec!["a.rs".into()], vec![]).unwrap();
+        assert_eq!(snap, "S1");
+        assert!(c.store.read(|d| d.jobs.is_empty()));
+        let dir = snap_dir(&c, &snap);
+        let manifest = std::fs::read(dir.join("manifest.json")).unwrap();
+        let job_log = c.logs("jobs").join("J999.log");
+        std::fs::write(&job_log, "job output").unwrap();
+        let artifacts = crate::lease::master::artifacts_dir(&c.home, "L12");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        std::fs::write(artifacts.join("grab.png"), [0; 1024]).unwrap();
+        let now = wall_ms();
+        age_path(&artifacts, now, 10);
+        let logs = c.logs(LEASE_LOGS);
+        let kept = [("L12.log", "lease output"), ("L12.kept.json", r#"{"version":1,"keep_dir":null,"kept":[]}"#)];
+        for (file, body) in kept {
+            std::fs::write(logs.join(file), body).unwrap();
+            age_path(&logs.join(file), now, 30);
+        }
+        assert_eq!(prune_lease_artifacts_for(&c, now, LEASE_ARTIFACTS_AGE_MS), (1, 1024));
+        assert!(!artifacts.exists());
+        assert_eq!(std::fs::read(dir.join("manifest.json")).unwrap(), manifest);
+        assert_eq!(std::fs::read_to_string(dir.join("files/a.rs")).unwrap(), "live source");
+        assert_eq!(std::fs::read_to_string(job_log).unwrap(), "job output");
+        for (file, body) in kept { assert_eq!(std::fs::read_to_string(logs.join(file)).unwrap(), body); }
+
+        let snaps = c.logs("jobs").join("snap");
+        let jobs = HashSet::new();
+        let live_trees = HashSet::from([c.repo.to_string_lossy().into_owned()]);
+        // S6 was allocated after the scan read its cutoff of 5.
+        let newer = snap_dir(&c, "S6");
+        std::fs::create_dir(&newer).unwrap();
+        std::fs::write(newer.join("manifest.json"), r#"{"tree":"other"}"#).unwrap();
+        prune_snaps(&snaps, &jobs, 5, &live_trees, None);
+        assert!(newer.is_dir(), "(a) an ID above the cutoff survives the scan");
+
+        // Model S4 as this image's first allocation. S5 finished its copy before its job registered.
+        let stale = snap_dir(&c, "S2");
+        let abandoned = snap_dir(&c, "S3");
+        let copying = snap_dir(&c, "S4");
+        let finished = snap_dir(&c, "S5");
+        for path in [&stale, &abandoned, &copying, &finished] { std::fs::create_dir(path).unwrap(); }
+        for path in [&stale, &finished] {
+            std::fs::write(path.join("manifest.json"), r#"{"tree":"other"}"#).unwrap();
+        }
+        prune_snaps(&snaps, &jobs, 5, &live_trees, Some(4));
+        assert!(dir.is_dir(), "(b) an active live tree keeps its older snapshot");
+        assert!(!stale.exists(), "(c) an unreferenced snapshot from an earlier image is collected");
+        assert!(!abandoned.exists(), "(d) an earlier image's unfinished copy is collected");
+        assert_eq!((copying.is_dir(), finished.is_dir()), (true, true),
+            "keep this image's (d) unfinished copy and (e) finished copy awaiting job registration");
+        std::fs::remove_dir_all(c.home).unwrap();
+    }
+
     fn req(cmd: &str, after: &[&str]) -> String {
         let after: Vec<String> = after.iter().map(|a| json_str(a)).collect();
         format!("{{\"kind\":\"test\",\"needs\":\"arch=x64\",\"lane\":\"lane1\",\"agent\":\"a\",\"cmd\":[{}],\"after\":[{}]}}", json_str(cmd), after.join(","))
@@ -2108,23 +2580,23 @@ mod tests {
         let r = submit_line(&c, "rc-t", false, &[req("x", &[])]).unwrap();
         assert!(r.contains(&format!("\"rev\":\"rc-t@{head},commercial=rc-t@{chead}\",\"snap\":\"\"")), "{r}");
         let none = |_: &str, _: Option<&str>| -> Result<String, String> { unreachable!("a rev naming both sides asks for no landing") };
-        assert_eq!(crate::lease::client::pin_lane_rev(&tree, &format!("rc-t,commercial=rc-t@{}", &chead[..10]), "lane1", Some(&none)).unwrap(), format!("rc-t@{head},commercial=rc-t@{chead}"));
+        assert_eq!(crate::lease::client::pin_lane_rev(&tree, &format!("rc-t,commercial=rc-t@{}", &chead[..10]), "lane1", Some(&none), None).unwrap(), format!("rc-t@{head},commercial=rc-t@{chead}"));
         // a rev naming only work pins commercial at the main that work commit landed beside, never
         // at the worktree's HEAD (a lane's newer main beside an older work built a pair that never
         // landed together); without a landing it is refused, saying how to name both
         g(&tree, &["branch", "work"]);
         let beside = |w: &str, at: Option<&str>| -> Result<String, String> { if w == head && at.is_none() { Ok(chead.clone()) } else { Err(format!("work@{w:.10} holds no landing")) } };
-        assert_eq!(crate::lease::client::pin_lane_rev(&tree, "work", "lane1", Some(&beside)).unwrap(), format!("work@{head},commercial=main@{chead}"));
-        assert_eq!(crate::lease::client::pin_lane_rev(&tree, &format!("work@{}", &head[..10]), "lane1", Some(&|_: &str, _: Option<&str>| Err("holds no landing".to_string()))).unwrap_err(), "holds no landing");
+        assert_eq!(crate::lease::client::pin_lane_rev(&tree, "work", "lane1", Some(&beside), None).unwrap(), format!("work@{head},commercial=main@{chead}"));
+        assert_eq!(crate::lease::client::pin_lane_rev(&tree, &format!("work@{}", &head[..10]), "lane1", Some(&|_: &str, _: Option<&str>| Err("holds no landing".to_string())), None).unwrap_err(), "holds no landing");
         // a rev off work keeps the commercial HEAD the master pairs it with, else the main it says
         // (a rig branch on an older base beside a newer main, 11-12)
         let keep = |_: &str, at: Option<&str>| -> Result<String, String> { Ok(at.expect("the HEAD to pair").to_string()) };
-        assert_eq!(crate::lease::client::pin_lane_rev(&tree, "rc-t", "lane1", Some(&keep)).unwrap(), format!("rc-t@{head},commercial=rc-t@{chead}"));
+        assert_eq!(crate::lease::client::pin_lane_rev(&tree, "rc-t", "lane1", Some(&keep), None).unwrap(), format!("rc-t@{head},commercial=rc-t@{chead}"));
         let old_main = g(&tree.join("apps/commercial"), &["commit-tree", "HEAD^{tree}", "-m", "an older main"]);
         let older = |_: &str, _: Option<&str>| -> Result<String, String> { Ok(old_main.clone()) };
-        assert_eq!(crate::lease::client::pin_lane_rev(&tree, "rc-t", "lane1", Some(&older)).unwrap(), format!("rc-t@{head},commercial=main@{old_main}"));
-        assert_eq!(crate::lease::client::pin_lane_rev(&tree, "work", "lane1", None).unwrap(), format!("work@{head},commercial=rc-t@{chead}"), "a worktree's own HEAD keeps its commercial HEAD");
-        let old = crate::lease::client::pin_lane_rev(&tree, "rc-t,rc-t", "lane1", Some(&none)).unwrap_err();
+        assert_eq!(crate::lease::client::pin_lane_rev(&tree, "rc-t", "lane1", Some(&older), None).unwrap(), format!("rc-t@{head},commercial=main@{old_main}"));
+        assert_eq!(crate::lease::client::pin_lane_rev(&tree, "work", "lane1", None, None).unwrap(), format!("work@{head},commercial=rc-t@{chead}"), "a worktree's own HEAD keeps its commercial HEAD");
+        let old = crate::lease::client::pin_lane_rev(&tree, "rc-t,rc-t", "lane1", Some(&none), None).unwrap_err();
         assert!(old.contains("write `<name>=<branch>`, as in `work,commercial=main`"), "an old-form rev is refused in one line: {old}");
         // bad requests change nothing
         assert!(submit_line(&c, "", false, &[req("x", &["@1"])]).unwrap_err().contains("no earlier job"));

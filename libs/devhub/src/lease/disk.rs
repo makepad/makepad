@@ -883,8 +883,12 @@ impl Guard {
     }
 
     /// The periodic look: floor / warn crossings, and automatic reclaim below the floor; `quiet`
-    /// (a timed lease runs) skips the walk that refreshes what the roots hold. `leases`: the
-    /// leases' paths now, which a reclaim asks again at each deletion ([`Guard::reclaim`]).
+    /// (a timed lease runs) skips the retired run dirs. `leases`: the leases' paths now, which a
+    /// reclaim asks again at each deletion ([`Guard::reclaim`]). Above the floor it walks nothing:
+    /// what the roots hold is measured when a reclaim or a dry run asks ([`Guard::items`]). It
+    /// walked every root each minute a lease had started or ended in, and a pool box's hub spent
+    /// 27 CPU-s a walk on its 5.2 M files: a quarter of a core on average, all of one while it ran
+    /// (11-27).
     pub fn check(&self, live: &dyn Fn() -> Live, leases: &dyn Fn() -> Vec<(PathBuf, String)>, quiet: bool) {
         let (free, warn) = (self.free(), self.warn_at());
         let (floor_cross, warn_cross) = {
@@ -904,8 +908,6 @@ impl Guard {
                 self.emit(Sev::Warn, format!("disk_floor: {} has {:.0} GB free, floor {:.0} GB: reclaiming", self.machine, gb(free), gb(self.floor())));
             }
             self.reclaim(&live(), leases, false, 0);
-        } else if !quiet {
-            let _ = self.items(&live(), false);
         }
         if !quiet && !self.user_machine() {
             self.remove_retired_run_dirs(live);
@@ -1419,6 +1421,18 @@ mod tests {
         assert!(!base.join("tmp/landgate.Q1").exists(), "what no lease uses goes: {lines:?}");
         assert!(!sys.join("tmp.0ldRunDir1").exists() && sys.join("tmp.FreshDir22").exists() && sys.join("tmp.short").exists() && sys.join("keepme.AbCdEfGhIj").exists(), "only the stray dir no running lease writes goes: {lines:?}");
         assert!(!caps.join("oldlane").exists() && caps.join("keptlane").exists() && caps.join("livelane").exists() && caps.join("rec.mp4").exists(), "an ended lane's grabs go, nothing else of the folder: {lines:?}");
+        // the periodic look above the floor walks nothing, a lease's start or end since or not
+        // (a pool box's hub spent a quarter of a core walking its roots each minute, 11-27); a
+        // dry run measures when asked
+        let g = Guard::new("box-a", Roots { home: base.join("home"), work: base.join("home/devhub"), deploy: Some(base.join("home/makepad")), run_home: base.join("home/.relax"), tmp: base.join("tmp"), sys_tmp: base.join("systmp") }, 0.0, false, std::sync::Arc::new(|_| {}));
+        for _ in 0..2 {
+            g.check(&|| running.clone(), &|| Vec::new(), true);
+            g.check(&|| running.clone(), &|| Vec::new(), false);
+            assert!(g.state.lock().unwrap().measured.is_none(), "a look above the floor walks no root");
+            g.touch();
+        }
+        let _ = g.reclaim(&running, &|| Vec::new(), true, 0);
+        assert!(g.state.lock().unwrap().measured.is_some(), "a dry run measures what the roots hold");
         let _ = std::fs::remove_dir_all(&base);
     }
 }

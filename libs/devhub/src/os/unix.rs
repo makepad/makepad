@@ -90,15 +90,14 @@ pub fn own_nice() -> i32 {
 
 /// The argv a lease run executes: the scope (collected even on failure), nice and pinning wrappers, then `argv`.
 /// `weight`: a shared lease's scope CPU weight ([`crate::lease::Priority::cpu_weight`]): its
-/// share of the box under contention, the whole box when idle. Never a CPU quota: a quota of the
-/// lease's cores throttled a live Fab (measured at one core) to one CPU, and its pools and JIT
-/// sized themselves to that one CPU. Weight 0 (a session that rests) starts at weight 1.
+/// share of the box under contention, the whole box when idle. Weight 0 (a session that rests)
+/// starts at weight 1. A confined live call's new scopes start on its cores (`cpu_quota`).
 /// `ram_max_gb`: the RAM the lease asked for itself (`--ram-gb`): past half again as much its
 /// scope is throttled (`MemoryHigh`: the kernel reclaims its pages and slows its allocations),
 /// never killed. A hard cap (`MemoryMax`) killed a hot bucket's JIT at 7.5 GB of its 5 GB ask, and
 /// systemd stopped the scope with it: the bucket had no verdict (11-13). A measured ask only
 /// schedules.
-pub fn lease_argv(argv: Vec<String>, unit: Option<&str>, nice: i32, cpus: &str, weight: Option<u32>, ram_max_gb: Option<f64>) -> Vec<String> {
+pub fn lease_argv(argv: Vec<String>, unit: Option<&str>, nice: i32, cpus: &str, weight: Option<u32>, ram_max_gb: Option<f64>, cpu_quota: Option<f64>) -> Vec<String> {
     let mut full: Vec<String> = Vec::new();
     if let Some(u) = unit {
         // the command's words stay its own: left to expand, systemd takes `$$` for `$` and `${X}`
@@ -109,6 +108,7 @@ pub fn lease_argv(argv: Vec<String>, unit: Option<&str>, nice: i32, cpus: &str, 
             // (a run that starts while its session rests starts at the least weight: a systemd
             // before 252 takes no `idle` and the run would not start; [`set_cpu_weight`] falls back)
             full.extend(["-p".into(), format!("CPUWeight={}", weight.max(1))]);
+            if let Some(cores) = cpu_quota { full.extend(["-p".into(), cpu_quota_property(cores)]); }
             if let Some(gb) = ram_max_gb { full.extend(["-p".into(), format!("MemoryHigh={}G", gb * 1.5)]); }
         }
         full.push("--".into());
@@ -140,6 +140,20 @@ pub fn set_cpu_weight(unit: &str, weight: u32) -> Result<(), String> {
     let out = Command::new(tool("systemctl")).args(["--user", "set-property", "--runtime", &format!("{unit}.scope"), &property])
         .stdin(std::process::Stdio::null()).output().map_err(|e| format!("systemctl: {e}"))?;
     if out.status.success() { Ok(()) } else if weight == 0 { set_cpu_weight(unit, 1) } else { Err(format!("systemctl set-property {unit}.scope {property}: {}", String::from_utf8_lossy(&out.stderr).trim())) }
+}
+
+fn cpu_quota_property(cores: f64) -> String {
+    format!("CPUQuota={}%", (cores * 100.0).round().max(1.0) as u64)
+}
+
+/// A run scope's CPU time, at most `cores` of its box's (`CPUQuota`), or as much as its weight
+/// gets it (`None`): a live call that starts short of its charge runs on the cores it started
+/// with, and a box's interactive calls never take more than its cores between them (11-26).
+pub fn set_cpu_quota(unit: &str, cores: Option<f64>) -> Result<(), String> {
+    let property = match cores { Some(c) => cpu_quota_property(c), None => "CPUQuota=".into() };
+    let out = Command::new(tool("systemctl")).args(["--user", "set-property", "--runtime", &format!("{unit}.scope"), &property])
+        .stdin(std::process::Stdio::null()).output().map_err(|e| format!("systemctl: {e}"))?;
+    if out.status.success() { Ok(()) } else { Err(format!("systemctl set-property {unit}.scope {property}: {}", String::from_utf8_lossy(&out.stderr).trim())) }
 }
 
 /// Error windows are Windows' alone ([`crate::os`]'s Windows `quiet_errors`).
@@ -463,7 +477,41 @@ fn stacks(pid: u32) -> Result<String, String> {
     Err(format!("{} (kernel.yama.ptrace_scope={})", text.lines().find(|l| l.contains("ptrace:")).unwrap_or("gdb gave none"), scope.trim()))
 }
 
-#[cfg(not(target_os = "linux"))]
+/// The OS call graph for each process in a stuck run.
+#[cfg(target_os = "macos")]
+pub fn processes_view(pids: &[u32]) -> String {
+    let mut out = String::new();
+    for pid in pids {
+        let sample = Command::new(tool("/usr/bin/sample")).args([&pid.to_string(), "1", "-file", "/dev/stdout"])
+            .stdin(std::process::Stdio::null()).output();
+        let why = match sample {
+            Ok(o) => {
+                let report = String::from_utf8_lossy(&o.stdout);
+                let mut graph = report.lines().skip_while(|l| l.trim() != "Call graph:");
+                if o.status.success() && graph.next().is_some() && graph.clone().any(|l| !l.trim().is_empty()) {
+                    out.push_str(&format!("pid {pid}\nCall graph:\n"));
+                    for line in graph {
+                        out.push_str(line);
+                        out.push('\n');
+                    }
+                    continue;
+                }
+                if o.status.success() {
+                    "sample gave no call graph".to_string()
+                } else {
+                    let stderr = String::from_utf8_lossy(&o.stderr);
+                    let detail = stderr.lines().find(|l| !l.trim().is_empty()).unwrap_or("no diagnostic");
+                    format!("sample failed ({status}): {detail}", status = o.status)
+                }
+            }
+            Err(e) => format!("could not run sample: {e}"),
+        };
+        out.push_str(&format!("pid {pid}: {why}\n"));
+    }
+    out
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn processes_view(pids: &[u32]) -> String {
     pids.iter().map(|p| format!("pid {p}\n")).collect()
 }
@@ -956,19 +1004,32 @@ fn first_on(path: &std::ffi::OsStr, name: &str) -> Option<PathBuf> {
 /// Mac nobody works at, the clamp kept every such build on its 4 efficiency cores while 12 others
 /// idled, at load 76-120 and 36-42% of its CPU for an hour (11-26).
 pub fn background(program: &std::ffi::OsStr) -> Command {
-    let (low, words): (&str, &[&str]) = if super::clamps_background() { ("/usr/sbin/taskpolicy", &["-c", "background"]) } else { ("nice", &["-n", "15"]) };
-    let mut cmd = Command::new(tool(low));
-    cmd.args(words).arg(program);
-    cmd
+    background_scoped(program, None)
 }
 
 /// A background build in its weighted scope when the box has a user bus.
 pub fn background_scoped(program: &std::ffi::OsStr, scope: Option<(&str, u32)>) -> Command {
-    let Some((unit, weight)) = scope else { return background(program); };
-    // lease_argv targets nice 15 from the hub's level. background adds 15.
-    let prefix = lease_argv(Vec::new(), Some(unit), 15, "", Some(weight), None);
-    let mut cmd = Command::new(&prefix[0]);
-    cmd.args(&prefix[1..]).arg(program);
+    scoped_build(program, 15, scope)
+}
+
+/// A box build in its weighted scope at the requested nice level. Unscoped builds use
+/// background QoS on a person's Mac and the nice adjustment elsewhere.
+pub fn scoped_build(program: &std::ffi::OsStr, nice: i32, scope: Option<(&str, u32)>) -> Command {
+    let mut cmd = if let Some((unit, weight)) = scope {
+        let prefix = lease_argv(Vec::new(), Some(unit), nice, "", Some(weight), None, None);
+        let mut cmd = Command::new(&prefix[0]);
+        cmd.args(&prefix[1..]);
+        cmd
+    } else if super::clamps_background() {
+        let mut cmd = Command::new(tool("/usr/sbin/taskpolicy"));
+        cmd.args(["-c", "background"]);
+        cmd
+    } else {
+        let mut cmd = Command::new(tool("nice"));
+        cmd.arg("-n").arg(nice.to_string());
+        cmd
+    };
+    cmd.arg(program);
     cmd
 }
 
@@ -1183,12 +1244,82 @@ pub fn env_values(prefix: &str) -> Vec<(u32, String)> {
     out
 }
 
-/// As on Linux: the environment comes with a process's arguments (KERN_PROCARGS2).
+/// The kernel's `KERN_ARGMAX` ceiling for `KERN_PROCARGS2` requests, cached once with a 1 MiB fallback.
+#[cfg(target_os = "macos")]
+fn kern_argmax() -> usize {
+    static ARGMAX: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *ARGMAX.get_or_init(|| {
+        extern "C" {
+            fn sysctl(name: *const i32, namelen: u32, oldp: *mut u8, oldlenp: *mut usize, newp: *const u8, newlen: usize) -> i32;
+        }
+        const CTL_KERN: i32 = 1;
+        const KERN_ARGMAX: i32 = 8;
+        let mut argmax: i32 = 0;
+        let mut len = std::mem::size_of::<i32>();
+        let ok = unsafe { sysctl([CTL_KERN, KERN_ARGMAX].as_ptr(), 2, (&mut argmax as *mut i32).cast(), &mut len, std::ptr::null(), 0) } == 0;
+        if ok && argmax > 0 { argmax as usize } else { 1 << 20 }
+    })
+}
+
+/// The environment slice of a macOS `KERN_PROCARGS2` buffer, after `argc`, non-empty `exec_path`,
+/// its NUL padding, and the `argc` NUL-terminated argument strings.
+///
+/// Fails closed (`None`) when truncated or malformed (`len < 4`, `argc <= 0`, empty `exec_path`,
+/// no NUL after `exec_path`, only NULs after `exec_path`, or fewer than `argc` NUL-terminated
+/// arguments).
+///
+/// `argc == 0` fails closed because `KERN_PROCARGS2` carries no padding-length field: without at
+/// least one `argv` string between `exec_path`'s NUL padding and the environment, an empty
+/// environment's terminating NUL merges into the padding and cannot be distinguished from trailing
+/// `apple[]` / post-env strings. For the same reason, `argv[0]` is assumed non-empty (the
+/// default for `std::process::Command`); if a process were `execve`'d with `e >= 1`
+/// leading empty arguments, the padding scan eats those `e` NULs and shifts the `argc` loop
+/// forward by `e` entries (never backward into `argv`, so `argv` never leaks into `env`, though
+/// `env[0..e]` are skipped and when `envc < e` the scan can cross an empty-env NUL into post-env
+/// bytes).
+#[cfg(any(target_os = "macos", test))]
+fn procargs2_env_slice(buf: &[u8]) -> Option<&[u8]> {
+    if buf.len() < 4 {
+        return None;
+    }
+    let argc = i32::from_ne_bytes(buf[..4].try_into().ok()?);
+    if argc <= 0 {
+        return None;
+    }
+    let argc = argc as usize;
+    let rest = &buf[4..];
+    let path_end = rest.iter().position(|&b| b == 0)?;
+    if path_end == 0 {
+        return None;
+    }
+    let mut at = path_end + rest[path_end..].iter().position(|&b| b != 0)?;
+    for _ in 0..argc {
+        let nul = rest[at..].iter().position(|&b| b == 0)?;
+        at += nul + 1;
+    }
+    Some(&rest[at..])
+}
+
+/// The value following `prefix` in the first matching environment entry. An empty entry ends
+/// the environment block before any trailing strings.
+#[cfg(any(target_os = "macos", test))]
+fn procargs2_env_value<'a>(buf: &'a [u8], prefix: &[u8]) -> Option<&'a [u8]> {
+    let env = procargs2_env_slice(buf)?;
+    env.split(|&b| b == 0)
+        .take_while(|s| !s.is_empty())
+        .filter(|s| s.iter().position(|&b| b == b'=').is_some_and(|i| i > 0))
+        .find_map(|s| s.strip_prefix(prefix))
+}
+
+/// PIDs with the exact environment entry `marker`. The `KERN_PROCARGS2` scan skips the
+/// executable path and arguments. Unreadable or withheld environments yield no match.
 #[cfg(target_os = "macos")]
 pub fn with_env(marker: &str) -> Vec<u32> {
     env_values(marker).into_iter().filter(|(_, v)| v.is_empty()).map(|(p, _)| p).collect()
 }
 
+/// Read the suffix after `prefix` from environment entries in `KERN_PROCARGS2`, skipping
+/// the executable path and arguments. Unreadable or withheld environments yield no match.
 #[cfg(target_os = "macos")]
 pub fn env_values(prefix: &str) -> Vec<(u32, String)> {
     extern "C" {
@@ -1197,15 +1328,16 @@ pub fn env_values(prefix: &str) -> Vec<(u32, String)> {
     }
     const CTL_KERN: i32 = 1;
     const KERN_PROCARGS2: i32 = 49;
-    let mut pids = vec![0i32; 8192];
+    let want = unsafe { proc_listallpids(std::ptr::null_mut(), 0) };
+    let mut pids = vec![0i32; (want.max(0) as usize + 64).max(1024)];
     let n = unsafe { proc_listallpids(pids.as_mut_ptr() as *mut _, (pids.len() * 4) as i32) };
-    let mut buf = vec![0u8; 1 << 20];
+    let mut buf = vec![0u8; kern_argmax()];
     let mut out = Vec::new();
     for &pid in pids.iter().take(n.max(0) as usize).filter(|p| **p > 0) {
         let mib = [CTL_KERN, KERN_PROCARGS2, pid];
         let mut len = buf.len();
         if unsafe { sysctl(mib.as_ptr(), 3, buf.as_mut_ptr(), &mut len, std::ptr::null(), 0) } == 0 {
-            if let Some(v) = buf[..len].split(|b| *b == 0).find_map(|v| v.strip_prefix(prefix.as_bytes())) {
+            if let Some(v) = procargs2_env_value(&buf[..len.min(buf.len())], prefix.as_bytes()) {
                 out.push((pid as u32, String::from_utf8_lossy(v).into_owned()));
             }
         }
@@ -1221,6 +1353,173 @@ pub fn with_env(_marker: &str) -> Vec<u32> {
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn env_values(_prefix: &str) -> Vec<(u32, String)> {
     Vec::new()
+}
+
+#[cfg(test)]
+#[test]
+fn procargs2_env_reads_environment_and_skips_exec_path_and_argv() {
+    fn buffer(argc: i32, strings: &[u8]) -> Vec<u8> {
+        let mut buf = argc.to_ne_bytes().to_vec();
+        buf.extend_from_slice(strings);
+        buf
+    }
+    let cases: &[(i32, &[u8], Option<&[u8]>)] = &[
+        (2, b"KEY=fake\0\0\0KEY=fake\0KEY=fake\0KEY=real\0", Some(b"real")),
+        (2, b"p\0\0prog\0KEY=only-arg\0HOME=/u\0", None),
+        (3, b"p\0\0prog\0\0KEY=only-arg\0HOME=/u\0", None),
+        (3, b"p\0\0prog\0\0arg2\0KEY=real\0", Some(b"real")),
+        (2, b"p\0\0prog\0\0KEY=real\0", Some(b"real")),
+        (1, b"p\0\0prog\0\0KEY=stale\0", None),
+        (1, b"p\0\0prog\0\0executable_path=/p\0KEY=stale\0", None),
+        (1, b"p\0\0prog\0HOME=/u\0\0KEY=stale\0", None),
+        (2, b"p\0\0\0KEY=only-arg\0HOME=/u\0", None),
+        (2, b"p\0\0\0arg1\0KEY=first\0KEY=second\0", Some(b"second")),
+    ];
+    for &(argc, strings, expected) in cases {
+        assert_eq!(procargs2_env_value(&buffer(argc, strings), b"KEY="), expected, "argc={argc} {:?}", String::from_utf8_lossy(strings));
+    }
+    let withheld = buffer(1, b"p\0\0prog\0");
+    assert_eq!(procargs2_env_slice(&withheld), Some(&b""[..]));
+    assert_eq!(procargs2_env_value(&withheld, b"KEY="), None);
+    let entries = buffer(1, b"p\0\0prog\0=bad\0NOEQ\0KEY=ok\0");
+    assert_eq!(procargs2_env_value(&entries, b"KEY="), Some(&b"ok"[..]));
+    assert_eq!(procargs2_env_value(&entries, b"=bad"), None);
+    assert_eq!(procargs2_env_value(&entries, b"NOEQ"), None);
+
+    for malformed in [
+        vec![], vec![1, 0], buffer(0, b"p\0\0KEY=v\0"), buffer(0, b"p\0\0\0\0KEY=v\0"),
+        buffer(-1, b"p\0\0prog\0KEY=v\0"), buffer(i32::MIN, b"p\0\0prog\0KEY=v\0"),
+        buffer(1, b"\0\0prog\0KEY=v\0"), buffer(1, b"no-nul-path"), buffer(1, b"p\0\0\0"),
+        buffer(2, b"p\0\0only-one-arg\0"), buffer(1, b"p\0\0unterminated-arg"),
+    ] {
+        assert_eq!(procargs2_env_slice(&malformed), None, "malformed {malformed:?}");
+        assert_eq!(procargs2_env_value(&malformed, b"KEY="), None, "malformed {malformed:?}");
+    }
+}
+
+/// A test role announces its PID and answers pings on stdout, then exits on stdin EOF.
+#[cfg(test)]
+pub(crate) mod pipe_role {
+    use super::*;
+    use std::io::{self, BufRead, BufReader, Write};
+    use std::process::{ChildStdin, Stdio};
+    use std::sync::mpsc::{self, Receiver};
+
+    pub(crate) const ROLE: &str = "ENV_PARSE_TEST_ROLE";
+
+    pub(crate) fn wait() {
+        if std::env::var_os(ROLE).is_none() { return; }
+        let mut replies = io::stdout().lock();
+        replies.write_all(format!("role-pid {}\n", std::process::id()).as_bytes()).unwrap();
+        replies.flush().unwrap();
+        for request in io::stdin().lock().lines() {
+            assert_eq!(request.unwrap(), "ping");
+            replies.write_all(b"role-pong\n").unwrap();
+            replies.flush().unwrap();
+        }
+        std::process::exit(0);
+    }
+
+    pub(crate) struct Role {
+        pub(crate) pid: u32,
+        input: Option<ChildStdin>,
+        child: Child,
+        replies: Receiver<String>,
+    }
+
+    impl Role {
+        /// An orphan inherits the launcher's pipes. Drain stdout while the launcher runs, then
+        /// reap it before using the waiter's PID so reparenting is complete.
+        pub(crate) fn spawn(mut cmd: Command, sandbox: &Path, orphan: bool) -> Self {
+            let mut child = cmd.env(ROLE, sandbox).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+            let input = child.stdin.take();
+            let stdout = child.stdout.take().unwrap();
+            let (tx, replies) = mpsc::channel();
+            let mut role = Self { pid: child.id(), input, child, replies };
+            std::thread::spawn(move || {
+                for line in BufReader::new(stdout).lines() {
+                    let Ok(line) = line else { break };
+                    if let Some(reply) = line.strip_prefix("role-") {
+                        if tx.send(reply.to_owned()).is_err() { break; }
+                    }
+                }
+            });
+            let name = cmd.get_args().nth(1).unwrap_or(cmd.get_program()).to_string_lossy();
+            let launcher_status = orphan.then(|| role.child.wait().unwrap());
+            let ready = role.replies.recv().unwrap_or_else(|_| panic!("{name}: role exited before it announced its pid (launcher status {launcher_status:?})"));
+            if let Some(status) = launcher_status {
+                assert!(status.success(), "{name}: orphan launcher exited with {status}");
+            }
+            role.pid = ready.strip_prefix("pid ").and_then(|pid| pid.parse().ok())
+                .unwrap_or_else(|| panic!("{name}: expected a PID announcement, got {ready:?}"));
+            if !orphan {
+                assert_eq!(role.pid, role.child.id(), "the child itself reported ready");
+            }
+            role
+        }
+
+        pub(crate) fn ping(&mut self) {
+            self.input.as_mut().unwrap().write_all(b"ping\n").unwrap_or_else(|e| panic!("role PID {} closed its pipe before answering: {e}", self.pid));
+            let reply = self.replies.recv().unwrap_or_else(|_| panic!("role PID {} closed its pipe before answering", self.pid));
+            assert_eq!(reply, "pong", "reply from PID {}", self.pid);
+        }
+
+        pub(crate) fn expect_eof(&self) {
+            if let Ok(line) = self.replies.recv() {
+                panic!("expected pipe EOF from role PID {}, got {line:?}", self.pid);
+            }
+        }
+
+        pub(crate) fn finish(&mut self) -> ExitStatus {
+            drop(self.input.take());
+            self.expect_eof();
+            self.child.wait().unwrap()
+        }
+    }
+
+    impl Drop for Role {
+        fn drop(&mut self) {
+            drop(self.input.take());
+            // Only the direct child handle can be killed or reaped here. An orphan exits on EOF.
+            if std::thread::panicking() {
+                let _ = self.child.kill();
+            }
+            let _ = self.child.wait();
+        }
+    }
+}
+
+#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+#[test]
+fn env_wait_role() {
+    pipe_role::wait();
+}
+
+#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+#[test]
+fn env_values_ignores_matching_command_line_arguments() {
+    let pid = std::process::id();
+    let dir = std::env::temp_dir().join(format!("devhub-env-parse-{pid}"));
+    std::fs::create_dir(&dir).unwrap();
+    let value = format!("val-{pid}");
+    let exact = format!("ENV_PARSE_TEST_KEY={value}");
+    let role = || crate::testenv::role("os::unix::env_wait_role", &dir);
+    let mut env_cmd = role();
+    env_cmd.env("ENV_PARSE_TEST_KEY", &value);
+    let mut marked = pipe_role::Role::spawn(env_cmd, &dir, false);
+    let mut argv_cmd = role();
+    argv_cmd.env_remove("ENV_PARSE_TEST_KEY").args(["--skip", &exact]);
+    let mut argv = pipe_role::Role::spawn(argv_cmd, &dir, false);
+
+    let exact_pids = with_env(&exact);
+    let values = env_values("ENV_PARSE_TEST_KEY=");
+    let (env_pid, argv_pid) = (marked.pid, argv.pid);
+    assert!(marked.finish().success() && argv.finish().success(), "roles exited cleanly on stdin EOF");
+    std::fs::remove_dir_all(dir).unwrap();
+    assert!(exact_pids.contains(&env_pid), "with_env missed environment PID {env_pid}");
+    assert!(values.contains(&(env_pid, value)), "env_values missed the value for PID {env_pid}");
+    assert!(!exact_pids.contains(&argv_pid), "with_env selected argv-only PID {argv_pid}");
+    assert!(!values.iter().any(|(pid, _)| *pid == argv_pid), "env_values selected argv-only PID {argv_pid}");
 }
 
 /// TERM (`hard`: KILL) the run's process group.
@@ -1341,7 +1640,7 @@ fn the_account_home_is_the_password_databases() {
 #[test]
 fn a_runs_nice_does_not_stack_on_its_hubs() {
     let ni = |level: i32| {
-        let argv = lease_argv(["sh", "-c", "ps -o ni= -p $$"].map(String::from).to_vec(), None, level, "", None, None);
+        let argv = lease_argv(["sh", "-c", "ps -o ni= -p $$"].map(String::from).to_vec(), None, level, "", None, None, None);
         let out = Command::new(&argv[0]).args(&argv[1..]).output().unwrap();
         String::from_utf8_lossy(&out.stdout).trim().parse::<i32>().unwrap()
     };
@@ -1355,11 +1654,11 @@ fn a_runs_nice_does_not_stack_on_its_hubs() {
 #[cfg(all(test, target_os = "linux"))]
 #[test]
 fn a_scope_leaves_a_runs_dollars_to_its_shell() {
-    let argv = lease_argv(["sh", "-c", "echo $$ ${X}y"].map(String::from).to_vec(), Some("devhub-test-dollars"), 10, "", None, None);
+    let argv = lease_argv(["sh", "-c", "echo $$ ${X}y"].map(String::from).to_vec(), Some("devhub-test-dollars"), 10, "", None, None, None);
     assert!(argv.iter().any(|a| a == "--expand-environment=no"), "{argv:?}");
     if !crate::lease::exec::user_bus() { return; }
     let unit = format!("devhub-test-dollars-{}", std::process::id());
-    let argv = lease_argv(["sh", "-c", "echo $$ ${X}y"].map(String::from).to_vec(), Some(&unit), 10, "", None, None);
+    let argv = lease_argv(["sh", "-c", "echo $$ ${X}y"].map(String::from).to_vec(), Some(&unit), 10, "", None, None, None);
     let out = Command::new(&argv[0]).args(&argv[1..]).env("X", "from-the-run").output().unwrap();
     let out = String::from_utf8_lossy(&out.stdout);
     let (pid, x) = out.trim().split_once(' ').unwrap_or_else(|| panic!("{out}"));

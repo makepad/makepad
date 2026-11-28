@@ -6,6 +6,7 @@
 //! ([`Held::attach`], [`Held::follow`]).
 
 use crate::cli::ask;
+use crate::lease::master::{LeaseMaster, LocalHold};
 use crate::lease::sched::{parse_needs, Req};
 use crate::lease::Kind;
 use makepad_remote::link::{Client, Target};
@@ -18,7 +19,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const BEAT: Duration = Duration::from_secs(2);
-/// How long node calls may fail in a row (a link coming back) before the run counts as lost.
+/// How long node calls may fail in a row (a link coming back) before the run counts as lost. A
+/// box off the network ([`crate::lease::master::host_gone`]) counts no time here: the master's
+/// outage rule ([`crate::lease::sched::Sched::caps_missed`]) ends the lease or keeps it, and the
+/// lease's beat says which. A 90 s clock of its own ended runs the master kept through a bench
+/// Mac's sleep, its runs going on there (11-26).
 const NODE_GRACE: Duration = Duration::from_secs(90);
 /// How long a run's start waits out its node's hub restarting for the self-update (a `cargo run`).
 const HUB_RESTART_FOR: Duration = Duration::from_secs(900);
@@ -183,7 +188,7 @@ pub fn lease_held(ctx: &super::Ctx, id: &str) -> bool {
 fn ended_error(id: &str, st: &Value) -> String {
     let how = s(st, "how");
     // (a lease devhub ended for its app's parked panic says the panic: a job's result carries it)
-    if matches!(how.as_str(), "disk" | "memory" | "panicked" | "hung") { format!("{id} ended ({how}): {}", s(st, "reason")) } else { format!("{id} ended ({how})") }
+    if matches!(how.as_str(), "disk" | "memory" | "panicked" | "hung" | "stopped") { format!("{id} ended ({how}): {}", s(st, "reason")) } else { format!("{id} ended ({how})") }
 }
 
 /// [`ended_error`] of a granted lease that ended `how` for `reason`, as a run hears it.
@@ -206,7 +211,7 @@ pub fn ended_by_hand(e: &str) -> bool {
 
 /// Whether a run's error says only that its exit was lost, not how it ran: its lease ended under
 /// it by no one's hand (beats the master did not hear, a holder it lost), its box's link stayed
-/// down past [`NODE_GRACE`], its box's hub did not see it end, or the master or the box answered
+/// down past [`NODE_GRACE`] (off the network: the master's outage rule ended it), its box's hub did not see it end, or the master or the box answered
 /// an ask about it with nothing. The run may well have passed, or never started, and it is placed
 /// again: a verify or jitlegs leg ([`super::verify::run_leg`]), a job ([`super::job`]), a live
 /// session that has no box yet ([`super::live`]). The Mac asleep 13 min, the master took its
@@ -226,10 +231,16 @@ pub struct Held {
     pub node: String,
     /// the `--rev` it was granted for: its spec's, or the one its queued request followed to
     pub rev: String,
+    /// its work dir on its box, and the box's home there, from its start's answer (empty: taken
+    /// back after a master restart, or an older hub's answer without a home)
+    pub work: String,
+    pub home: String,
     ctl: Client,
     released: bool,
+    kept: AtomicBool,
     /// its own thread beats the lease: a slow node call must not cost it
     _beats: Beats,
+    _local_hold: Option<LocalHold>,
 }
 
 /// Beats a lease until dropped.
@@ -237,10 +248,14 @@ struct Beats(Arc<AtomicBool>, std::thread::Thread);
 
 impl Beats {
     fn start(id: &str) -> Beats {
+        Self::start_on(crate::proto::control_socket(), id)
+    }
+
+    fn start_on(sock: PathBuf, id: &str) -> Beats {
         let stop = Arc::new(AtomicBool::new(false));
         let (stopped, id) = (stop.clone(), id.to_string());
         let beater = std::thread::Builder::new().name("devhub-lease-beat".into()).spawn(move || {
-            let ctl = Client::new(Target::Unix(crate::proto::control_socket()), "devhub-orch");
+            let ctl = Client::new(Target::Unix(sock), "devhub-orch");
             while !stopped.load(Ordering::Acquire) {
                 std::thread::park_timeout(BEAT);
                 if !stopped.load(Ordering::Acquire) {
@@ -325,8 +340,12 @@ impl Held {
     /// and its age ([`crate::lease::sched::Sched::retarget`]). Granted meanwhile, it keeps the
     /// grant; [`Held::rev`] says which target that was.
     pub fn acquire_following(spec: &Spec, configure: &dyn Fn(&mut Req), on_wait: &mut dyn FnMut(&str), stop: &dyn Fn() -> bool, follow: &mut dyn FnMut() -> Option<String>) -> Result<Held, String> {
+        Self::acquire_following_with(crate::proto::control_socket(), super::leases(), spec, configure, on_wait, stop, follow)
+    }
+
+    fn acquire_following_with(sock: PathBuf, lm: Option<Arc<LeaseMaster>>, spec: &Spec, configure: &dyn Fn(&mut Req), on_wait: &mut dyn FnMut(&str), stop: &dyn Fn() -> bool, follow: &mut dyn FnMut() -> Option<String>) -> Result<Held, String> {
         let mut rev = spec.rev.clone();
-        let ctl = Client::new(Target::Unix(crate::proto::control_socket()), "devhub-orch");
+        let ctl = Client::new(Target::Unix(sock.clone()), "devhub-orch");
         let mut req = Req::new(&spec.lane, spec.kind);
         req.needs = parse_needs(&spec.needs);
         req.prio = spec.prio;
@@ -342,7 +361,6 @@ impl Held {
         configure(&mut req);
         // CI's separate tree and slot are queued behind lane work by the scheduler.
         let background = req.priority == crate::lease::Priority::Background && spec.kind != Kind::Ci && spec.prio >= BACKGROUND_PRIO;
-        let lm = super::leases();
         let mut last = String::new();
         let mut class_notified = false;
         let since = run_started_ms(&spec.agent);
@@ -380,6 +398,7 @@ impl Held {
             let mut gen = lm.as_ref().map_or(0, |m| m.generation());
             let mut v = first(ask(&ctl, None, "lease", &req.to_json()), "lease")?;
             let id = s(&v, "id");
+            let local_hold = (!id.is_empty()).then(|| lm.as_ref().map(|m| m.hold_local(&id))).flatten();
             // fast at first (a free box grants at once), then at the beat; in the master the
             // scheduler's change wakes it at once (no poll between the grant and its start)
             let mut wait = Duration::from_millis(25);
@@ -389,8 +408,9 @@ impl Held {
                 match s(&v, "state").as_str() {
                     "granted" => {
                         if !note.is_empty() { on_wait(&format!("{id} granted{note}")); }
-                        let beats = Beats::start(&id);
-                        return Ok(Held { id, node: s(&v, "node"), rev, ctl, released: false, _beats: beats });
+                        let beats = Beats::start_on(sock, &id);
+                        let start = |k: &str| v.get("start").map_or(String::new(), |x| s(x, k));
+                        return Ok(Held { id, node: s(&v, "node"), rev, work: start("work"), home: start("home"), ctl, released: false, kept: AtomicBool::new(false), _beats: beats, _local_hold: local_hold });
                     }
                     "queued" | "starting" => {
                         let line = wait_line(&id, &v);
@@ -476,7 +496,8 @@ impl Held {
 
     /// A lease this process took before its exec (the same pid holds it): held again.
     pub fn attach(id: &str, node: &str) -> Held {
-        Held { id: id.to_string(), node: node.to_string(), rev: String::new(), ctl: Client::new(Target::Unix(crate::proto::control_socket()), "devhub-orch"), released: false, _beats: Beats::start(id) }
+        let local_hold = (!id.is_empty()).then(|| super::leases().map(|m| m.hold_local(id))).flatten();
+        Held { id: id.to_string(), node: node.to_string(), rev: String::new(), work: String::new(), home: String::new(), ctl: Client::new(Target::Unix(crate::proto::control_socket()), "devhub-orch"), released: false, kept: AtomicBool::new(false), _beats: Beats::start(id), _local_hold: local_hold }
     }
 
     /// Runs `argv` in the lease's tree; its output goes to `log`; its exit code.
@@ -512,6 +533,7 @@ impl Held {
         // the node's hub restarting for its self-update (at a run boundary: this one) takes the
         // lease back from its ledger: the run starts on the new hub
         let (mut failing, mut last, mut beat) = (None::<Instant>, String::new(), Instant::now());
+        let mut wait = Duration::ZERO;
         let v = loop {
             match self.node_call("lease-run", &format!("lease-run {} {cwd} {b64}{extra}", self.id)) {
                 Ok(v) => {
@@ -521,13 +543,25 @@ impl Held {
                         let _ = writeln!(log, "{} {}: {pending}", self.id, self.node);
                         let _ = log.flush();
                         last = pending.to_string();
+                        wait = Duration::ZERO;
                     }
                     if beat.elapsed() >= BEAT {
                         beat = Instant::now();
                         let st = self.beat()?;
                         if s(&st, "state") == "ended" { return Err(ended_error(&self.id, &st)); }
                     }
-                    std::thread::sleep(Duration::from_secs(1));
+                    wait = crate::lease::pending_poll_delay(wait);
+                    std::thread::sleep(wait);
+                }
+                Err(e) if crate::lease::master::host_gone(&e) => {
+                    // its box is off the network: the master's outage rule decides ([`NODE_GRACE`])
+                    failing = None;
+                    if beat.elapsed() >= BEAT {
+                        beat = Instant::now();
+                        let st = self.beat()?;
+                        if s(&st, "state") == "ended" { return Err(ended_error(&self.id, &st)); }
+                    }
+                    std::thread::sleep(Duration::from_secs(2));
                 }
                 Err(e) if e.contains("restarting: ") || crate::lease::master::unreachable(&e) => {
                     if failing.get_or_insert_with(Instant::now).elapsed() >= HUB_RESTART_FOR { return Err(e); }
@@ -587,6 +621,11 @@ impl Held {
                         std::thread::sleep(quiet);
                         quiet = (quiet * 2).min(Duration::from_millis(500));
                     }
+                }
+                // its box off the network: the master's outage rule decides, its beat below says
+                Err(e) if crate::lease::master::host_gone(&e) => {
+                    failing = None;
+                    std::thread::sleep(Duration::from_secs(2));
                 }
                 Err(e) => {
                     let t = *failing.get_or_insert_with(Instant::now);
@@ -695,6 +734,7 @@ impl Held {
     /// copied into `dst` before the lease ends and the node's scratch goes, said in `log`.
     pub fn save_kept(&self, lane: &str, dst: &Path, log: &mut dyn Write) {
         let r = crate::lease::client::kept(&self.ctl, &self.node, lane, &self.id, dst);
+        if r.is_ok() { self.kept.store(true, Ordering::Release); }
         if let Some(line) = crate::lease::client::kept_line(&self.id, dst, &r) {
             let _ = writeln!(log, "{line}");
         }
@@ -717,12 +757,15 @@ impl Held {
             return (None, None);
         }
         self.released = true;
-        let line = match exit {
-            Some(c) => format!("{} released exit={c}", self.id),
-            None => self.id.clone(),
-        };
+        let kept = self.kept.load(Ordering::Acquire);
+        let mut line = format!("{} released", self.id);
+        if kept { line.push_str(" kept=1"); }
+        if let Some(c) = exit { line.push_str(&format!(" exit={c}")); }
         let Ok(answer) = ask(&self.ctl, None, "release", &line) else { return (None, None) };
         let answers: Vec<Value> = answer.iter().filter_map(|l| json(l)).collect();
+        if !kept && answers.iter().filter_map(|v| v.get("err")?.as_str()).any(|e| e.contains("has already ended")) {
+            let _ = ask(&self.ctl, None, "beat", &format!("{} wait-keep", self.id));
+        }
         let fault = answers.iter().find_map(|v| cleanup_fault(&self.id, v));
         let toolchain = answers.iter().find_map(|v| v.get("cleanup")?.get("toolchain")?.as_str().map(str::to_string));
         (fault, toolchain)
@@ -743,6 +786,65 @@ fn cleanup_fault(id: &str, answer: &Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn acquire_with_slow_on_wait_past_beat_expiry_does_not_expire_in_process_lease() {
+        use crate::lease::sched::{State, BEAT_EXPIRY_MS};
+        use makepad_remote::{carrier::unix, lines, Endpoint};
+
+        struct SocketPath(PathBuf);
+        impl Drop for SocketPath {
+            fn drop(&mut self) { let _ = std::fs::remove_file(&self.0); }
+        }
+
+        let dir = makepad_git::test_support::tempdir().unwrap();
+        let (m, clock) = LeaseMaster::with_test_node_and_clock(dir.path());
+        let path = dir.path().join("control.sock");
+        let path = SocketPath(if path.as_os_str().as_encoded_bytes().len() <= 100 {
+            path
+        } else {
+            Path::new("/tmp").join(format!("dhh-{}.sock", crate::proto::request_id()))
+        });
+        let ep = Endpoint::new("local-hold-test");
+        for service in ["lease", "retarget", "beat", "release"] {
+            let master = Arc::downgrade(&m);
+            ep.register(service, 1, lines::service(service, Arc::new(move |line, out| {
+                if let Some(m) = master.upgrade() { m.serve(service, line, out); }
+            })));
+        }
+        unix::listen_at(&ep, &path.0).unwrap();
+        let ctl = Client::new(Target::Unix(path.0.clone()), "blocker");
+        let blocker = Req { holder: Some(std::process::id()), ..Req::new("blocker", Kind::Build) };
+        let answer = first(ask(&ctl, None, "lease", &blocker.to_json()), "lease").unwrap();
+        assert_eq!(s(&answer, "state"), "granted");
+        let blocker = s(&answer, "id");
+
+        let spec = Spec {
+            lane: "waiting".into(), agent: "test".into(), kind: Kind::Build, needs: String::new(), prio: 0,
+            rev: String::new(), repo_dir: dir.path().display().to_string(), node: Some("node-a".into()), since_ms: None,
+        };
+        let mut first_id = String::new();
+        let mut on_wait = |line: &str| {
+            let id = asked_lease(line).expect("a wait on the queued ask");
+            assert!(first_id.is_empty(), "the first wait releases the blocker: {line}");
+            first_id = id.to_string();
+            for _ in 0..3 {
+                clock.fetch_add(BEAT_EXPIRY_MS, Ordering::SeqCst);
+                m.pump();
+                assert!(m.view().iter().any(|l| l.id == id && l.state == State::Queued), "{id} stays queued during on_wait");
+            }
+            let end = first(ask(&ctl, None, "release", &blocker), "release").unwrap();
+            assert_eq!(s(&end, "how"), "released");
+            m.pump();
+            assert!(m.view().iter().any(|l| l.id == id && l.state == State::Granted), "freeing the box grants the original ask");
+        };
+        let held = Held::acquire_following_with(path.0.clone(), Some(m.clone()), &spec, &|_| {}, &mut on_wait, &|| false, &mut || None).unwrap();
+        assert_eq!(held.id, first_id);
+        assert!(m.is_locally_held(&first_id), "the grant hands the hold to Held");
+        drop(held);
+        assert!(!m.is_locally_held(&first_id));
+    }
 
     /// A lease someone ended (granted or still asked) ends what it held; a lost box, an expiry,
     /// an override or the node's disk or memory guard do not say so.

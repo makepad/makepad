@@ -837,6 +837,25 @@ fn cleanup_pass(ctx: &Ctx, cwds: impl FnOnce() -> Vec<(u32, PathBuf)>) {
                     kept_said(ctx, &l, format!("landed, kept: {} file(s) of its own in its local/, which git ignores ({}{more}) and the main checkout's local/ has no copy of (`devhub lane remove {}` keeps them there and removes it)", own.len(), names.join(", "), l.name));
                     continue;
                 }
+                match super::slot::check_for_cleanup(ctx, &l, &cwds) {
+                    Ok(super::slot::CleanupCheck::Clean) => {}
+                    Ok(super::slot::CleanupCheck::Busy(why)) => {
+                        kept_said(ctx, &l, format!("landed, kept: {why}"));
+                        continue;
+                    }
+                    Ok(super::slot::CleanupCheck::OwnerWork(why)) => {
+                        let note = format!("landed, kept: {why}");
+                        if l.note != note {
+                            let recipients = slot_note_recipients(ctx, &l, &land);
+                            kept_said_notified(ctx, &l, note, &recipients);
+                        }
+                        continue;
+                    }
+                    Err(e) => {
+                        finish(ctx, &l.name, "removed", Err(e));
+                        continue;
+                    }
+                }
                 let what = remove(ctx, &l, false, true);
                 finish(ctx, &l.name, "removed", what);
             }
@@ -858,11 +877,39 @@ fn cleanup_pass(ctx: &Ctx, cwds: impl FnOnce() -> Vec<(u32, PathBuf)>) {
 
 /// A landed lane the cleanup keeps for its work: the note and an event, once for each reason.
 fn kept_said(ctx: &Ctx, l: &LaneRec, note: String) {
-    if l.note == note {
+    kept_said_notified(ctx, l, note, &[]);
+}
+
+/// Like [`kept_said`], and also leaves a one-time agent note (`crate::notes::leave`) for each
+/// recipient in `recipients` when the reason is new (`x.note != note`). Notes are written
+/// before `x.note` is committed so a write error or crash never suppresses delivery silently.
+fn kept_said_notified(ctx: &Ctx, l: &LaneRec, note: String, recipients: &[String]) {
+    let already = ctx.store.read(|d| match d.lanes.iter().rev().find(|x| x.name == l.name && x.state == "live") {
+        Some(x) => x.note == note,
+        None => true,
+    });
+    if already {
         return;
     }
-    let rec = set(ctx, &l.name, |x| x.note = note.clone());
-    event(ctx, Sev::Info, format!("lane {}: {note}", l.name), rec.as_ref());
+    let line = format!("lane {}: {note}", l.name);
+    for agent in recipients {
+        if let Err(e) = crate::notes::leave(&ctx.home, agent, &line) {
+            eprintln!("devhub lane {}: agent notes for {agent}: {e}", l.name);
+            return;
+        }
+    }
+    match ctx.store.update(|d| {
+        let x = d.lanes.iter_mut().rev().find(|x| x.name == l.name && x.state == "live")?;
+        let changed = x.note != note;
+        if changed {
+            x.note = note.clone();
+        }
+        Some((changed, x.clone()))
+    }) {
+        Ok(Some((true, rec))) => event(ctx, Sev::Info, line, Some(&rec)),
+        Ok(_) => {}
+        Err(e) => eprintln!("devhub state: {e}"),
+    }
 }
 
 /// The end of the lane's newest job, live session or lease (reads the lease ledger).
@@ -885,6 +932,43 @@ fn lane_agents(ctx: &Ctx, l: &LaneRec, land: &[String]) -> BTreeSet<String> {
     agents
 }
 
+/// Whether `agent` is a lane owner with its own devhub inbox (not empty, not `"main"`, not an
+/// internal `devhub-*` agent such as `"devhub-test"` / `"devhub-shadow"`, and accepted by
+/// `agent-seen`).
+fn is_lane_owner_agent(agent: &str) -> bool {
+    !agent.is_empty()
+        && agent != "main"
+        && !agent.starts_with("devhub-")
+        && makepad_devhub_conf::valid_name(agent)
+}
+
+/// Who receives a once-per-reason agent note when automatic cleanup keeps a landed lane for its
+/// slots' uncollected work: every distinct owning lane agent (from `lane_agents`, falling back
+/// to archived `land` history if none is in the live window), plus `"main"` so a lane whose
+/// owner already exited after landing is never missed silently.
+fn slot_note_recipients(ctx: &Ctx, l: &LaneRec, land: &[String]) -> Vec<String> {
+    let mut owners: BTreeSet<String> = lane_agents(ctx, l, land)
+        .into_iter()
+        .filter(|a| is_lane_owner_agent(a))
+        .collect();
+    if owners.is_empty() {
+        if let Ok(hist) = ctx.store.history("land") {
+            for v in hist {
+                let Some(e) = crate::land::Entry::parse(&v.to_json()) else { continue };
+                let matches = e.changed_ms >= l.created_ms
+                    && ((!l.branch.is_empty() && e.branch == l.branch)
+                        || (!l.cbranch.is_empty() && e.cbranch == l.cbranch));
+                if matches && is_lane_owner_agent(&e.agent) {
+                    owners.insert(e.agent);
+                }
+            }
+        }
+    }
+    let mut out: Vec<String> = owners.into_iter().collect();
+    out.push("main".to_string());
+    out
+}
+
 fn finish(ctx: &Ctx, name: &str, state: &str, what: Result<String, String>) {
     match what {
         Ok(w) => {
@@ -896,8 +980,19 @@ fn finish(ctx: &Ctx, name: &str, state: &str, what: Result<String, String>) {
             event(ctx, Sev::Info, format!("lane {name} {state}: {w}"), l.as_ref());
         }
         Err(e) => {
-            let l = set(ctx, name, |x| x.note = format!("{state} failed: {e}"));
-            event(ctx, Sev::Warn, format!("lane {name}: {state} failed: {e}"), l.as_ref());
+            let note = format!("{state} failed: {e}");
+            match ctx.store.update(|d| {
+                let x = d.lanes.iter_mut().rev().find(|x| x.name == name && x.state == "live")?;
+                let changed = x.note != note;
+                if changed {
+                    x.note = note.clone();
+                }
+                Some((changed, x.clone()))
+            }) {
+                Ok(Some((true, l))) => event(ctx, Sev::Warn, format!("lane {name}: {note}"), Some(&l)),
+                Ok(_) => {}
+                Err(se) => eprintln!("devhub state: {se}"),
+            }
         }
     }
 }
@@ -1065,22 +1160,38 @@ fn remove(ctx: &Ctx, l: &LaneRec, drop: bool, branches: bool) -> Result<String, 
     Ok(done.join(", "))
 }
 
-/// The lane's dirs on every node that is up, as "node dirs (N MB: per node)".
+/// The lane's dirs on every node that is up, as "node dirs (N MB: per node)", and the nodes whose
+/// dirs stayed, with why. A node that is down, or whose clean answered an error, read as one with
+/// nothing to free, so "node dirs (0 MB)" could not tell a lane cleaned before from one whose dirs
+/// stayed (a lane's removal said so of two Macs it built on; its landed cleanup had taken them, 11-26).
 fn clean_node_dirs(ctx: &Ctx, l: &LaneRec) -> String {
     let c = makepad_remote::link::Client::new(makepad_remote::link::Target::Unix(crate::proto::control_socket()), "devhub-lanes");
-    let mut freed: Vec<(String, f64)> = Vec::new();
-    for n in ctx.leases.nodes().into_iter().filter(|n| n.up) {
-        if let Ok(lines) = crate::cli::ask(&c, Some(&n.name), "disk", &format!("disk clean {}", l.name)) {
-            let mb = lines.first().and_then(|x| makepad_strict_json::parse(x.as_bytes()).ok()).and_then(|v| v.get("freed_mb").and_then(crate::lease::num)).unwrap_or(0.0);
-            if mb >= 1.0 {
-                freed.push((n.name.clone(), mb));
-            }
+    let mut answers = Vec::new();
+    for n in ctx.leases.nodes() {
+        let answer = if n.up { crate::cli::ask(&c, Some(&n.name), "disk", &format!("disk clean {}", l.name)).map(|lines| lines.into_iter().next().unwrap_or_default()) } else { Err("down".to_string()) };
+        answers.push((n.name.clone(), answer));
+    }
+    node_dirs_said(&answers)
+}
+
+/// [`clean_node_dirs`]'s line from each node's answer to `disk clean <lane>` (its JSON line, or
+/// why there was none).
+fn node_dirs_said(answers: &[(String, Result<String, String>)]) -> String {
+    let mut freed: Vec<(&str, f64)> = Vec::new();
+    let mut stayed: Vec<String> = Vec::new();
+    for (node, answer) in answers {
+        let v = answer.as_ref().map_err(String::clone).and_then(|x| makepad_strict_json::parse(x.as_bytes()).map_err(|_| format!("no answer: {}", crate::proto::clean(x, 120))));
+        match v.as_ref().map(|v| (v.get("freed_mb").and_then(crate::lease::num), v.get("err").and_then(|e| e.as_str()))) {
+            Ok((Some(mb), _)) => if mb >= 1.0 { freed.push((node, mb)); },
+            Ok((None, e)) => stayed.push(format!("{node} ({})", e.unwrap_or("no freed_mb in its answer"))),
+            Err(e) => stayed.push(format!("{node} ({e})")),
         }
     }
     // (from +0: an empty f64 sum is -0, which printed as "-0 MB")
     let total = freed.iter().fold(0.0, |a, f| a + f.1);
     let each = if freed.is_empty() { String::new() } else { format!(": {}", freed.iter().map(|(n, mb)| format!("{n} {mb:.0}")).collect::<Vec<_>>().join(", ")) };
-    format!("node dirs ({total:.0} MB{each})")
+    let kept = if stayed.is_empty() { String::new() } else { format!("; not cleaned: {}", stayed.join(", ")) };
+    format!("node dirs ({total:.0} MB{each}{kept})")
 }
 
 /// Each `--with` half: a nested repository the user's checkout holds, on a branch to land on:
@@ -1487,6 +1598,7 @@ fn remove_now(ctx: &Ctx, name: &str) -> Result<String, String> {
         removable(ctx, &l, &mut views, &wt::live_cwds(), &land_entries(ctx), true)?;
     }
     // its own local/ goes to the main checkout's first, as a retire's does
+    super::slot::check_clean(ctx, &l)?;
     let (files, bytes) = keep_local(&Path::new(&l.path).join("local"), &ctx.repo.join("local"), name).map_err(|e| format!("its local/ was not kept, nothing removed: {e}"))?;
     let kept = if files == 0 { String::new() } else { format!(", local/: {files} file(s) kept in {} ({} MB)", ctx.repo.join("local").display(), bytes / 1_000_000) };
     let what = remove(ctx, &l, false, true).map(|w| w + &kept);
@@ -1980,7 +2092,8 @@ const RETIRE_OFFER_MS: u64 = 6 * 3_600_000;
 /// measure whose agent went silent ([`crate::lease::master::LeaseMaster::silent_overdue`]),
 /// devhub's own legs past their measure kept because they work
 /// ([`crate::lease::master::LeaseMaster::legs_at_work`]), the
-/// live sessions whose restart waited past 5 min ([`super::live::restarts_pending`]) and the tests
+/// live sessions whose restart waited past 5 min and the test calls whose edit made no progress for
+/// 10 min ([`super::live::restarts_pending`]), and the tests
 /// run's units far over their measure ([`crate::bucket::slow_units`]). Some just work on code. Then the lanes offered for retirement ([`retire_offers`]) and the parked
 /// ones, in one row.
 /// The bucket shards' units far past their measure, each with its box as the lease scheduler sees
@@ -2068,6 +2181,11 @@ fn quiet(ctx: &Ctx) -> Result<String, String> {
     rows.extend(super::live::restarts_pending(ctx, now));
     rows.extend(slow_now(ctx, now));
     rows.extend(down_nodes(&ctx.leases.nodes()));
+    let waits = ctx.leases.wm_waits(now);
+    if !waits.is_empty() {
+        rows.push("boxes whose WM update waits on a lease (no new screen or gui leases start there until it ends):".into());
+        rows.extend(waits);
+    }
     let stale = ctx.leases.stale_boxes(now);
     if !stale.is_empty() {
         rows.push("boxes that run older code than their checkout (their WM or JIT apps):".to_string());
@@ -2510,6 +2628,20 @@ mod tests {
     use crate::lease::master::LeaseMaster;
     use crate::state::Store;
 
+    /// A lane's removal names each node that kept the lane's dirs, and why.
+    #[test]
+    fn a_lanes_node_dirs_say_the_nodes_that_kept_them() {
+        let ok = |x: &str| -> Result<String, String> { Ok(x.to_string()) };
+        let answers = vec![
+            ("a".to_string(), ok(r#"{"cleaned":"x","removed":["/w/native/x"],"freed_mb":120}"#)),
+            ("b".to_string(), ok(r#"{"err":"lane x has a lease here"}"#)),
+            ("c".to_string(), Err("down".to_string())),
+            ("d".to_string(), ok(r#"{"cleaned":"x","removed":[],"freed_mb":0}"#)),
+        ];
+        assert_eq!(super::node_dirs_said(&answers), "node dirs (120 MB: a 120; not cleaned: b (lane x has a lease here), c (down))", "a node that kept them says why; one with nothing left says nothing");
+        assert_eq!(super::node_dirs_said(&answers[3..]), "node dirs (0 MB)", "nothing left anywhere reads as before");
+    }
+
     /// A lane with ten or more asks queued is listed, the most first, with its oldest's wait; one
     /// with fewer is not.
     #[test]
@@ -2821,6 +2953,168 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    #[test]
+    fn cleanup_keeps_dirty_slot_once_notifies_owner_and_main_and_dedups_remove_errors() {
+        use crate::state::{Job, Live, Publish, KEEP};
+        use std::fs;
+        use std::sync::Mutex;
+
+        let base = std::env::temp_dir().join(format!("devhub-slot-cleanup-{}-{}", std::process::id(), wall_ms()));
+        let mk = base.join("makepad");
+        let home = base.join("home");
+        repo(&mk, "work");
+        fs::create_dir_all(&home).unwrap();
+        let records = Arc::new(Mutex::new(Vec::<crate::proto::Record>::new()));
+        let publish: Publish = {
+            let records = Arc::clone(&records);
+            Arc::new(move |r| { records.lock().unwrap().push(r); 0 })
+        };
+        let open = || Ctx {
+            store: Store::open(&home, "", publish.clone()).unwrap(),
+            leases: Arc::new(LeaseMaster::new("", home.clone(), Arc::new(|_, _, _| Err("no nodes".into())), Arc::new(|_| {}), Arc::new(|| 1), None, true)),
+            machine: String::new(), monitor: crate::monitor::Monitor::start(&[]), repo: mk.clone(), home: home.clone(),
+        };
+        let mut ctx = open();
+        serve(&ctx, r#"lane new {"name":"x","commercial":false}"#).unwrap();
+        let lane = root(&ctx).join("x");
+        g(&lane, &["commit", "-q", "--allow-empty", "-m", "lane work"]);
+        g(&mk, &["merge", "-q", "--no-ff", "-m", "land", "rc-x"]);
+        let old = wall_ms() - GRACE_MS - AGENT_IDLE_MS;
+        let landing = |id: usize, branch: &str, agent: &str| makepad_strict_json::parse(format!(
+            r#"{{"id":{id},"branch":"{branch}","agent":"{agent}","state":"landed","changed_ms":{old}}}"#,
+        ).as_bytes()).unwrap();
+        ctx.store.update(|d| {
+            let l = &mut d.lanes[0];
+            l.created_ms = old - 1;
+            l.landed_ms = old;
+            l.dirs_ms = old;
+            l.agent_ms = old;
+            d.land.push(landing(1, "rc-x", "AGENT-X"));
+            d.jobs.push(Job { id: "J1".into(), lane: "x".into(), agent: "devhub-test".into(), state: "ok".into(), ended_ms: old, ..Default::default() });
+            for (id, agent) in [("W1", "devhub-shadow"), ("W2", "main")] {
+                d.lives.push(Live { id: id.into(), lane: "x".into(), agent: agent.into(), state: "ended".into(), ended_ms: old, ..Default::default() });
+            }
+        }).unwrap();
+        let slot_cmd = |ctx: &Ctx, args: &[&str]| {
+            let request = super::super::slot::request(args).unwrap();
+            serve(ctx, &format!("lane slot {request}")).unwrap()
+        };
+        slot_cmd(&ctx, &["slot", "x", "2"]);
+        let slot = root(&ctx).join("x.slots/2");
+        let drop_slot = |ctx: &Ctx| slot_cmd(ctx, &["slot", "drop", "x", "2"]);
+        fs::write(slot.join("a.txt"), "work").unwrap();
+        records.lock().unwrap().clear();
+        let events = || records.lock().unwrap().drain(..).map(|r| (r.sev, r.line)).collect::<Vec<_>>();
+        let kept = |ctx: &Ctx, prefix: &str| {
+            let l = rec(ctx, "x").expect("cleanup keeps the lane live");
+            assert!(l.note.starts_with(prefix), "expected {prefix:?}, got {:?}", l.note);
+            format!("lane x: {}", l.note)
+        };
+        let notes = |line: &str, recipients: &[&str]| {
+            for agent in recipients {
+                let got: Vec<_> = crate::notes::take(&home, agent).into_iter().map(|(_, text)| text).collect();
+                assert_eq!(got, [line], "{agent} receives the reason once");
+            }
+            let file = home.join("agent-notes.jsonl");
+            assert!(!file.exists() || fs::read(file).unwrap().is_empty(), "no other agent notes");
+        };
+
+        for _ in 0..2 {
+            cleanup_pass(&ctx, || vec![(999, slot.canonicalize().unwrap())]);
+        }
+        let busy = kept(&ctx, "landed, kept: slot 2 of x: pid 999 runs in it");
+        assert_eq!(events(), [(Sev::Info, busy)]);
+        notes("", &[]);
+
+        cleanup_pass(&ctx, Vec::new);
+        let dirty = kept(&ctx, "landed, kept: slot 2 of x holds changes: \"a.txt\"");
+        assert!(!dirty.contains("from job") && !dirty.contains("none recorded"));
+        assert_eq!(events(), [(Sev::Info, dirty.clone())]);
+        notes(&dirty, &["AGENT-X", "main"]);
+        cleanup_pass(&ctx, Vec::new);
+        drop(ctx);
+        ctx = open();
+        cleanup_pass(&ctx, Vec::new);
+        assert!(events().is_empty(), "the same reason stays quiet across ticks and restart");
+        notes("", &[]);
+
+        fs::write(slot.join("b.txt"), "more").unwrap();
+        cleanup_pass(&ctx, Vec::new);
+        cleanup_pass(&ctx, Vec::new);
+        let both = kept(&ctx, "landed, kept: slot 2 of x holds changes: \"a.txt\", \"b.txt\"");
+        assert_eq!(events(), [(Sev::Info, both.clone())]);
+        notes(&both, &["AGENT-X", "main"]);
+
+        drop_slot(&ctx);
+        fs::create_dir_all(slot.join("local/notes")).unwrap();
+        fs::write(slot.join("local/notes/out.txt"), "keep").unwrap();
+        cleanup_pass(&ctx, Vec::new);
+        cleanup_pass(&ctx, Vec::new);
+        let ignored = kept(&ctx, "landed, kept: slot 2 of x holds ignored local work: \"local/notes/out.txt\"");
+        assert_eq!(events(), [(Sev::Info, ignored.clone())]);
+        notes(&ignored, &["AGENT-X", "main"]);
+        fs::remove_file(slot.join("local/notes/out.txt")).unwrap();
+
+        ctx.store.update(|d| {
+            d.jobs.clear();
+            d.lives.clear();
+            d.land = vec![landing(1, "rc-x", "AGENT-ARCHIVED")];
+            d.land.extend((2..=KEEP + 1).map(|id| landing(id, "rc-other", "OTHER")));
+        }).unwrap();
+        let land = land_entries(&ctx);
+        assert!(!land.iter().any(|e| e.contains("rc-x")) && home.join("history.jsonl").is_file(), "the owner is archived");
+        assert_eq!(slot_note_recipients(&ctx, &rec(&ctx, "x").unwrap(), &land), ["AGENT-ARCHIVED", "main"]);
+        let unowned = LaneRec { name: "unowned".into(), branch: "rc-unowned".into(), ..Default::default() };
+        assert_eq!(slot_note_recipients(&ctx, &unowned, &land), ["main"]);
+
+        fs::write(slot.join("a.txt"), "work").unwrap();
+        let inbox = home.join("agent-notes.jsonl");
+        fs::remove_file(&inbox).unwrap();
+        fs::create_dir(&inbox).unwrap();
+        cleanup_pass(&ctx, Vec::new);
+        assert_eq!(kept(&ctx, "landed, kept:"), ignored, "failed delivery preserves the previous reason");
+        assert!(events().is_empty());
+        fs::remove_dir(&inbox).unwrap();
+        cleanup_pass(&ctx, Vec::new);
+        assert_eq!(kept(&ctx, "landed, kept:"), dirty);
+        assert_eq!(events(), [(Sev::Info, dirty.clone())]);
+        notes(&dirty, &["AGENT-ARCHIVED", "main"]);
+
+        fs::create_dir_all(lane.join("local")).unwrap();
+        fs::write(lane.join("local/keepme.txt"), "keep").unwrap();
+        let refused = serve(&ctx, "lane remove x").unwrap_err();
+        assert!(refused.contains("slot 2 of x") && refused.contains("\"a.txt\""), "{refused}");
+        assert!(events().is_empty() && !mk.join("local/keepme.txt").exists(), "manual refusal precedes copying and warning");
+        fs::remove_file(lane.join("local/keepme.txt")).unwrap();
+        drop_slot(&ctx);
+
+        let file = home.join("slots.json");
+        let valid = fs::read_to_string(&file).unwrap();
+        let corrupt = valid.replace(&json_str(&slot.to_string_lossy()), &json_str(&lane.to_string_lossy()));
+        assert_ne!(valid, corrupt);
+        fs::write(&file, corrupt).unwrap();
+        cleanup_pass(&ctx, Vec::new);
+        cleanup_pass(&ctx, Vec::new);
+        drop(ctx);
+        ctx = open();
+        cleanup_pass(&ctx, Vec::new);
+        let error = kept(&ctx, "removed failed: slot 2 of x:");
+        assert_eq!(events(), [(Sev::Warn, error)], "the same error warns once across restart");
+        for _ in 0..2 {
+            finish(&ctx, "x", "removed", Err("different error".into()));
+        }
+        assert_eq!(events(), [(Sev::Warn, "lane x: removed failed: different error".into())]);
+
+        fs::write(file, valid).unwrap();
+        cleanup_pass(&ctx, Vec::new);
+        let removed = ctx.store.read(|d| d.lanes[0].clone());
+        assert_eq!(removed.state, "removed", "{}", removed.note);
+        assert!(!lane.exists() && !slot.exists(), "cleanup removes both clean worktrees");
+        assert_eq!(events(), [(Sev::Info, format!("lane x removed: {}", removed.note))]);
+        drop(ctx);
+        fs::remove_dir_all(base).unwrap();
+    }
+
     /// new, a landing, the cleanup (after its grace) and a drop, on throwaway repos.
     #[test]
     fn lanes_are_made_cleaned_after_landing_and_dropped() {
@@ -3046,7 +3340,9 @@ mod tests {
         assert!(!out.contains("retire cleanly") && out.contains(&format!("{SLOT_REFUSAL}: slotted\n")), "{out}");
         let offer = &with.get("lanes").unwrap().as_arr().unwrap()[0];
         let refused = clean_offer_refusal(offer).unwrap_or_default();
-        assert!(refused.starts_with("slot 2 of slotted holds changes from job (none recorded): \"a.txt\""), "retire's own words: {refused}");
+        assert!(refused.starts_with("slot 2 of slotted holds changes: \"a.txt\""), "retire's own words: {refused}");
+        assert!(!refused.contains("from job") && !refused.contains("none recorded"), "an unlabeled slot omits the job clause: {refused}");
+        assert!(refused.contains("devhub lane slot take slotted 2") && refused.contains("devhub lane slot drop slotted 2"), "both commands name the slot: {refused}");
         g(&slots.join("2"), &["checkout", "-q", "--", "a.txt"]);
         assert!(check_offers(&with, &[]).lines().any(|l| l.starts_with("retire cleanly")), "a clean slot keeps it from nothing");
         let list = offers.get("lanes").unwrap().as_arr().unwrap();

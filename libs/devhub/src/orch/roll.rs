@@ -61,7 +61,7 @@
 use super::{git, Ctx};
 use crate::lease::sched::{deploy_to, DeployTo};
 use crate::proto::{wall_ms, Sev};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -889,7 +889,7 @@ fn landed_since(ctx: &Ctx, since: u64) -> Vec<(String, u64)> {
 
 /// A node's hub that does not answer during its roll is restarting (its new build starts in
 /// seconds): warned about only past this.
-const HUB_BACK: Duration = Duration::from_secs(120);
+const HUB_BACK: Duration = Duration::from_millis(crate::lease::sched::HUB_RESTART_MS);
 
 /// An update (`what`: the deployment, the hub restart) that a timed run made wait
 /// ([`crate::lease::master::Master::update_waits`]), said no more when its ask ends.
@@ -1275,6 +1275,8 @@ fn roll_node(ctx: &Ctx, node: &str, svc: &str, dirs: &BTreeSet<String>, work: &s
                     ctx.leases.ledger_hub_build(node, &b);
                 }
                 restarts();
+                // (a miss of its hub is this restart now, no drop off the network: below)
+                if svc == "devhub" { ctx.leases.hub_restarting(node, true); }
                 event(ctx, Sev::Info, format!("update: {node} restarts {svc} for {short}"));
                 break;
             }
@@ -1283,6 +1285,12 @@ fn roll_node(ctx: &Ctx, node: &str, svc: &str, dirs: &BTreeSet<String>, work: &s
     drop(waits);
     // its build is done (or it will not build): the room is the box's again
     drop(room);
+    // its hub's restart is over once it is back, or the roll gives up on it
+    struct Restarting<'a>(&'a Ctx, &'a str, bool);
+    impl Drop for Restarting<'_> {
+        fn drop(&mut self) { if self.2 { self.0.leases.hub_restarting(self.1, false); } }
+    }
+    let _restarting = Restarting(ctx, node, svc == "devhub");
     // back: the hub reports the new commit; a service a newer start that answers again (its slot
     // is held till then: a new start takes seconds, its build and load minutes, and a roll that
     // went on at the new start had every box's AI hub down at once)
@@ -1361,7 +1369,7 @@ fn hub_build_room(ctx: &Ctx, node: &str, gone: &dyn Fn() -> bool, waits: &dyn Fn
 pub(crate) fn deploy_build_room(repo: &std::path::Path, node: &str, waits: &mut dyn FnMut(&str)) -> Result<Option<DeployRoom>, String> {
     use crate::lease::sched::{DEFAULT_PRIO, DEPLOY_BUILD, HUB_BUILD};
     let timed = || super::leases().is_some_and(|lm| lm.update_pin(node).is_some() || lm.view().iter().any(|l| matches!(l.state, crate::lease::sched::State::Starting | crate::lease::sched::State::Granted) && l.req.kind == crate::lease::Kind::Timed && l.node.as_deref() == Some(node)));
-    if timed() { return Ok(None); }
+    if timed() || deploy_room_active(node) { return Ok(None); }
     let spec = super::leg::Spec { lane: format!("{DEPLOY_BUILD}-{node}"), agent: "devhub-sync".into(), kind: crate::lease::Kind::Build, needs: String::new(), prio: DEFAULT_PRIO, rev: String::new(), repo_dir: repo.to_string_lossy().into_owned(), node: Some(node.to_string()), since_ms: None };
     match super::leg::Held::acquire_with(&spec, &|r| r.class = HUB_BUILD.into(), waits, &timed) {
         Ok(held) => Ok(Some(DeployRoom { held })),
@@ -1424,7 +1432,40 @@ pub(super) static RESTARTING: Mutex<()> = Mutex::new(());
 
 /// The deployment-build rooms a previous master granted whose apply still runs on its node: held
 /// until it ends ([`follow_rooms`]).
-static FOLLOWED_ROOMS: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+static FOLLOWED_ROOMS: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
+
+/// Keep the oldest granted deployment room on each node. The other restored rooms
+/// have no watcher and the master's startup cleanup can release them.
+fn dedup_followed_rooms(leases: &[crate::lease::sched::Lease]) -> Vec<(String, String)> {
+    use crate::lease::sched::{Lease, State};
+    let mut oldest: HashMap<&str, &Lease> = HashMap::new();
+    for l in leases.iter().filter(|l| l.req.master && l.req.deploy_build() && l.state == State::Granted) {
+        let Some(node) = l.node.as_deref() else { continue };
+        let kept = oldest.entry(node).or_insert(l);
+        if (l.asked_ms, l.seq) < (kept.asked_ms, kept.seq) { *kept = l; }
+    }
+    leases.iter().filter_map(|l| {
+        let node = l.node.as_ref()?;
+        (oldest.get(node.as_str())?.id == l.id).then(|| (l.id.clone(), node.clone()))
+    }).collect()
+}
+
+/// A restored queued room awaits a new owner until its matching request takes it over.
+fn deploy_room_active_in(followed: &BTreeMap<String, String>, leases: &[crate::lease::sched::Lease], node: &str) -> bool {
+    use crate::lease::sched::State;
+    followed.values().any(|n| n == node) || leases.iter().any(|l| {
+        l.req.master && l.req.deploy_build() && matches!(l.state, State::Queued | State::Starting | State::Granted)
+            && l.reask_by.is_none() && l.node.as_deref().or(l.req.node.as_deref()) == Some(node)
+    })
+}
+
+pub(crate) fn deploy_room_active(node: &str) -> bool {
+    // Startup cleanup holds the scheduler lock when it calls follows_room. Release
+    // the map lock before taking the scheduler view here.
+    if FOLLOWED_ROOMS.lock().unwrap_or_else(|e| e.into_inner()).values().any(|n| n == node) { return true; }
+    let Some(lm) = super::leases() else { return false };
+    deploy_room_active_in(&BTreeMap::new(), &lm.view(), node)
+}
 
 /// How often a taken-back room asks its node whether the apply still runs.
 const ROOM_LOOK: Duration = Duration::from_secs(5);
@@ -1436,11 +1477,9 @@ const ROOM_LOOK: Duration = Duration::from_secs(5);
 /// that waited for them waited minutes (a box's deployment build: p90 230 s, up to 19 min, 11-15).
 /// Called once at the start, before the master's own leases no record names end.
 fn follow_rooms(ctx: &Arc<Ctx>) {
-    use crate::lease::sched::State;
-    for l in ctx.leases.view().into_iter().filter(|l| l.req.master && l.req.deploy_build() && l.state == State::Granted) {
-        let Some(node) = l.node.clone() else { continue };
-        FOLLOWED_ROOMS.lock().unwrap().insert(l.id.clone());
-        let (c, id) = (ctx.clone(), l.id.clone());
+    for (room_id, node) in dedup_followed_rooms(&ctx.leases.view()) {
+        FOLLOWED_ROOMS.lock().unwrap().insert(room_id.clone(), node.clone());
+        let (c, id) = (ctx.clone(), room_id.clone());
         let followed = std::thread::Builder::new().name("devhub-room".into()).spawn(move || {
             let held = super::leg::Held::attach(&id, &node);
             event(&c, Sev::Info, format!("update: {node}'s deployment build goes on under this master: its room {id} is held until the box's apply ends"));
@@ -1451,7 +1490,7 @@ fn follow_rooms(ctx: &Arc<Ctx>) {
             held.release(None);
             FOLLOWED_ROOMS.lock().unwrap().remove(&id);
         });
-        if followed.is_err() { FOLLOWED_ROOMS.lock().unwrap().remove(&l.id); }
+        if followed.is_err() { FOLLOWED_ROOMS.lock().unwrap().remove(&room_id); }
     }
 }
 
@@ -1464,7 +1503,7 @@ fn apply_ended(status: Result<Vec<String>, String>) -> bool {
 /// A room the master holds for a box's apply a previous master started ([`follow_rooms`]): a
 /// record of its work, so it does not end with the unfollowed ones.
 pub fn follows_room(id: &str) -> bool {
-    FOLLOWED_ROOMS.lock().unwrap().contains(id)
+    FOLLOWED_ROOMS.lock().unwrap().contains_key(id)
 }
 
 /// What a master runs as, and so what its self-update builds and execs into: devhub's own binary
@@ -2208,6 +2247,76 @@ pub fn build_failure(o: &std::process::Output) -> String {
 
 #[cfg(test)]
 mod tests {
+    use crate::lease::sched::{Req, Sched, HUB_BUILD};
+
+    fn deploy_request(node: &str) -> Req {
+        let mut req = Req::new(&format!("deploy-build-{node}"), crate::lease::Kind::Build);
+        req.class = HUB_BUILD.into();
+        req.master = true;
+        req.node = Some(node.into());
+        req
+    }
+
+    fn restore_room(s: &mut Sched, id: &str, req: &Req, state: &str, asked: u64) {
+        let node = if state == "queued" { "" } else { req.node.as_deref().unwrap() };
+        let line = format!(r#"{{"id":"{id}","state":"{state}","node":"{node}","asked_ms":{asked},"req":{}}}"#, req.to_json());
+        assert_eq!(s.restore(&line, 100).as_deref(), Some(id));
+    }
+
+    #[test]
+    fn dedup_followed_rooms_keeps_only_oldest_deploy_room_per_node() {
+        let mut s = Sched::new("master", 1);
+        let a = deploy_request("box-a");
+        for (id, asked) in [("L2", 20), ("L3", 30), ("L1", 10)] {
+            restore_room(&mut s, id, &a, "granted", asked);
+        }
+        restore_room(&mut s, "L4", &deploy_request("box-b"), "granted", 15);
+        restore_room(&mut s, "L5", &deploy_request("box-c"), "queued", 5);
+        let mut leases = s.view();
+        assert_eq!(super::dedup_followed_rooms(&leases),
+            [("L1".into(), "box-a".into()), ("L4".into(), "box-b".into())]);
+
+        leases.retain(|l| l.node.as_deref() == Some("box-a"));
+        leases.iter_mut().find(|l| l.id == "L2").unwrap().asked_ms = 10;
+        leases.reverse();
+        assert_eq!(super::dedup_followed_rooms(&leases), [("L2".into(), "box-a".into())],
+            "equal ask times use the earlier sequence even when its row comes last");
+    }
+
+    #[test]
+    fn deploy_room_active_admits_restored_queued_takeover_and_blocks_owned_rooms() {
+        use super::deploy_room_active_in;
+        use std::collections::BTreeMap;
+        let empty = BTreeMap::new();
+        let mut s = Sched::new("master", 1);
+        let req = deploy_request("box-c");
+        restore_room(&mut s, "L5", &req, "queued", 10);
+        let queued = s.get("L5").unwrap();
+        assert!(queued.reask_by.is_some() && queued.node.is_none());
+        assert!(!deploy_room_active_in(&empty, &s.view(), "box-c"), "the matching ask can reclaim L5");
+        assert_eq!(s.request(req, 101), "L5");
+        let owned = s.get("L5").unwrap();
+        assert!(owned.reask_by.is_none() && owned.node.is_none());
+        assert_eq!(owned.asked_ms, 10);
+        assert!(deploy_room_active_in(&empty, &s.view(), "box-c"), "the owned queue entry blocks a duplicate");
+
+        let a = deploy_request("box-a");
+        restore_room(&mut s, "L1", &a, "granted", 5);
+        restore_room(&mut s, "L6", &a, "queued", 20);
+        let followed = BTreeMap::from([("L1".into(), "box-a".into())]);
+        assert!(deploy_room_active_in(&empty, &s.view(), "box-a"), "the granted room is still active alongside an ownerless ask");
+        assert!(deploy_room_active_in(&followed, &[], "box-a"), "a followed room suffices on its own");
+        let mut hub = deploy_request("box-d");
+        hub.lane = "hub-build-box-d".into();
+        restore_room(&mut s, "L7", &hub, "granted", 10);
+        let mut lane = deploy_request("box-d");
+        lane.master = false;
+        restore_room(&mut s, "L8", &lane, "granted", 20);
+        assert!(!deploy_room_active_in(&followed, &s.view(), "box-d"), "neither request owns a deployment room");
+        restore_room(&mut s, "L9", &deploy_request("box-d"), "starting", 30);
+        assert!(deploy_room_active_in(&empty, &s.view(), "box-d"), "a starting room already owns its box's deployment");
+    }
+
     const PANIC_OUT: &str = "DEVHUB_TEST_PANIC_OUT";
 
     /// The probation role: a thread panics twice within the window; the act writes what it heard.
