@@ -102,6 +102,20 @@ impl FromWasmMsg {
         }
     }
 
+    /// Empties the message batch while retaining its backing allocation.
+    pub fn clear(&mut self) {
+        self.data.truncate(1);
+        self.odd = false;
+    }
+
+    /// Appends complete, u64-aligned messages after this batch's last message.
+    pub fn append_from(&mut self, other: &Self) {
+        if other.data.len() > 1 {
+            self.data.extend_from_slice(&other.data[1..]);
+            self.odd = other.odd;
+        }
+    }
+
     pub fn reserve_u64(mut self, capacity_u64: usize) -> Self {
         self.data.reserve(capacity_u64);
         self

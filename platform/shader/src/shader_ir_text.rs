@@ -5,7 +5,7 @@
 use relax_api::relax_api;
 
 use crate::shader_ir::*;
-use crate::shader_output::TextureType;
+use crate::shader_output::{pick_twin_name, glsl_texture_uniform_name, TextureType};
 use makepad_live_id::{id, LiveId};
 use std::fmt::Write;
 
@@ -32,6 +32,8 @@ pub struct TextCx<'a> {
     pub m: &'a IrModule,
     pub compute: Option<&'a crate::shader_ir_compute::ComputeLayout>,
     pub dialect: Dialect,
+    /// Checked once at the first discard, including derivatives in callees.
+    module_has_derivatives: Option<bool>,
     /// XR variant: the pass matrices select by the view.
     pub xr: bool,
     /// Helpers the printed code calls (the module printer emits them).
@@ -42,6 +44,8 @@ pub struct TextCx<'a> {
     /// GLSL: video textures are `samplerExternalOES` sampled by
     /// `sample2dOES` (GL ES on Android and Linux, not under Vulkan).
     pub glsl_oes_video: bool,
+    /// GLSL combined-sampler uniform for each (texture global, sampler index).
+    pub glsl_sampler_names: Vec<(GlobalId, u32, String)>,
     /// HLSL: the structs built by a constructor (HLSL has none; the module
     /// printer emits `_mp_make_<struct>` for each).
     pub hlsl_ctors: Vec<u32>,
@@ -92,11 +96,13 @@ impl<'a> TextCx<'a> {
             m,
             compute: None,
             dialect,
+            module_has_derivatives: None,
             xr,
             needs_inverse: false,
             needs_pass_helpers: false,
             uses_f16: std::cell::Cell::new(false),
             glsl_oes_video: false,
+            glsl_sampler_names: Vec::new(),
             hlsl_ctors: Vec::new(),
             pick_twins: Vec::new(),
         }
@@ -332,6 +338,7 @@ impl<'a> TextCx<'a> {
                 IrIo::FragmentOutput(i) => format!("frag_fb{}", i),
                 IrIo::FragmentDepth => "frag_depth_out".to_string(),
                 IrIo::FragmentPosition => "frag_position".to_string(),
+                IrIo::Texture(_) if self.glsl() => glsl_texture_uniform_name(glob.name, 0),
                 IrIo::Texture(_) => format!("tex_{}", n),
                 IrIo::Storage(_) | IrIo::Workgroup => format!("kernel_{}", n),
             },
@@ -995,9 +1002,17 @@ impl<'a> TextCx<'a> {
     }
 
     /// GLSL samples through the host's helpers (`sample2d`, `samplecube`,
-    /// `sample2dOES`); the sampler state is bound per texture by the host.
+    /// `sample2dOES`) with one uniform for each texture/sampler pair.
     fn glsl_sample(&mut self, f: &IrFunction, s: &IrSample, ty: TyId) -> String {
-        let t = self.expr(f, s.tex);
+        let binding = match f.exprs[s.tex as usize].kind {
+            ExprKind::Global(g) => self.glsl_sampler_names.iter()
+                .find(|(global, sampler, _)| *global == g && *sampler == s.sampler),
+            _ => None,
+        };
+        let t = match binding {
+            Some((_, _, name)) => name.clone(),
+            None => self.expr(f, s.tex),
+        };
         let c = self.expr(f, s.coord);
         let r = match s.kind {
             SampleKind::CompareLevel0 => {
@@ -1040,7 +1055,7 @@ impl<'a> TextCx<'a> {
         };
         let r = match (&f.exprs[s.tex as usize].kind, s.tex_type) {
             (ExprKind::Global(g), TextureType::Texture2d) => match self.pick_twins.iter().find(|(pg, _)| pg == g) {
-                Some((_, bit)) => format!("_mp_pick_sample({}u, {}__pick, {}, {})", bit, self.plain_global_name(*g), r, c),
+                Some((_, bit)) => format!("_mp_pick_sample({}u, {}, {}, {})", bit, pick_twin_name(&self.plain_global_name(*g)), r, c),
                 None => r,
             },
             _ => r,
@@ -1120,7 +1135,7 @@ impl<'a> TextCx<'a> {
                 // The pick variant: a 2D texture's sample also reads its twin.
                 let r = match (&f.exprs[smp.tex as usize].kind, smp.tex_type) {
                     (ExprKind::Global(g), TextureType::Texture2d) => match self.pick_twins.iter().find(|(pg, _)| pg == g) {
-                        Some((_, bit)) => format!("_mp_pick_sample({}u, {}__pick, {}, {})", bit, self.plain_global_name(*g), r, c),
+                        Some((_, bit)) => format!("_mp_pick_sample({}u, {}, {}, {})", bit, pick_twin_name(&self.plain_global_name(*g)), r, c),
                         None => r,
                     },
                     _ => r,
@@ -1340,6 +1355,15 @@ impl<'a> TextCx<'a> {
         }
     }
 
+    fn metal_construct(&self, ty: TyId, parts: &[String]) -> String {
+        let name = self.ty_name(ty);
+        match self.m.get(ty) {
+            IrTy::Struct(_) | IrTy::Array(..) => format!("{}{{{}}}", name, parts.join(", ")),
+            _ if parts.is_empty() => format!("{}(0)", name),
+            _ => format!("{}({})", name, parts.join(", ")),
+        }
+    }
+
     /// The expressions MSL spells its own way (None: the shared spelling).
     fn metal_expr(&mut self, f: &IrFunction, e: ExprId) -> Option<String> {
         let ex = &f.exprs[e as usize];
@@ -1384,17 +1408,7 @@ impl<'a> TextCx<'a> {
                 for a in args {
                     parts.push(self.expr(f, *a));
                 }
-                let name = self.ty_name(ty);
-                match self.m.get(ty) {
-                    IrTy::Struct(_) | IrTy::Array(..) => format!("{}{{{}}}", name, parts.join(", ")),
-                    _ => {
-                        if parts.is_empty() {
-                            format!("{}(0)", name)
-                        } else {
-                            format!("{}({})", name, parts.join(", "))
-                        }
-                    }
-                }
+                self.metal_construct(ty, &parts)
             }
             ExprKind::Builtin(op, args) => return self.metal_builtin(f, *op, args),
             ExprKind::Select(c, t, fl) => {
@@ -1436,7 +1450,7 @@ impl<'a> TextCx<'a> {
                 let r = match (&f.exprs[smp.tex as usize].kind, smp.tex_type) {
                     (ExprKind::Global(g), TextureType::Texture2d) => match self.pick_twins.iter().find(|(pg, _)| pg == g) {
                         Some((_, bit)) => {
-                            let twin = format!("_mp.{}__pick", self.plain_global_name(*g));
+                            let twin = format!("_mp.{}", pick_twin_name(&self.plain_global_name(*g)));
                             format!("_mp_pick_sample(_mp, {}u, {}, {}, {})", bit, twin, r, c)
                         }
                         None => r,
@@ -1761,6 +1775,34 @@ impl<'a> TextCx<'a> {
             Stmt::Discard => {
                 Self::pad(out, indent);
                 out.push_str(if self.metal() { "discard_fragment();\n" } else { "discard;\n" });
+                // WGSL needs uniform control flow for later implicit samples and derivatives.
+                if self.dialect == Dialect::Wgsl {
+                    return;
+                }
+                // A demoted lane still supplies its quad neighbours' derivatives.
+                if *self.module_has_derivatives.get_or_insert_with(|| {
+                    self.m.functions.iter().flat_map(|f| &f.exprs)
+                        .any(|e| matches!(e.kind, ExprKind::Builtin(Builtin::Dpdx | Builtin::Dpdy, _)))
+                }) {
+                    return;
+                }
+                if f.entry.is_some() || f.ret == TY_VOID {
+                    self.stmt(f, &Stmt::Return(NO_EXPR), indent, out);
+                } else {
+                    Self::pad(out, indent);
+                    if self.hlsl() && matches!(self.m.get(f.ret), IrTy::Array(..)) {
+                        // An HLSL array initializer list needs a declaration.
+                        writeln!(out, "{{ {} = {}; return _mp_zero; }}", self.decl(f.ret, "_mp_zero"), self.hlsl_zero_init(f.ret)).ok();
+                    } else {
+                        let zero = match self.dialect {
+                            Dialect::Metal => self.metal_construct(f.ret, &[]),
+                            Dialect::Hlsl => self.hlsl_zero_init(f.ret),
+                            Dialect::Glsl => self.glsl_zero(f.ret),
+                            Dialect::Wgsl => unreachable!(),
+                        };
+                        writeln!(out, "return {};", zero).ok();
+                    }
+                }
             }
             Stmt::Return(e) => {
                 Self::pad(out, indent);

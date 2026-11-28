@@ -24,6 +24,7 @@
 
 use crate::{AudioShader, AudioShaderBody};
 use makepad_script_compute::wasm::{self as backend, Entry, Target};
+use relax_api::relax_api;
 use std::sync::Arc;
 
 /// One module whose export `run<k>` is `shaders[k]`'s render entry
@@ -32,8 +33,44 @@ use std::sync::Arc;
 /// `target`: how the module imports `env.memory` (a threaded app's memory
 /// is shared with a maximum). Audio code has no fused multiply-add, so
 /// `relaxed_fma` changes nothing here.
+#[inline(always)]
 pub fn module(shaders: &[&AudioShader], target: Target) -> Option<Vec<u8>> {
-    module_checked(shaders, target).ok()
+    let mut out = None;
+    module_into(shaders, target, &mut AudioWasmOut::new(&mut out));
+    out
+}
+
+/// Where [`module_into`] writes the module's bytes, copied into a vector
+/// the caller's memory holds (`None` stays when the shaders do not compile).
+#[relax_api(plain)]
+#[repr(C)]
+pub struct AudioWasmOut<'a> {
+    ctx: *mut u8,
+    write: unsafe extern "C-unwind" fn(*mut u8, *const u8, usize),
+    _out: std::marker::PhantomData<&'a mut u8>,
+}
+
+impl<'a> AudioWasmOut<'a> {
+    #[inline(always)]
+    pub fn new(out: &'a mut Option<Vec<u8>>) -> Self {
+        unsafe extern "C-unwind" fn write(ctx: *mut u8, module: *const u8, module_len: usize) {
+            let out = &mut *(ctx as *mut Option<Vec<u8>>);
+            *out = Some(std::slice::from_raw_parts(module, module_len).to_vec());
+        }
+        Self { ctx: out as *mut Option<Vec<u8>> as *mut u8, write, _out: std::marker::PhantomData }
+    }
+
+    fn write(&mut self, module: &[u8]) {
+        unsafe { (self.write)(self.ctx, module.as_ptr(), module.len()) }
+    }
+}
+
+/// Compiles the shaders in order and writes the module to `out`.
+#[relax_api]
+pub fn module_into(shaders: &[&AudioShader], target: Target, out: &mut AudioWasmOut<'_>) {
+    if let Ok(module) = module_checked(shaders, target) {
+        out.write(&module);
+    }
 }
 
 /// The memory a shader module imports, including its live data, scratch and audio buffers.
@@ -114,6 +151,14 @@ pub(crate) fn run_slot(shader: &AudioShader, slot: u32, ctx: &mut [u32], state: 
 
 static RECORDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Stops recording and discards any shaders left by the run that just ended.
+pub(crate) fn end_run() {
+    RECORDING.store(false, std::sync::atomic::Ordering::Relaxed);
+    let q = recorded();
+    let rx = q.1.lock().unwrap_or_else(|e| e.into_inner());
+    while rx.try_recv().is_ok() {}
+}
+
 fn recorded() -> &'static (std::sync::mpsc::Sender<Arc<AudioShaderBody>>, std::sync::Mutex<std::sync::mpsc::Receiver<Arc<AudioShaderBody>>>) {
     static Q: std::sync::OnceLock<(std::sync::mpsc::Sender<Arc<AudioShaderBody>>, std::sync::Mutex<std::sync::mpsc::Receiver<Arc<AudioShaderBody>>>)> = std::sync::OnceLock::new();
     Q.get_or_init(|| {
@@ -124,6 +169,7 @@ fn recorded() -> &'static (std::sync::mpsc::Sender<Arc<AudioShaderBody>>, std::s
 
 /// Keeps every audio shader compiled from now on (any thread) for
 /// [`take_recorded`], or stops keeping them.
+#[relax_api]
 pub fn record_compiled(on: bool) {
     RECORDING.store(on, std::sync::atomic::Ordering::Relaxed);
 }
@@ -133,33 +179,82 @@ pub fn record_compiled(on: bool) {
 /// [`AudioShader::program_key`].
 #[inline(always)]
 pub fn take_recorded() -> Vec<crate::AudioShaderRef> {
-    let mut batch = take_recorded_batch();
-    let mut shaders = Vec::new();
-    while let Some(shader) = batch.next_shader() {
-        shaders.push(shader);
-    }
-    shaders
+    let mut out = Vec::new();
+    take_recorded_into(&mut RecordedShadersOut::new(&mut out));
+    out
 }
 
-/// An owned recording batch; its Arc values are never read by the caller.
-pub struct RecordedShaders(std::vec::IntoIter<Arc<AudioShaderBody>>);
+/// Where [`take_recorded_into`] writes the recorded shaders: each cloned
+/// through its handle into a caller-owned vector.
+#[relax_api(plain)]
+#[repr(C)]
+pub struct RecordedShadersOut<'a> {
+    ctx: *mut u8,
+    push: unsafe extern "C-unwind" fn(*mut u8, *const crate::AudioShaderRef),
+    _out: std::marker::PhantomData<&'a mut u8>,
+}
 
-impl RecordedShaders {
-    pub fn next_shader(&mut self) -> Option<crate::AudioShaderRef> {
-        self.0.next().map(crate::AudioShaderRef::from_arc)
+impl<'a> RecordedShadersOut<'a> {
+    #[inline(always)]
+    pub fn new(out: &'a mut Vec<crate::AudioShaderRef>) -> Self {
+        unsafe extern "C-unwind" fn push(ctx: *mut u8, shader: *const crate::AudioShaderRef) {
+            let out = &mut *(ctx as *mut Vec<crate::AudioShaderRef>);
+            out.push((*shader).clone());
+        }
+        Self { ctx: out as *mut Vec<crate::AudioShaderRef> as *mut u8, push, _out: std::marker::PhantomData }
+    }
+
+    fn push(&mut self, shader: &crate::AudioShaderRef) {
+        unsafe { (self.push)(self.ctx, shader) }
     }
 }
 
-pub fn take_recorded_batch() -> Box<RecordedShaders> {
-    let shaders: Vec<_> = match recorded().1.lock() {
+/// Drains the recorded audio shaders into `out`, in recording order.
+#[relax_api]
+pub fn take_recorded_into(out: &mut RecordedShadersOut<'_>) {
+    // The guard drops at the end of this statement: `out` runs the caller's
+    // code, which never runs under the lock.
+    let shaders: Vec<Arc<AudioShaderBody>> = match recorded().1.lock() {
         Ok(rx) => rx.try_iter().collect(),
         Err(_) => Vec::new(),
     };
-    Box::new(RecordedShaders(shaders.into_iter()))
+    for shader in shaders {
+        out.push(&crate::AudioShaderRef::from_arc(shader));
+    }
 }
 
 pub(crate) fn note_compiled(shader: &Arc<AudioShaderBody>) {
     if RECORDING.load(std::sync::atomic::Ordering::Relaxed) {
         recorded().0.send(shader.clone()).ok();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn take_recorded_and_module_round_trip() {
+        struct StopRecording;
+        impl Drop for StopRecording {
+            fn drop(&mut self) {
+                record_compiled(false);
+            }
+        }
+
+        let (key, recorded) = {
+            record_compiled(true);
+            let _reset = StopRecording;
+            let shader = crate::compile_with("fn voice() { 0.3125 }", crate::Backend::Interp)
+                .expect("the test voice compiles");
+            (shader.program_key(), take_recorded())
+        };
+        // Other unit tests may compile shaders while the process-wide recorder is on.
+        let mut voices = recorded.iter().filter(|shader| shader.program_key() == key);
+        let voice = voices.next().expect("the recorder returns the compiled voice");
+        assert!(voices.next().is_none(), "compiling the voice once records it exactly once");
+        let mut bytes = module(&[voice.as_ref()], Target::default()).expect("the recorded voice emits a module");
+        bytes.resize(bytes.capacity() + 1, 0xff);
+        assert!(bytes.starts_with(b"\0asm"), "the audio wasm magic survives growing the returned buffer");
     }
 }

@@ -776,6 +776,15 @@ fn derive_script_impl_inner(
                     }
                     tb.add("], file!(), line!())");
                     tb.add("});");
+                    tb.add("vm.script_derive_enum_tuple_args(<Self as ScriptNew>::script_type_id_static(), ")
+                        .live_id(&item.name)
+                        .add(", &[");
+                    for arg in args.iter() {
+                        tb.add("<")
+                            .stream(Some(arg.clone()))
+                            .add(" as ScriptNew>::script_type_id_static(),");
+                    }
+                    tb.add("]);");
                 }
                 EnumKind::Named(fields) => {
                     tb.add("let def =");

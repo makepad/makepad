@@ -1,7 +1,7 @@
 use relax_api::relax_api;
 use crate::array::*;
 use crate::gc::*;
-use crate::gen_index::{GenSlot, GenVec};
+use crate::gen_index::{GenSlot, GenVec, SlotRefusal};
 use crate::handle::*;
 use crate::makepad_live_id::*;
 use crate::object::*;
@@ -24,6 +24,85 @@ pub struct ScriptAllocationReport {
     pub allocated_bytes: usize,
     /// True when an allocation was refused before growing its container.
     pub exceeded: bool,
+}
+
+/// The refusal reason when a heap table already holds as many values as a
+/// value's index can name (16.7 M per kind): a limit of the representation,
+/// reported like a refused allocation.
+pub const TOO_MANY_LIVE_VALUES: &str = "too many live values";
+
+const COLLECTING_GARBAGE: &str = "out of memory while collecting garbage";
+pub(crate) const NAMING_A_PROPERTY: &str = "out of memory while naming a property";
+pub(crate) const STARTING_A_LOOP: &str = "out of memory while starting a loop";
+pub(crate) const RAN_LOW_ON_MEMORY: &str = "out of memory: the system refused an allocation";
+
+/// Capacity for an entire walk, irrespective of the vector's current length.
+pub(crate) fn reserve_to<T>(v: &mut Vec<T>, required: usize) -> bool {
+    required <= v.capacity() || v.try_reserve(required - v.len()).is_ok()
+}
+
+fn size_marks(marks: &mut Vec<u64>, slots: usize) -> bool {
+    let words = slots.div_ceil(64);
+    if words > marks.len() {
+        if !reserve_to(marks, words) { return false; }
+        marks.resize(words, 0);
+    }
+    true
+}
+
+// One room check for the next slot: its bitmap bit and its share of the common worklist.
+#[inline]
+fn reserve_trace_slot(work: &mut Vec<u32>, marks: &mut Vec<u64>, slots: usize, other: usize,
+    reason: &'static str) -> Result<(), &'static str> {
+    let covered = (marks.len() * 64).min(work.capacity().saturating_sub(other));
+    if slots < covered || (reserve_to(work, slots + 1 + other) && size_marks(marks, slots + 1)) {
+        Ok(())
+    } else {
+        Err(reason)
+    }
+}
+
+const STORING_A_STRING: &str = "out of memory while storing a string";
+
+/// Room for one more slot in `table`, and for `free` to hold every slot of
+/// the grown table, so that sweep and unwind never grow a free list.
+#[inline]
+fn reserve_table_slot<T, R>(table: &mut GenVec<T>, free: &mut Vec<R>, reason: &'static str) -> Result<(), &'static str> {
+    match table.try_reserve_slot() {
+        Ok(()) => {}
+        Err(SlotRefusal::Full) => return Err(TOO_MANY_LIVE_VALUES),
+        Err(SlotRefusal::Memory) => return Err(reason),
+    }
+    let slots = table.len() + 1;
+    if free.capacity() < slots && free.try_reserve(slots - free.len()).is_err() {
+        return Err(reason);
+    }
+    Ok(())
+}
+
+/// Grow `free` so it can hold every slot of a table about to reach `slots`,
+/// for the tables whose new slots are not guarded (pods, pod types, handles,
+/// regexes: a document cannot make one of their requests large). Their sweep
+/// then never grows a free list either.
+#[inline]
+pub(crate) fn reserve_free_list<R>(free: &mut Vec<R>, slots: usize) {
+    if free.capacity() < slots {
+        free.reserve(slots - free.len());
+    }
+}
+
+/// The first physical allocation refusal in an evaluation. The reason is static
+/// so the host can read it even while the allocator is still refusing requests.
+#[relax_api(plain, run)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScriptMemoryRefusal {
+    pub reason: &'static str,
+    pub ip: ScriptIp,
+}
+
+pub(crate) enum AllocationError {
+    Memory,
+    Limit(String),
 }
 
 #[relax_api(handle, run)]
@@ -105,6 +184,7 @@ pub const HEAP_STAT_LIVE_LEN: u32 = 9;
 pub const HEAP_STAT_NEEDS_GC: u32 = 10;
 /// the heap's tag (heap_tag.rs)
 pub const HEAP_STAT_TAG: u32 = 11;
+pub const HEAP_STAT_ALLOCATION_ERROR_PENDING: u32 = 12;
 
 /// value_text's mode.
 pub const TEXT_DEBUG: u32 = 0;
@@ -143,13 +223,22 @@ impl TypeInfo {
     }
 }
 
-#[relax_api(handle, run)]
+#[relax_api(handle, run, default)]
 #[derive(Default)]
 pub struct ScriptHeap {
     pub modules: ScriptObject,
     pub(crate) gc_last: ScriptHeapGcLast,
-    pub(crate) mark_vec: Vec<ScriptGcMark>,
+    pub(crate) mark_vec: Vec<u32>,
+    pub(crate) object_marks: Vec<u64>,
+    pub(crate) array_marks: Vec<u64>,
+    pub(crate) gc_phase: GcPhase,
+    pub(crate) transient_bodies: Vec<bool>,
+    pub(crate) live_bodies: Vec<bool>,
+    pub(crate) newly_live_bodies: Vec<usize>,
     pub(crate) object_reuse_epoch: u64,
+    /// A guest under an entry policy asked for a collection (`gc.run`); the host collects on its
+    /// own schedule and clears this ([`Self::take_gc_request`]).
+    pub(crate) gc_requested: bool,
 
     /// root counts of the Rust-held refs (roots.rs)
     pub(crate) roots: crate::roots::ScriptRootsOwner,
@@ -181,6 +270,12 @@ pub struct ScriptHeap {
 
     pub(crate) type_check: Vec<ScriptTypeCheck>,
     pub(crate) type_index: HashMap<ScriptTypeId, ScriptTypeIndex>,
+    /// The argument types of each derived enum's tuple variants, by enum type and variant
+    /// (`script_derive_enum_tuple_args`): what lets `typed_value` build `Size.Fixed(200)` from
+    /// data, each argument against its own type, without calling the variant's constructor.
+    pub(crate) tuple_arg_types: HashMap<(ScriptTypeId, LiveId), Box<[ScriptTypeId]>>,
+    /// The element type recorded when a generic `Vec<T>` builds its prototype.
+    vec_element_types: HashMap<ScriptTypeId, ScriptTypeId>,
     /// The pod type of each Rust type (`ScriptNew::script_pod`). A Rust type's layout is fixed
     /// for the process, so it has one pod type, static (never collected). A module's
     /// `#(T::script_pod(vm))` then gives the same value on every run: a changed `#(..)` value
@@ -228,10 +323,14 @@ pub struct ScriptHeap {
     /// A refusal raised by the per-string ceiling, surfaced through the same
     /// `take_allocation_error` poll the VM uses for budget refusals.
     pub(crate) pending_string_limit_error: Option<String>,
-    /// Set whenever a refusal is recorded (scoped budget, retained cap or
-    /// string ceiling). The interpreter asks `take_allocation_error` before
+    /// Set whenever a limit or physical refusal is recorded.
+    /// The interpreter asks `take_allocation_error` before
     /// every instruction, so the no-error case must be one flag read.
     pub(crate) allocation_error_pending: bool,
+    memory_refusal: Option<ScriptMemoryRefusal>,
+    memory_refusal_pending: bool,
+    /// Includes host call and eval setup, direct natives, and nested interpreters.
+    vm_entry_depth: u32,
     /// Bounded document evaluation (`eval_bounded`): natives that build a
     /// string without a preflight build it and charge its length after,
     /// instead of being refused. Off for Octoscript, which refuses them.
@@ -243,8 +342,74 @@ pub struct ScriptHeap {
     pub(crate) touch: Option<Box<crate::touch::ScriptTouch>>,
 }
 
+// Report a refusal no interpreter owns without asking for memory or taking a std lock:
+// on macOS the first lock of std::io::stderr() allocates its mutex, which fails here.
+#[cfg(unix)]
+#[cold]
+fn report_refusal(reason: &str) {
+    unsafe extern "C" {
+        fn write(fd: std::ffi::c_int, buf: *const std::ffi::c_void, count: usize) -> isize;
+    }
+    let write_all = |mut bytes: &[u8]| {
+        while !bytes.is_empty() {
+            let n = unsafe { write(2, bytes.as_ptr().cast(), bytes.len()) };
+            if n > 0 {
+                bytes = &bytes[n as usize..];
+            } else if n < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            } else {
+                break;
+            }
+        }
+    };
+    // One write when it fits, so concurrent reports do not interleave.
+    let mut line = [0u8; 256];
+    let bytes = reason.as_bytes();
+    if bytes.len() < line.len() {
+        line[..bytes.len()].copy_from_slice(bytes);
+        line[bytes.len()] = b'\n';
+        write_all(&line[..bytes.len() + 1]);
+    } else {
+        write_all(bytes);
+        write_all(b"\n");
+    }
+}
+
+#[cfg(not(unix))]
+#[cold]
+fn report_refusal(reason: &str) {
+    use std::io::Write;
+    let mut stderr = std::io::stderr().lock();
+    let _ = stderr.write_all(reason.as_bytes());
+    let _ = stderr.write_all(b"\n");
+}
+
 #[relax_api(run)]
 impl ScriptHeap {
+    /// How many arguments a derived enum's tuple variant takes, when the derive recorded its
+    /// argument types (`typed_value` builds each from data). An op: the table is rustc's.
+    #[relax_api(run)]
+    pub fn tuple_arg_count(&self, enum_ty: ScriptTypeId, variant: LiveId) -> Option<usize> {
+        self.tuple_arg_types.get(&(enum_ty, variant)).map(|args| args.len())
+    }
+
+    /// The recorded type of argument `index` of a derived enum's tuple variant.
+    #[relax_api(run)]
+    pub fn tuple_arg_type(&self, enum_ty: ScriptTypeId, variant: LiveId, index: usize) -> Option<ScriptTypeId> {
+        self.tuple_arg_types.get(&(enum_ty, variant)).and_then(|args| args.get(index)).copied()
+    }
+
+    /// Returns true on first registration, before the vector registers its element's prototype.
+    #[relax_api(run)]
+    pub fn register_vec_element_type(&mut self, vec_ty: ScriptTypeId, element_ty: ScriptTypeId) -> bool {
+        self.vec_element_types.insert(vec_ty, element_ty).is_none()
+    }
+
+    #[relax_api(run)]
+    pub fn vec_element_type(&self, vec_ty: ScriptTypeId) -> Option<ScriptTypeId> {
+        self.vec_element_types.get(&vec_ty).copied()
+    }
+
     /// Declare metadata accepted by a registered component without making it a
     /// child in the object's ordered vector. The metadata has no Rust field. An op of the
     /// provided crate: JIT'd widget registration calls it, never reads the heap's fields.
@@ -259,6 +424,12 @@ impl ScriptHeap {
     pub fn object_alive(&self, obj: ScriptObject) -> bool {
         let slots = self.object_slots();
         slots.is_valid(obj) && slots[obj].tag.is_alloced()
+    }
+
+    /// The shader compiler's test for a draw object: `vertex` with `fragment` or `pixel`.
+    pub(crate) fn is_draw_object(&self, obj: ScriptObject) -> bool {
+        let has = |name: LiveId| self.object_method(obj, name.into(), crate::trap::NoTrap).as_object().is_some();
+        has(id!(vertex)) && (has(id!(fragment)) || has(id!(pixel)))
     }
 
     /// The draw shader objects reachable from `root` (fields holding an object with `vertex`
@@ -293,12 +464,9 @@ impl ScriptHeap {
         if !valid(obj) {
             continue;
         }
-        if by_field && !candidates.contains(&obj) {
-            let has = |name: LiveId| heap.object_method(obj, name.into(), crate::trap::NoTrap).as_object().is_some();
-            if has(id!(vertex)) && (has(id!(fragment)) || has(id!(pixel))) {
-                candidates.insert(obj);
-                out.push(obj);
-            }
+        if by_field && !candidates.contains(&obj) && heap.is_draw_object(obj) {
+            candidates.insert(obj);
+            out.push(obj);
         }
         if !seen.insert(obj) {
             continue;
@@ -341,6 +509,7 @@ impl ScriptHeap {
         if self.allocation_poison_object == ScriptObject::ZERO {
             let object = self.new_object();
             self.objects[object].tag.set_static();
+            self.objects[object].tag.set_reffed();
             self.objects[object].tag.freeze();
             self.allocation_poison_object = object;
         }
@@ -388,6 +557,170 @@ impl ScriptHeap {
                 exceeded: budget.exceeded,
             }
         })
+    }
+
+    /// Reserve the container before mutating it. A physical refusal is independent
+    /// of the host's logical allocation budget.
+    #[inline]
+    pub(crate) fn reserve_for(
+        &mut self,
+        reason: &'static str,
+        trap: crate::trap::ScriptTrap,
+        reserve: impl FnOnce(&mut Self) -> Result<(), std::collections::TryReserveError>,
+    ) -> bool {
+        if self.memory_refusal_pending { return false; }
+        if reserve(self).is_ok() { return true; }
+        self.refuse_memory(reason, trap);
+        false
+    }
+
+    #[cold]
+    pub(crate) fn refuse_memory(&mut self, reason: &'static str, trap: crate::trap::ScriptTrap) {
+        if !self.memory_refusal_pending {
+            let ip = match trap {
+                crate::trap::ScriptTrap::Inner(trap) => trap.ip,
+                crate::trap::NoTrap => ScriptIp::UNKNOWN,
+            };
+            self.memory_refusal = Some(ScriptMemoryRefusal { reason, ip });
+            if self.in_vm_entry() {
+                self.memory_refusal_pending = true;
+                self.allocation_error_pending = true;
+            } else {
+                // No VM entry owns this failure. Report it to the host right here.
+                report_refusal(reason);
+            }
+            if let Some(budget) = &mut self.allocation_budget { budget.exceeded = true; }
+        }
+    }
+
+    #[inline]
+    pub(crate) fn memory_refusal_pending(&self) -> bool { self.memory_refusal_pending }
+
+    /// Marking and reclamation only borrow storage acquired before the first mark.
+    pub(crate) fn preflight_gc(&mut self, code: &crate::vm::ScriptCode) -> bool {
+        let bodies = code.bodies.borrow().len();
+        if reserve_to(&mut self.mark_vec, self.objects.len() + self.arrays.len())
+            && size_marks(&mut self.object_marks, self.objects.len())
+            && size_marks(&mut self.array_marks, self.arrays.len())
+            && reserve_to(&mut self.transient_bodies, bodies)
+            && reserve_to(&mut self.live_bodies, bodies)
+            && reserve_to(&mut self.newly_live_bodies, bodies)
+            && reserve_to(&mut code.free_bodies.borrow_mut(), bodies)
+        {
+            true
+        } else {
+            self.refuse_memory(COLLECTING_GARBAGE, crate::trap::NoTrap);
+            false
+        }
+    }
+
+    /// Room for one more object slot (see [`reserve_table_slot`]). False after
+    /// recording the refusal; the caller returns its refused value.
+    #[inline]
+    pub(crate) fn reserve_object_slot(&mut self) -> bool {
+        if self.memory_refusal_pending { return false; }
+        const REASON: &str = "out of memory while creating an object";
+        let result = reserve_table_slot(&mut self.objects, &mut self.objects_free, REASON)
+            .and_then(|()| reserve_trace_slot(&mut self.mark_vec, &mut self.object_marks,
+                self.objects.len(), self.arrays.len(), REASON));
+        self.table_slot_result(result)
+    }
+
+    #[inline]
+    pub(crate) fn reserve_array_slot(&mut self) -> bool {
+        if self.memory_refusal_pending { return false; }
+        const REASON: &str = "out of memory while creating an array";
+        let result = reserve_table_slot(&mut self.arrays, &mut self.arrays_free, REASON)
+            .and_then(|()| reserve_trace_slot(&mut self.mark_vec, &mut self.array_marks,
+                self.arrays.len(), self.objects.len(), REASON));
+        self.table_slot_result(result)
+    }
+
+    /// A new string slot and its intern-table entry.
+    #[inline]
+    pub(crate) fn reserve_string_slot(&mut self) -> bool {
+        if self.memory_refusal_pending { return false; }
+        let result = reserve_table_slot(&mut self.strings, &mut self.strings_free, STORING_A_STRING);
+        self.table_slot_result(result) && self.reserve_string_intern()
+    }
+
+    /// The intern-table entry for a string stored in a reused slot.
+    #[inline]
+    pub(crate) fn reserve_string_intern(&mut self) -> bool {
+        if self.memory_refusal_pending { return false; }
+        let room = self.string_intern.len() < self.string_intern.capacity() || self.string_intern.try_reserve(1).is_ok();
+        self.table_slot_result(if room { Ok(()) } else { Err(STORING_A_STRING) })
+    }
+
+    #[inline]
+    fn table_slot_result(&mut self, result: Result<(), &'static str>) -> bool {
+        match result {
+            Ok(()) => true,
+            Err(reason) => {
+                self.refuse_memory(reason, crate::trap::NoTrap);
+                false
+            }
+        }
+    }
+
+    pub(crate) fn memory_error_value(&mut self, ip: ScriptIp) -> ScriptValue {
+        let refusal = self.memory_refusal.as_mut().expect("pending memory refusal");
+        if refusal.ip.is_unknown() { refusal.ip = ip; }
+        ScriptValue::script_err_limit(refusal.ip)
+    }
+
+    pub(crate) fn finish_memory_refusal(&mut self) {
+        self.memory_refusal_pending = false;
+        self.allocation_error_pending = self.first_limit_error().is_some();
+    }
+
+    #[cold]
+    fn clear_superseded_limit_errors(&mut self) {
+        if let Some(budget) = &mut self.allocation_budget { budget.error = None; }
+        if let Some(cap) = &mut self.heap_cap { cap.error = None; }
+        self.pending_string_limit_error = None;
+    }
+
+    #[inline]
+    pub(crate) fn enter_vm_entry(&mut self) {
+        if self.vm_entry_depth == 0 {
+            self.memory_refusal = None;
+            self.finish_memory_refusal();
+        }
+        self.vm_entry_depth += 1;
+    }
+
+    #[inline]
+    pub(crate) fn leave_vm_entry(&mut self) {
+        debug_assert!(self.vm_entry_depth > 0);
+        self.vm_entry_depth -= 1;
+        if self.vm_entry_depth == 0 && self.memory_refusal_pending {
+            self.clear_superseded_limit_errors();
+            self.finish_memory_refusal();
+        }
+    }
+
+    #[inline]
+    pub(crate) fn in_vm_entry(&self) -> bool {
+        self.vm_entry_depth != 0
+    }
+
+    /// Takes the last completed physical refusal once, including its
+    /// instruction pointer when known. Reading cannot disarm an active unwind.
+    #[inline]
+    pub fn take_memory_refusal(&mut self) -> Option<ScriptMemoryRefusal> {
+        let mut out = ScriptMemoryRefusal { reason: "", ip: ScriptIp::UNKNOWN };
+        self.read_memory_refusal(&mut out).then_some(out)
+    }
+
+    #[relax_api(run)]
+    fn read_memory_refusal(&mut self, out: &mut ScriptMemoryRefusal) -> bool {
+        if self.memory_refusal_pending { return false; }
+        if let Some(refusal) = self.memory_refusal.take() {
+            *out = refusal;
+            return true;
+        }
+        false
     }
 
     /// Charge logical payload bytes before a script-controlled container
@@ -464,27 +797,39 @@ impl ScriptHeap {
     }
 
     /// The pending refusal the interpreter turns into an uncatchable bail
-    /// before the next opcode: a scoped-budget refusal, a retained-cap
-    /// refusal, or a per-string ceiling refusal, in that order.
+    /// before the next opcode. Physical exhaustion takes precedence and
+    /// stays pending until the outermost VM entry has unwound.
     #[inline(always)]
-    pub(crate) fn take_allocation_error(&mut self) -> Option<String> {
+    pub(crate) fn take_allocation_error(&mut self) -> Option<AllocationError> {
         if !self.allocation_error_pending {
             return None;
         }
-        self.take_pending_allocation_error()
+        if self.memory_refusal_pending {
+            return Some(AllocationError::Memory);
+        }
+        self.take_pending_allocation_error().map(AllocationError::Limit)
     }
 
     #[inline(never)]
     #[cold]
     fn take_pending_allocation_error(&mut self) -> Option<String> {
         let error = self.take_first_allocation_error();
-        self.allocation_error_pending = self
-            .allocation_budget
-            .as_ref()
-            .is_some_and(|budget| budget.error.is_some())
-            || self.heap_cap.as_ref().is_some_and(|cap| cap.error.is_some())
-            || self.pending_string_limit_error.is_some();
+        self.allocation_error_pending = self.peek_allocation_error().is_some();
         error
+    }
+
+    pub(crate) fn peek_allocation_error(&self) -> Option<&str> {
+        if !self.allocation_error_pending { return None; }
+        if self.memory_refusal_pending {
+            return Some(self.memory_refusal.as_ref().map_or("out of memory", |r| r.reason));
+        }
+        self.first_limit_error()
+    }
+
+    fn first_limit_error(&self) -> Option<&str> {
+        self.allocation_budget.as_ref().and_then(|budget| budget.error.as_deref())
+            .or_else(|| self.heap_cap.as_ref().and_then(|cap| cap.error.as_deref()))
+            .or(self.pending_string_limit_error.as_deref())
     }
 
     fn take_first_allocation_error(&mut self) -> Option<String> {
@@ -602,7 +947,12 @@ impl ScriptHeap {
 
         let mut bytes = size_of::<Self>();
 
-        bytes = bytes.saturating_add(bytes_for::<ScriptGcMark>(self.mark_vec.capacity()));
+        bytes = bytes.saturating_add(bytes_for::<u32>(self.mark_vec.capacity()));
+        bytes = bytes.saturating_add(bytes_for::<u64>(self.object_marks.capacity()));
+        bytes = bytes.saturating_add(bytes_for::<u64>(self.array_marks.capacity()));
+        bytes = bytes.saturating_add(bytes_for::<bool>(self.transient_bodies.capacity()));
+        bytes = bytes.saturating_add(bytes_for::<bool>(self.live_bodies.capacity()));
+        bytes = bytes.saturating_add(bytes_for::<usize>(self.newly_live_bodies.capacity()));
         bytes = bytes.saturating_add(self.roots.get().bytes());
         bytes = bytes.saturating_add(map_bytes(&self.type_defaults));
 
@@ -702,6 +1052,10 @@ impl ScriptHeap {
     /// The slot arrays keep their high-water `len` (slots are reused via the free lists), so
     /// every existing index / reference stays valid.
     pub fn shrink_to_fit(&mut self) {
+        if self.gc_phase == GcPhase::Skipped { return; }
+        self.mark_vec.shrink_to(self.objects.len() + self.arrays.len());
+        self.object_marks.shrink_to(self.objects.len().div_ceil(64));
+        self.array_marks.shrink_to(self.arrays.len().div_ceil(64));
         if self.strings_reuse.len() > Self::MAX_STRINGS_REUSE {
             self.strings_reuse.truncate(Self::MAX_STRINGS_REUSE);
         }
@@ -714,13 +1068,14 @@ impl ScriptHeap {
         self.handles.shrink_to_fit();
         self.regexes.shrink_to_fit();
 
-        self.objects_free.shrink_to_fit();
-        self.strings_free.shrink_to_fit();
-        self.arrays_free.shrink_to_fit();
-        self.pods_free.shrink_to_fit();
-        self.pod_types_free.shrink_to_fit();
-        self.handles_free.shrink_to_fit();
-        self.regexes_free.shrink_to_fit();
+        // A later sweep can return every collectible slot without growing these lists.
+        self.objects_free.shrink_to(self.objects.len());
+        self.strings_free.shrink_to(self.strings.len());
+        self.arrays_free.shrink_to(self.arrays.len());
+        self.pods_free.shrink_to(self.pods.len());
+        self.pod_types_free.shrink_to(self.pod_types.len());
+        self.handles_free.shrink_to(self.handles.len());
+        self.regexes_free.shrink_to(self.regexes.len());
         self.reconcile_heap_bytes_if_limited();
     }
 
@@ -729,7 +1084,13 @@ impl ScriptHeap {
         self.heap_stat(HEAP_STAT_TAG) as u8
     }
 
-    pub fn empty() -> Self {
+    /// Whether the VM has an allocation refusal to deliver.
+    #[inline]
+    pub fn allocation_error_pending(&self) -> bool {
+        self.heap_stat(HEAP_STAT_ALLOCATION_ERROR_PENDING) != 0
+    }
+
+    pub(crate) fn empty() -> Self {
         let mut objects = GenVec::new();
         let mut arrays = GenVec::new();
         let mut pods = GenVec::new();
@@ -773,6 +1134,8 @@ impl ScriptHeap {
 
         v.modules = v.new_with_proto(id!(mod).into());
         v.roots.add_static(crate::roots::ROOT_OBJECT, v.modules.index);
+        // A refused table slot returns these, so they must exist before any refusal can.
+        v.ensure_allocation_poison();
 
         v
     }
@@ -1036,6 +1399,7 @@ impl ScriptHeap {
             HEAP_STAT_LIVE_LEN => self.gc_live_len_impl() as u64,
             HEAP_STAT_NEEDS_GC => self.needs_gc_impl() as u64,
             HEAP_STAT_TAG => self.heap_tag.get() as u64,
+            HEAP_STAT_ALLOCATION_ERROR_PENDING => self.allocation_error_pending as u64,
             _ => unreachable!("heap_stat"),
         }
     }
@@ -1118,6 +1482,13 @@ impl ScriptHeap {
     #[inline]
     pub fn object_reuse_epoch(&self) -> u64 {
         self.heap_stat(HEAP_STAT_REUSE_EPOCH)
+    }
+
+    /// Whether a guest asked for a collection since the last call, clearing the request. The host
+    /// that pumps the VM collects it at most once per turn, so a loop of `gc.run()` costs fuel like
+    /// any loop instead of a collection each.
+    pub fn take_gc_request(&mut self) -> bool {
+        std::mem::take(&mut self.gc_requested)
     }
 
     #[inline]
@@ -1840,6 +2211,831 @@ mod tests {
 
     fn string_of(vm: &ScriptVm, value: ScriptValue) -> Option<String> {
         vm.bx.heap.string_with(value, |_, text| text.to_owned())
+    }
+
+    fn refusal_vm(host: &mut ScriptVmHost) -> ScriptVm<'_> {
+        let mut bx = Box::new(ScriptVmBase::new());
+        bx.bail_on_uncaught_error = true;
+        bx.captured_errors = Some(Vec::new());
+        ScriptVm { host: host.host_context(), bx }
+    }
+
+    fn cap_object_growth(heap: &mut ScriptHeap, headroom: usize) {
+        while !heap.objects_free.is_empty() {
+            heap.new_object();
+        }
+        heap.reconcile_heap_bytes();
+        heap.set_max_heap_bytes(Some(heap.accounted_heap_bytes() + headroom));
+    }
+
+    fn assert_limit_record(vm: &mut ScriptVm, message: &str) {
+        let errors = vm.take_error_records();
+        assert_eq!(errors.len(), 1, "expected a single refusal: {errors:?}");
+        assert!(errors[0].message().contains(message), "wrong refusal: {errors:?}");
+        vm.capture_errors();
+    }
+
+    #[test]
+    fn array_map_filter_retain_stop_callback_after_heap_cap() {
+        fn warm_free_objects_drain_arrays(heap: &mut ScriptHeap) {
+            while !heap.arrays_free.is_empty() { heap.new_array(); }
+            if heap.objects_free.len() < 8 {
+                let slots: [ScriptObject; 8] = std::array::from_fn(|_| heap.new_object());
+                for slot in slots { heap.free_object_if_unreffed(slot); }
+            }
+        }
+
+        let mut host = ScriptVmHost::new((), ());
+        let mut vm = refusal_vm(&mut host);
+        let calls = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let probe = vm.new_module(id!(probe));
+        let counter = calls.clone();
+        vm.add_method(probe, id_lut!(bump), &[], move |_, _| {
+            counter.set(counter.get() + 1);
+            NIL
+        });
+        let counter = calls.clone();
+        vm.add_method(probe, id_lut!(fail_str), &[(id!(x), NIL)], move |vm, _| {
+            counter.set(counter.get() + 1);
+            vm.bx.heap.new_string_from_str("01234");
+            true.into()
+        });
+        let arr = vm.bx.heap.new_array();
+        let obj = vm.bx.heap.new_object();
+        vm.set_injected_global(id!(arr), arr.into());
+        vm.set_injected_global(id!(obj), obj.into());
+        let nil_calls = ["map", "filter"].map(|m| eval(&mut vm, &format!("{m}_nil"), &format!("fn() {{ arr.{m}(nil) }}")));
+        let string_calls = ["map", "filter", "find", "any"].map(|m|
+            eval(&mut vm, m, &format!("fn() {{ arr.{m}(mod.probe.fail_str) }}")));
+        let retains = ["arr", "obj"].map(|receiver| eval(&mut vm, receiver,
+            &format!("let cb = fn(x) {{ mod.probe.bump()\n return true }}\nfn() {{ {receiver}.retain(cb) }}")));
+
+        let empty_costs = nil_calls.map(|f| {
+            warm_free_objects_drain_arrays(&mut vm.bx.heap);
+            let (value, report) = vm.with_heap_allocation_limit(usize::MAX, |vm| vm.call(f, &[]));
+            assert!(value.is_array() && !report.exceeded, "empty map/filter must return a result array");
+            report.allocated_bytes
+        });
+        let refused_array_growth = |vm: &mut ScriptVm| [0, 1].map(|i| {
+            let heap = &mut vm.bx.heap;
+            warm_free_objects_drain_arrays(heap);
+            heap.reconcile_heap_bytes();
+            heap.set_max_heap_bytes(Some(heap.accounted_heap_bytes() + empty_costs[i] - 1));
+            let before = heap.gc_live_counts().objects;
+            assert!(vm.call(nil_calls[i], &[]).is_err(), "refused result array must stop the call");
+            assert!(vm.bx.heap.take_heap_limit_exceeded(), "result array must hit the heap cap");
+            assert_limit_record(vm, "while creating an array");
+            vm.bx.heap.set_max_heap_bytes(None);
+            vm.bx.heap.gc_live_counts().objects - before
+        });
+        let refused_string_growth = |vm: &mut ScriptVm| {
+            vm.bx.heap.set_max_string_bytes(Some(4));
+            let growth = string_calls.map(|f| {
+                calls.set(0);
+                let before = vm.bx.heap.gc_live_counts().objects;
+                assert!(vm.call(f, &[]).is_err(), "callback string refusal must end the call");
+                assert!(vm.bx.heap.take_string_limit_exceeded(), "callback must hit the string cap");
+                assert_limit_record(vm, "while creating a string");
+                assert_eq!(calls.get(), 1, "only the first native callback may execute");
+                vm.bx.heap.gc_live_counts().objects - before
+            });
+            vm.bx.heap.set_max_string_bytes(None);
+            growth
+        };
+        let empty_growth = refused_array_growth(&mut vm);
+        vm.bx.heap.array_push(arr, 1.into(), NoTrap);
+        vm.bx.heap.vec_push(obj, NIL, 1.into(), NoTrap);
+        let single_growth = refused_string_growth(&mut vm);
+        let retain_costs = retains.map(|f| {
+            while !vm.bx.heap.arrays_free.is_empty() { vm.bx.heap.new_array(); }
+            while !vm.bx.heap.objects_free.is_empty() { vm.bx.heap.new_object(); }
+            calls.set(0);
+            let (value, report) = vm.with_heap_allocation_limit(usize::MAX, |vm| vm.call(f, &[]));
+            assert!(!value.is_err() && !report.exceeded, "one-element retain must complete");
+            assert_eq!(calls.get(), 1, "one-element retain must call its predicate");
+            report.allocated_bytes
+        });
+        for n in 2..=4 {
+            vm.bx.heap.array_push(arr, n.into(), NoTrap);
+            vm.bx.heap.vec_push(obj, NIL, n.into(), NoTrap);
+        }
+        let array_growth = refused_array_growth(&mut vm);
+        let string_growth = refused_string_growth(&mut vm);
+        for (f, cost) in retains.into_iter().zip(retain_costs) {
+            while !vm.bx.heap.arrays_free.is_empty() { vm.bx.heap.new_array(); }
+            cap_object_growth(&mut vm.bx.heap, cost);
+            calls.set(0);
+            assert!(vm.call(f, &[]).is_err(), "a refused retain callback must bail");
+            assert!(vm.bx.heap.take_heap_limit_exceeded(), "retain must reach the heap cap");
+            assert_limit_record(&mut vm, "script heap allocation limit exceeded while");
+            assert_eq!(calls.get(), 1, "retain must stop before the second callback");
+            vm.bx.heap.set_max_heap_bytes(None);
+        }
+        let lengths = (vm.bx.heap.array_len(arr), vm.bx.heap.vec_len(obj));
+        assert_eq!((array_growth, string_growth, lengths), (empty_growth, single_growth, (4, 4)),
+            "result-array and callback refusals must skip later scopes, and retain must preserve both receivers");
+    }
+
+    #[test]
+    fn regex_methods_and_split_stop_on_allocation_refusal() {
+        let mut host = ScriptVmHost::new((), ());
+        let mut vm = refusal_vm(&mut host);
+        for (id, pattern, flags) in [
+            (id!(comma), ",", "g"), (id!(no_match), "z", "g"),
+            (id!(words), "[a-z]+", "g"), (id!(pair), "(a)(b)", ""),
+            (id!(left_pair), "(aaaaaaa)(ffffff)", ""), (id!(right_pair), "(aaaaaaa)(gggggg)", ""),
+        ] {
+            let re = vm.bx.heap.new_regex(pattern, flags).expect("compile fixture regex");
+            vm.set_injected_global(id, re);
+        }
+        let loops = [
+            ("aaaaaaa,bbbbbb", "split(\",\")", "bbbbbb"),
+            ("aaaaaaa,cccccc", "split(comma)", "cccccc"),
+            ("aaaaaaa,dddddd", "match_str(words)", "dddddd"),
+            ("aaaaaaa,eeeeee", "match_all(words)", "eeeeee"),
+        ].map(|(s, method, tail)| {
+            let f = eval(&mut vm, tail, &format!("fn() {{ \"{s}\".{method} }}"));
+            (f, tail)
+        });
+        let [replace, noop, exec, first, test, left, right] = [
+            r#""a,b,c,d".replace(comma, "-")"#, r#""a,b,c,d".replace(no_match, "-")"#,
+            r#"pair.exec("zz")"#, r#""zz".match_str(pair)"#, r#"pair.test("zz")"#,
+            r#"left_pair.exec("aaaaaaaffffff")"#, r#""aaaaaaagggggg".match_str(right_pair)"#,
+        ].map(|body| eval(&mut vm, body, &format!("fn() {{ {body} }}")));
+
+        vm.bx.heap.set_max_string_bytes(Some(6));
+        let interned = loops.map(|(f, tail)| {
+            assert!(vm.bx.heap.check_intern_string(tail).is_none(), "tail {tail} must start outside the string table");
+            assert!(vm.call(f, &[]).is_err(), "the first long token before {tail} must end the call");
+            assert!(vm.bx.heap.take_string_limit_exceeded(), "token before {tail} must reach the string cap");
+            assert_limit_record(&mut vm, "while creating a string");
+            vm.bx.heap.check_intern_string(tail).is_some()
+        });
+        let captures = [(left, "ffffff"), (right, "gggggg")].map(|(f, tail)| {
+            assert!(vm.bx.heap.check_intern_string(tail).is_none(), "capture {tail} must start outside the string table");
+            let before = vm.bx.heap.gc_live_counts().arrays;
+            assert!(vm.call(f, &[]).is_err(), "the long full match must stop capture construction");
+            assert!(vm.bx.heap.take_string_limit_exceeded(), "the full match must reach the string cap");
+            assert_limit_record(&mut vm, "while creating a string");
+            (vm.bx.heap.gc_live_counts().arrays - before, vm.bx.heap.check_intern_string(tail).is_some())
+        });
+        vm.bx.heap.set_max_string_bytes(None);
+
+        let mut measure = |f| {
+            while !vm.bx.heap.objects_free.is_empty() { vm.bx.heap.new_object(); }
+            let (value, report) = vm.with_heap_allocation_limit(usize::MAX, |vm| vm.call(f, &[]));
+            assert!(!value.is_err() && !report.exceeded, "the uncapped no-match prefix must complete");
+            report.allocated_bytes
+        };
+        let cost_noop = measure(noop);
+        let cost_test = measure(test);
+        cap_object_growth(&mut vm.bx.heap, cost_noop);
+        vm.bx.heap.set_max_string_bytes(Some(4));
+        assert!(vm.call(replace, &[]).is_err(), "the first refused match must stop replacement");
+        assert!(vm.bx.heap.take_heap_limit_exceeded(), "collecting the first match must hit the heap cap");
+        assert_limit_record(&mut vm, "while collecting regex matches");
+        let pending = vm.bx.heap.allocation_error_pending;
+        let string_limit = vm.bx.heap.take_string_limit_exceeded();
+        vm.bx.heap.set_max_string_bytes(None);
+        vm.bx.heap.set_max_heap_bytes(None);
+
+        let slots = [exec, first].map(|f| {
+            cap_object_growth(&mut vm.bx.heap, cost_test);
+            let value = vm.call(f, &[]);
+            let exceeded = vm.bx.heap.take_heap_limit_exceeded();
+            if exceeded { assert_limit_record(&mut vm, "while running a regex"); }
+            vm.bx.heap.set_max_heap_bytes(None);
+            (value.is_err(), exceeded)
+        });
+        assert_eq!((interned, captures, (pending, string_limit), slots),
+            ([false; 4], [(0, false); 2], (false, false), [(true, true); 2]),
+            "split/match loops must skip later tokens, exec must skip captures, replace must deliver only the heap limit, and both exec paths must charge slots");
+    }
+
+    #[test]
+    fn html_query_array_and_parse_json_stop_on_heap_cap() {
+        let mut host = ScriptVmHost::new((), ());
+        let mut vm = refusal_vm(&mut host);
+        let sel = eval(&mut vm, "selection", r#""<a>1</a><a>2</a><a>3</a>".parse_html().query("a")"#);
+        let doc = eval(&mut vm, "document", r#""<a href='aaaaaaa'>aaaaaaa</a><a href='bbbbbb'>cccccc</a>".parse_html()"#);
+        let raw = vm.bx.heap.new_string_from_str("[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]");
+        vm.set_injected_global(id!(sel), sel);
+        vm.set_injected_global(id!(doc), doc);
+        vm.set_injected_global(id!(raw), raw);
+        let [array, attr, text, json] = ["sel.array()", r#"doc.query("a@href")"#, r#"doc.query("a.text")"#, "raw.parse_json()"]
+            .map(|body| eval(&mut vm, body, &format!("fn() {{ {body} }}")));
+        let refuse_result_array = |vm: &mut ScriptVm, f| {
+            let entry = size_of::<(ScriptValue, ScriptMapValue)>() + 2 * size_of::<usize>();
+            while !vm.bx.heap.arrays_free.is_empty() { vm.bx.heap.new_array(); }
+            cap_object_growth(&mut vm.bx.heap, 2 * size_of::<ScriptObjectData>() + entry);
+            assert!(vm.call(f, &[]).is_err(), "refusing the result array must end the call");
+            assert!(vm.bx.heap.take_heap_limit_exceeded(), "result array must hit the retained cap");
+            assert_limit_record(vm, "while creating an array");
+            vm.bx.heap.set_max_heap_bytes(None);
+        };
+        let before = vm.bx.heap.handles.len();
+        refuse_result_array(&mut vm, array);
+        let handles = vm.bx.heap.handles.len() - before;
+
+        vm.bx.heap.set_max_string_bytes(Some(6));
+        let interned = [(attr, "bbbbbb"), (text, "cccccc")].map(|(f, tail)| {
+            assert!(vm.bx.heap.check_intern_string(tail).is_none(), "trailing query value {tail} must start uninterned");
+            assert!(vm.call(f, &[]).is_err(), "the first seven-byte query value must stop the call");
+            assert!(vm.bx.heap.take_string_limit_exceeded(), "query must report the string limit");
+            assert_limit_record(&mut vm, "while creating a string");
+            vm.bx.heap.check_intern_string(tail).is_some()
+        });
+        vm.bx.heap.set_max_string_bytes(None);
+
+        refuse_result_array(&mut vm, json);
+        let parser = &vm.bx.threads.cur_ref().json_parser.parser;
+        let root = (parser.index, parser.root.is_nil());
+
+        vm.bx.heap.new_array();
+        vm.gc();
+        while vm.bx.heap.arrays_free.len() > 1 { vm.bx.heap.new_array(); }
+        let outer = *vm.bx.heap.arrays_free.last().expect("one free slot for the outer JSON array");
+        cap_object_growth(&mut vm.bx.heap, 0);
+        let mut parser = crate::json::JsonParserThread::default();
+        let nested = parser.read_json("[{}]", &mut vm.bx.heap);
+        assert!(vm.bx.heap.take_heap_limit_exceeded(), "the nested object must hit the retained cap");
+        assert_eq!(vm.bx.heap.array_len(outer), 0, "a refused child must leave the outer array empty");
+        assert_eq!((handles, interned, root, (parser.parser.index, nested.is_nil())),
+            (0, [false; 2], (1, true), (2, true)),
+            "HTML must skip trailing handles and strings, and JSON must stop at the refusing root or child with NIL");
+    }
+
+    #[test]
+    fn eval_scope_setup_and_tokenize_refusal_report_limit() {
+        use crate::vm::{ScriptEvalReq, EVAL_ADD};
+
+        let mut host = ScriptVmHost::new((), ());
+        let mut vm = refusal_vm(&mut host);
+        let parent = vm.bx.heap.new_object();
+        let poison = vm.bx.heap.allocation_poison_object;
+        let proto = vm.bx.heap.objects[poison].proto;
+        cap_object_growth(&mut vm.bx.heap, 0);
+        let scoped = ScriptMod::new("", "", "scoped", 1, 0, "42", &[]);
+        let value = vm.eval_in_scope(scoped, parent);
+        assert_eq!(vm.bx.heap.objects[poison].proto, proto, "a refused scope must preserve the sentinel prototype");
+        {
+            let bodies = vm.bx.code.bodies.borrow();
+            let body = bodies.last().expect("registered body");
+            assert!(body.scope.is_unrooted() && body.me.is_unrooted(), "refused body objects must be unrooted");
+        }
+        assert!(value.is_err(), "a refused eval scope must return an error");
+        assert!(vm.bx.heap.take_heap_limit_exceeded(), "scope construction must reach the heap limit");
+        assert_limit_record(&mut vm, "script heap allocation limit exceeded");
+        vm.bx.heap.set_max_heap_bytes(None);
+
+        vm.set_injected_global(id!(g1), 1.into());
+        vm.set_injected_global(id!(g2), 2.into());
+        let entry = size_of::<(ScriptValue, ScriptMapValue)>() + 2 * size_of::<usize>();
+        cap_object_growth(&mut vm.bx.heap, size_of::<ScriptObjectData>() + 2 * entry);
+        let added = ScriptMod::new("", "", "added", 1, 0, "42", &[]);
+        let mut req = ScriptEvalReq::new(EVAL_ADD, added.view());
+        let value = vm.vm_eval(&mut req);
+        assert!(value.is_err(), "adding a body must report a refused global");
+        assert!(vm.bx.heap.take_heap_limit_exceeded(), "injecting a global must reach the heap limit");
+        assert_limit_record(&mut vm, "while adding an object property");
+        {
+            let bodies = vm.bx.code.bodies.borrow();
+            let body = &bodies[req.body as usize];
+            assert!(!body.scope.is_unrooted() && body.me.is_unrooted(), "only the refused body object must be unrooted");
+            assert_eq!(vm.bx.heap.map_len(body.scope.obj), 2, "the scope must contain mod and one completed global");
+        }
+        vm.bx.heap.set_max_heap_bytes(None);
+
+        for append in [false, true] {
+            let code = "\"12345\" + (";
+            let module = || ScriptMod::new("", "", if append { "stream" } else { "eval" }, 1, 0, code, &[]);
+            vm.bx.heap.set_max_string_bytes(Some(4));
+            let result = if append {
+                vm.eval_with_append_source(module(), code, ScriptObject::ZERO)
+            } else { vm.eval(module()) };
+            assert!(result.is_err(), "tokenization refusal must end evaluation (append={append})");
+            assert!(vm.bx.heap.take_string_limit_exceeded(), "tokenization must hit the string limit (append={append})");
+            assert_limit_record(&mut vm, "script string allocation limit exceeded");
+            vm.bx.heap.set_max_string_bytes(None);
+            let result = if append {
+                vm.eval_with_append_source(module(), "\"12345\" + (\"6\")", ScriptObject::ZERO)
+            } else { eval(&mut vm, "eval", "\"123456\"") };
+            assert_eq!(string_of(&vm, result).as_deref(), Some("123456"), "tokenization must retry cleanly (append={append})");
+        }
+    }
+
+    #[test]
+    fn array_apply_transform_refusal_never_invokes_native_without_self() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let mut host = ScriptVmHost::new((), ());
+        let mut vm = refusal_vm(&mut host);
+        let array = vm.bx.heap.new_array();
+        let calls = Rc::new(Cell::new(0));
+        let count = calls.clone();
+        let native = vm.add_apply_transform_fn(move |vm, args| {
+            count.set(count.get() + 1);
+            vm.value(args, id!(self))
+        });
+        vm.bx.heap.arrays[array].tag.set_apply_transform(native);
+        while !vm.bx.heap.objects_free.is_empty() { vm.bx.heap.new_object(); }
+        let obj = size_of::<ScriptObjectData>();
+        for (budget, operation) in [(obj - 1, "creating an object"), (obj, "adding an object property")] {
+            let (result, report) = vm.with_heap_allocation_limit(budget, |vm| vm.call_apply_transform(array.into()));
+            assert!(report.exceeded, "the transform must reach its budget while {operation}");
+            assert!(result.is_some_and(|v| v.is_err()), "the refused transform must return an error while {operation}");
+            assert_eq!(calls.get(), 0, "the transform must await a complete receiver");
+            assert_limit_record(&mut vm, operation);
+        }
+        assert_eq!(vm.call_apply_transform(array.into()), Some(array.into()), "a successful transform must receive its array");
+        assert_eq!(calls.get(), 1, "a complete receiver must dispatch once");
+    }
+
+    #[test]
+    fn string_keys_set_value_string_limit_never_inserts_nil_key() {
+        let mut host = ScriptVmHost::new((), ());
+        let mut vm = refusal_vm(&mut host);
+        let obj = vm.bx.heap.new_object();
+        vm.bx.heap.set_string_keys(obj);
+        vm.set_injected_global(id!(o), obj.into());
+        vm.bx.heap.set_max_string_bytes(Some(4));
+        let result = eval(&mut vm, "string-key", "o.long_property_name = 42");
+        assert!(result.is_err(), "a refused property name must end the evaluation");
+        assert!(vm.bx.heap.take_string_limit_exceeded(), "the property name must reach the string cap");
+        assert_limit_record(&mut vm, "script string allocation limit exceeded");
+        assert!(vm.bx.heap.map_ref(obj).is_empty(), "a refused name must leave the property map empty");
+    }
+
+    #[test]
+    fn proto_field_refusal_never_stores_poison_or_reports_not_found() {
+        use crate::opcode::{Opcode, OpcodeArgs};
+        use crate::thread::ScriptMe;
+
+        for op in [Opcode::PROTO_INHERIT_READ, Opcode::FIELD_SLOT_READ, Opcode::PROTO_FIELD] {
+            let mut host = ScriptVmHost::new((), ());
+            let mut vm = refusal_vm(&mut host);
+            let template = eval(&mut vm, "proto-child", "{ child := { x: 1 } }");
+            let instance = vm.bx.heap.new_with_proto(template);
+            let child = vm.bx.heap.vec_key_value(instance, 0, NoTrap);
+            assert!(child.value.is_object(), "the instance must own the named child slot");
+            let thread = vm.bx.threads.cur();
+            if op == Opcode::PROTO_INHERIT_READ {
+                thread.push_me(ScriptMe::Object(instance));
+            } else {
+                thread.push_stack_unchecked(instance.into());
+            }
+            thread.push_stack_unchecked(child.key);
+            let ip = thread.trap.ip;
+            cap_object_growth(&mut vm.bx.heap, 0);
+            vm.opcode(op, OpcodeArgs::NONE);
+            assert!(vm.bx.heap.take_heap_limit_exceeded(), "{op:?} must refuse the derived child");
+            assert_eq!(vm.bx.heap.vec_key_value(instance, 0, NoTrap).value, child.value,
+                "{op:?} must retain the original child");
+            let thread = vm.bx.threads.cur_ref();
+            assert!(thread.trap.err_is_empty(), "{op:?} must preserve the refusal without a missing-field error");
+            assert_eq!(thread.trap.ip, ip, "{op:?} must stop at the refused field");
+        }
+
+        let mut heap = ScriptHeap::empty();
+        let ty = ScriptTypeId::from_u128(1);
+        let child_type = heap.register_type(Some(ty), ScriptTypeCheck::from_props(&mut ScriptTypeProps::default()));
+        let child = heap.new_object();
+        heap.type_defaults.insert(child_type, child);
+        let mut fields = ScriptTypeProps::default();
+        fields.insert(id!(child), ty);
+        let parent_type = heap.register_type(None, ScriptTypeCheck::from_props(&mut fields));
+        let parent = heap.new_object();
+        heap.objects[parent].tag.set_type_index(parent_type);
+        let trap = ScriptTrapInner::default();
+        cap_object_growth(&mut heap, 0);
+        let result = heap.proto_field_from_type_check(parent, id!(child), trap.pass());
+        assert!(heap.take_heap_limit_exceeded(), "instantiating the field default must reach the heap cap");
+        assert!(result.is_nil(), "a refused default must publish no child");
+        assert!(trap.err_is_empty(), "the declared field must produce no lookup error");
+        assert!(heap.map_ref(parent).is_empty(), "a refused default must leave the parent empty");
+
+        for (base, field, levels) in [("{child := {x: 1}}", "child", 1), ("{a := {child := {x: 1}}}", "a.child", 2)] {
+            let mut host = ScriptVmHost::new((), ());
+            let mut vm = refusal_vm(&mut host);
+            let template = eval(&mut vm, "template", base).as_object().expect("named-child template");
+            let out = vm.bx.heap.new_object();
+            vm.bx.heap.set_value_def(out, id!(obj).into(), NIL);
+            vm.set_injected_global(id!(base), template.into());
+            vm.set_injected_global(id!(out), out.into());
+            let code = format!("fn() {{ base {{\n out.obj = me\n {field} +: {{x: 2}}\n }} }}");
+            let f = eval(&mut vm, "derived-child", &code);
+            let bytes = size_of::<ScriptObjectData>() + levels * (size_of::<ScriptObjectData>() + size_of::<ScriptVecValue>());
+            cap_object_growth(&mut vm.bx.heap, bytes);
+            assert!(vm.call(f, &[]).is_err(), "{field}: a refused child must bail");
+            assert!(vm.bx.heap.take_heap_limit_exceeded(), "{field}: the child must reach the retained cap");
+            assert_limit_record(&mut vm, "while creating an object with a prototype");
+            let mut instance = vm.bx.heap.value(out, id!(obj).into(), NoTrap).as_object().expect("published instance");
+            let mut base = template;
+            if levels == 2 {
+                instance = vm.bx.heap.vec_key_value(instance, 0, NoTrap).value.as_object().expect("derived parent");
+                base = vm.bx.heap.vec_key_value(base, 0, NoTrap).value.as_object().expect("template parent");
+            }
+            assert_ne!(instance, base, "{field}: the containing instance must exist before the refusal");
+            assert_eq!(vm.bx.heap.vec_key_value(instance, 0, NoTrap).value, vm.bx.heap.vec_key_value(base, 0, NoTrap).value,
+                "{field}: the instance must retain the template child");
+        }
+    }
+
+    #[test]
+    fn use_glob_and_shadow_let_refusal_never_push_or_tag_poison_scope() {
+        for headroom in [0, size_of::<ScriptObjectData>()] {
+            let mut host = ScriptVmHost::new((), ());
+            let mut vm = refusal_vm(&mut host);
+            let scope = vm.bx.heap.new_object();
+            let module = vm.bx.heap.new_object();
+            vm.bx.heap.def_scope_value(scope, id!(x), 1.into());
+            vm.bx.heap.set_value_def(module, id!(x).into(), 2.into());
+            vm.bx.heap.set_value_def(module, id!(y).into(), 3.into());
+            let thread = vm.bx.threads.cur();
+            thread.push_scope(scope);
+            thread.push_stack_unchecked(module.into());
+            thread.push_stack_unchecked(id!(*).into());
+            cap_object_growth(&mut vm.bx.heap, headroom);
+            vm.handle_use();
+            assert!(vm.bx.heap.take_heap_limit_exceeded(), "shadowing x must reach the heap cap");
+            assert_eq!(vm.bx.threads.cur_ref().scopes.as_slice(), &[scope], "a refused shadow scope must stay off the stack");
+            let poison = vm.bx.heap.allocation_poison_object;
+            for obj in [scope, poison] {
+                assert!(!vm.bx.heap.objects[obj].tag.has_globs(), "a refused use must leave the glob tag clear");
+                assert!(!vm.bx.heap.glob_sources.contains_key(&obj), "a refused use must publish no glob source");
+            }
+            assert_eq!(vm.bx.heap.map_len(scope), 1, "later glob entries must remain unbound");
+            assert_eq!(vm.bx.heap.value(scope, id!(x).into(), NoTrap), 1.into(), "the shadowed value must survive");
+        }
+        let mut heap = ScriptHeap::empty();
+        let scope = heap.new_object();
+        let later = heap.new_object();
+        cap_object_growth(&mut heap, 0);
+        let items = [(id!(a), 1.into()), (id!(b), later.into())];
+        assert_eq!(heap.def_scope_values(scope, &items), (2, None), "a failed batch must stop the caller's binding loop");
+        assert!(heap.take_heap_limit_exceeded(), "the first binding must hit the retained cap");
+        assert!(!heap.objects[later].tag.is_reffed(), "the value after a refused binding must never be visited");
+        assert!(heap.map_ref(scope).is_empty(), "a refused first binding must leave the scope empty");
+
+        let mut host = ScriptVmHost::new((), ());
+        let mut vm = refusal_vm(&mut host);
+        let closures = eval(&mut vm, "glob-shadow",
+            "let prefix = {a: 1}\nlet m = {a: 1, b: 2, c: 3}\n{\n prefix: fn() {let b = 0\n let keep = || b\n use prefix.*}\n shadow: fn() {let b = 0\n let keep = || b\n use m.*}\n}").as_object().expect("glob fixtures");
+        let prefix = vm.bx.heap.value(closures, id!(prefix).into(), NoTrap);
+        let shadow = vm.bx.heap.value(closures, id!(shadow).into(), NoTrap);
+        while !vm.bx.heap.objects_free.is_empty() { vm.bx.heap.new_object(); }
+        let (value, full) = vm.with_heap_allocation_limit(usize::MAX, |vm| vm.call(prefix, &[]));
+        assert!(!value.is_err() && !full.exceeded, "the prefix must complete before the shared name");
+        cap_object_growth(&mut vm.bx.heap, full.allocated_bytes);
+        assert!(vm.call(shadow, &[]).is_err(), "the glob must bail at the shadowed name");
+        assert!(vm.bx.heap.take_heap_limit_exceeded(), "creating the shadow scope must reach the heap cap");
+        assert_limit_record(&mut vm, "while creating an object with a prototype");
+        let poison = vm.bx.heap.allocation_poison_object;
+        assert!(!vm.bx.heap.objects[poison].tag.has_globs() && !vm.bx.heap.glob_sources.contains_key(&poison),
+            "a refused glob must publish no metadata for the sentinel");
+    }
+
+    #[test]
+    fn splat_call_args_refusal_stops_before_type_shift() {
+        use crate::opcode::{Opcode, OpcodeArgs};
+        use crate::thread::{CallFrame, CallTarget, ScriptMe};
+
+        for (source, call) in [("[1, \"hi\"]", true), ("{1, \"hi\"}", true), ("[1, 2]", false)] {
+            let mut host = ScriptVmHost::new((), ());
+            let mut vm = refusal_vm(&mut host);
+            let f = eval(&mut vm, "parameters", "fn(a = 0, b = \"ok\") { a }");
+            let values = eval(&mut vm, "values", source);
+            assert!(f.is_object() && (values.is_object() || values.is_array()), "the splat fixtures must compile");
+            let args = vm.bx.heap.new_with_proto(f);
+            vm.bx.heap.clear_object_deep(args);
+            let dst = vm.bx.heap.new_object();
+            let thread = vm.bx.threads.cur();
+            thread.push_call_frame(CallFrame {
+                bases: thread.new_bases(), args: OpcodeArgs::NONE, return_ip: None,
+                prev_slot_base: thread.slot_base, body_root: false, native_cont: false,
+            });
+            thread.push_me(if call {
+                ScriptMe::Call { args, sself: None, target: CallTarget::Resolve(None) }
+            } else { ScriptMe::Object(dst) });
+            thread.push_stack_unchecked(values);
+            let ip = thread.trap.ip;
+            cap_object_growth(&mut vm.bx.heap, 0);
+            vm.opcode(Opcode::ME_SPLAT, OpcodeArgs::NONE);
+            assert!(vm.bx.heap.take_heap_limit_exceeded(), "{source} must reach the heap cap");
+            let thread = vm.bx.threads.cur_ref();
+            assert!(thread.trap.err_is_empty(), "{source} must produce no secondary type error");
+            assert_eq!(thread.trap.ip, ip, "{source} must stop at the refused element");
+            assert_eq!(vm.bx.heap.map_len(args), 0, "a refused argument must stay unbound");
+            assert_eq!(vm.bx.heap.vec_len(dst), 0, "a refused splat must leave the destination empty");
+        }
+
+        let mut host = ScriptVmHost::new((), ());
+        let mut vm = refusal_vm(&mut host);
+        let f = eval(&mut vm, "splat", "fn f(a = 0, b = \"ok\") { a }\nfn() { f(..[1, \"hi\"]) }");
+        assert!(f.is_object(), "the splatting closure must compile before enabling the cap");
+        while !vm.bx.heap.arrays_free.is_empty() { vm.bx.heap.new_array(); }
+        let bytes = 2 * size_of::<ScriptObjectData>() + size_of::<ScriptArrayData>() + 2 * size_of::<ScriptValue>();
+        cap_object_growth(&mut vm.bx.heap, bytes);
+        assert!(vm.call(f, &[]).is_err(), "a refused splat must end the enclosing call");
+        assert!(vm.bx.heap.take_heap_limit_exceeded(), "binding the first positional argument must reach the heap cap");
+        assert_limit_record(&mut vm, "while binding a function argument");
+    }
+
+    #[test]
+    fn compound_string_assign_refusal_preserves_target_and_slot() {
+        use crate::opcode::{Opcode, OpcodeArgs};
+
+        for (setup, target) in [
+            ("let s = \"abc\"", "s"),
+            ("let o = {s: \"abc\"}", "o.s"),
+            ("let o = {s: \"abc\"}", "o[\"s\"]"),
+            ("let a = [\"abc\"]", "a[0]"),
+        ] {
+            let mut host = ScriptVmHost::new((), ());
+            let mut vm = refusal_vm(&mut host);
+            let code = format!("{setup}\n{{get: fn() {{ {target} }}, bump: fn() {{ {target} += \"123456\" }} }}");
+            let obj = eval(&mut vm, "compound", &code).as_object().expect("accessor pair");
+            let bump = vm.bx.heap.value(obj, id!(bump).into(), NoTrap);
+            let get = vm.bx.heap.value(obj, id!(get).into(), NoTrap);
+            vm.bx.heap.set_max_string_bytes(Some(8));
+            assert!(vm.call(bump, &[]).is_err(), "{target} must bail");
+            assert!(vm.bx.heap.take_string_limit_exceeded(), "{target} must hit the string cap");
+            assert_limit_record(&mut vm, "while concatenating strings");
+            vm.bx.heap.set_max_string_bytes(None);
+            let value = vm.call(get, &[]);
+            assert_eq!(string_of(&vm, value).as_deref(), Some("abc"), "{target} must retain its original value");
+            cap_object_growth(&mut vm.bx.heap, size_of::<ScriptObjectData>());
+            assert!(vm.call(bump, &[]).is_err(), "{target} must also bail on a retained-heap refusal");
+            assert!(vm.bx.heap.take_heap_limit_exceeded(), "{target} must hit the retained cap");
+            assert_limit_record(&mut vm, "script heap allocation limit exceeded while concatenating strings");
+            vm.bx.heap.set_max_heap_bytes(None);
+            let value = vm.call(get, &[]);
+            assert_eq!(string_of(&vm, value).as_deref(), Some("abc"), "{target} must survive a retained-heap refusal");
+        }
+
+        let mut host = ScriptVmHost::new((), ());
+        let mut vm = refusal_vm(&mut host);
+        let old = vm.bx.heap.new_string_from_str("abc");
+        let rhs = vm.bx.heap.new_string_from_str("123456");
+        let t = vm.bx.threads.cur();
+        t.slots.push(old);
+        t.push_stack_unchecked(id!(x).into());
+        t.push_stack_unchecked(rhs);
+        let ip = t.trap.ip;
+        vm.bx.heap.set_max_string_bytes(Some(8));
+        vm.opcode(Opcode::ASSIGN_SLOT_ADD, OpcodeArgs::from_u32(0));
+        let t = vm.bx.threads.cur();
+        assert_eq!(t.slot(0), old, "the refused concatenation must preserve its slot");
+        assert!(t.stack.is_empty(), "a refused assignment must publish no operand");
+        assert_eq!(t.trap.ip, ip, "a refused assignment must keep its instruction pointer");
+        assert!(vm.bx.heap.take_string_limit_exceeded(), "slot concatenation must reach the cap");
+
+        assert_concat_refusal("local-add.splash",
+            "fn f() {\n    var x = \"abc\"\n    x += \"123456\"\n    x\n}\nf()", 3);
+    }
+
+    fn assert_concat_refusal(file: &str, code: &str, line: u32) {
+        let mut host = ScriptVmHost::new((), ());
+        let mut vm = refusal_vm(&mut host);
+        vm.bx.heap.set_max_string_bytes(Some(8));
+        let result = vm.eval(ScriptMod::new("", "", file, 1, 0, code, &[]));
+        let errors = vm.take_error_records();
+        assert!(result.is_err(), "{file} must bail on the refused expression: {result:?}");
+        assert!(vm.bx.heap.take_string_limit_exceeded(), "{file} missed the string limit: {errors:?}");
+        assert_eq!(errors.len(), 1, "{file} must report only the refusal: {errors:?}");
+        let error = errors[0].view();
+        assert!(error.message.contains("script string allocation limit exceeded while concatenating strings"),
+            "{file} reported the wrong allocation: {errors:?}");
+        assert_eq!((error.file, error.line), (file, line), "refusal must point to the expression");
+    }
+
+    #[test]
+    fn same_opcode_error_after_refusal_still_reports_heap_limit() {
+        assert_concat_refusal("assign.splash",
+            "let o = {s: \"12345\"}\no.freeze()\no.s += \"6789\"\n99", 3);
+        assert_concat_refusal("caught-assign.splash",
+            "let o = {s: \"12345\"}\no.freeze()\ntry {\n    o.s += \"6789\"\n} catch {\n    99\n}", 4);
+    }
+
+    #[test]
+    fn refused_expr_in_pod_or_typed_arg_pop_to_me_reports_limit() {
+        assert_concat_refusal("pod-arg.splash",
+            "use mod.pod.*\nvec2(\"12345\" + \"6789\", 0)", 2);
+        assert_concat_refusal("typed-arg.splash",
+            "fn f(x = 0) { x }\nf(\"12345\" + \"6789\")", 2);
+    }
+
+    #[test]
+    fn logical_cap_loop_scope_refusal_never_frees_poison_sentinel() {
+        let mut host = ScriptVmHost::new((), ());
+        let mut vm = refusal_vm(&mut host);
+        let parent = vm.bx.heap.new_object();
+        while !vm.bx.heap.objects_free.is_empty() {
+            vm.bx.heap.new_object();
+        }
+        vm.bx.heap.reconcile_heap_bytes();
+        let baseline = vm.bx.heap.accounted_heap_bytes();
+        let poison = vm.bx.heap.allocation_poison_object;
+        for _ in 0..2 {
+            vm.bx.heap.set_max_heap_bytes(Some(baseline));
+            let scope = vm.bx.heap.new_loop_scope(parent);
+            assert_eq!(scope, poison, "refused scope must use the shared sentinel");
+            assert!(vm.bx.heap.take_allocation_error().is_some(), "scope must report the refusal");
+            assert!(vm.bx.heap.take_heap_limit_exceeded(), "retained heap cap must be reported");
+            let thread = vm.bx.threads.cur();
+            let bases = thread.new_bases();
+            assert!(thread.push_scope(scope), "scope must be present during unwind");
+            thread.truncate_bases(bases, &mut vm.bx.heap);
+            assert!(vm.bx.heap.objects.is_valid(poison), "unwind must preserve the sentinel generation");
+            assert!(vm.bx.heap.objects_free.iter().all(|slot| slot.index != poison.index),
+                "the sentinel slot must stay off the free list");
+        }
+        vm.bx.heap.set_max_heap_bytes(None);
+        assert_eq!(eval(&mut vm, "after-scope.splash", "6 * 7").as_number(), Some(42.0),
+            "the VM must accept work after lifting the cap");
+    }
+
+    #[test]
+    fn refused_object_mode_and_tag_mutations_leave_poison_clean() {
+        let mut heap = ScriptHeap::empty();
+        let obj = heap.allocation_poison_object;
+        let tag = heap.objects[obj].tag;
+        let proto = heap.objects[obj].proto;
+        let made_at = heap.objects[obj].made_at;
+        let ip = ScriptIp { body: 1, index: 2 };
+        heap.set_object_deep(obj);
+        assert_eq!(heap.objects[obj].tag, tag, "setting deep must preserve the tag");
+        heap.clear_object_deep(obj);
+        heap.set_object_storage_vec2(obj);
+        heap.set_object_pod_type(obj, ScriptPodType::VOID);
+        heap.set_first_applied_and_clean(obj);
+        heap.set_string_keys(obj);
+        heap.set_from_eval(obj);
+        heap.set_notproto(obj);
+        heap.freeze_module(obj);
+        heap.set_made_at(obj, ip);
+        heap.set_fn(obj, crate::function::ScriptFnPtr::Script(ip));
+        assert_eq!(heap.objects[obj].tag, tag, "object modes and function metadata must stay inert");
+        assert_eq!(heap.objects[obj].proto, proto, "the sentinel must retain its prototype");
+        assert_eq!(heap.objects[obj].made_at, made_at, "the sentinel must retain its origin");
+    }
+
+    #[test]
+    fn refused_receiver_leaves_call_frame_for_unwind() {
+        use crate::opcode::OpcodeArgs;
+        use crate::thread::{CallTarget, ScriptMe};
+
+        let mut host = ScriptVmHost::new((), ());
+        let mut vm = refusal_vm(&mut host);
+        let args = vm.bx.heap.new_object();
+        let receiver = vm.bx.heap.new_array();
+        let thread = vm.bx.threads.cur();
+        let ip = thread.trap.ip;
+        let stack_depth = thread.stack.len();
+        assert!(thread.push_me(ScriptMe::Call {
+            args, sself: Some(receiver.into()), target: CallTarget::Resolve(None),
+        }), "call arguments must be present before binding the receiver");
+        vm.bx.heap.reconcile_heap_bytes();
+        vm.bx.heap.set_max_heap_bytes(Some(vm.bx.heap.accounted_heap_bytes()));
+        assert!(!vm.handle_call_exec(OpcodeArgs::NONE), "a refused receiver suppresses pop_to_me");
+        assert!(vm.bx.heap.take_heap_limit_exceeded(), "binding the receiver must hit the heap cap");
+        let thread = vm.bx.threads.cur_ref();
+        assert_eq!(thread.trap.ip, ip, "the refusal must stay on the call");
+        assert_eq!(thread.stack.len(), stack_depth, "the refused call must publish no operand");
+        assert!(matches!(thread.mes.last(), Some(ScriptMe::Call { args: frame, .. }) if *frame == args),
+            "the call builder must be left for the unwind");
+        assert!(vm.bx.heap.objects.is_valid(args), "the call arguments must survive until unwind");
+        assert_eq!(vm.bx.heap.array_len(receiver), 0, "the receiver must retain its contents");
+        assert!(thread.trap.err_is_empty(), "the refused call must emit no secondary error");
+
+        let obj = size_of::<ScriptObjectData>();
+        let pod = size_of::<ScriptPodData>() + 8;
+        let item = size_of::<ScriptVecValue>();
+        for (file, code, bytes, line) in [
+            ("pod-receiver", "use mod.pod.*\nfn() {\n    vec2(\n        a.push(1),\n        0\n    )\n}", 2 * obj + pod + item, 4),
+            ("typed-receiver", "fn f(x = 0) { x }\nfn() {\n    f(\n        a.push(1)\n    )\n}", 3 * obj + item, 4),
+            ("caught-receiver", "use mod.pod.*\nfn() {\n    try {\n        vec2(\n            a.push(1),\n            0\n        )\n    } catch {\n        99\n    }\n}", 2 * obj + pod + item, 5),
+        ] {
+            let mut host = ScriptVmHost::new((), ());
+            let mut vm = refusal_vm(&mut host);
+            let array = vm.bx.heap.new_array();
+            vm.set_injected_global(id!(a), array.into());
+            let f = vm.eval(ScriptMod::new("", "", file, 1, 0, code, &[]));
+            assert!(f.is_object(), "{file} must compile before enabling the cap");
+            cap_object_growth(&mut vm.bx.heap, bytes);
+            let value = vm.call(f, &[]);
+            let errors = vm.take_error_records();
+            assert!(value.is_err(), "{file}: the nested call must bail");
+            assert!(vm.bx.heap.take_heap_limit_exceeded(), "{file}: the receiver must reach the heap cap");
+            assert_eq!(vm.bx.heap.array_len(array), 0, "{file}: the receiver must stay empty");
+            assert_eq!(errors.len(), 1, "{file}: expected a single refusal: {errors:?}");
+            assert!(errors[0].message().contains("script heap allocation limit exceeded while adding an object property"),
+                "{file}: the receiver binding must own the refusal: {errors:?}");
+            assert_eq!(errors[0].view().line, line, "{file}: the reported line must be the inner call");
+        }
+    }
+
+    #[test]
+    fn poison_container_writes_are_inert_without_immutable_error() {
+        let mut heap = ScriptHeap::empty();
+        let errors = ScriptTrapInner::default();
+        let trap = errors.pass();
+        let obj = heap.allocation_poison_object;
+        let arr = heap.allocation_poison_array;
+        let source = heap.new_object();
+        let nested = heap.new_object();
+        let values = heap.new_array_from_vec_u8(vec![1]);
+        heap.vec_push(source, NIL, nested.into(), NoTrap);
+        let key = id!(name).into();
+        let text = heap.new_string_from_str("name");
+        let value = ScriptValue::from_f64(1.0);
+        for k in [key, text, source.into(), value] {
+            assert_eq!(heap.set_value(obj, k, value, trap), NIL, "set_value on sentinel for {k:?}");
+        }
+        assert_eq!(heap.set_value_slot(obj, key, value, trap), NIL, "slot write on sentinel");
+        assert_eq!(heap.set_inherit_slot(obj, text, value, trap), NIL, "literal slot write on sentinel");
+        assert_eq!(heap.set_value_vec(obj, key, value, trap), NIL, "vec write on sentinel");
+        assert_eq!(heap.vec_push(obj, key, value, trap), NIL, "vec push on sentinel");
+        for from in [source, obj] {
+            assert_eq!(heap.vec_push_vec(obj, from, trap), NIL, "vec extension on sentinel");
+            assert_eq!(heap.merge_object(obj, from, trap), NIL, "object merge on sentinel");
+        }
+        assert_eq!(heap.vec_push_vec_of_vec(obj, source, true, trap), NIL, "nested vec push on sentinel");
+        heap.array_push(arr, value, trap);
+        heap.array_push_vec(arr, source, trap);
+        heap.merge_array(arr, values, trap);
+        assert_eq!(heap.set_array_index(arr, 0, value, trap), NIL, "array write on sentinel");
+        assert!(errors.err_is_empty(), "sentinel writes must leave the trap queue empty");
+        assert!(heap.objects[obj].map.is_empty() && heap.objects[obj].vec.is_empty(),
+            "sentinel writes must preserve empty object storage");
+        assert_eq!(heap.array_len(arr), 0, "sentinel writes must preserve empty array storage");
+    }
+
+    #[test]
+    fn shrinking_keeps_room_to_sweep_each_table() {
+        let mut heap = ScriptHeap::empty();
+        for name in ["kept pattern", "dead pattern"] {
+            let values = [
+                heap.new_object().into(),
+                heap.new_array().into(),
+                heap.new_string_from_str(name),
+                heap.new_regex(name, "").unwrap(),
+            ];
+            if name == "kept pattern" {
+                for value in values { heap.set_static(value); }
+            }
+        }
+        heap.sweep(false);
+        heap.shrink_to_fit();
+        for (table, free, len) in [
+            ("objects", heap.objects_free.capacity(), heap.objects.len()),
+            ("strings", heap.strings_free.capacity(), heap.strings.len()),
+            ("arrays", heap.arrays_free.capacity(), heap.arrays.len()),
+            ("pods", heap.pods_free.capacity(), heap.pods.len()),
+            ("pod types", heap.pod_types_free.capacity(), heap.pod_types.len()),
+            ("handles", heap.handles_free.capacity(), heap.handles.len()),
+            ("regexes", heap.regexes_free.capacity(), heap.regexes.len()),
+        ] {
+            assert!(free + 1 >= len, "{table}: shrunk free list has capacity {free} for {len} table slots");
+        }
+    }
+
+    #[test]
+    fn a_full_table_refuses_as_too_many_live_values() {
+        use crate::gen_index::TEST_SLOT_LIMIT;
+        let mut host = ScriptVmHost::new((), ());
+        let mut vm = ScriptVm { host: host.host_context(), bx: Box::new(ScriptVmBase::new()) };
+        let heap = &vm.bx.heap;
+        for (table, len, free) in [
+            ("objects", heap.objects.len(), heap.objects_free.capacity()),
+            ("arrays", heap.arrays.len(), heap.arrays_free.capacity()),
+            ("strings", heap.strings.len(), heap.strings_free.capacity()),
+        ] {
+            // Slot 0 is never freed.
+            assert!(free + 1 >= len, "{table}: the free list can take every slot, so a sweep never grows it");
+        }
+        let poison = heap.allocation_poison_object;
+        assert!(poison != ScriptObject::ZERO, "the refused-value sentinels exist before any refusal can");
+
+        // Room for 64 more values of each kind than the heap holds now.
+        let limit = heap.objects.len().max(heap.arrays.len()).max(heap.strings.len()) + 64;
+        TEST_SLOT_LIMIT.with(|l| l.set(Some(limit)));
+        vm.capture_errors();
+        let chain = vm.with_instruction_limit(100_000, |vm| eval(vm, "full_table", "let head = nil\nloop { head = {next: head} }"));
+        let refusal = vm.bx.heap.take_memory_refusal();
+        let errors = vm.take_errors();
+        // A host call outside any run gets its refusal at once (after any free slots are reused).
+        let refused = (0..=limit).map(|_| vm.bx.heap.new_object()).find(|object| *object == poison);
+        let host_refusal = vm.bx.heap.take_memory_refusal();
+        TEST_SLOT_LIMIT.with(|l| l.set(None));
+
+        assert!(chain.is_err(), "the chain that filled the table ended as an error");
+        assert_eq!(refusal.map(|r| r.reason), Some(TOO_MANY_LIVE_VALUES), "the run names the full table");
+        assert!(errors.is_empty(), "the refusal formats no diagnostic: {errors:?}");
+        assert_eq!(refused, Some(poison), "a refused host object is the inert sentinel");
+        assert_eq!(host_refusal.map(|r| r.reason), Some(TOO_MANY_LIVE_VALUES), "the host call gets its refusal");
+        assert_eq!(eval(&mut vm, "after_full", "6 * 7").as_number(), Some(42.0), "the VM evaluates again");
     }
 
     #[test]

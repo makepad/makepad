@@ -103,21 +103,44 @@ impl NumericValue {
                                 w: f32::from_bits(pod_data.data[3]),
                             });
                         }
-                        // Handle integer vectors by converting to float
-                        ScriptPodVec::Vec2i | ScriptPodVec::Vec2u => {
+                        // Integer vectors convert to float lanes; signed lanes are
+                        // read as i32 (a raw `as f32` turned -1 into 4.29e9).
+                        ScriptPodVec::Vec2i => {
+                            return NumericValue::Vec2(Vec2f {
+                                x: pod_data.data[0] as i32 as f32,
+                                y: pod_data.data[1] as i32 as f32,
+                            });
+                        }
+                        ScriptPodVec::Vec3i => {
+                            return NumericValue::Vec3(Vec3f {
+                                x: pod_data.data[0] as i32 as f32,
+                                y: pod_data.data[1] as i32 as f32,
+                                z: pod_data.data[2] as i32 as f32,
+                            });
+                        }
+                        ScriptPodVec::Vec4i => {
+                            return NumericValue::Vec4(Vec4f {
+                                x: pod_data.data[0] as i32 as f32,
+                                y: pod_data.data[1] as i32 as f32,
+                                z: pod_data.data[2] as i32 as f32,
+                                w: pod_data.data[3] as i32 as f32,
+                            });
+                        }
+                        // Unsigned integer vectors convert to float lanes.
+                        ScriptPodVec::Vec2u => {
                             return NumericValue::Vec2(Vec2f {
                                 x: pod_data.data[0] as f32,
                                 y: pod_data.data[1] as f32,
                             });
                         }
-                        ScriptPodVec::Vec3i | ScriptPodVec::Vec3u => {
+                        ScriptPodVec::Vec3u => {
                             return NumericValue::Vec3(Vec3f {
                                 x: pod_data.data[0] as f32,
                                 y: pod_data.data[1] as f32,
                                 z: pod_data.data[2] as f32,
                             });
                         }
-                        ScriptPodVec::Vec4i | ScriptPodVec::Vec4u => {
+                        ScriptPodVec::Vec4u => {
                             return NumericValue::Vec4(Vec4f {
                                 x: pod_data.data[0] as f32,
                                 y: pod_data.data[1] as f32,

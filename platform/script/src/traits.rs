@@ -206,7 +206,7 @@ pub fn script_derive_enum_type_check(heap: &ScriptHeap, value: ScriptValue, vari
 
 // The per-type functions the VM calls (type checks, proto builders) are `extern "C-unwind"`
 // trampolines over the trait methods: the VM calls them without knowing which compiler built
-// the type (local/plans/loader-core.md section 8). Same cost as a Rust fn pointer.
+// the type. Same cost as a Rust fn pointer.
 pub type ScriptTypeCheckFn = extern "C-unwind" fn(&ScriptHeap, ScriptValue) -> bool;
 pub type ScriptProtoBuildFn = extern "C-unwind" fn(&mut ScriptVm, &mut ScriptTypeProps) -> ScriptValue;
 pub type ScriptProtoPropsFn = extern "C-unwind" fn(&mut ScriptVm, ScriptObject, &mut ScriptTypeProps);
@@ -570,7 +570,9 @@ impl ScriptVm<'_> {
             return value;
         }
         let proto = T::script_proto(self).into();
+        if self.heap().allocation_error_pending() { return NIL; }
         let obj = self.new_with_proto_of(proto);
+        if self.heap().allocation_error_pending() { return obj.into(); }
         this.script_to_value_props(self, obj);
         obj.into()
     }
@@ -579,8 +581,10 @@ impl ScriptVm<'_> {
     /// values[i]`, in order, in one call.
     #[doc(hidden)]
     pub fn script_derive_set_props(&mut self, obj: ScriptObject, ids: &[LiveId], values: &[ScriptValue]) {
+        if self.heap().allocation_error_pending() { return; }
         for (id, value) in ids.iter().zip(values) {
             self.set_value_trap_of(obj, ScriptValue::from_id(*id), *value);
+            if self.heap().allocation_error_pending() { break; }
         }
     }
 
@@ -621,12 +625,25 @@ impl ScriptVm<'_> {
         repr_value: Option<f64>,
     ) {
         let bare = self.new_with_proto_of(LiveId::from_str_with_lut(proto_name).unwrap().into());
+        if self.heap().allocation_error_pending() { return; }
         if let Some(repr_value) = repr_value {
             self.set_value_trap_of(bare, id!(_repr_u32_enum_value).into(), repr_value.into());
+            if self.heap().allocation_error_pending() { return; }
         }
         self.set_value_trap_of(enum_object, key.into(), bare.into());
+        if self.heap().allocation_error_pending() { return; }
         self.set_value_trap_of(bare, LiveId::from_str_with_lut("__enum").unwrap().into(), LiveId::from_str_with_lut(enum_name).unwrap().into());
+        if self.heap().allocation_error_pending() { return; }
         self.heap_mut().freeze(bare);
+    }
+
+    /// Records the argument types of a derived enum's tuple variant, so a value built from data
+    /// (`typed_value`) can check and build each argument without calling the constructor.
+    #[doc(hidden)]
+    #[relax_api(run)]
+    #[inline(never)]
+    pub fn script_derive_enum_tuple_args(&mut self, enum_ty: ScriptTypeId, variant: LiveId, args: &[ScriptTypeId]) {
+        self.bx.heap.tuple_arg_types.insert((enum_ty, variant), args.into());
     }
 
     /// The constructor method of a tuple variant of a derived enum: builds
@@ -644,11 +661,13 @@ impl ScriptVm<'_> {
         line: u32,
     ) -> ScriptValue {
         let tuple = self.new_with_proto_of(key.into());
+        if self.heap().allocation_error_pending() { return NIL; }
         self.set_value_trap_of(
             tuple,
             LiveId::from_str_with_lut("__enum").unwrap().into(),
             LiveId::from_str_with_lut(enum_name).unwrap().into(),
         );
+        if self.heap().allocation_error_pending() { return NIL; }
         if self.heap().vec_len(args) != checks.len() {
             self.script_derive_push_err(
                 ScriptValue::script_err_invalid_args,

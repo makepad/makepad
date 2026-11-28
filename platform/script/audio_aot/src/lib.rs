@@ -1,8 +1,7 @@
 //! Splash audio shaders: instruments and effects written as small Splash
 //! functions, compiled ahead of time (at edit time, on a worker thread)
 //! into realtime-safe code for the audio thread by the Splash compute core
-//! (makepad-script-compute); the plan of record is
-//! local/agent_state/edits/design/AUDIO-SHADERS.md.
+//! (makepad-script-compute).
 //!
 //! ```text
 //! shader source --[parse]--> AST --[lower: types, inlining, math]--> AIR
@@ -166,7 +165,9 @@ static LAYOUTS: relax_api::sync::Mutex<Vec<Weak<StateLayout>>> = relax_api::sync
 
 /// A run of this process's app ended in place (`makepad run`). The interned layouts belong to that
 /// run's programs and go with it, table and all, so the next run starts as a fresh process does.
+#[relax_api]
 pub fn end_run() {
+    wasm::end_run();
     drop(std::mem::take(&mut *LAYOUTS.lock().unwrap_or_else(|e| e.into_inner())));
 }
 
@@ -859,14 +860,6 @@ impl AudioShaderBody {
         &self.render
     }
 
-    /// The render program's identity across hosts (the compute core's
-    /// `kernel::program_key`): a build tool compiles a document's shaders
-    /// to wasm ahead of time under these keys, and the browser host links
-    /// them by key ([`wasm::link`]).
-    pub fn program_key(&self) -> u64 {
-        *self.key.get_or_init(|| makepad_script_compute::kernel::program_key(&self.render))
-    }
-
     /// The shared tables (built by `init()`; the render program reads them).
     pub fn shared_table(&self) -> &[u32] {
         &self.shared
@@ -926,6 +919,14 @@ impl AudioShaderBody {
 /// The run entry: the one door the audio thread renders through.
 #[relax_api]
 impl AudioShaderBody {
+    /// The render program's identity across hosts (the compute core's
+    /// `kernel::program_key`): a build tool compiles a document's shaders
+    /// to wasm ahead of time under these keys, and the browser host links
+    /// them by key ([`wasm::link`]).
+    pub fn program_key(&self) -> u64 {
+        *self.key.get_or_init(|| makepad_script_compute::kernel::program_key(&self.render))
+    }
+
     /// Whether the host supplied this module while compiling the shader.
     pub fn uses_module(&self, path: &str) -> bool {
         self.module_paths.iter().any(|p| p == path)

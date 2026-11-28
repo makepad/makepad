@@ -4,11 +4,12 @@
 //! `depth_clip`).
 
 use crate::shader_ir::*;
-use crate::shader_ir_draw::{build_gl_entries, GlDrawInfo};
+use crate::shader_ir_draw::{build_gl_entries, GlDrawInfo, INSTANCE_WORD_ROW_SHIFT};
 use crate::shader_ir_text::*;
 use crate::shader_output::*;
 use makepad_live_id::LiveId;
 use relax_api::relax_api;
+use std::collections::HashMap;
 use std::fmt::Write;
 
 pub struct GlslDrawSources {
@@ -43,8 +44,7 @@ impl GlslDrawSources {
     pub fn inline_function_bytes(&self, index: usize) -> usize { self.inline_estimate.1[index].2 }
 }
 
-/// The GL sources of a compiled draw shader; records which sampler each
-/// texture is bound with in `output.texture_sampler_bindings`.
+/// The GL sources of a compiled draw shader and its combined-sampler bindings.
 pub fn glsl_draw_sources(output: &mut ShaderOutput, types: &impl crate::shader_types::ShaderTypes) -> GlslDrawSources {
     draw_sources(output, types, false, false)
 }
@@ -70,17 +70,13 @@ fn draw_sources(output: &mut ShaderOutput, types: &impl crate::shader_types::Sha
             _ => ir.pod_ty(types, io.ty),
         });
     }
-    output.texture_sampler_bindings = texture_sampler_bindings(&ir);
+    let (bindings, slots) = collect_texture_bindings(output, &ir);
+    output.glsl_texture_bindings = bindings;
     let mut cx = TextCx::new(&ir, Dialect::Glsl, false);
     cx.glsl_oes_video = !complete && cfg!(any(target_os = "android", target_os = "linux")) && !output.use_vulkan;
-    if pick {
-        for (i, io) in output.io.iter().filter(|io| matches!(io.kind, ShaderIoKind::Texture(_))).enumerate() {
-            if i < 32 && matches!(io.kind, ShaderIoKind::Texture(TextureType::Texture2d)) {
-                if let Some(g) = ir.find_global(IrGlobalKind::Io(IrIo::Texture(TextureType::Texture2d)), io.name) {
-                    cx.pick_twins.push((g, i as u32));
-                }
-            }
-        }
+    for b in &output.glsl_texture_bindings {
+        let g = slots[b.texture_slot as usize].global.unwrap();
+        cx.glsl_sampler_names.push((g, b.sampler_index, b.uniform_name.clone()));
     }
 
     // Shared definitions: the structs, members before their users.
@@ -88,12 +84,6 @@ fn draw_sources(output: &mut ShaderOutput, types: &impl crate::shader_types::Sha
     if !complete && output.io.iter().any(|io| matches!(io.kind, ShaderIoKind::Texture(TextureType::Texture3d))) {
         // The same packed shader body also runs with the WebGL2 host's ES prelude.
         shared.push_str("#ifdef GL_ES\nprecision highp sampler3D;\n#endif\n");
-    }
-    if pick {
-        shared.push_str(GLES_PICK);
-        for (g, _) in &cx.pick_twins {
-            writeln!(shared, "uniform sampler2D {}__pick;", cx.plain_global_name(*g)).ok();
-        }
     }
     let mut done = vec![false; ir.structs.len()];
     for s in 0..ir.structs.len() {
@@ -111,7 +101,7 @@ fn draw_sources(output: &mut ShaderOutput, types: &impl crate::shader_types::Sha
 
     // Vertex.
     let mut vertex = shared.clone();
-    textures(&cx, output, false, &mut vertex);
+    textures(&cx, &output.glsl_texture_bindings, &slots, GLSL_STAGE_VERTEX, &mut vertex);
     vertex.push_str("vec4 vtx_pos;\nuniform float mp_clip_y_flip;\n");
     private_globals(&cx, &ir, true, &mut vertex);
     let entry = ir.functions[vertex_main as usize].entry.clone().unwrap();
@@ -119,11 +109,15 @@ fn draw_sources(output: &mut ShaderOutput, types: &impl crate::shader_types::Sha
         writeln!(vertex, "in {};", cx.decl(io.ty, &io.name)).ok();
     }
     if info.instance_fetch_from.is_some() {
-        vertex.push_str("uniform highp usampler2D mp_inst_data;\nuniform int mp_inst_base;\n");
+        // Word i of the instance buffer is at column i % ROW, row (i / ROW) % ROW and layer
+        // i / ROW^2 of a ROW-wide array texture (`INSTANCE_WORD_ROW_SHIFT`): each layer is one
+        // window of ROW^2 words, and a buffer of any size takes as many layers as it needs.
+        let (shift, mask) = (INSTANCE_WORD_ROW_SHIFT, (1u32 << INSTANCE_WORD_ROW_SHIFT) - 1);
+        vertex.push_str("uniform highp usampler2DArray mp_inst_data;\nuniform int mp_inst_base;\n");
         writeln!(
             vertex,
-            "float _mp_inst_word(int slot) {{ int i = (gl_InstanceID + mp_inst_base) * {} + slot; int w = textureSize(mp_inst_data, 0).x; return uintBitsToFloat(texelFetch(mp_inst_data, ivec2(i % w, i / w), 0).r); }}",
-            info.instance_slots
+            "float _mp_inst_word(int slot) {{ int i = (gl_InstanceID + mp_inst_base) * {} + slot; return uintBitsToFloat(texelFetch(mp_inst_data, ivec3(i & {mask}, (i >> {shift}) & {mask}, i >> {}), 0).r); }}",
+            info.instance_slots, 2 * shift
         )
         .ok();
     }
@@ -145,7 +139,17 @@ fn draw_sources(output: &mut ShaderOutput, types: &impl crate::shader_types::Sha
 
     // Fragment.
     let mut fragment = shared;
-    textures(&cx, output, true, &mut fragment);
+    textures(&cx, &output.glsl_texture_bindings, &slots, GLSL_STAGE_FRAGMENT, &mut fragment);
+    if pick {
+        fragment.push_str(GLES_PICK);
+        for (i, slot) in slots.iter().enumerate().take(32) {
+            if slot.ty == TextureType::Texture2d && slot.fragment_sample {
+                let g = slot.global.unwrap();
+                cx.pick_twins.push((g, i as u32));
+                writeln!(fragment, "uniform sampler2D {};", pick_twin_name(&cx.plain_global_name(g))).ok();
+            }
+        }
+    }
     private_globals(&cx, &ir, false, &mut fragment);
     if ir.globals.iter().any(|g| g.kind == IrGlobalKind::FragYOrigin) {
         // `fragment_position()`'s row origin (the host sets it with the clip Y flip)
@@ -329,15 +333,11 @@ fn uniform_blocks(cx: &TextCx, output: &ShaderOutput, io_tys: &[TyId], out: &mut
     }
 }
 
-fn textures(cx: &TextCx, output: &ShaderOutput, fragment: bool, out: &mut String) {
-    for io in &output.io {
-        if let ShaderIoKind::Texture(tt) = io.kind {
-            // The vertex stage never samples video (and Adreno fails on a
-            // `samplerExternalOES` next to `[int(VIEW_ID)]`).
-            if !fragment && matches!(tt, TextureType::TextureVideo) {
-                continue;
-            }
-            writeln!(out, "uniform {} tex_{};", cx.glsl_sampler_type(tt), io.name).ok();
+fn textures(cx: &TextCx, bindings: &[GlslTextureBinding], slots: &[TextureSlot], stage: u8, out: &mut String) {
+    for b in bindings {
+        if b.stages & stage != 0 {
+            let ty = slots[b.texture_slot as usize].ty;
+            writeln!(out, "uniform {} {};", cx.glsl_sampler_type(ty), b.uniform_name).ok();
         }
     }
 }
@@ -365,61 +365,137 @@ fn private_globals(cx: &TextCx, ir: &IrModule, vertex: bool, out: &mut String) {
     }
 }
 
-/// Which sampler each texture is sampled with, the first sample winning, in
-/// the order the compile reached them (the vertex stage's calls first).
-/// GL binds one sampler per texture, so this rule covers filter, address and anisotropy alike.
-pub fn texture_sampler_bindings(ir: &IrModule) -> Vec<(String, usize)> {
-    let mut out = Vec::new();
-    let mut seen = vec![false; ir.functions.len()];
-    for root in ["io_vertex", "io_fragment"] {
-        if let Some(f) = ir.function_by_name(root) {
-            bindings_in(ir, f, &mut seen, &mut out);
-        }
-    }
-    out
+/// The uniforms the linked stages can use, in first-use order.
+pub fn glsl_texture_bindings(output: &mut ShaderOutput, ir: &IrModule) -> Vec<GlslTextureBinding> {
+    collect_texture_bindings(output, ir).0
 }
 
-fn bindings_in(ir: &IrModule, fi: FuncId, seen: &mut Vec<bool>, out: &mut Vec<(String, usize)>) {
+struct TextureSlot {
+    name: LiveId,
+    ty: TextureType,
+    global: Option<GlobalId>,
+    primary: Option<usize>,
+    pair_count: usize,
+    size_or_load_stages: u8,
+    fragment_sample: bool,
+}
+
+fn collect_texture_bindings(output: &mut ShaderOutput, ir: &IrModule) -> (Vec<GlslTextureBinding>, Vec<TextureSlot>) {
+    let mut slots = Vec::new();
+    let mut slot_by_name = HashMap::new();
+    for io in &output.io {
+        if let ShaderIoKind::Texture(ty) = io.kind {
+            slot_by_name.insert((io.name, ty), slots.len());
+            slots.push(TextureSlot {
+                name: io.name, ty, global: None, primary: None, pair_count: 0,
+                size_or_load_stages: 0, fragment_sample: false,
+            });
+        }
+    }
+    let mut global_to_slot = vec![None; ir.globals.len()];
+    for (g, global) in ir.globals.iter().enumerate() {
+        if let IrGlobalKind::Io(IrIo::Texture(ty)) = global.kind {
+            if let Some(&slot) = slot_by_name.get(&(global.name, ty)) {
+                slots[slot].global = Some(g as GlobalId);
+                global_to_slot[g] = Some(slot);
+            }
+        }
+    }
+
+    let mut bindings: Vec<GlslTextureBinding> = Vec::new();
+    let mut pairs = HashMap::<(usize, u32), usize>::new();
+    for (root, stage) in [("vertex_main", GLSL_STAGE_VERTEX), ("fragment_main", GLSL_STAGE_FRAGMENT)] {
+        let Some(root) = ir.function_by_name(root) else { continue };
+        let mut seen = vec![false; ir.functions.len()];
+        visit_texture_uses(ir, root, &mut seen, &mut |f, kind| {
+            let tex = match kind {
+                ExprKind::Sample(s) => s.tex,
+                ExprKind::TexSize(t) | ExprKind::TexLoad(t, ..) => *t,
+                _ => return,
+            };
+            let slot_index = match f.exprs[tex as usize].kind {
+                ExprKind::Global(g) => global_to_slot[g as usize],
+                _ => None,
+            };
+            let Some(slot_index) = slot_index else {
+                if matches!(kind, ExprKind::Sample(_)) {
+                    output.push_error("texture sample target must be a texture global".into());
+                }
+                return;
+            };
+            let slot = &mut slots[slot_index];
+            // Adreno rejects a vertex-stage external sampler beside [int(VIEW_ID)].
+            if stage == GLSL_STAGE_VERTEX && slot.ty == TextureType::TextureVideo {
+                return;
+            }
+            let ExprKind::Sample(s) = kind else {
+                slot.size_or_load_stages |= stage;
+                return;
+            };
+            slot.fragment_sample |= stage == GLSL_STAGE_FRAGMENT;
+            let index = pairs.entry((slot_index, s.sampler)).or_insert_with(|| {
+                let index = bindings.len();
+                if slot.pair_count == 0 { slot.primary = Some(index); }
+                let uniform_name = glsl_texture_uniform_name(slot.name, slot.pair_count);
+                slot.pair_count += 1;
+                bindings.push(GlslTextureBinding {
+                    uniform_name, texture_slot: slot_index as u32, sampler_index: s.sampler, stages: 0,
+                });
+                index
+            });
+            bindings[*index].stages |= stage;
+        });
+    }
+    for (i, slot) in slots.iter().enumerate() {
+        if slot.size_or_load_stages == 0 {
+            continue;
+        }
+        if let Some(primary) = slot.primary {
+            bindings[primary].stages |= slot.size_or_load_stages;
+        } else {
+            bindings.push(GlslTextureBinding {
+                uniform_name: glsl_texture_uniform_name(slot.name, 0),
+                texture_slot: i as u32,
+                sampler_index: output.get_or_create_sampler(ShaderSampler::default()) as u32,
+                stages: slot.size_or_load_stages,
+            });
+        }
+    }
+    (bindings, slots)
+}
+
+fn visit_texture_uses(
+    ir: &IrModule, fi: FuncId, seen: &mut [bool], visit: &mut impl FnMut(&IrFunction, &ExprKind),
+) {
     if seen[fi as usize] {
         return;
     }
     seen[fi as usize] = true;
     let f = &ir.functions[fi as usize];
-    let mut order = Vec::new();
-    stmt_exprs(&f.body, &mut order);
+    let mut roots = Vec::new();
+    stmt_exprs(&f.body, &mut roots);
+    let mut visited = vec![false; f.exprs.len()];
     let mut stack = Vec::new();
-    for e in order {
-        stack.push(e);
-        while let Some(x) = stack.pop() {
-            if x == NO_EXPR {
+    let mut children = Vec::new();
+    for root in roots {
+        stack.push((root, false));
+        while let Some((e, after_children)) = stack.pop() {
+            if e == NO_EXPR {
                 continue;
             }
-            let kind = &f.exprs[x as usize].kind;
-            let mut kids = Vec::new();
-            expr_children(kind, &mut kids);
-            // Arguments before the expression itself (evaluation order).
-            let mut k = kids.len();
-            while k > 0 {
-                k -= 1;
-                stack.push(kids[k]);
-            }
-            match kind {
-                ExprKind::Call(c, _) => bindings_in(ir, *c, seen, out),
-                ExprKind::Sample(s) => {
-                    if let ExprKind::Global(g) = f.exprs[s.tex as usize].kind {
-                        let name = format!("tex_{}", ir.globals[g as usize].name);
-                        let mut have = false;
-                        for (n, _) in out.iter() {
-                            if *n == name {
-                                have = true;
-                            }
-                        }
-                        if !have {
-                            out.push((name, s.sampler as usize));
-                        }
-                    }
+            let kind = &f.exprs[e as usize].kind;
+            if after_children {
+                if let ExprKind::Call(callee, _) = kind {
+                    visit_texture_uses(ir, *callee, seen, visit);
+                } else {
+                    visit(f, kind);
                 }
-                _ => {}
+            } else if !visited[e as usize] {
+                visited[e as usize] = true;
+                stack.push((e, true));
+                children.clear();
+                expr_children(kind, &mut children);
+                stack.extend(children.iter().rev().map(|&child| (child, false)));
             }
         }
     }
@@ -485,4 +561,121 @@ fn inline_estimate(ir: &IrModule, root: FuncId, sizes: &[usize]) -> (usize, Vec<
     top.sort_by_key(|(_, c, l)| std::cmp::Reverse(c.saturating_mul(*l)));
     top.truncate(4);
     (total, top)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::shader_ids::ShaderTypeId;
+    use crate::shader_schema::ShaderTypeData;
+    use crate::shader_types::ShaderTypes;
+
+    struct TextureOnlyTypes;
+
+    impl ShaderTypes for TextureOnlyTypes {
+        fn type_data(&self, _: ShaderTypeId) -> &ShaderTypeData {
+            unreachable!("texture IO is typed by its IR texture shape")
+        }
+    }
+
+    fn texture(output: &mut ShaderOutput, name: &str, ty: TextureType) -> (GlobalId, TyId) {
+        let name = LiveId::from_str_with_lut(name).unwrap();
+        output.io.push(ShaderIo {
+            kind: ShaderIoKind::Texture(ty), name, ty: ShaderTypeId::VOID, buffer_index: None, instance_lane: None,
+        });
+        let texture_ty = output.ir.ty(IrTy::Texture(ty));
+        (output.ir.global(IrGlobalKind::Io(IrIo::Texture(ty)), name, texture_ty), texture_ty)
+    }
+
+    fn sample_2d(f: &mut IrFunction, tex: ExprId, sampler: u32, uv: ExprId, vec4: TyId) {
+        let sample = f.expr(ExprKind::Sample(Box::new(IrSample {
+            tex, tex_type: TextureType::Texture2d, sampler, kind: SampleKind::Implicit,
+            method: LiveId::from_str("sample"), coord: uv, lod: NO_EXPR, dx: NO_EXPR, dy: NO_EXPR, reference: NO_EXPR,
+        })), vec4);
+        f.body.push(Stmt::Expr(sample));
+    }
+
+    #[test]
+    fn multi_sampler_same_texture_emits_distinct_uniforms_and_stage_masks() {
+        let mut out = ShaderOutput::default();
+        let (tex, d2) = texture(&mut out, "tex", TextureType::Texture2d);
+        let (morph, _) = texture(&mut out, "morph_map", TextureType::Texture2d);
+        let (volume, d3) = texture(&mut out, "trace_vol", TextureType::Texture3d);
+        texture(&mut out, "unused_map", TextureType::Texture2d);
+        let repeat = ShaderSampler { address: SamplerAddress::Repeat, ..ShaderSampler::default() };
+        let aniso = out.get_or_create_sampler(ShaderSampler { anisotropy: 16, ..repeat }) as u32;
+        let linear = out.get_or_create_sampler(repeat) as u32;
+        let default = out.get_or_create_sampler(ShaderSampler::default()) as u32;
+        let vec2 = out.ir.vec_ty(2, IrScalar::F32);
+        let vec4 = out.ir.vec_ty(4, IrScalar::F32);
+        let ivec3 = out.ir.vec_ty(3, IrScalar::I32);
+
+        let mut vertex = IrFunction::new("io_vertex".into(), TY_VOID);
+        let img = vertex.expr(ExprKind::Global(morph), d2);
+        let half = vertex.expr(ExprKind::Lit(IrLit::F32(0.5)), TY_F32);
+        let uv = vertex.expr(ExprKind::Construct(vec![half]), vec2);
+        sample_2d(&mut vertex, img, default, uv, vec4);
+        out.ir.functions.push(vertex);
+
+        let mut fragment = IrFunction::new("io_fragment".into(), TY_VOID);
+        let img = fragment.expr(ExprKind::Global(tex), d2);
+        let size = fragment.expr(ExprKind::TexSize(img), vec2);
+        fragment.body.push(Stmt::Expr(size));
+        let half = fragment.expr(ExprKind::Lit(IrLit::F32(0.5)), TY_F32);
+        let uv = fragment.expr(ExprKind::Construct(vec![half]), vec2);
+        sample_2d(&mut fragment, img, aniso, uv, vec4);
+        sample_2d(&mut fragment, img, linear, uv, vec4);
+        let vol = fragment.expr(ExprKind::Global(volume), d3);
+        let zero = fragment.expr(ExprKind::Lit(IrLit::I32(0)), TY_I32);
+        let coord = fragment.expr(ExprKind::Construct(vec![zero]), ivec3);
+        let load = fragment.expr(ExprKind::TexLoad(vol, coord, NO_EXPR, zero), vec4);
+        fragment.body.push(Stmt::Expr(load));
+        out.ir.functions.push(fragment);
+
+        let (wgsl, _) = crate::shader_ir_wgsl::draw_wgsl(&out, &TextureOnlyTypes, false).unwrap();
+        assert!(!wgsl.contains("__"), "WGSL contains a reserved identifier");
+        for pick in [false, true] {
+            let msl = crate::shader_ir_metal::metal_draw_source(&out, &TextureOnlyTypes, pick);
+            let (hlsl, _) = crate::shader_ir_hlsl::hlsl_draw(&out, &TextureOnlyTypes, pick);
+            assert!(!msl.replace("__attribute__", "").contains("__"), "MSL contains a reserved identifier");
+            assert!(!hlsl.contains("__"), "HLSL contains a reserved identifier");
+            assert_eq!(msl.contains("mp_pick_tex_tex"), pick);
+            assert_eq!(hlsl.contains("mp_pick_tex_tex"), pick);
+            let src = gles_draw_sources(&mut out, &TextureOnlyTypes, pick);
+            assert!(!src.vertex.contains("__") && !src.fragment.contains("__"), "GLSL reserves double underscores");
+            assert!(!out.has_errors(), "{}", out.error_report());
+            let actual: Vec<_> = out.glsl_texture_bindings.iter()
+                .map(|b| (b.uniform_name.as_str(), b.texture_slot, b.sampler_index, b.stages)).collect();
+            assert_eq!(actual, [
+                ("tex_morph_map", 1, default, GLSL_STAGE_VERTEX),
+                ("tex_tex", 0, aniso, GLSL_STAGE_FRAGMENT),
+                ("mp_s1_tex", 0, linear, GLSL_STAGE_FRAGMENT),
+                ("tex_trace_vol", 2, default, GLSL_STAGE_FRAGMENT),
+            ]);
+            let texture_uniforms = |source: &str| source.lines()
+                .filter(|line| line.starts_with("uniform sampler")).map(str::to_owned).collect::<Vec<_>>();
+            assert_eq!(texture_uniforms(&src.vertex), ["uniform sampler2D tex_morph_map;"]);
+            let mut expected = vec!["uniform sampler2D tex_tex;", "uniform sampler2D mp_s1_tex;", "uniform sampler3D tex_trace_vol;"];
+            if pick {
+                expected.push("uniform sampler2D mp_pick_tex_tex;");
+            }
+            assert_eq!(texture_uniforms(&src.fragment), expected);
+            assert!(src.vertex.contains("sample2d(tex_morph_map,"));
+            assert!(src.fragment.contains("sample2d(tex_tex,"));
+            assert!(src.fragment.contains("sample2d(mp_s1_tex,"));
+            assert!(src.fragment.contains("textureSize(tex_tex, 0)"));
+            assert!(src.fragment.contains("texelFetch(tex_trace_vol,"));
+            assert_eq!(src.vertex.matches("_mp_pick_sample(").count(), 0);
+            assert_eq!(src.fragment.matches("_mp_pick_sample(0u, mp_pick_tex_tex,").count(), if pick { 2 } else { 0 });
+        }
+
+        // Reaching the same sampler through the same function in both stages must add both bits.
+        let fragment = &mut out.ir.functions[1];
+        let call = fragment.expr(ExprKind::Call(0, Vec::new()), TY_VOID);
+        fragment.body.push(Stmt::Expr(call));
+        let shared = gles_draw_sources(&mut out, &TextureOnlyTypes, true);
+        assert_eq!(out.glsl_texture_bindings[0].stages, GLSL_STAGE_VERTEX | GLSL_STAGE_FRAGMENT);
+        assert!(shared.fragment.contains("_mp_pick_sample(1u, mp_pick_tex_morph_map,"));
+        assert!(!shared.vertex.contains("mp_pick_tex_"));
+    }
 }

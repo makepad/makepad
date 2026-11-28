@@ -266,7 +266,7 @@ static REGISTRY: RwLock<Vec<HostFn>> = RwLock::new(Vec::new());
 /// (`crate::end_run`) The host fns the ended run registered: their callbacks are its code. The
 /// next look starts from the built-in ones.
 pub(crate) fn end_run() {
-    REGISTRY.write().unwrap_or_else(|e| e.into_inner()).clear();
+    drop(std::mem::take(&mut *REGISTRY.write().unwrap_or_else(|e| e.into_inner())));
 }
 
 fn registry() -> std::sync::RwLockReadGuard<'static, Vec<HostFn>> {

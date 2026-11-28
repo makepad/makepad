@@ -12,7 +12,7 @@ use ::std::fmt;
 //use std::collections::btree_map::BTreeMap;
 
 #[relax_api(plain, run)]
-#[derive(Default, Clone, Copy)]
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
 pub struct ScriptObjectTag(u64);
 
 pub type ScriptObjectMap = ValueMap<ScriptValue, ScriptMapValue>;
@@ -172,8 +172,6 @@ impl Drop for ScriptObjectRef {
 }
 
 impl ScriptObjectTag {
-    // marked in the mark-sweep gc
-    pub const MARK: u64 = 0x1 << 40;
     // object is not 'free'
     pub const ALLOCED: u64 = 0x2 << 40;
     // object is 'deep' aka writes to protochain
@@ -442,21 +440,6 @@ impl ScriptObjectTag {
         self.0 = 0;
     }
 
-    #[inline]
-    pub fn is_marked(&self) -> bool {
-        self.0 & Self::MARK != 0
-    }
-
-    #[inline]
-    pub fn set_mark(&mut self) {
-        self.0 |= Self::MARK
-    }
-
-    #[inline]
-    pub fn clear_mark(&mut self) {
-        self.0 &= !Self::MARK
-    }
-
     // FREEZE
 
     #[inline]
@@ -667,9 +650,6 @@ impl fmt::Display for ScriptObjectTag {
         }
         if self.is_map() {
             write!(f, "STORAGE_MAP|").ok();
-        }
-        if self.is_marked() {
-            write!(f, "MARK|").ok();
         }
         if self.is_alloced() {
             write!(f, "ALLOCED|").ok();
@@ -1050,28 +1030,33 @@ impl ScriptObjectData {
             id!(retain),
             script_args!(cb = NIL),
             |vm, args| {
-                if let Some(sself) = script_value!(vm, args.self).as_object() {
-                    let fnptr = script_value!(vm, args.cb);
-                    let mut i = 0;
-                    while i < vm.bx.heap.vec_len(sself) {
-                        let value = script_value!(vm, sself[i]);
-                        let ret = vm.call(fnptr, &[value]);
-                        if ret.is_err() {
-                            return ret;
-                        }
-                        if !vm.bx.heap.cast_to_bool(ret) {
-                            let trap = vm.bx.threads.cur().trap.pass();
-                            vm.bx.heap.vec_remove(sself, i, trap);
-                        } else {
-                            i += 1
-                        }
+                let (mut i, sself, cb, mut returned) = match vm.take_call_back() {
+                    Some(([index, receiver, cb, _], ret)) => (usize::from(index), receiver.as_object().unwrap(), cb, Some(ret)),
+                    None => {
+                        let Some(sself) = script_value!(vm, args.self).as_object() else {
+                            return script_err_not_impl!(vm.bx.threads.cur_ref().trap, "retain called on non-object value");
+                        };
+                        (0, sself, script_value!(vm, args.cb), None)
                     }
-                    return NIL;
+                };
+                loop {
+                    let ret = if let Some(ret) = returned.take() {
+                        ret
+                    } else {
+                        if i >= vm.bx.heap.vec_len(sself) { return NIL; }
+                        let item = script_value!(vm, sself[i]);
+                        let Some(ret) = vm.call_back(cb, &[item], [i.into(), sself.into(), cb, NIL]) else { return NIL };
+                        ret
+                    };
+                    if vm.bx.heap.allocation_error_pending { return NIL; }
+                    if ret.is_err() { return ret; }
+                    if vm.bx.heap.cast_to_bool(ret) {
+                        i += 1;
+                    } else {
+                        let trap = vm.bx.threads.cur().trap.pass();
+                        vm.bx.heap.vec_remove(sself, i, trap);
+                    }
                 }
-                script_err_not_impl!(
-                    vm.bx.threads.cur_ref().trap,
-                    "retain called on non-object value"
-                )
             },
         );
     }

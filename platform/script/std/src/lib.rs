@@ -28,6 +28,11 @@ use makepad_script::*;
 pub fn script_mod(vm: &mut ScriptVm) {
     crate::fs::script_mod(vm);
     crate::run::script_mod(vm);
+    script_mod_isolate(vm);
+}
+
+#[relax_api(run)]
+pub fn script_mod_isolate(vm: &mut ScriptVm) {
     crate::task::script_mod(vm);
     crate::net::script_mod(vm);
 }

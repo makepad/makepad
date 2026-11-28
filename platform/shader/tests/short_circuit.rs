@@ -88,6 +88,56 @@ fn guarded_reads_and_pure_operands() {
             }
         }
     }
+
+    let mut m = IrModule::new();
+    let mut fragment = IrFunction::new("fragment_main".into(), TY_VOID);
+    fragment.entry = Some(IrEntry {
+        stage: IrStage::Fragment,
+        inputs: vec![IrEntryIo { name: "x".into(), ty: TY_F32, binding: IrIoBinding::Location(0) }],
+        outputs: vec![IrEntryIo { name: "color".into(), ty: TY_F32, binding: IrIoBinding::Location(0) }],
+    });
+    let mut coverage = IrFunction::new("coverage".into(), TY_F32);
+    coverage.params.push(IrParam { name: id!(x), shadow: 0, ty: TY_F32, inout: false });
+    let x = fragment.expr(ExprKind::EntryIn(0), TY_F32);
+    let arg = coverage.expr(ExprKind::Param(0), TY_F32);
+    for (f, value) in [(&mut fragment, x), (&mut coverage, arg)] {
+        let zero = f.expr(ExprKind::Lit(IrLit::F32(0.0)), TY_F32);
+        let reject = f.expr(ExprKind::Binary(BinOp::Lt, value, zero), TY_BOOL);
+        f.body.push(Stmt::If(reject, vec![Stmt::Discard], vec![]));
+    }
+    coverage.body.push(Stmt::Return(arg));
+    let result = fragment.expr(ExprKind::Call(1, vec![x]), TY_F32);
+    let color = fragment.expr(ExprKind::EntryOut(0), TY_F32);
+    fragment.body.extend([Stmt::Assign(color, result), Stmt::Return(NO_EXPR)]);
+    m.functions.push(fragment);
+    m.functions.push(coverage);
+    let discard_branch = |m: &IrModule, dialect, function: usize| {
+        let f = &m.functions[function];
+        let mut source = String::new();
+        TextCx::new(m, dialect, false).stmts(f, &f.body, 0, &mut source);
+        source.lines().skip(1).take_while(|line| line.trim() != "}").map(str::trim).collect::<Vec<_>>().join(" ")
+    };
+    for (dialect, entry, helper) in [
+        (Dialect::Metal, "discard_fragment(); return out_data;", "discard_fragment(); return float(0);"),
+        (Dialect::Glsl, "discard; return;", "discard; return 0.0;"),
+        (Dialect::Hlsl, "discard; return out_data;", "discard; return ((float)0);"),
+        (Dialect::Wgsl, "discard;", "discard;"),
+    ] {
+        assert_eq!(discard_branch(&m, dialect, 0), entry, "{dialect:?} fragment entry discard");
+        assert_eq!(discard_branch(&m, dialect, 1), helper, "{dialect:?} non-void helper discard");
+    }
+
+    // Return a derivative from a callee after the fragment's varying discard.
+    for op in [Builtin::Dpdx, Builtin::Dpdy] {
+        let mut m = m.clone();
+        let f = &mut m.functions[1];
+        let gradient = f.expr(ExprKind::Builtin(op, vec![arg]), TY_F32);
+        f.body[1] = Stmt::Return(gradient);
+        for (dialect, bare) in [(Dialect::Metal, "discard_fragment();"), (Dialect::Hlsl, "discard;"), (Dialect::Glsl, "discard;")] {
+            assert_eq!(discard_branch(&m, dialect, 0), bare, "{dialect:?} entry must preserve quad derivatives");
+            assert_eq!(discard_branch(&m, dialect, 1), bare, "{dialect:?} helper must preserve quad derivatives");
+        }
+    }
 }
 
 #[test]

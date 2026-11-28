@@ -521,6 +521,7 @@ pub enum CompileReq<'a> {
 
 /// The kernel compiles running now, as `kind [name] on thread` (the host's quit trace names
 /// what an app's stop waited for: a compile that has begun runs to its end).
+#[relax_api::relax_api(loader = "the loader waits at an app's stop for the compiles that began: JIT code has no use for it")]
 pub fn kernels_compiling() -> Vec<String> {
     COMPILING.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|(_, what)| what.clone()).collect()
 }
@@ -530,8 +531,8 @@ static COMPILING: relax_api::sync::Mutex<Vec<(u64, String)>> = relax_api::sync::
 /// A run of this process's app ended in place (`makepad run`): a compile that ended with its thread
 /// never removed its row.
 pub(crate) fn end_run() {
-    COMPILING.lock().unwrap_or_else(|e| e.into_inner()).clear();
-    registry().lock().unwrap_or_else(|e| e.into_inner()).clear();
+    drop(std::mem::take(&mut *COMPILING.lock().unwrap_or_else(|e| e.into_inner())));
+    drop(std::mem::take(&mut *registry().lock().unwrap_or_else(|e| e.into_inner())));
 }
 
 /// One running compile in [`COMPILING`], removed when it ends.

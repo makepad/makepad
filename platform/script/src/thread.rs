@@ -8,6 +8,41 @@ use crate::trap::*;
 use crate::value::*;
 use crate::*;
 
+/// The operand stack limit ([`ScriptThread::stack_limit`]) was reached.
+pub(crate) const SIGNAL_OPERAND_STACK: u8 = 1;
+/// The call frame limit ([`ScriptThread::call_frame_limit`]) was reached.
+pub(crate) const SIGNAL_CALL_FRAMES: u8 = 2;
+/// A thread vector could not grow ([`ScriptThread::growth_refusal`]).
+pub(crate) const SIGNAL_GROWTH: u8 = 4;
+
+pub(crate) const GROWING_THE_OPERAND_STACK: &str = "out of memory while growing the operand stack";
+pub(crate) const GROWING_THE_CALL_STACK: &str = "out of memory while growing the call stack";
+
+/// Push `value` if `v` has or can get room: one compare while there is room (the
+/// push itself checks nothing more), an out-of-line fallible grow when full.
+/// False when the grow is refused; `value` is dropped.
+#[inline(always)]
+fn try_push<T>(v: &mut Vec<T>, value: T) -> bool {
+    let len = v.len();
+    if len == v.capacity() && !grow_one(v) {
+        return false;
+    }
+    // SAFETY: `len < capacity` now holds, so slot `len` is allocated and unused;
+    // it is written before the length covers it.
+    unsafe {
+        v.as_mut_ptr().add(len).write(value);
+        v.set_len(len + 1);
+    }
+    true
+}
+
+/// The amortised (doubling) grow behind [`try_push`].
+#[cold]
+#[inline(never)]
+fn grow_one<T>(v: &mut Vec<T>) -> bool {
+    v.try_reserve(1).is_ok()
+}
+
 #[relax_api(plain, run)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct StackBases {
@@ -17,6 +52,7 @@ pub struct StackBases {
     pub scope: usize,
     pub mes: usize,
     pub slots: usize,
+    pub native_conts: usize,
 }
 
 #[relax_api(plain, run)]
@@ -67,6 +103,35 @@ pub struct CallFrame {
     /// The root frame of a script body run (not a host->fn call): its
     /// return records the scope the body ended in (`ScriptBody::end_scope`).
     pub body_root: bool,
+    /// A script callback whose result a suspended native consumes.
+    pub native_cont: bool,
+}
+
+impl CallFrame {
+    pub(crate) fn call_site(&self) -> Option<ScriptIp> {
+        self.return_ip.map(|ip| if self.native_cont { ip } else {
+            ScriptIp { index: ip.index.saturating_sub(1), ..ip }
+        })
+    }
+}
+
+pub(crate) struct NativeCont {
+    pub keep: [ScriptValue; 4],
+    pub ret: Option<ScriptValue>,
+}
+
+/// A suspended callback keeps its admitted target. A fresh call or a native's own
+/// pause resolves the original method at the call opcode.
+#[derive(Clone, Copy, Debug)]
+pub enum CallTarget {
+    Resolve(Option<LiveId>),
+    Admitted(OpcodeNative),
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum OpcodeNative {
+    Function(NativeId),
+    TypeCall { handler: usize, ty: ScriptTypeRedux, method: LiveId },
 }
 
 #[derive(Debug)]
@@ -75,9 +140,7 @@ pub enum ScriptMe {
     Call {
         sself: Option<ScriptValue>,
         args: ScriptObject,
-        /// When set, this is a dynamic dispatch via the type's call function.
-        /// The method name is passed to the call handler at exec time.
-        method: Option<LiveId>,
+        target: CallTarget,
     },
     Pod {
         pod: ScriptPod,
@@ -125,11 +188,16 @@ pub struct ScriptThread {
     pub(crate) scopes: Vec<ScriptObject>,
     pub(crate) stack: Vec<ScriptValue>,
     pub(crate) calls: Vec<CallFrame>,
+    pub(crate) native_conts: Vec<NativeCont>,
     pub(crate) mes: Vec<ScriptMe>,
-    /// Resource-limit signals are consumed by the VM loop so these failures
-    /// cannot enter script-level `try` recovery.
-    pub(crate) stack_limit_exceeded: bool,
-    pub(crate) call_frame_limit_exceeded: bool,
+    /// Resource-limit signals ([`SIGNAL_OPERAND_STACK`], [`SIGNAL_CALL_FRAMES`],
+    /// [`SIGNAL_GROWTH`]) are consumed by the VM loop so these failures cannot
+    /// enter script-level `try` recovery. One byte, so the per-instruction poll
+    /// is one compare.
+    pub(crate) limit_signals: u8,
+    /// Why a thread vector could not grow ([`SIGNAL_GROWTH`]); the VM loop hands it
+    /// to the heap's memory refusal.
+    pub(crate) growth_refusal: Option<&'static str>,
     /// Frame-local variable slots for slot-compiled fn bodies. Lexically
     /// resolved locals live here as `slots[slot_base + i]` instead of in
     /// scope-object maps; GC marks the whole slab as roots.
@@ -137,8 +205,10 @@ pub struct ScriptThread {
     /// Base of the CURRENT slot frame (see CallFrame::prev_slot_base).
     pub(crate) slot_base: usize,
     pub(crate) instruction_limit_remaining: Option<u64>,
-    /// Remaining instructions for a suspended run, reapplied only while it resumes.
-    pub(crate) paused_instruction_limit: Option<u64>,
+    /// Real limit scopes sharing this counter. At depth zero it only paces interrupt samples.
+    pub(crate) instruction_limit_depth: usize,
+    /// The counter and whether it enforces a limit, reapplied only while the run resumes.
+    pub(crate) paused_instruction_limit: Option<(u64, bool)>,
     /// The innermost scope when the root frame returned, kept alive so
     /// the body can hand it to host->script calls.
     pub(crate) root_end_scope: Option<ScriptObjectRef>,
@@ -173,9 +243,9 @@ impl ScriptThread {
     /// A host can install a policy while a thread is suspended. Its existing
     /// stack must fit too, even if its first resumed instruction only pops.
     pub(crate) fn policy_stack_failure(&self, policy: &crate::policy::ScriptVmPolicy) -> Option<crate::policy::Limit> {
-        if self.stack_limit_exceeded || policy.stack_values.is_some_and(|cap| self.stack.len() > cap) {
+        if self.limit_signals & SIGNAL_OPERAND_STACK != 0 || policy.stack_values.is_some_and(|cap| self.stack.len() > cap) {
             Some(crate::policy::Limit::OperandStack)
-        } else if self.call_frame_limit_exceeded || policy.call_frames.is_some_and(|cap| self.calls.len() > cap) {
+        } else if self.limit_signals & SIGNAL_CALL_FRAMES != 0 || policy.call_frames.is_some_and(|cap| self.calls.len() > cap) {
             Some(crate::policy::Limit::CallFrames)
         } else {
             None
@@ -197,12 +267,14 @@ impl ScriptThread {
             loops: Vec::with_capacity(16),
             stack: Vec::with_capacity(1024),
             calls: Vec::with_capacity(64),
+            native_conts: Vec::new(),
             mes: Vec::with_capacity(64),
-            stack_limit_exceeded: false,
-            call_frame_limit_exceeded: false,
+            limit_signals: 0,
+            growth_refusal: None,
             slots: Vec::with_capacity(256),
             slot_base: 0,
             instruction_limit_remaining: None,
+            instruction_limit_depth: 0,
             paused_instruction_limit: None,
             trap: ScriptTrapInner::default(),
             json_parser: Default::default(),
@@ -210,6 +282,11 @@ impl ScriptThread {
             yielded: false,
             completions: Vec::new(),
         }
+    }
+
+    /// Roots held by a native between callback steps, including a result awaiting delivery.
+    pub(crate) fn continuation_roots(&self) -> impl Iterator<Item = ScriptValue> + '_ {
+        self.native_conts.iter().flat_map(|c| c.keep.into_iter().chain(c.ret))
     }
 
     pub fn new_bases(&self) -> StackBases {
@@ -220,11 +297,21 @@ impl ScriptThread {
             scope: self.scopes.len(),
             mes: self.mes.len(),
             slots: self.slots.len(),
+            native_conts: self.native_conts.len(),
         }
     }
 
+    pub(crate) fn real_instruction_remaining(&self) -> Option<u64> {
+        self.instruction_limit_remaining.filter(|_| self.instruction_limit_depth != 0)
+    }
+
+    pub(crate) fn save_instruction_counter(&mut self) {
+        self.paused_instruction_limit = self.instruction_limit_remaining
+            .map(|remaining| (remaining, self.instruction_limit_depth != 0));
+    }
+
     pub fn pause(&mut self) -> ScriptThreadId {
-        self.paused_instruction_limit = self.instruction_limit_remaining;
+        self.save_instruction_counter();
         self.trap.set_on(Some(ScriptTrapOn::Pause));
         self.is_paused = true;
         self.thread_id
@@ -262,6 +349,7 @@ impl ScriptThread {
         self.stack.truncate(bases.stack);
         self.free_unreffed_scopes(&bases, heap);
         self.mes.truncate(bases.mes);
+        self.native_conts.truncate(bases.native_conts);
         self.slots.truncate(bases.slots);
     }
 
@@ -274,6 +362,7 @@ impl ScriptThread {
         self.tries.truncate(bases.tries);
         self.stack.truncate(bases.stack);
         self.mes.truncate(bases.mes);
+        self.native_conts.truncate(bases.native_conts);
     }
 
     /// Read a slot of the current frame. Bounds-checked: the parser only
@@ -397,10 +486,12 @@ impl ScriptThread {
         // historical name distinguishes it from identifier resolution, not
         // from resource accounting.
         if self.stack.len() >= self.stack_limit {
-            self.stack_limit_exceeded = true;
+            self.limit_signals |= SIGNAL_OPERAND_STACK;
             return;
         }
-        self.stack.push(value);
+        if !try_push(&mut self.stack, value) {
+            self.refuse_growth(GROWING_THE_OPERAND_STACK);
+        }
     }
 
     #[inline]
@@ -409,26 +500,82 @@ impl ScriptThread {
             .call_frame_limit
             .is_some_and(|limit| self.calls.len() >= limit)
         {
-            self.call_frame_limit_exceeded = true;
+            self.limit_signals |= SIGNAL_CALL_FRAMES;
             return false;
         }
-        self.calls.push(call);
+        try_push(&mut self.calls, call) || self.refuse_growth(GROWING_THE_CALL_STACK)
+    }
+
+    /// The pushes of a frame's bookkeeping (scopes, receivers, loops, tries, slots).
+    /// False when the vector could not grow: the push is dropped and the VM loop
+    /// ends the run with the memory refusal before another instruction.
+    #[inline]
+    pub(crate) fn push_scope(&mut self, scope: ScriptObject) -> bool {
+        try_push(&mut self.scopes, scope) || self.refuse_growth(GROWING_THE_CALL_STACK)
+    }
+
+    #[inline]
+    pub(crate) fn push_me(&mut self, me: ScriptMe) -> bool {
+        try_push(&mut self.mes, me) || self.refuse_growth(GROWING_THE_CALL_STACK)
+    }
+
+    #[inline]
+    pub(crate) fn push_loop(&mut self, frame: LoopFrame) -> bool {
+        try_push(&mut self.loops, frame) || self.refuse_growth(GROWING_THE_CALL_STACK)
+    }
+
+    #[inline]
+    pub(crate) fn push_try(&mut self, frame: TryFrame) -> bool {
+        try_push(&mut self.tries, frame) || self.refuse_growth(GROWING_THE_CALL_STACK)
+    }
+
+    /// Grow the slot slab to `len` (NIL-filled), or refuse like the pushes above.
+    #[inline]
+    pub(crate) fn grow_slots(&mut self, len: usize) -> bool {
+        if len > self.slots.capacity() && self.slots.try_reserve(len - self.slots.len()).is_err() {
+            return self.refuse_growth(GROWING_THE_CALL_STACK);
+        }
+        self.slots.resize(len, NIL);
         true
+    }
+
+    /// Record why a thread vector could not grow, for the VM loop. Always false.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn refuse_growth(&mut self, reason: &'static str) -> bool {
+        if self.growth_refusal.is_none() {
+            self.growth_refusal = Some(reason);
+        }
+        self.limit_signals |= SIGNAL_GROWTH;
+        false
     }
 
     #[inline]
     pub(crate) fn take_stack_limit_exceeded(&mut self) -> bool {
-        std::mem::take(&mut self.stack_limit_exceeded)
+        self.take_signal(SIGNAL_OPERAND_STACK)
     }
 
     #[inline]
     pub(crate) fn take_call_frame_limit_exceeded(&mut self) -> bool {
-        std::mem::take(&mut self.call_frame_limit_exceeded)
+        self.take_signal(SIGNAL_CALL_FRAMES)
+    }
+
+    #[inline]
+    pub(crate) fn take_growth_refusal(&mut self) -> Option<&'static str> {
+        self.take_signal(SIGNAL_GROWTH);
+        self.growth_refusal.take()
+    }
+
+    #[inline]
+    fn take_signal(&mut self, signal: u8) -> bool {
+        let raised = self.limit_signals & signal != 0;
+        self.limit_signals &= !signal;
+        raised
     }
 
     #[inline]
     pub(crate) fn has_execution_limit_exceeded(&self) -> bool {
-        self.stack_limit_exceeded || self.call_frame_limit_exceeded
+        self.limit_signals != 0
     }
 
     #[inline]
@@ -452,16 +599,18 @@ impl ScriptThread {
     ///
     /// The scan stops at the nearest root frame (`return_ip == None`). The
     /// frames below it belong to an outer `run_core` that is still live on
-    /// the Rust stack under a native call (`array.retain(fn)` calls back on
-    /// this same thread); unwinding into them from here would pop frames that
-    /// outer loop is still executing.
+    /// the Rust stack under a native that called back with `vm.call`;
+    /// unwinding into them from here would pop frames that outer loop is
+    /// still executing. It also stops at a continuation frame (`native_cont`,
+    /// `array.retain(fn)` and friends): that callback shares the interpreter,
+    /// but its errors stay its own, as a nested run's do.
     #[inline]
     pub(crate) fn call_stack_has_try(&self) -> bool {
         for call in self.calls.iter().rev() {
             if self.tries.len() > call.bases.tries {
                 return true;
             }
-            if call.return_ip.is_none() {
+            if call.return_ip.is_none() || call.native_cont {
                 return false;
             }
         }
@@ -496,7 +645,7 @@ impl ScriptThread {
     pub fn def_scope_value(&mut self, heap: &mut ScriptHeap, id: LiveId, value: ScriptValue) {
         // alright if we are shadowing a value, we need to make a new scope
         if let Some(new_scope) = heap.def_scope_value(*self.scopes.last().unwrap(), id, value) {
-            self.scopes.push(new_scope);
+            self.push_scope(new_scope);
         }
     }
 
@@ -505,7 +654,7 @@ impl ScriptThread {
         while !items.is_empty() {
             let (taken, shadow) = heap.def_scope_values(*self.scopes.last().unwrap(), items);
             if let Some(scope) = shadow {
-                self.scopes.push(scope);
+                if !self.push_scope(scope) { return; }
             }
             items = &items[taken..];
         }

@@ -107,6 +107,7 @@ impl std::ops::DerefMut for ShaderOutput {
     fn deref_mut(&mut self) -> &mut Self::Target { &mut self.compiled }
 }
 pub const MAX_EMITTED_BYTES: usize = 1 << 20;
+#[relax_api::relax_api(marked)]
 impl ShaderOutput {
     pub(crate) fn request_anisotropy(&mut self, requested: u8) -> u8 {
         self.requests_anisotropy |= requested > 1;
@@ -125,6 +126,7 @@ impl ShaderOutput {
         id.0.checked_sub(1).and_then(|index| self.function_objects.get(index as usize)).copied()
     }
 
+    #[relax_api::relax_api(loader = "the shader compiler makes its output: JIT code gets one from the `compile_shader` op")]
     pub fn new_for(backend: ShaderBackend, use_vulkan: bool, const_table: bool, pick: bool) -> Self {
         Self { compiled: makepad_shader::shader_output::ShaderOutput { backend, use_vulkan, pick, ..Default::default() }, const_table, live_literals: crate::literal::live(), ..Default::default() }
     }
@@ -138,6 +140,60 @@ impl ShaderOutput {
     pub fn scope_uniforms(&self) -> &[ScopeUniformSource] { &self.scope_uniforms }
     pub fn table_consts(&self) -> &[ShaderTableConst] { &self.table_consts }
     pub fn folded_sites(&self) -> &[crate::literal::LiteralSite] { &self.folded_sites }
+    /// Check source names after lowering the reachable shader functions, before backend
+    /// entry points, temporaries and uniform blocks introduce their own identifiers.
+    pub(crate) fn validate_shader_identifiers(&self, heap: &ScriptHeap) -> Result<(), String> {
+        use crate::pod::{ScriptPodTy, ScriptPodTypeData};
+        use crate::shader_ir::{IrGlobalKind, LocalKind};
+
+        fn check_type(data: &ScriptPodTypeData, check: &mut impl FnMut(LiveId) -> Result<(), String>) -> Result<(), String> {
+            match &data.ty {
+                ScriptPodTy::Struct { fields, .. } => {
+                    if let Some(name) = data.name { check(name)?; }
+                    for field in fields {
+                        check(field.name)?;
+                        check_type(&field.ty.data, check)?;
+                    }
+                }
+                ScriptPodTy::FixedArray { ty, .. } | ScriptPodTy::VariableArray { ty, .. } => check_type(&ty.data, check)?,
+                _ => {}
+            }
+            Ok(())
+        }
+
+        let mut seen = std::collections::HashSet::new();
+        let mut check = |id: LiveId| {
+            if !seen.insert(id) { return Ok(()); }
+            id.as_string(|name| match name {
+                Some(name) if name.contains("__") => Err(format!("shader identifier `{name}` contains reserved sequence `__`")),
+                Some(name) if name.starts_with("_mp_") => Err(format!("shader identifier `{name}` starts with reserved prefix `_mp_`")),
+                _ => Ok(()),
+            })
+        };
+        for f in &self.ir.functions {
+            check(f.key_name)?;
+            for p in &f.params { check(p.name)?; }
+            for l in &f.locals {
+                if l.kind == LocalKind::User { check(l.name)?; }
+            }
+        }
+        for io in &self.io {
+            check(io.name)?;
+            // A declared I/O struct can enter the IR only when the backend builds its interface.
+            check_type(heap.pod_type_ref(io.ty.into()), &mut check)?;
+        }
+        for g in &self.ir.globals {
+            if matches!(g.kind, IrGlobalKind::Io(_) | IrGlobalKind::StorageTexture(_)) { check(g.name)?; }
+        }
+        for st in &self.ir.structs {
+            if st.synth.is_none() {
+                check(st.name)?;
+                for field in &st.fields { check(field.name)?; }
+            }
+        }
+        Ok(())
+    }
+
     fn validate_collected_vertex_fetch_io(&mut self, heap: &ScriptHeap) {
         let io: Vec<_> = self
             .io

@@ -946,6 +946,13 @@ pub struct ScriptParser {
 impl Default for ScriptParser {
     #[relax_api(run)]
     fn default() -> Self {
+        Self { state: vec![State::BeginStmt { last_was_sep: false }], ..Self::vacant() }
+    }
+}
+
+impl ScriptParser {
+    /// A vacant body's placeholder, never used for parsing; `place_body` overwrites the slot before reuse.
+    pub(crate) fn vacant() -> Self {
         Self {
             keep_numbers: false,
             index: 0,
@@ -960,9 +967,7 @@ impl Default for ScriptParser {
             emit_errors: true,
             admission: None,
             admission_error: None,
-            state: vec![State::BeginStmt {
-                last_was_sep: false,
-            }],
+            state: Vec::new(),
             file: String::new(),
             line_offset: 0,
             col_offset: 0,

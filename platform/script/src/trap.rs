@@ -17,6 +17,9 @@ pub enum ScriptTrapOn {
     Pause,
     TimeBudgetYield,
     Return(ScriptValue),
+    CallBack { scope: ScriptObject, ip: ScriptIp },
+    /// An uncaught script error ends only the callback that raised it.
+    Uncaught(ScriptValue),
     Bail(ScriptValue),
 }
 use std::cell::Cell;

@@ -67,13 +67,13 @@ impl Replace {
 
 /// What a tree is, ignoring where it sits and the text between its nodes.
 #[derive(Clone, Debug, PartialEq)]
-struct Shape {
-    label: String,
-    names: Vec<String>,
-    kids: Vec<Shape>,
+pub(super) struct Shape {
+    pub(super) label: String,
+    pub(super) names: Vec<String>,
+    pub(super) kids: Vec<Shape>,
 }
 
-fn shape(node: &Node, src: &str) -> Shape {
+pub(super) fn shape(node: &Node, src: &str) -> Shape {
     let mut names = Vec::new();
     let label = match &node.kind {
         Kind::Error | Kind::Number(_) | Kind::Str(_) | Kind::Name(_) | Kind::Color(_) | Kind::Ident(_) => format!("{}:{}", node.kind_name(), node.text(src)),
@@ -107,7 +107,7 @@ fn shape(node: &Node, src: &str) -> Shape {
 }
 
 impl Shape {
-    fn at_mut(&mut self, loc: &[usize]) -> &mut Shape {
+    pub(super) fn at_mut(&mut self, loc: &[usize]) -> &mut Shape {
         let mut s = self;
         for &i in loc {
             s = &mut s.kids[i];
@@ -156,7 +156,7 @@ fn line_start(src: &str, at: usize) -> usize {
     src[..at].rfind('\n').map_or(0, |i| i + 1)
 }
 
-fn line_indent(src: &str, at: usize) -> &str {
+pub(super) fn line_indent(src: &str, at: usize) -> &str {
     let start = line_start(src, at);
     let rest = &src[start..];
     let len = rest.len() - rest.trim_start_matches([' ', '\t']).len();
@@ -281,7 +281,7 @@ impl Elements {
     }
 }
 
-fn resolve_index(at: At, n: usize) -> Result<usize, EditError> {
+pub(super) fn resolve_index(at: At, n: usize) -> Result<usize, EditError> {
     let index = match at {
         At::Start => 0,
         At::End => n,
@@ -396,9 +396,10 @@ fn line_separator(el: &Elements, sep: Option<char>, next: &str) -> String {
 fn first_element(src: &str, el: &Elements, text: &str) -> Replace {
     let inner = &src[el.inner.clone()];
     if el.inner.start == 0 {
-        // The file: one statement on its own line at the end.
-        let lead = if src.is_empty() || src.ends_with('\n') { "" } else { "\n" };
-        return Replace::new(src.len()..src.len(), format!("{lead}{text}\n"));
+        // Leave an enclosing delimiter's trailing indentation after the new statement.
+        let at = if starts_line(src, src.len()) { line_start(src, src.len()) } else { src.len() };
+        let lead = if at == 0 || src[..at].ends_with('\n') { "" } else { "\n" };
+        return Replace::new(at..at, format!("{lead}{text}\n"));
     }
     if let Some(last_break) = inner.rfind('\n') {
         // `{\n}`: the element gets a line of its own, one level in.
@@ -533,6 +534,132 @@ pub fn duplicate_element_edits(src: &str, node: &Node, index: usize, transform: 
     Ok(edits)
 }
 
+fn object_field(object: &Node, index: usize) -> Result<&Field, EditError> {
+    object.object().and_then(|(_, fields)| fields.get(index))
+        .ok_or_else(|| EditError { message: format!("no object field at index {index}") })
+}
+
+/// Change the operator and value, keeping trivia on either side of the operator.
+pub fn replace_field_op_and_value_edits(src: &str, object: &Node, index: usize, op: &str, value_text: &str) -> Result<Vec<Replace>, EditError> {
+    let field = object_field(object, index)?;
+    if field.name.is_none() || !matches!(op, ":" | ":=" | "+:" | "-:" | ">:" | "<:" | "^:") {
+        return err("expected a named field and a field operator");
+    }
+    let mut edits = Vec::new();
+    if op != field.op {
+        let start = field.name_span.end;
+        let gap = &src[start..field.value.span.start];
+        let tokens = crate::tokenizer::lex(gap);
+        let [token] = tokens.as_slice() else { return err("cannot locate the field operator") };
+        if gap.get(token.span()) != Some(field.op.as_str()) {
+            return err("field operator does not match the source");
+        }
+        edits.push(Replace::new(start + token.start()..start + token.end(), op));
+    }
+    edits.push(Replace::new(field.value.span.clone(), value_text));
+    Ok(edits)
+}
+
+pub fn rename_field_edits(src: &str, object: &Node, index: usize, new_name: &str) -> Result<Vec<Replace>, EditError> {
+    let field = object_field(object, index)?;
+    if !write::is_ident(new_name) || write::is_reserved(new_name) {
+        return err(format!("invalid field name `{new_name}`"));
+    }
+    if object.object().unwrap().1.iter().enumerate().any(|(i, f)| i != index && f.name.as_deref() == Some(new_name)) {
+        return err(format!("field `{new_name}` already exists"));
+    }
+    if src.get(field.name_span.clone()).is_none() {
+        return err("field name is outside the source");
+    }
+    let replacement = if field.name.is_some() { new_name.to_string() } else { format!("{new_name} := ") };
+    Ok(vec![Replace::new(field.name_span.clone(), replacement)])
+}
+
+pub(super) fn insert_child_edits(src: &str, object: &Node, index: usize, text: &str) -> Result<Vec<Replace>, EditError> {
+    let el = container(object, src.len())?;
+    if el.fields && el.spans.is_empty() && index == 0 && !src[el.inner.clone()].contains('\n') {
+        let indent = line_indent(src, el.inner.start - 1);
+        let at = el.inner.end;
+        return Ok(vec![Replace::new(at..at, format!("\n{indent}    {text}\n{indent}"))]);
+    }
+    insert_element_edits(src, object, At::Before(index), text)
+}
+
+// Take the owned comments along. A newline inside a string literal is data.
+fn child_text(src: &str, el: &Elements, index: usize, value: &Node, indent: &str) -> (Range<usize>, String) {
+    let span = &el.spans[index];
+    let base = line_indent(src, span.start);
+    let extent = el.line_extent(src, index);
+    let start = extent.as_ref().filter(|e| e.start < line_start(src, span.start))
+        .map_or(span.start, |e| e.start + line_indent(src, e.start).len());
+    let end = extent.map_or(span.end, |e| e.end);
+    let after = after_separator(src, span.end);
+    let tail = src.get(after..end).unwrap_or("").trim_end_matches(['\r', '\n']);
+    let end = if tail.trim().is_empty() { span.end } else { after + tail.len() };
+    let mut out = reindent(src, start..span.end, value, base, indent);
+    if end > span.end { out.push_str(tail); }
+    (start..end, out)
+}
+
+// The insertion takes care of the first line. Align continuation lines, leaving
+// every byte inside a multiline string in the original column.
+fn reindent(src: &str, range: Range<usize>, value: &Node, base: &str, indent: &str) -> String {
+    let mut strings = Vec::new();
+    value.walk(&Loc::default(), &mut |_, n| {
+        if matches!(n.kind, Kind::Str(_)) { strings.push(n.span.clone()); }
+    });
+    let mut out = String::new();
+    let mut offset = range.start;
+    for line in src[range.clone()].split_inclusive('\n') {
+        let within_string = strings.partition_point(|r| r.end <= offset);
+        if offset == range.start || strings.get(within_string).is_some_and(|r| r.start < offset) {
+            out.push_str(line);
+        } else {
+            if !line.trim().is_empty() { out.push_str(indent); }
+            out.push_str(line.strip_prefix(base).unwrap_or(line));
+        }
+        offset += line.len();
+    }
+    out
+}
+
+pub(super) fn child_indent(src: &str, parent: &Node, neighbour: Option<usize>) -> String {
+    match neighbour {
+        Some(start) => line_indent(src, start).to_owned(),
+        None => format!("{}    ", line_indent(src, parent.span.start)),
+    }
+}
+
+pub fn reparent_element_edits(src: &str, src_container: &Node, src_index: usize, dst_container: &Node, dst_at: At) -> Result<Vec<Replace>, EditError> {
+    let field = object_field(src_container, src_index)?;
+    if field.value.span.contains(&dst_container.span.start) {
+        return err("cannot move a widget into itself");
+    }
+    let dst = container(dst_container, src.len())?;
+    if !dst.fields { return err("expected destination object"); }
+    let at = resolve_index(dst_at, dst.spans.len())?;
+    if std::ptr::eq(src_container, dst_container) {
+        return move_element_edits(src, src_container, src_index, at - usize::from(src_index < at));
+    }
+    let neighbour = dst.spans.get(at).or_else(|| dst.spans.last());
+    let indent = child_indent(src, dst_container, neighbour.map(|s| s.start));
+    let from = container(src_container, src.len())?;
+    let (range, mut text) = child_text(src, &from, src_index, &field.value, &indent);
+    if range.end > field.span.end { text.push('\n'); text.push_str(&indent); }
+    let mut edits = vec![removal(src, &from, src_index)];
+    edits.extend(insert_child_edits(src, dst_container, at, &text)?);
+    Ok(edits)
+}
+
+pub fn wrap_element_edits(src: &str, container_node: &Node, index: usize, wrapper_prefix: &str, wrapper_ty: &str) -> Result<Vec<Replace>, EditError> {
+    let el = container(container_node, src.len())?;
+    let field = object_field(container_node, index)?;
+    let indent = line_indent(src, field.span.start);
+    let inner = format!("{indent}    ");
+    let (range, child) = child_text(src, &el, index, &field.value, &inner);
+    Ok(vec![Replace::new(range, format!("{wrapper_prefix}{wrapper_ty} {{\n{inner}{child}\n{indent}}}"))])
+}
+
 fn first_difference(a: &Shape, b: &Shape) -> String {
     if a.label != b.label || a.names != b.names {
         return format!("expected {} {:?}, found {} {:?}", a.label, a.names, b.label, b.names);
@@ -579,11 +706,18 @@ impl Syntax {
             *expected.at_mut(&loc.0) = shape(&new, text);
             edits.push(Replace::new(node.span.clone(), text.clone()));
         }
-        self.commit(&edits, expected, Loc::default()).map(|e| e.syntax)
+        self.apply_checked(&edits, expected)
     }
 
-    fn require(&self, loc: &Loc) -> Result<&Node, EditError> {
+    pub(super) fn require(&self, loc: &Loc) -> Result<&Node, EditError> {
         self.node(loc).ok_or_else(|| EditError { message: format!("no node at {:?}", loc.0) })
+    }
+
+    pub(super) fn apply_checked(&self, edits: &[Replace], expected: Shape) -> Result<Syntax, EditError> {
+        if edits.iter().any(|e| !self.source.is_char_boundary(e.range.start) || !self.source.is_char_boundary(e.range.end)) {
+            return err("edit splits a UTF-8 character or lies outside the text");
+        }
+        self.commit(edits, expected, Loc::default()).map(|e| e.syntax)
     }
 
     /// Splice, parse and check the new tree is `expected`.
@@ -596,7 +730,7 @@ impl Syntax {
         Ok(Edited { syntax, loc })
     }
 
-    fn old_shape(&self) -> Shape {
+    pub(super) fn old_shape(&self) -> Shape {
         shape(&self.root, &self.source)
     }
 
@@ -644,6 +778,32 @@ impl Syntax {
             Kind::Block(_) => self.insert_element(block, at, text),
             _ => err("insert_statement needs a block"),
         }
+    }
+
+    /// Insert a statement into a file or an extracted braced body. Match its
+    /// neighbours' indentation and return the exact edits for document write-back.
+    /// An empty braced body opens a line one indent beyond its closing delimiter.
+    pub fn insert_indented_root_statement(&self, at: At, text: &str, braced_body: bool) -> Result<(Edited, Vec<Replace>), EditError> {
+        let stmts = self.statements();
+        let index = resolve_index(at, stmts.len())?;
+        let neighbour = stmts.get(index).or_else(|| stmts.last());
+        let pos = neighbour.map_or(self.source.len(), |node| node.span.start);
+        let mut indent = line_indent(&self.source, pos).to_owned();
+        let mut first_line = String::new();
+        if neighbour.is_none() {
+            if braced_body {
+                indent.push_str("    ");
+                if starts_line(&self.source, pos) && line_start(&self.source, pos) == 0 {
+                    first_line.push('\n');
+                }
+            }
+            first_line.push_str(&indent);
+        }
+        let node = parse_value_with(text, &self.units).map_err(|e| EditError { message: e.to_string() })?;
+        let text = first_line + &reindent(text, 0..text.len(), &node, "", &indent);
+        let edited = self.insert_statement(&Loc::default(), at, &text)?;
+        let edits = insert_element_edits(&self.source, self.root(), at, &text)?;
+        Ok((edited, edits))
     }
 
     /// Remove the element at `index` of the list, block or object at `list`.

@@ -394,7 +394,6 @@ impl State {
 }
 
 #[relax_api(handle, default, run)]
-#[derive(Default)]
 pub struct ScriptTokenizer {
     units: UnitTable,
     pos: usize,
@@ -435,11 +434,25 @@ pub struct ScriptLoc {
     pub col: usize,
 }
 
+impl Default for ScriptTokenizer {
+    fn default() -> Self { Self::with_units(UnitTable::default()) }
+}
+
 #[relax_api(run)]
 impl ScriptTokenizer {
+    /// A vacant body's placeholder, never used for tokenizing; `place_body` overwrites the slot before reuse.
+    pub(crate) fn vacant() -> Self { Self::with_units(UnitTable::vacant()) }
+
     /// Lex number suffixes with the host's table.
     #[relax_api(run)]
-    pub fn with_units(units: UnitTable) -> Self { Self { units, ..Self::default() } }
+    pub fn with_units(units: UnitTable) -> Self {
+        Self {
+            units, pos: 0, newline_pending: false, space_pending: false, provisional: false,
+            tokens: Vec::new(), docs: Vec::new(), original: String::new(), line_starts: Vec::new(),
+            unfinished: String::new(), temp: String::new(), unit_start: None, state: State::default(),
+            lex_start: 0, tok_end: 0,
+        }
+    }
 
     /// The table the tokens' unit indices refer to.
     #[relax_api(run)]
@@ -1593,6 +1606,9 @@ impl ScriptTokenizer {
                     if c >= '0' && c <= '9' {
                         self.temp.push(c);
                     } else {
+                        if c == ')' {
+                            self.tok_end = self.pos;
+                        }
                         self.emit_rust_value();
                         self.state = State::Whitespace
                     }
@@ -1892,6 +1908,22 @@ mod tests {
                 "\"h\\\"i\"", "e", ":", "vec2", "(", "1", "..", "2", ")", "f", ":", "1.0f", "g", ":", "x", "->", "y", "}"
             ]
         );
+    }
+
+    #[test]
+    fn rust_value_spans_include_closing_paren() {
+        fn spans(source: &str) -> Vec<&str> {
+            lex(source).iter()
+                .filter(|token| token.token().kind() == ScriptTokenTag::RustValue)
+                .map(|token| &source[token.span()])
+                .collect()
+        }
+
+        assert_eq!(spans("a: #(0), b: @(12)}"), ["#(0)", "@(12)"], "both placeholder forms end at their closing parenthesis");
+        assert_eq!(spans("#(0)"), ["#(0)"], "a complete placeholder at EOF includes its closing parenthesis");
+        assert_eq!(spans("#(0"), ["#(0"], "an unfinished placeholder ends at EOF");
+        assert_eq!(spans("#(0\n"), ["#(0"], "an unfinished placeholder excludes the following newline");
+        assert_eq!(spans("@(+"), ["@("], "a malformed placeholder excludes the following operator");
     }
 
     /// A raw literal is one token through its matching delimiter, its

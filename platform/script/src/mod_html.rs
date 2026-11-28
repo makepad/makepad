@@ -495,16 +495,19 @@ pub fn define_html_module(heap: &mut ScriptHeap, native: &mut ScriptNative) {
                         return NIL;
                     }
                     let arr = vm.bx.heap.new_array();
+                    if vm.bx.heap.allocation_error_pending { return NIL; }
                     let trap = vm.bx.threads.cur_ref().trap.pass();
                     for &(s, _e) in &matches {
                         if let Some(val) =
                             get_attr(&backing.decoded, &backing.nodes, s as usize, attr_id)
                         {
                             let sv = vm.bx.heap.new_string_from_str(val);
+                            if vm.bx.heap.allocation_error_pending { return NIL; }
                             vm.bx.heap.array_push(arr, sv, trap);
                         } else {
                             vm.bx.heap.array_push(arr, NIL, trap);
                         }
+                        if vm.bx.heap.allocation_error_pending { return NIL; }
                     }
                     arr.into()
                 }
@@ -528,6 +531,7 @@ pub fn define_html_module(heap: &mut ScriptHeap, native: &mut ScriptNative) {
                         return vm.bx.heap.new_string_from_str(&owned);
                     }
                     let arr = vm.bx.heap.new_array();
+                    if vm.bx.heap.allocation_error_pending { return NIL; }
                     let trap = vm.bx.threads.cur_ref().trap.pass();
                     for &(s, e) in &matches {
                         let slice =
@@ -543,7 +547,9 @@ pub fn define_html_module(heap: &mut ScriptHeap, native: &mut ScriptNative) {
                             );
                             vm.bx.heap.new_string_from_str(&owned)
                         };
+                        if vm.bx.heap.allocation_error_pending { return NIL; }
                         vm.bx.heap.array_push(arr, sv, trap);
+                        if vm.bx.heap.allocation_error_pending { return NIL; }
                     }
                     arr.into()
                 }
@@ -649,6 +655,7 @@ pub fn define_html_module(heap: &mut ScriptHeap, native: &mut ScriptNative) {
                 };
 
             let arr = vm.bx.heap.new_array();
+            if vm.bx.heap.allocation_error_pending { return NIL; }
             let trap = vm.bx.threads.cur_ref().trap.pass();
             for range in &ranges {
                 let sub = ScriptHtmlDoc {
@@ -659,6 +666,7 @@ pub fn define_html_module(heap: &mut ScriptHeap, native: &mut ScriptNative) {
                 };
                 let h = vm.bx.heap.new_handle(html_type, Box::new(sub));
                 vm.bx.heap.array_push(arr, h.into(), trap);
+                if vm.bx.heap.allocation_error_pending { return NIL; }
             }
             arr.into()
         },

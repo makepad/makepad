@@ -25,36 +25,95 @@ impl<'a> ScriptVm<'a> {
         }
         if let Some(ty) = self.bx.heap.pod_type(fnobj) {
             let pod = self.bx.heap.new_pod(ty);
-            self.bx.threads.cur().mes.push(ScriptMe::Pod {
+            self.bx.threads.cur().push_me(ScriptMe::Pod {
                 pod,
                 offset: ScriptPodOffset::default(),
             });
         } else {
             let scope = self.bx.heap.new_with_proto(fnobj);
             self.bx.heap.clear_object_deep(scope);
-            self.bx.threads.cur().mes.push(ScriptMe::Call {
+            self.bx.threads.cur().push_me(ScriptMe::Call {
                 args: scope,
                 sself: None,
-                method: None,
+                target: CallTarget::Resolve(None),
             });
         }
         self.bx.threads.cur().trap.goto_next();
     }
 
-    // Returns true if caller should call pop_to_me, false if it should be skipped
+    // Only the final poll publishes the result and applies the original call's pop-to-me.
+    fn finish_native_call(
+        &mut self, ip: ScriptIp, args: ScriptObject,
+        native: OpcodeNative, opargs: OpcodeArgs, ret: ScriptValue, traced: Option<String>,
+    ) {
+        if self.bx.heap.allocation_error_pending {
+            // Leave the builder and its arguments for the allocation-error unwind.
+            let thread = self.bx.threads.cur();
+            thread.is_paused = false;
+            thread.trap.take_on();
+            thread.trap.ip = ip;
+            return;
+        }
+        self.propagate_native_failure();
+        let thread = self.bx.threads.cur();
+        let trap = thread.trap.get_on();
+        if matches!(trap, Some(ScriptTrapOn::Pause | ScriptTrapOn::CallBack { .. })) {
+            let Some(ScriptMe::Call { target, .. }) = thread.mes.last_mut() else {
+                self.bail("call builder missing after native invocation");
+                return;
+            };
+            if let Some(ScriptTrapOn::CallBack { scope, ip: callee }) = trap {
+                if matches!(target, CallTarget::Resolve(_)) {
+                    *target = CallTarget::Admitted(native);
+                }
+                thread.trap.take_on();
+                thread.is_paused = false;
+                self.enter_callback(scope, callee, Some(ip), opargs);
+            } else {
+                // A native's own pause retries the original call, even after a callback.
+                let method = match native {
+                    OpcodeNative::Function(_) => None,
+                    OpcodeNative::TypeCall { method, .. } => Some(method),
+                };
+                *target = CallTarget::Resolve(method);
+                self.force_budget_sample();
+            }
+            return;
+        }
+        self.force_budget_sample();
+        self.bx.threads.cur().is_paused = false;
+        if let Some(verb) = traced {
+            crate::inspect_query::trace_record(&self.bx, verb, ip, args, ret);
+        }
+        let thread = self.bx.threads.cur();
+        thread.mes.pop();
+        thread.trap.ip = ip;
+        thread.push_stack_value(ret);
+        if ret.as_object() != Some(args) {
+            self.bx.heap.free_object_if_unreffed(args);
+        }
+        thread.trap.goto_next();
+        if opargs.is_pop_to_me() && !thread.has_execution_limit_exceeded()
+            && !self.bx.heap.allocation_error_pending
+        {
+            self.pop_to_me();
+        }
+    }
+
     pub(crate) fn handle_call_exec(&mut self, opargs: OpcodeArgs) -> bool {
-        let Some(me) = self.bx.threads.cur().mes.pop() else {
+        let Some(me) = self.bx.threads.cur_ref().mes.last() else {
             self.bail("mes empty in handle_call_exec");
             return false;
         };
 
-        let (args, sself, method) = match me {
+        let (args, sself, method) = match *me {
             ScriptMe::Call {
                 args,
                 sself,
-                method,
+                target: CallTarget::Resolve(method),
             } => (args, sself, method),
             ScriptMe::Pod { pod, offset } => {
+                self.bx.threads.cur().mes.pop();
                 self.bx
                     .heap
                     .pod_check_arg_total(pod, offset, self.bx.threads.cur().trap.pass());
@@ -63,6 +122,7 @@ impl<'a> ScriptVm<'a> {
                 return true; // Pod: caller should handle pop_to_me
             }
             _ => {
+                self.bx.threads.cur().mes.pop();
                 self.bail("unexpected me type in handle_call_exec");
                 return false;
             }
@@ -72,6 +132,7 @@ impl<'a> ScriptVm<'a> {
         // its original result through CALL_EXEC, including the usual stack cleanup.
         let target = self.bx.heap.proto(args);
         if target.is_reported_err() {
+            self.bx.threads.cur().mes.pop();
             self.bx.threads.cur().push_stack_unchecked(target);
             self.bx.heap.free_object_if_unreffed(args);
             self.bx.threads.cur().trap.goto_next();
@@ -83,6 +144,10 @@ impl<'a> ScriptVm<'a> {
                 .heap
                 .force_value_in_map(args, id!(self).into(), sself);
         }
+        // Keep the call builder, arguments and IP intact for the allocation-error unwind.
+        if self.bx.heap.allocation_error_pending {
+            return false;
+        }
         self.bx.heap.set_object_deep(args);
         self.bx.heap.set_object_storage_auto(args);
 
@@ -91,116 +156,31 @@ impl<'a> ScriptVm<'a> {
         // registered call function instead.
         if let Some(method) = method {
             let sself = sself.unwrap_or(NIL);
-            let type_index = sself.value_type().to_redux();
-            let call = self
-                .bx
-                .code
-                .native
-                .borrow()
-                .calls
-                .get(type_index.to_index())
-                .and_then(|c| c.as_ref().map(|f| f.view()));
-            if let Some(call) = call {
-                let ip = self.bx.threads.cur_ref().trap.ip;
-                // Pause thread before native call so re-entrant calls get a different thread
-                self.bx.threads.cur().is_paused = true;
-                // makepad inspect `trace verbs`: the call with its arguments (one load when off)
-                let traced = if crate::inspect_query::trace_on() {
-                    let ty = crate::inspect_query::handle_type_name(&self.bx.code.native.borrow(), type_index);
-                    crate::inspect_query::trace_wants(&ty, method)
-                } else {
-                    None
-                };
-                // SAFETY: The call pointer is valid as long as native calls aren't removed during execution
-                let ret = unsafe { call.call(self, args, method) };
-                self.sample_budget_now();
-                if let Some(verb) = traced {
-                    crate::inspect_query::trace_record(&self.bx, verb, ip, args, ret);
-                }
-
-                // Check if call explicitly paused (via pause() which sets trap.on to Pause)
-                if matches!(
-                    self.bx.threads.cur().trap.get_on(),
-                    Some(ScriptTrapOn::Pause)
-                ) {
-                    // Re-push the me so it can be re-executed on resume
-                    self.bx.threads.cur().mes.push(ScriptMe::Call {
-                        args,
-                        sself: Some(sself),
-                        method: Some(method),
-                    });
-                    return false; // Paused: skip pop_to_me, function not complete
-                }
-
-                // Call didn't explicitly pause, unpause the thread
-                self.bx.threads.cur().is_paused = false;
-
-                self.bx.threads.cur().trap.ip = ip;
-                self.bx.threads.cur().push_stack_value(ret);
-                // Eager-free the args scope. Safe: a call handler that stores
-                // args must set_reffed/new_object_ref it (escape-barriered
-                // stores do this automatically), and a handler returning args
-                // is guarded here.
-                if ret.as_object() != Some(args) {
-                    self.bx.heap.free_object_if_unreffed(args);
-                }
+            let ty = sself.value_type().to_redux();
+            let handler = self.bx.code.native.borrow().type_call_ids.get(ty.to_index()).copied().flatten();
+            let Some(handler) = handler else {
+                self.bx.threads.cur().mes.pop();
+                let value = script_err_not_found!(
+                    self.bx.threads.cur_ref().trap,
+                    "no call handler for method {:?} on type {:?}",
+                    method, ty
+                );
+                self.bx.threads.cur().push_stack_unchecked(value);
                 self.bx.threads.cur().trap.goto_next();
-                return true; // Call complete
-            }
-            // No call handler registered - fall through to error
-            let value = script_err_not_found!(
-                self.bx.threads.cur_ref().trap,
-                "no call handler for method {:?} on type {:?}",
-                method,
-                type_index
-            );
-            self.bx.threads.cur().push_stack_unchecked(value);
-            self.bx.threads.cur().trap.goto_next();
-            return true;
+                return true;
+            };
+            self.poll_opcode_native(args, OpcodeNative::TypeCall { handler, ty, method }, opargs);
+            return false;
         }
 
         if let Some(fnptr) = self.bx.heap.parent_as_fn(args) {
             match fnptr {
                 ScriptFnPtr::Native(ni) => {
-                    let ip = self.bx.threads.cur_ref().trap.ip;
-                    // Get the function pointer and drop the borrow before calling
-                    let func = self.bx.code.native.borrow().functions[ni.index as usize].view();
-                    // Pause thread before native call so re-entrant calls get a different thread
-                    self.bx.threads.cur().is_paused = true;
-                    // SAFETY: The function pointer is valid as long as native functions aren't removed during execution
-                    let ret = unsafe { func.call(self, args) };
-                    self.sample_budget_now();
-
-                    // Check if native explicitly paused (via pause() which sets trap.on to Pause)
-                    if matches!(
-                        self.bx.threads.cur().trap.get_on(),
-                        Some(ScriptTrapOn::Pause)
-                    ) {
-                        // Native explicitly paused, leave is_paused = true
-                        self.bx.threads.cur().mes.push(ScriptMe::Call {
-                            args,
-                            sself,
-                            method: None,
-                        });
-                        return false; // Paused: skip pop_to_me, function not complete
-                    }
-
-                    // Native didn't explicitly pause, unpause the thread
-                    self.bx.threads.cur().is_paused = false;
-
-                    self.bx.threads.cur().trap.ip = ip;
-                    self.bx.threads.cur().push_stack_value(ret);
-                    // Eager-free the native call's args scope. Safe: natives
-                    // that store args must set_reffed it (task.rs does; the
-                    // escape barrier covers stores through checked funnels),
-                    // and a native returning args itself is guarded here.
-                    if ret.as_object() != Some(args) {
-                        self.bx.heap.free_object_if_unreffed(args);
-                    }
-                    self.bx.threads.cur().trap.goto_next();
-                    return true; // Native complete: caller should handle pop_to_me
+                    self.poll_opcode_native(args, OpcodeNative::Function(ni), opargs);
+                    false
                 }
                 ScriptFnPtr::Script(sip) => {
+                    self.bx.threads.cur().mes.pop();
                     let call = CallFrame {
                         bases: self.bx.threads.cur_ref().new_bases(),
                         args: opargs,
@@ -210,16 +190,18 @@ impl<'a> ScriptVm<'a> {
                         }),
                         prev_slot_base: self.bx.threads.cur_ref().slot_base,
                         body_root: false,
+                        native_cont: false,
                     };
                     if !self.bx.threads.cur().push_call_frame(call) {
                         return false;
                     }
-                    self.bx.threads.cur().scopes.push(args);
+                    self.bx.threads.cur().push_scope(args);
                     self.bx.threads.cur().trap.ip = sip;
                     return false; // Script: skip pop_to_me, RETURN will handle it via call.args
                 }
             }
         } else {
+            self.bx.threads.cur().mes.pop();
             let value = script_err_wrong_value!(
                 self.bx.threads.cur_ref().trap,
                 "call target is not a function (got {:?})",
@@ -229,6 +211,33 @@ impl<'a> ScriptVm<'a> {
             self.bx.threads.cur().trap.goto_next();
             return true; // Error: caller should handle pop_to_me
         }
+    }
+
+    pub(crate) fn poll_opcode_native(&mut self, args: ScriptObject, native: OpcodeNative, opargs: OpcodeArgs) {
+        let ip = self.bx.threads.cur_ref().trap.ip;
+        let (ret, traced) = match native {
+            OpcodeNative::Function(id) => {
+                let func = self.bx.code.native.borrow().functions[id.index as usize].view();
+                self.bx.threads.cur().is_paused = true;
+                // SAFETY: the callable is borrowed by index anew for this invocation.
+                let ret = self.invoke_native(NativeInvocation::Opcode, |vm| unsafe { func.call(vm, args) });
+                (ret, None)
+            }
+            OpcodeNative::TypeCall { handler, ty, method } => {
+                let call = self.bx.code.native.borrow().call_handlers[handler].view();
+                self.bx.threads.cur().is_paused = true;
+                let traced = if crate::inspect_query::trace_on() {
+                    let ty = crate::inspect_query::handle_type_name(&self.bx.code.native.borrow(), ty);
+                    crate::inspect_query::trace_wants(&ty, method)
+                } else {
+                    None
+                };
+                // SAFETY: the append-only handler table owns the closure throughout this call.
+                let ret = self.invoke_native(NativeInvocation::Opcode, |vm| unsafe { call.call(vm, args, method) });
+                (ret, traced)
+            }
+        };
+        self.finish_native_call(ip, args, native, opargs, ret, traced)
     }
 
     pub(crate) fn handle_method_call_args(&mut self) -> bool {
@@ -254,7 +263,7 @@ impl<'a> ScriptVm<'a> {
                 let type_entry = &native.type_table[type_index.to_index()];
                 let found = type_entry.get(&method).copied();
                 let has_call = native
-                    .calls
+                    .type_call_ids
                     .get(type_index.to_index())
                     .map(|c| c.is_some())
                     .unwrap_or(false);
@@ -270,10 +279,10 @@ impl<'a> ScriptVm<'a> {
                 self.bx.heap.set_object_storage_vec2(args);
                 self.bx.heap.clear_object_deep(args);
 
-                self.bx.threads.cur().mes.push(ScriptMe::Call {
+                self.bx.threads.cur().push_me(ScriptMe::Call {
                     args,
                     sself: Some(sself),
-                    method: Some(method),
+                    target: CallTarget::Resolve(Some(method)),
                 });
                 self.bx.threads.cur().trap.goto_next();
                 return false;
@@ -289,7 +298,7 @@ impl<'a> ScriptVm<'a> {
         } else {
             if let Some(ty) = self.bx.heap.pod_type(fnobj) {
                 let pod = self.bx.heap.new_pod(ty);
-                self.bx.threads.cur().mes.push(ScriptMe::Pod {
+                self.bx.threads.cur().push_me(ScriptMe::Pod {
                     pod,
                     offset: ScriptPodOffset::default(),
                 });
@@ -300,10 +309,10 @@ impl<'a> ScriptVm<'a> {
         };
         self.bx.heap.clear_object_deep(args);
 
-        self.bx.threads.cur().mes.push(ScriptMe::Call {
+        self.bx.threads.cur().push_me(ScriptMe::Call {
             args,
             sself: Some(sself),
-            method: None,
+            target: CallTarget::Resolve(None),
         });
         self.bx.threads.cur().trap.goto_next();
         false
@@ -319,7 +328,7 @@ impl<'a> ScriptVm<'a> {
         let me = self.bx.heap.new_with_proto(scope.into());
         self.bx.heap.set_object_storage_vec2(me);
         self.bx.heap.clear_object_deep(me);
-        self.bx.threads.cur().mes.push(ScriptMe::Object(me));
+        self.bx.threads.cur().push_me(ScriptMe::Object(me));
         self.bx.threads.cur().trap.goto_next();
     }
 
@@ -338,7 +347,7 @@ impl<'a> ScriptVm<'a> {
         let me = self.bx.heap.new_with_proto(scope.into());
         self.bx.heap.set_object_storage_vec2(me);
         self.bx.heap.clear_object_deep(me);
-        self.bx.threads.cur().mes.push(ScriptMe::Object(me));
+        self.bx.threads.cur().push_me(ScriptMe::Object(me));
         self.bx
             .threads
             .cur()

@@ -107,13 +107,19 @@ pub const OBJ_MODE_MADE_AT: u32 = 12;
 pub const OBJ_MODE_REFFED: u32 = 13;
 pub const OBJ_MODE_TYPE_DEFAULT: u32 = 14;
 
+const ADDING_AN_OBJECT_PROPERTY: &str = "out of memory while adding an object property";
+const EXTENDING_AN_OBJECT_VECTOR: &str = "out of memory while extending an object vector";
+
 #[relax_api(run)]
 impl ScriptHeap {
     // New objects
 
+    /// Charge `entries` more values of `ptr`'s vector to the budget, then make room
+    /// for them, so the push or resize that follows allocates nothing.
     #[inline]
     pub(crate) fn charge_object_vec_entries(
         &mut self,
+        ptr: ScriptObject,
         entries: usize,
         operation: &'static str,
     ) -> bool {
@@ -121,6 +127,7 @@ impl ScriptHeap {
             .checked_mul(std::mem::size_of::<ScriptVecValue>())
             .unwrap_or(usize::MAX);
         self.charge_allocation(bytes, operation)
+            && self.reserve_for(EXTENDING_AN_OBJECT_VECTOR, NoTrap, |heap| heap.objects[ptr].vec.try_reserve(entries))
     }
 
     #[inline]
@@ -150,7 +157,9 @@ impl ScriptHeap {
         // overhead. This is deliberately conservative across both layouts.
         let bytes = std::mem::size_of::<(ScriptValue, ScriptMapValue)>()
             .saturating_add(2 * std::mem::size_of::<usize>());
+        // Then room for the key, so the insert that follows allocates nothing.
         self.charge_allocation(bytes, operation)
+            && self.reserve_for(ADDING_AN_OBJECT_PROPERTY, NoTrap, |heap| heap.objects[ptr].map.try_reserve_insert())
     }
 
     /// Insert an already converted Rust-map entry with the same budget charge
@@ -174,9 +183,9 @@ impl ScriptHeap {
     ) {
         if self.charge_object_map_entry(object, key, "converting a Rust map to a script object") {
             self.objects[object].map.insert(key, ScriptMapValue { tag: Default::default(), value });
-        }
-        if key.is_string_like() {
-            self.objects[object].tag.set_string_keys();
+            if key.is_string_like() {
+                self.objects[object].tag.set_string_keys();
+            }
         }
     }
 
@@ -207,7 +216,9 @@ impl ScriptHeap {
         }
         let bytes = std::mem::size_of::<(ScriptValue, ScriptMapValue)>()
             .saturating_add(2 * std::mem::size_of::<usize>());
-        if !self.charge_allocation(bytes, operation) {
+        if !self.charge_allocation(bytes, operation)
+            || !self.reserve_for(ADDING_AN_OBJECT_PROPERTY, NoTrap, |heap| heap.objects[ptr].map.try_reserve_insert())
+        {
             return;
         }
         self.objects[ptr].map_insert_absent_untracked(key, value);
@@ -229,6 +240,9 @@ impl ScriptHeap {
                 std::mem::size_of::<ScriptObjectData>(),
                 "creating an object",
             ) {
+                return self.allocation_poison_object;
+            }
+            if !self.reserve_object_slot() {
                 return self.allocation_poison_object;
             }
             let index = self.objects.len() as u32;
@@ -379,6 +393,7 @@ impl ScriptHeap {
     #[inline]
     #[relax_api(run)]
     pub fn obj_mode(&mut self, obj: ScriptObject, mode: u32, arg: u64) -> u64 {
+        if self.is_allocation_poison_object(obj) { return 0; }
         let object = &mut self.objects[obj];
         match mode {
             OBJ_MODE_FREEZE => object.tag.freeze(),
@@ -544,6 +559,21 @@ impl ScriptHeap {
         ) {
             return self.allocation_poison_object;
         }
+        // Before the prototype chain is referenced: a refusal must leave nothing to undo.
+        if self.objects_free.is_empty() && !self.reserve_object_slot() {
+            return self.allocation_poison_object;
+        }
+        // The copied values get their room the same way: in the free slot about to be
+        // reused (an empty vector keeps its capacity there), or in the new object's vector.
+        let mut copied = Vec::new();
+        if copy_count != 0 && !self.reserve_for("out of memory while copying prototype values", NoTrap, |heap| {
+            match heap.objects_free.last().copied() {
+                Some(free) => heap.objects.slots_split_at_mut(free.index as usize).1[0].data.vec.try_reserve_exact(copy_count),
+                None => copied.try_reserve_exact(copy_count),
+            }
+        }) {
+            return self.allocation_poison_object;
+        }
         if ref_proto {
             self.ref_object_chain(proto_ptr);
         }
@@ -579,6 +609,7 @@ impl ScriptHeap {
             object.tag.set_proto_fwd(proto_fwd);
             let proto_object = &self.objects[proto_ptr];
             if copy_vec_from_auto_proto && proto_object.tag.is_auto() {
+                object.vec = copied;
                 object.vec.extend_from_slice(&proto_object.vec);
             }
             let (_, generation) = self.objects.push(object);
@@ -615,6 +646,7 @@ impl ScriptHeap {
 
     #[inline]
     pub fn set_object_deep(&mut self, ptr: ScriptObject) {
+        if self.is_allocation_poison_object(ptr) { return; }
         self.objects[ptr].tag.set_deep()
     }
 
@@ -630,11 +662,13 @@ impl ScriptHeap {
 
     #[inline]
     pub fn set_object_pod_type(&mut self, ptr: ScriptObject, pt: ScriptPodType) {
+        if self.is_allocation_poison_object(ptr) { return; }
         self.objects[ptr].tag.set_pod_type(pt)
     }
 
     #[inline]
     pub fn set_first_applied_and_clean(&mut self, ptr: ScriptObject) {
+        if self.is_allocation_poison_object(ptr) { return; }
         self.objects[ptr].tag.set_first_applied_and_clean()
     }
 
@@ -650,11 +684,13 @@ impl ScriptHeap {
 
     #[inline]
     pub fn set_notproto(&mut self, ptr: ScriptObject) {
+        if self.is_allocation_poison_object(ptr) { return; }
         self.objects[ptr].tag.set_notproto()
     }
 
     #[inline]
     pub fn set_from_eval(&mut self, ptr: ScriptObject) {
+        if self.is_allocation_poison_object(ptr) { return; }
         self.objects[ptr].tag.set_from_eval()
     }
 
@@ -665,6 +701,7 @@ impl ScriptHeap {
 
     #[inline]
     pub fn freeze_module(&mut self, ptr: ScriptObject) {
+        if self.is_allocation_poison_object(ptr) { return; }
         self.objects[ptr].tag.freeze_module()
     }
 
@@ -736,7 +773,8 @@ impl ScriptHeap {
         value: ScriptValue,
         trap: ScriptTrap,
     ) -> ScriptValue {
-        if self.is_allocation_poison_object(ptr) || self.objects[ptr].tag.is_vec_frozen() {
+        if self.is_allocation_poison_object(ptr) { return NIL; }
+        if self.objects[ptr].tag.is_vec_frozen() {
             // has rw flags
             return script_err_immutable!(trap, "cannot set index on frozen vec");
         }
@@ -748,7 +786,7 @@ impl ScriptHeap {
                 .checked_add(1)
                 .and_then(|target| target.checked_sub(len))
                 .unwrap_or(usize::MAX);
-            if !self.charge_object_vec_entries(additional, "growing a sparse object index") {
+            if !self.charge_object_vec_entries(ptr, additional, "growing a sparse object index") {
                 return NIL;
             }
         }
@@ -768,6 +806,7 @@ impl ScriptHeap {
         literal_string: bool,
         trap: ScriptTrap,
     ) -> ScriptValue {
+        if self.is_allocation_poison_object(ptr) { return NIL; }
         // A named child lives in the instance's own copy of the template's vec.
         if self.objects[ptr].vec.iter().any(|kv| kv.key == key) {
             let result = self.set_value_vec_impl(ptr, key, value, trap);
@@ -809,6 +848,7 @@ impl ScriptHeap {
         value: ScriptValue,
         trap: ScriptTrap,
     ) -> ScriptValue {
+        if self.is_allocation_poison_object(ptr) { return NIL; }
         if self.objects[ptr].tag.is_vec_frozen() {
             return script_err_immutable!(trap, "cannot set vec key on frozen vec");
         }
@@ -821,7 +861,7 @@ impl ScriptHeap {
             }
         }
         // just append it
-        if !self.charge_object_vec_entries(1, "adding an object vector property") {
+        if !self.charge_object_vec_entries(ptr, 1, "adding an object vector property") {
             return NIL;
         }
         let object = &mut self.objects[ptr];
@@ -836,6 +876,7 @@ impl ScriptHeap {
         value: ScriptValue,
         trap: ScriptTrap,
     ) -> Result<(), ScriptValue> {
+        if self.is_allocation_poison_object(ptr) { return Err(NIL); }
         let mut ptr = ptr;
         loop {
             let object = &mut self.objects[ptr];
@@ -865,11 +906,12 @@ impl ScriptHeap {
             }
         }
         // alright nothing found
+        if self.is_allocation_poison_object(ptr) { return Err(NIL); }
         if self.objects[ptr].tag.is_immutable() {
             return Err(script_err_immutable!(trap, "cannot modify immutable object"));
         }
         if self.objects[ptr].tag.is_vec2() {
-            if !self.charge_object_vec_entries(1, "adding a deep object vector property") {
+            if !self.charge_object_vec_entries(ptr, 1, "adding a deep object vector property") {
                 return Err(NIL);
             }
             let object = &mut self.objects[ptr];
@@ -897,6 +939,7 @@ impl ScriptHeap {
         value: ScriptValue,
         trap: ScriptTrap,
     ) -> ScriptValue {
+        if self.is_allocation_poison_object(top_ptr) { return NIL; }
         let object = &self.objects[top_ptr];
         if object.tag.is_immutable() {
             return script_err_immutable!(trap, "cannot set property on immutable object");
@@ -1035,7 +1078,7 @@ impl ScriptHeap {
                         return script_err_duplicate!(trap, "key {:?} already exists in vec", key);
                     }
                 }
-                if !self.charge_object_vec_entries(1, "adding a checked object vector property") {
+                if !self.charge_object_vec_entries(top_ptr, 1, "adding a checked object vector property") {
                     return NIL;
                 }
                 let object = &mut self.objects[top_ptr];
@@ -1067,7 +1110,8 @@ impl ScriptHeap {
         value: ScriptValue,
         trap: ScriptTrap,
     ) -> Result<(), ScriptValue> {
-        if self.is_allocation_poison_object(ptr) || self.objects[ptr].tag.is_immutable() {
+        if self.is_allocation_poison_object(ptr) { return Err(NIL); }
+        if self.objects[ptr].tag.is_immutable() {
             return Err(script_err_immutable!(trap, "cannot set property on immutable object"));
         }
         if self.objects[ptr].tag.is_vec2() {
@@ -1077,7 +1121,7 @@ impl ScriptHeap {
                     return Ok(());
                 }
             }
-            if !self.charge_object_vec_entries(1, "adding an object vector property") {
+            if !self.charge_object_vec_entries(ptr, 1, "adding an object vector property") {
                 return Err(NIL);
             }
             let object = &mut self.objects[ptr];
@@ -1125,10 +1169,24 @@ impl ScriptHeap {
         value: ScriptValue,
         trap: ScriptTrap,
     ) -> ScriptValue {
+        if self.is_allocation_poison_object(ptr) { return NIL; }
         self.escape_value(value);
         let mut key = key.unescape_id();
-        if key.is_string_like() && !self.objects[ptr].tag.is_string_keys() {
-            key = self.string_key_id(key, true).unwrap_or(key);
+        if key.is_string_like() {
+            let named = self.with_string_key_id(key, self.objects[ptr].tag.is_string_keys(),
+                |id, text| (id, LiveId::lut_try_insert(id, text)));
+            if let Some((id, outcome)) = named {
+                match outcome {
+                    NameInsert::Recorded => key = ScriptValue::from_id(id),
+                    NameInsert::Refused => {
+                        self.refuse_memory(NAMING_A_PROPERTY, trap);
+                        return NIL;
+                    }
+                    NameInsert::Collision => return self.string_with(key, |_, text| {
+                        script_err_duplicate!(trap, "property name `{}` collides with `{}`", text, id)
+                    }).unwrap(),
+                }
+            }
         }
         if let Some(key_id) = key.as_id() {
             let object = &self.objects[ptr];
@@ -1150,6 +1208,7 @@ impl ScriptHeap {
                             None
                         }
                     }) {
+                        if skey.is_nil() { return NIL; }
                         return self.set_value_shallow(ptr, skey, value, trap).err().unwrap_or(NIL);
                     }
                     // LiveId couldn't be converted to string - fall through to use LiveId
@@ -1177,6 +1236,7 @@ impl ScriptHeap {
         value: ScriptValue,
         trap: ScriptTrap,
     ) -> Result<(), ScriptValue> {
+        if self.is_allocation_poison_object(ptr) { return Err(NIL); }
         let tag = self.objects[ptr].tag;
         if tag.is_deep() {
             self.set_value_deep(ptr, key, value, trap)
@@ -1625,8 +1685,10 @@ impl ScriptHeap {
         let key: ScriptValue = key.into();
         if self.objects[ptr].map.contains_key(&key) {
             let new_scope = self.new_with_proto(ptr.into());
-            if !self.charge_object_map_entry(new_scope, key, "defining a scope value") {
-                return Some(new_scope);
+            if self.is_allocation_poison_object(new_scope)
+                || !self.charge_object_map_entry(new_scope, key, "defining a scope value")
+            {
+                return None;
             }
             let object = &mut self.objects[new_scope];
             object.map.insert(
@@ -1704,21 +1766,15 @@ impl ScriptHeap {
     /// The identifier a string key names. On an object that is not string-keyed
     /// (`is_string_keys`, the JSON interop objects) the field `o.ab` and the key
     /// `o["a" + "b"]` are one property: the store and every lookup map the text
-    /// to this id. `record` (the store) keeps the text in the id table, so a key
-    /// written as a string iterates and prints by its name. None: not a string,
-    /// or its text is gone.
-    pub(crate) fn string_key_id(&self, key: ScriptValue, record: bool) -> Option<ScriptValue> {
-        if !key.is_string_like() {
-            return None;
-        }
-        self.string_with(key, |_, s| {
-            let id = if record {
-                LiveId::from_str_with_lut(s).unwrap_or_else(|_| LiveId::from_str(s))
-            } else {
-                LiveId::from_str(s)
-            };
-            ScriptValue::from_id(id)
-        })
+    /// to this id. Text-keyed objects keep the string itself.
+    fn with_string_key_id<R>(&self, key: ScriptValue, string_keys: bool,
+        f: impl FnOnce(LiveId, &str) -> R) -> Option<R> {
+        if string_keys { return None; }
+        self.string_with(key, |_, text| f(LiveId::from_str(text), text))
+    }
+
+    pub(crate) fn string_key_id(&self, key: ScriptValue, string_keys: bool) -> Option<ScriptValue> {
+        self.with_string_key_id(key, string_keys, |id, _| ScriptValue::from_id(id))
     }
 
     fn value_deep(&self, obj_ptr: ScriptObject, key: ScriptValue, trap: ScriptTrap) -> ScriptValue {
@@ -1862,6 +1918,7 @@ impl ScriptHeap {
             if let Some(default_obj) = self.type_default_for_id(field_type_id) {
                 // Create a new object with the default as prototype
                 let new_obj = self.new_with_proto(default_obj.into());
+                if self.is_allocation_poison_object(new_obj) { return NIL; }
                 // Set it on the parent object
                 self.set_value(obj, field_id.into(), new_obj.into(), trap);
                 return new_obj.into();
@@ -1917,6 +1974,7 @@ impl ScriptHeap {
             // Create a new object with the prototype value as its proto
             // Note: new_with_proto automatically copies type_index from prototype chain
             let new_obj = self.new_with_proto(value_obj.into());
+            if self.is_allocation_poison_object(new_obj) { return NIL; }
             // Set it on the current object, where the name lives (a named child keeps its vec position)
             self.set_value_slot(obj, field, new_obj.into(), trap);
             return new_obj.into();
@@ -2232,6 +2290,7 @@ impl ScriptHeap {
         source: ScriptObject,
         trap: ScriptTrap,
     ) -> ScriptValue {
+        if self.is_allocation_poison_object(target) { return NIL; }
         if target == source {
             return script_err_invalid_args!(
                 trap,
@@ -2239,11 +2298,11 @@ impl ScriptHeap {
                 target.index
             );
         }
-        if self.is_allocation_poison_object(target) || self.objects[target].tag.is_vec_frozen() {
+        if self.objects[target].tag.is_vec_frozen() {
             return script_err_immutable!(trap, "cannot push to frozen vec");
         }
         let source_len = self.objects[source].vec.len();
-        if !self.charge_object_vec_entries(source_len, "extending an object vector") {
+        if !self.charge_object_vec_entries(target, source_len, "extending an object vector") {
             return NIL;
         }
         let (target_obj, source_obj) = if target.index > source.index {
@@ -2264,6 +2323,7 @@ impl ScriptHeap {
         map: bool,
         trap: ScriptTrap,
     ) -> ScriptValue {
+        if self.is_allocation_poison_object(target) { return NIL; }
         let len = self.objects[source].vec.len();
         for i in 0..len {
             if let Some(source) = self.objects[source].vec[i].value.as_object() {
@@ -2274,9 +2334,7 @@ impl ScriptHeap {
                         target.index
                     );
                 }
-                if self.is_allocation_poison_object(target)
-                    || self.objects[target].tag.is_vec_frozen()
-                {
+                if self.objects[target].tag.is_vec_frozen() {
                     return script_err_immutable!(
                         trap,
                         "cannot push to frozen vec in nested push"
@@ -2303,6 +2361,12 @@ impl ScriptHeap {
                 ) {
                     return NIL;
                 }
+                if !self.reserve_for("out of memory while merging nested object containers", trap, |heap| {
+                    let dst = &mut heap.objects[target];
+                    if vec_entries != 0 { dst.vec.try_reserve(vec_entries)?; }
+                    if map_entries != 0 { dst.map.try_reserve(map_entries)?; }
+                    Ok(())
+                }) { return NIL; }
                 let (target_obj, source_obj) = if target.index > source.index {
                     let (o1, o2) = self.objects.slots_split_at_mut(target.index as usize);
                     (&mut o2[0].data, &mut o1[source.index as usize].data)
@@ -2333,6 +2397,7 @@ impl ScriptHeap {
         source: ScriptObject,
         trap: ScriptTrap,
     ) -> ScriptValue {
+        if self.is_allocation_poison_object(target) { return NIL; }
         if target == source {
             return script_err_invalid_args!(
                 trap,
@@ -2340,7 +2405,7 @@ impl ScriptHeap {
                 target.index
             );
         }
-        if self.is_allocation_poison_object(target) || self.objects[target].tag.is_immutable() {
+        if self.objects[target].tag.is_immutable() {
             return script_err_immutable!(trap, "cannot merge into immutable object");
         }
         let vec_entries = if self.objects[target].tag.is_vec_frozen() {
@@ -2353,9 +2418,8 @@ impl ScriptHeap {
             .iter()
             .filter(|(key, _)| !self.objects[target].map.contains_key(key))
             .count();
-        let temp_bytes = self.objects[source]
-            .map
-            .len()
+        let source_map_len = self.objects[source].map.len();
+        let temp_bytes = source_map_len
             .checked_mul(std::mem::size_of::<ScriptValue>())
             .unwrap_or(usize::MAX);
         let vec_bytes = vec_entries
@@ -2374,17 +2438,21 @@ impl ScriptHeap {
         if !self.charge_allocation(bytes, "merging object containers") {
             return NIL;
         }
+        let mut map_vals = Vec::new();
+        if !self.reserve_for("out of memory while merging object containers", trap, |heap| {
+            map_vals.try_reserve_exact(source_map_len)?;
+            let dst = &mut heap.objects[target];
+            if vec_entries != 0 { dst.vec.try_reserve(vec_entries)?; }
+            if missing_map_entries != 0 { dst.map.try_reserve(missing_map_entries)?; }
+            Ok(())
+        }) { return NIL; }
         // escape barrier: source's values become reachable from target
         let vec_len = self.objects[source].vec.len();
         for i in 0..vec_len {
             let v = self.objects[source].vec[i].value;
             self.escape_value(v);
         }
-        let map_vals: Vec<ScriptValue> = self.objects[source]
-            .map
-            .iter()
-            .map(|(_, v)| v.value)
-            .collect();
+        map_vals.extend(self.objects[source].map.iter().map(|(_, v)| v.value));
         for v in map_vals {
             self.escape_value(v);
         }
@@ -2421,10 +2489,11 @@ impl ScriptHeap {
         value: ScriptValue,
         trap: ScriptTrap,
     ) -> ScriptValue {
-        if self.is_allocation_poison_object(ptr) || self.objects[ptr].tag.is_vec_frozen() {
+        if self.is_allocation_poison_object(ptr) { return NIL; }
+        if self.objects[ptr].tag.is_vec_frozen() {
             return script_err_immutable!(trap, "cannot push to frozen vec");
         }
-        if !self.charge_object_vec_entries(1, "pushing an object vector value") {
+        if !self.charge_object_vec_entries(ptr, 1, "pushing an object vector value") {
             return NIL;
         }
         self.escape_value(value);
@@ -2442,7 +2511,7 @@ impl ScriptHeap {
         if self.is_allocation_poison_object(ptr) || self.allocation_exceeded() {
             return;
         }
-        if !self.charge_object_vec_entries(1, "pushing an object vector value") {
+        if !self.charge_object_vec_entries(ptr, 1, "pushing an object vector value") {
             return;
         }
         let object = &mut self.objects[ptr];
@@ -2675,10 +2744,13 @@ impl ScriptHeap {
                 if let Some(scope) = self.def_scope_value(ptr, *id, *value) {
                     return (n + 1, Some(scope));
                 }
+                if self.allocation_error_pending { break; }
             }
             return (items.len(), None);
         }
-        self.objects[ptr].map.reserve(items.len());
+        if !self.reserve_for(ADDING_AN_OBJECT_PROPERTY, NoTrap, |heap| heap.objects[ptr].map.try_reserve(items.len())) {
+            return (items.len(), None);
+        }
         for (n, (id, value)) in items.iter().enumerate() {
             self.escape_value(*value);
             let key: ScriptValue = (*id).into();
@@ -2687,6 +2759,11 @@ impl ScriptHeap {
                 // the scope had the name: it keeps its value, the new one shadows it
                 self.objects[ptr].map.insert(key, had);
                 let scope = self.new_with_proto(ptr.into());
+                if self.is_allocation_poison_object(scope)
+                    || !self.reserve_for(ADDING_AN_OBJECT_PROPERTY, NoTrap, |heap| heap.objects[scope].map.try_reserve_insert())
+                {
+                    return (items.len(), None);
+                }
                 self.objects[scope].map.insert(key, ScriptMapValue { tag: Default::default(), value: *value });
                 return (n + 1, Some(scope));
             }

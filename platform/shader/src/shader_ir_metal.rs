@@ -52,7 +52,7 @@ pub fn metal_draw(output: &ShaderOutput, types: &impl crate::shader_types::Shade
                     if let Some(g) = ir.find_global(IrGlobalKind::Io(IrIo::Texture(tt)), io.name) {
                         cx.pick_twins.push((g, k));
                     }
-                    twins.push((k, io.name));
+                    twins.push((k, pick_twin_name(&format!("tex_{}", io.name))));
                 }
                 k += 1;
             }
@@ -150,7 +150,7 @@ pub fn metal_draw(output: &ShaderOutput, types: &impl crate::shader_types::Shade
         }
     }
     for (_, name) in &twins {
-        writeln!(out, "    texture2d<float> tex_{}__pick;", name).ok();
+        writeln!(out, "    texture2d<float> {};", name).ok();
     }
     if pick {
         out.push_str("    uint _pick_mask;\n    uint _pick_id;\n    float _pick_w;\n");
@@ -288,7 +288,7 @@ pub fn metal_draw(output: &ShaderOutput, types: &impl crate::shader_types::Shade
     let ntex = output.io.iter().filter(|io| matches!(io.kind, ShaderIoKind::Texture(_))).count();
     if pick {
         for (k, name) in &twins {
-            write!(out, ",\n    texture2d<float> tex_{}__pick [[texture({})]]", name, ntex + *k as usize).ok();
+            write!(out, ",\n    texture2d<float> {} [[texture({})]]", name, ntex + *k as usize).ok();
         }
         out.push_str(",\n    constant uint4 *_pk [[buffer(30)]]");
     }
@@ -297,7 +297,7 @@ pub fn metal_draw(output: &ShaderOutput, types: &impl crate::shader_types::Shade
     if pick {
         out.push_str("    _mp._pick_mask = _pk->y;\n    _mp._pick_id = 0u;\n    _mp._pick_w = 0.0;\n");
         for (_, name) in &twins {
-            writeln!(out, "    _mp.tex_{0}__pick = tex_{0}__pick;", name).ok();
+            writeln!(out, "    _mp.{0} = {0};", name).ok();
         }
     }
     out.push_str("    FragmentOut out_data = {};\n");

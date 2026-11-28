@@ -47,7 +47,11 @@ where
     fn script_new(_vm: &mut ScriptVm) -> Self {
         Default::default()
     }
-    fn script_proto_build(_vm: &mut ScriptVm, _props: &mut ScriptTypeProps) -> ScriptValue {
+    fn script_proto_build(vm: &mut ScriptVm, _props: &mut ScriptTypeProps) -> ScriptValue {
+        // T can itself have a Vec<T> field. Record the edge before following it.
+        if vm.heap_mut().register_vec_element_type(Self::script_type_id_static(), T::script_type_id_static()) {
+            T::script_proto(vm);
+        }
         NIL
     }
 }
@@ -93,9 +97,12 @@ where
     }
     fn script_to_value(&self, vm: &mut ScriptVm) -> ScriptValue {
         let arr = vm.heap_mut().new_array();
+        if vm.heap().allocation_error_pending() { return arr.into(); }
         for value in self {
             let value = value.script_to_value(vm);
+            if vm.heap().allocation_error_pending() { break; }
             vm.heap_mut().array_push_unchecked(arr, value);
+            if vm.heap().allocation_error_pending() { break; }
         }
         arr.into()
     }
@@ -286,8 +293,10 @@ impl ScriptApply for Vec<ScriptValue> {
     }
     fn script_to_value(&self, vm: &mut ScriptVm) -> ScriptValue {
         let arr = vm.heap_mut().new_array();
+        if vm.heap().allocation_error_pending() { return arr.into(); }
         for value in self {
             vm.heap_mut().array_push_unchecked(arr, *value);
+            if vm.heap().allocation_error_pending() { break; }
         }
         arr.into()
     }
@@ -366,23 +375,26 @@ where
     }
     fn script_to_value(&self, vm: &mut ScriptVm) -> ScriptValue {
         let obj = vm.heap_mut().new_object();
+        if vm.heap().allocation_error_pending() { return obj.into(); }
         let mut has_string_keys = false;
         for (key, value) in self.iter() {
             let key = key.script_to_value(vm);
-            if key.is_string_like() {
-                has_string_keys = true;
-            }
+            if vm.heap().allocation_error_pending() { break; }
             let value = value.script_to_value(vm);
+            if vm.heap().allocation_error_pending() { break; }
             if !vm.heap_mut().charge_object_map_entry(
                 obj,
                 key,
                 "converting a Rust map to a script object",
             ) {
-                continue;
+                break;
+            }
+            if key.is_string_like() {
+                has_string_keys = true;
             }
             vm.heap_mut().map_insert_own(obj, key, value);
         }
-        if has_string_keys {
+        if has_string_keys && !vm.heap().allocation_error_pending() {
             vm.heap_mut().set_string_keys(obj);
         }
         obj.into()
@@ -462,23 +474,26 @@ where
     }
     fn script_to_value(&self, vm: &mut ScriptVm) -> ScriptValue {
         let obj = vm.heap_mut().new_object();
+        if vm.heap().allocation_error_pending() { return obj.into(); }
         let mut has_string_keys = false;
         for (key, value) in self.iter() {
             let key = key.script_to_value(vm);
-            if key.is_string_like() {
-                has_string_keys = true;
-            }
+            if vm.heap().allocation_error_pending() { break; }
             let value = value.script_to_value(vm);
+            if vm.heap().allocation_error_pending() { break; }
             if !vm.heap_mut().charge_object_map_entry(
                 obj,
                 key,
                 "converting a Rust map to a script object",
             ) {
-                continue;
+                break;
+            }
+            if key.is_string_like() {
+                has_string_keys = true;
             }
             vm.heap_mut().map_insert_own(obj, key, value);
         }
-        if has_string_keys {
+        if has_string_keys && !vm.heap().allocation_error_pending() {
             vm.heap_mut().set_string_keys(obj);
         }
         obj.into()

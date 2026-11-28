@@ -102,64 +102,18 @@ pub fn define_regex_module(heap: &mut ScriptHeap, native: &mut ScriptNative) {
                     return NIL;
                 };
 
-                let num_slots = (num_captures + 1) * 2;
+                let Some(num_slots) = crate::string::charge_regex_slots(&mut vm.bx.heap, num_captures, "running a regex") else {
+                    return NIL;
+                };
                 let mut slots = vec![None; num_slots];
-
-                let matched = vm.bx.heap.string_with(str_val, |heap, s| {
-                    if let Some(re) = heap.regex(re_ptr) {
-                        if re.inner.run(s, &mut slots) {
-                            Some(s.to_string())
-                        } else {
-                            None
-                        }
+                let trap = vm.bx.threads.cur_ref().trap.pass();
+                return vm.bx.heap.string_mut_self_with(str_val, |heap, input| {
+                    if heap.regex(re_ptr).is_some_and(|re| re.inner.run(input, &mut slots)) {
+                        crate::string::regex_match_from_slots(heap, input, &slots, trap)
                     } else {
-                        None
+                        NIL
                     }
-                });
-
-                match matched {
-                    Some(Some(input)) => {
-                        let match_start = slots[0].unwrap_or(0);
-                        let match_end = slots[1].unwrap_or(0);
-                        let value = &input[match_start..match_end];
-
-                        // Build result object
-                        let obj = vm.bx.heap.new_with_proto(NIL);
-                        let value_sv = vm.bx.heap.new_string_from_str(value);
-                        let trap = vm.bx.threads.cur_ref().trap.pass();
-                        vm.bx.heap.set_value(obj, id!(value).into(), value_sv, trap);
-                        vm.bx.heap.set_value(
-                            obj,
-                            id!(index).into(),
-                            ScriptValue::from_f64(match_start as f64),
-                            trap,
-                        );
-
-                        // Build captures array
-                        let captures = vm.bx.heap.new_array();
-                        // Group 0 = whole match
-                        let value = vm.bx.heap.new_string_from_str(value);
-                        vm.bx.heap.array_push_unchecked(captures, value);
-                        // Groups 1..N
-                        for i in 1..=num_captures {
-                            let s = slots.get(i * 2).copied().flatten();
-                            let e = slots.get(i * 2 + 1).copied().flatten();
-                            let value = match (s, e) {
-                                (Some(s), Some(e)) => {
-                                    vm.bx.heap.new_string_from_str(&input[s..e])
-                                }
-                                _ => NIL,
-                            };
-                            vm.bx.heap.array_push_unchecked(captures, value);
-                        }
-
-                        vm.bx
-                            .heap
-                            .set_value(obj, id!(captures).into(), captures.into(), trap);
-                        return obj.into();
-                    }
-                    _ => return NIL,
-                }
+                }).unwrap_or(NIL);
             }
             script_err_unexpected!(vm.bx.threads.cur_ref().trap, "exec called on non-regex")
         },

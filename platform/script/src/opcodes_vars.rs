@@ -23,7 +23,7 @@ impl<'a> ScriptVm<'a> {
             .new_with_proto_checked(proto, self.bx.threads.cur().trap.pass());
         // the construction site: cascade view / doc lookup key
         self.bx.heap.set_made_at(me, ip);
-        self.bx.threads.cur().mes.push(ScriptMe::Object(me));
+        self.bx.threads.cur().push_me(ScriptMe::Object(me));
         self.bx.threads.cur().trap.goto_next();
     }
 
@@ -35,6 +35,7 @@ impl<'a> ScriptVm<'a> {
             self.bx
                 .heap
                 .proto_field_from_value(object, field, self.bx.threads.cur().trap.pass());
+        if self.bx.heap.allocation_error_pending { return NIL; }
         if value.is_nil() || value.is_err() {
             self.bx.threads.cur().trap.err_take();
             if let Some(field_id) = field.as_id() {
@@ -64,6 +65,7 @@ impl<'a> ScriptVm<'a> {
         } else {
             NIL
         };
+        if self.bx.heap.allocation_error_pending { return; }
         self.bx.threads.cur().push_stack_unchecked(proto);
         self.bx.threads.cur().trap.goto_next();
     }
@@ -82,6 +84,7 @@ impl<'a> ScriptVm<'a> {
                 object.value_type()
             )
         };
+        if self.bx.heap.allocation_error_pending { return; }
         self.bx.threads.cur().push_stack_unchecked(proto);
         self.bx.threads.cur().trap.goto_next();
     }
@@ -253,7 +256,7 @@ impl<'a> ScriptVm<'a> {
         let ip = self.bx.threads.cur_ref().trap.ip;
         let me = self.bx.heap.new_object();
         self.bx.heap.set_made_at(me, ip);
-        self.bx.threads.cur().mes.push(ScriptMe::Object(me));
+        self.bx.threads.cur().push_me(ScriptMe::Object(me));
         self.bx.threads.cur().trap.goto_next();
     }
 
@@ -268,7 +271,7 @@ impl<'a> ScriptVm<'a> {
 
     pub(crate) fn handle_begin_array(&mut self) {
         let me = self.bx.heap.new_array();
-        self.bx.threads.cur().mes.push(ScriptMe::Array(me));
+        self.bx.threads.cur().push_me(ScriptMe::Array(me));
         self.bx.threads.cur().trap.goto_next();
     }
 
@@ -300,7 +303,7 @@ impl<'a> ScriptVm<'a> {
                 // them into a file's scope.
                 items.retain(|(id, _)| !self.bx.heap.is_private_name(*id));
                 self.bx.threads.cur().def_scope_values(&mut self.bx.heap, &items);
-                if obj != self.bx.heap.modules {
+                if obj != self.bx.heap.modules && !self.bx.heap.allocation_error_pending {
                     let scope = *self.bx.threads.cur().scopes.last().unwrap();
                     self.bx.heap.objects[scope].tag.set_globs();
                     let sources = self.bx.heap.glob_sources.entry(scope).or_default();
@@ -357,7 +360,7 @@ impl<'a> ScriptVm<'a> {
                 let type_index = object.value_type().to_redux();
                 let getter = self.bx.code.native.borrow().getters[type_index.to_index()].view();
                 // SAFETY: as in the plain read below
-                let value = unsafe { getter.call(self, object, field) };
+                let value = self.drive_native(object, move |vm| unsafe { getter.call(vm, object, field) });
                 self.sample_budget_now();
                 value
             };
@@ -398,7 +401,7 @@ impl<'a> ScriptVm<'a> {
             // Get the getter pointer and drop the borrow before calling
             let getter = self.bx.code.native.borrow().getters[type_index.to_index()].view();
             // SAFETY: The getter pointer is valid as long as native getters aren't removed during execution
-            let ret = unsafe { getter.call(self, object, field) };
+            let ret = self.drive_native(object, move |vm| unsafe { getter.call(vm, object, field) });
             self.sample_budget_now();
             self.bx.threads.cur().push_stack_unchecked(ret);
         }
@@ -475,6 +478,7 @@ impl<'a> ScriptVm<'a> {
                 self.bx
                     .heap
                     .proto_field_from_value(obj, field, self.bx.threads.cur().trap.pass());
+            if self.bx.heap.allocation_error_pending { return; }
             if value.is_nil() || value.is_err() {
                 self.bx.threads.cur().trap.err_take();
                 if let Some(field_id) = field.as_id() {
@@ -483,6 +487,7 @@ impl<'a> ScriptVm<'a> {
                         field_id,
                         self.bx.threads.cur().trap.pass(),
                     );
+                    if self.bx.heap.allocation_error_pending { return; }
                     self.bx.threads.cur().push_stack_unchecked(value);
                 } else {
                     let value = script_err_not_found!(
@@ -541,6 +546,7 @@ impl<'a> ScriptVm<'a> {
                         self.bx
                             .heap
                             .vec_push(obj, NIL, v, self.bx.threads.cur().trap.pass());
+                        if self.bx.heap.allocation_error_pending { return; }
                     }
                 }
             }
@@ -571,6 +577,7 @@ impl<'a> ScriptVm<'a> {
                             kv.value,
                             self.bx.threads.cur().trap.pass(),
                         );
+                        if self.bx.heap.allocation_error_pending { return; }
                     }
                 } else if let Some(source_arr) = source.as_array() {
                     let len = self.bx.heap.array_len(source_arr);
@@ -583,6 +590,7 @@ impl<'a> ScriptVm<'a> {
                         self.bx
                             .heap
                             .unnamed_fn_arg(args, v, self.bx.threads.cur().trap.pass());
+                        if self.bx.heap.allocation_error_pending { return; }
                     }
                 }
             }
@@ -593,7 +601,7 @@ impl<'a> ScriptVm<'a> {
                 );
             }
         }
-        self.bx.threads.cur().trap.goto_next();
+        if !self.bx.heap.allocation_error_pending { self.bx.threads.cur().trap.goto_next(); }
     }
 
     /// Validate an array/pod index before touching storage, so rejected reads

@@ -4,7 +4,7 @@
 //! A ref is `{roots, value}`. Its Clone calls [`script_root_retain`] and its Drop calls
 //! [`script_root_release`]: plain non-generic fns over a pointer, a kind and a slot index, so
 //! app code built by another compiler than the VM (Rapid-compiled apps against the rustc-built
-//! VM in the makepad loader, local/plans/loader-core.md section 8) calls them through the C ABI.
+//! VM in the makepad loader) calls them through the C ABI.
 //! The counts are one `u32` per slot index (no hashing). A rooted value is alive, so its slot
 //! index is not reused while it is counted.
 //!

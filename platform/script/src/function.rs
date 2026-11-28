@@ -83,6 +83,7 @@ impl ScriptHeap {
 
     #[inline]
     pub fn set_fn(&mut self, ptr: ScriptObject, fnptr: ScriptFnPtr) {
+        if self.is_allocation_poison_object(ptr) { return; }
         let object = &mut self.objects[ptr];
         object.tag.set_fn(fnptr);
     }
@@ -162,7 +163,7 @@ impl ScriptHeap {
             }
         }
         // only allow if we are varargs
-        if !self.charge_object_vec_entries(1, "binding a variadic function argument") {
+        if !self.charge_object_vec_entries(top_ptr, 1, "binding a variadic function argument") {
             return NIL;
         }
         self.objects[top_ptr]
@@ -222,6 +223,7 @@ impl ScriptHeap {
         args: &[ScriptValue],
         trap: ScriptTrap,
     ) -> ScriptValue {
+        if self.is_allocation_poison_object(top_ptr) { return NIL; }
         // see unnamed_fn_arg: closure capture retains bound args
         for value in args {
             self.escape_value(*value);
@@ -262,7 +264,7 @@ impl ScriptHeap {
                     }
                     self.objects[top_ptr].map_insert(key, *value);
                 } else {
-                    if !self.charge_object_vec_entries(1, "binding variadic function arguments") {
+                    if !self.charge_object_vec_entries(top_ptr, 1, "binding variadic function arguments") {
                         return NIL;
                     }
                     self.objects[top_ptr].vec.push(ScriptVecValue {

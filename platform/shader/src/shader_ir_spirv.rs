@@ -2298,6 +2298,7 @@ pub fn fullscreen_blit_spirv() -> (Vec<u32>, Vec<u32>) {
 /// tool is installed. None when it is not.
 pub fn spirv_val(words: &[u32]) -> Option<Result<(), String>> {
     use std::sync::atomic::{AtomicUsize, Ordering};
+    #[relax_api::relax_api(per_side)]
     static SEQ: AtomicUsize = AtomicUsize::new(0);
     let path = std::env::temp_dir().join(format!(
         "makepad-spirv-val-{}-{}.spv",

@@ -25,6 +25,9 @@
 
 mod parse;
 pub mod edit;
+pub mod diff;
+pub mod literal_class;
+pub mod widget;
 pub mod quantity;
 pub mod write;
 

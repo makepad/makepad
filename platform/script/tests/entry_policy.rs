@@ -90,6 +90,24 @@ fn streaming_and_native_callbacks_keep_the_first_uncaught_error() {
 }
 
 #[test]
+fn a_guests_gc_calls_only_ask_and_leave_what_they_touch_collectable() {
+    let mut host = ScriptVmHost::new((), ());
+    let mut vm = ScriptVm { host: host.host_context(), bx: Box::new(ScriptVmBase::new()) };
+    let code = "fn() {\n    for i in 0..2000 {\n        mod.gc.set_static({n: i})\n        mod.gc.run()\n        mod.gc.run_status()\n    }\n    1\n}\n;";
+    let closure = vm.eval(ScriptMod::new("", "", "fixture.splash", 0, 0, code, &[]));
+    let _keep = vm.new_object_ref(closure.as_object().expect("the fixture compiled"));
+    vm.bx.set_policy(ScriptVmPolicy::untrusted()).expect("install the untrusted policy");
+    vm.gc();
+    let before = vm.heap().gc_live_len();
+    let mut call = ScriptCallReq::new(CALL_ARGS, closure);
+    assert_eq!(vm.call_entry(&mut call).ok().and_then(|v| v.as_number()), Some(1.), "the loop runs within one entry's fuel");
+    assert!(vm.bx.heap_mut().take_gc_request(), "the guest's collections are one request to its host");
+    assert!(!vm.bx.heap_mut().take_gc_request(), "taking the request clears it");
+    vm.gc();
+    assert_eq!(vm.heap().gc_live_len(), before, "set_static under a policy leaves the values collectable");
+}
+
+#[test]
 fn debug_logging_from_a_guest_never_reaches_the_host_log() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static MESSAGES: AtomicUsize = AtomicUsize::new(0);

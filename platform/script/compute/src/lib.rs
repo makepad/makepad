@@ -71,6 +71,7 @@ pub mod boundary;
 
 /// A run of this process's app ended in place (`makepad run`): what this crate holds of it goes, as a
 /// fresh process has it.
+#[relax_api]
 pub fn end_run() {
     boundary::end_run();
     host::end_run();

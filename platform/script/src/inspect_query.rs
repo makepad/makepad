@@ -676,6 +676,7 @@ fn roots_job(top: usize) -> Job {
             }
             stacks.extend(t.stack.iter().copied());
             stacks.extend(t.slots.iter().copied());
+            stacks.extend(t.continuation_roots());
             stacks.extend(t.scopes.iter().map(|&o| ScriptValue::from(o)));
             for me in t.mes.iter() {
                 match me {
@@ -690,8 +691,10 @@ fn roots_job(top: usize) -> Job {
             }
             stacks.extend(t.loops.iter().filter_map(|l| l.values.as_ref().map(|v| v.source)));
             stacks.extend(t.trap.err_borrow().iter().map(|e| e.value));
-            if let Some(ScriptTrapOn::Return(v)) | Some(ScriptTrapOn::Bail(v)) = t.trap.get_on() {
-                stacks.push(v);
+            match t.trap.get_on() {
+                Some(ScriptTrapOn::Return(v) | ScriptTrapOn::Uncaught(v) | ScriptTrapOn::Bail(v)) => stacks.push(v),
+                Some(ScriptTrapOn::CallBack { scope, .. }) => stacks.push(scope.into()),
+                _ => {}
             }
         }
         kind("thread stacks", stacks, &mut objects, &mut arrays);
@@ -1038,6 +1041,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
 ];
 
 /// Answers `words` (the command first) with `kv`; None when the command is not one of ours.
+#[relax_api::relax_api(loader = "the loader answers inspect queries: JIT code has no use for it")]
 pub fn query(words: &[String], kv: &[(String, String)]) -> Option<Vec<String>> {
     let get = |k: &str| kv.iter().rev().find(|x| x.0 == k).map(|x| x.1.clone());
     let vm_arg = get("vm").and_then(|v| v.trim_start_matches('V').parse::<u32>().ok());
@@ -1151,4 +1155,42 @@ pub fn query(words: &[String], kv: &[(String, String)]) -> Option<Vec<String>> {
         }
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod continuation_tests {
+    use super::roots_job;
+    use crate::*;
+
+    #[test]
+    fn vm_roots_reaches_an_object_held_only_by_a_suspended_native() {
+        let mut host = ScriptVmHost::new((), ());
+        let mut vm = ScriptVm { host: host.host_context(), bx: Box::new(ScriptVmBase::new()) };
+        let probe = vm.new_module(id!(probe));
+        vm.add_method(probe, id_lut!(hold), script_args_def!(cb = NIL), |vm, args| {
+            if let Some((keep, _)) = vm.take_call_back() { return keep[0]; }
+            let cb = vm.value(args, id!(cb));
+            let only_root = vm.heap_mut().new_object().into();
+            vm.call_back(cb, &[], [only_root, NIL, NIL, NIL]).unwrap_or(NIL)
+        });
+        vm.set_run_budget(Some(ScriptRunBudget::slice(std::time::Duration::ZERO, 1)));
+        let _ = vm.eval(ScriptMod::new("", "", "continuation_roots.splash", 0, 0, "mod.probe.hold(fn(){ return 1 })\n;", &[]));
+        while vm.thread().native_conts.is_empty() {
+            assert!(vm.run_yielded(), "the probe must enter its callback");
+            vm.resume();
+        }
+        fn reached(vm: &ScriptVm) -> usize {
+            let rows = roots_job(1)(&vm.bx);
+            rows.iter().find_map(|r| r.strip_prefix("{\"root\":\"thread stacks\",\"reaches\":"))
+                .unwrap().trim_end_matches('}').parse().unwrap()
+        }
+        let with = reached(&vm);
+        let record = vm.thread_mut().native_conts.pop().unwrap();
+        assert_eq!(with, reached(&vm) + 1, "vm roots counts the object reachable only from the continuation");
+        vm.thread_mut().native_conts.push(record);
+        vm.gc();
+        vm.set_run_budget(None);
+        let object = vm.resume().as_object().expect("the probe returned its kept object");
+        assert!(vm.heap().object_alive(object), "the kept object survived GC between slices");
+    }
 }

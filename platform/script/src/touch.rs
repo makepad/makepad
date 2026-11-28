@@ -1,5 +1,5 @@
 //! Splash touches: which top-level definitions of the `script_mod!` blocks a
-//! run really used (local/agent_state/wasm/DESIGN.md "Splash shaking").
+//! run really used ("Splash shaking").
 //!
 //! A definition is used when, outside the registrations, something reads it:
 //! a lookup that finds it or a field in it (`mod.widgets.Button`,
@@ -31,6 +31,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
 /// Heaps made from now on record touches (the census sets it).
+#[relax_api::relax_api(loader = "the census (native code) sets it: JIT code has no use for it")]
 pub static TOUCH_RECORD: AtomicBool = AtomicBool::new(false);
 
 /// (`crate::end_run`) The next run's heaps record only if its census asks.
@@ -40,9 +41,11 @@ pub(crate) fn end_run() {
 
 /// The census's mapping of the definitions of every block not mapped yet:
 /// run at each registration's end.
+#[relax_api::relax_api(loader = "the census (native code) sets it: JIT code has no use for it")]
 pub static TOUCH_MAP: OnceLock<fn(&ScriptHeap, &ScriptCode)> = OnceLock::new();
 
 /// The census's note that a definition (its slot, from `touch_define`) was used.
+#[relax_api::relax_api(loader = "the census (native code) sets it: JIT code has no use for it")]
 pub static TOUCH_SINK: OnceLock<fn(u32)> = OnceLock::new();
 
 /// One heap's touch record.

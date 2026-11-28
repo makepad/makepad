@@ -374,12 +374,12 @@ pub fn edit_mode() -> bool {
 
 /// The edit-mode state compilers read (None: off).
 #[inline(always)]
-pub fn live() -> Option<Arc<LiveLiterals>> {
+pub(crate) fn live() -> Option<Arc<LiveLiterals>> {
     let ptr = live_into();
     if ptr.is_null() { None } else { Some(unsafe { Arc::from_raw(ptr) }) }
 }
 /// Transfers one strong reference to the caller, or null when edit mode is off.
-pub fn live_into() -> *const LiveLiterals {
+pub(crate) fn live_into() -> *const LiveLiterals {
     if !edit_mode() { return std::ptr::null(); }
     LIVE.read().ok().and_then(|s| s.clone()).map_or(std::ptr::null(), Arc::into_raw)
 }

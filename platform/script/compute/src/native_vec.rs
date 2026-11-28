@@ -62,6 +62,7 @@ fn cpu_ok() -> bool {
 /// AVX2 + FMA (the CPUs `cpu_ok` admits) runs eight (the back end's `pair256` makes each pair of
 /// 128-bit halves one ymm instruction); AArch64 runs four. `MAKEPAD_KERNEL_LANES=4|8` overrides
 /// it for the process (A/B measurement); [`with_lanes`] for one thread's compiles (tests).
+#[relax_api::relax_api(loader = "the loader's back end picks its lanes: JIT code has no use for it")]
 pub fn host_lanes() -> u32 {
     host().0
 }
@@ -83,7 +84,7 @@ fn host() -> (u32, bool) {
 /// start pays nothing for the width. A thread override ([`with_lanes`]) or MAKEPAD_KERNEL_LANES
 /// compiles that width at once, with no upgrade (tests, A/Bs). The results are the same bits
 /// at either width, so the switch is invisible to them.
-pub fn install_lanes() -> (u32, bool) {
+pub(crate) fn install_lanes() -> (u32, bool) {
     match LANES.with(|c| c.get()) {
         0 => match host() {
             (l, true) => (l, false),
@@ -113,7 +114,7 @@ pub fn with_lanes<R>(lanes: u32, f: impl FnOnce() -> R) -> R {
 }
 
 /// The lanes a compile on this thread makes now.
-pub fn lanes() -> u32 {
+pub(crate) fn lanes() -> u32 {
     match LANES.with(|c| c.get()) {
         0 => host_lanes(),
         l => l,
@@ -122,16 +123,18 @@ pub fn lanes() -> u32 {
 
 /// Compiles a kernel's element loop to vector code of [`lanes`] lanes, or declines: (code,
 /// lanes). An eight-lane compile whose frame is too large makes four-lane code.
+#[relax_api::relax_api(loader = "JIT code compiles with `makepad_script_compute::native::compile_words`")]
 pub fn compile(p: &Program) -> Option<(Code, u32)> {
     compile_at(p, lanes())
 }
 
 /// [`compile`] at `lanes` (4 or 8).
-pub fn compile_at(p: &Program, lanes: u32) -> Option<(Code, u32)> {
+pub(crate) fn compile_at(p: &Program, lanes: u32) -> Option<(Code, u32)> {
     compile_with_offset_limit(p, lanes, i32::MAX)
 }
 
 #[doc(hidden)]
+#[relax_api::relax_api(loader = "a test hook of the loader's back end: JIT code compiles with `makepad_script_compute::native::compile_words`")]
 pub fn compile_with_offset_limit(p: &Program, lanes: u32, offset_limit: i32) -> Option<(Code, u32)> {
     if !cpu_ok() || crate::ir::has_narrow(p) {
         return None;

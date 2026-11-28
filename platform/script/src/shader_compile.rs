@@ -358,8 +358,8 @@ impl CompiledShader {
     pub(crate) fn backend(&self) -> ShaderBackend {
         self.state.backend()
     }
-    pub(crate) fn texture_sampler_index(&self, name: &str) -> usize {
-        self.state.texture_sampler_index(name)
+    pub(crate) fn glsl_texture_bindings(&self) -> &[makepad_shader::shader_output::GlslTextureBinding] {
+        &self.state.glsl_texture_bindings
     }
     pub(crate) fn uses_time(&self) -> bool {
         self.state.uses_time()

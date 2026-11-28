@@ -207,6 +207,7 @@ pub fn compile_compute_kernel(vm: &mut ScriptVm, kernel: ScriptObject, target: C
     }
     let main = main.ok_or("the kernel's main fn did not compile")?;
     output.compiled.ir.refresh_struct_names(&vm.bx.heap);
+    output.validate_shader_identifiers(&vm.bx.heap)?;
     let ir = &mut output.compiled.ir;
     ir.workgroup = workgroup;
     ir.precise = vm.bx.heap.value(kernel, id!(precise_math).into(), NoTrap).as_bool().unwrap_or(false);

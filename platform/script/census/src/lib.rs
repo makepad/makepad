@@ -4,6 +4,8 @@
 //! Outside the VM crate: the VM only calls the recording census it is given
 //! (makepad_script::census).
 
+#[cfg(not(target_arch = "wasm32"))]
+use relax_api::relax_api;
 
 pub mod census;
 pub mod top_use;
@@ -11,6 +13,7 @@ pub mod top_use;
 pub use census::{census_record, census_used, census_used_from, census_used_into, Census, ModuleUse, ModuleUseOut};
 /// What this crate holds of a run goes when it ends: the next run records only if it asks.
 #[cfg(not(target_arch = "wasm32"))]
+#[relax_api]
 pub fn end_run() {
     census::end_run();
     top_use::end_run();

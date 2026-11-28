@@ -99,7 +99,7 @@ macro_rules! script_args_def{
 // Natives are C-ABI callables: `{data, call, drop}` where `call` is an `extern "C-unwind"` fn
 // made per closure type by a generic trampoline. The VM calls them without knowing which
 // compiler built the closure: in the makepad loader the VM is rustc-built and app natives are
-// Rapid-built (local/plans/loader-core.md section 8). Under one compiler this is the same
+// Rapid-built. Under one compiler this is the same
 // indirect call a `Box<dyn Fn>` makes. "C-unwind": a panicking native unwinds through the VM
 // as before.
 macro_rules! native_callable {
@@ -210,7 +210,10 @@ pub struct ScriptNative {
     pub(crate) handle_type: LiveIdMap<LiveId, ScriptHandleType>,
     pub(crate) getters: Vec<NativeGetterFn>,
     pub(crate) setters: Vec<NativeSetterFn>,
-    pub(crate) calls: Vec<Option<NativeCallFn>>,
+    pub(crate) type_call_ids: Vec<Option<usize>>,
+    // A suspended call resumes its admitted handler, even after its type is
+    // registered again. Keep previous entries alive until the VM drops.
+    pub(crate) call_handlers: Vec<NativeCallFn>,
 }
 
 impl ScriptNative {
@@ -359,7 +362,9 @@ impl ScriptNative {
 
     pub fn set_type_call_native(&mut self, ty_redux: ScriptTypeRedux, f: NativeCallFn) {
         self.ensure_type_table_capacity(ty_redux);
-        self.calls[ty_redux.to_index()] = Some(f);
+        let handler = self.call_handlers.len();
+        self.call_handlers.push(f);
+        self.type_call_ids[ty_redux.to_index()] = Some(handler);
     }
 
     /// The methods registered on a value type (`set_type_method`), by name.
@@ -393,7 +398,7 @@ impl ScriptNative {
                     )
                 })
             });
-            self.calls.resize_with(ty_redux.to_index() + 1, || None);
+            self.type_call_ids.resize(ty_redux.to_index() + 1, None);
         }
     }
 

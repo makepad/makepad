@@ -1252,6 +1252,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn reserved_identifiers_are_checked_only_in_shaders() {
+        let mut host = ScriptVmHost::new(0i32, ());
+        let mut vm = ScriptVm { host: host.host_context(), bx: Box::new(ScriptVmBase::new()) };
+        vm.bx.captured_errors = Some(Vec::new());
+        let ordinary = "let shade__value = 17.0\nlet _mp_value = 25.0\nshade__value + _mp_value";
+        assert_eq!(vm.eval(ScriptMod::new("", "", "ordinary_names", 0, 0, ordinary, &[])).as_number(), Some(42.0));
+
+        let source = "use mod.pod.*\nuse mod.shader\n{
+            pixel: shader.fragment_output(0, vec4f)
+            mp_backdrop: fn(PARAM: float) -> float { let LOCAL = PARAM + 1.0; return LOCAL }
+            vertex: fn() {}
+            fragment: fn() { self.pixel = vec4f(self.mp_backdrop(0.25)) }
+        }";
+        for (param, local, error) in [
+            ("value", "shade__value", Some("shader identifier `shade__value` contains reserved sequence `__`")),
+            ("_mp_value", "shade", Some("shader identifier `_mp_value` starts with reserved prefix `_mp_`")),
+            ("value", "shade", None),
+        ] {
+            let text = source.replace("PARAM", param).replace("LOCAL", local);
+            let shader = vm.eval(ScriptMod::new("", "", "shader_names", 0, 0, &text, &[])).as_object().expect("shader object");
+            let output = crate::shader_ir_draw::compile_draw_shader_ir_with(&mut vm, shader, &Default::default());
+            if let Some(message) = error {
+                assert_eq!(output.errors.as_slice(), &[message]);
+            } else {
+                assert!(!output.has_errors, "{}", output.error_report());
+                assert!(output.ir.functions.iter().any(|f| f.key_name == id!(mp_backdrop)));
+            }
+        }
+        let errors = vm.take_errors();
+        assert!(errors.is_empty(), "unexpected Splash diagnostics: {errors:?}");
+    }
+
+    #[test]
     fn anisotropic_samples_opt_in_and_share_the_repeat_sampler() {
         let mut host = ScriptVmHost::new(0i32, ());
         let mut vm = ScriptVm { host: host.host_context(), bx: Box::new(ScriptVmBase::new()) };

@@ -25,8 +25,23 @@ pub struct DrawShaderDescIo {
     pub(crate) buffer_index: Option<usize>,
     /// Uniform buffers: the block name the code declares.
     pub(crate) block_name: Box<str>,
-    /// Textures: the sampler the code samples it with.
-    pub(crate) sampler: usize,
+}
+
+/// A combined GLSL sampler uniform and its logical texture, sampler, and stage mask.
+#[relax_api(plain, run)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DrawShaderDescGlslTexture {
+    pub(crate) uniform_name: Box<str>,
+    pub(crate) texture_slot: u32,
+    pub(crate) sampler_index: u32,
+    pub(crate) stages: u8,
+}
+
+impl DrawShaderDescGlslTexture {
+    pub fn uniform_name(&self) -> &str { &self.uniform_name }
+    pub fn texture_slot(&self) -> u32 { self.texture_slot }
+    pub fn sampler_index(&self) -> u32 { self.sampler_index }
+    pub fn stages(&self) -> u8 { self.stages }
 }
 
 /// Where a scope uniform's value comes from.
@@ -59,6 +74,7 @@ pub struct DrawShaderDescScopeUniform {
 pub struct DrawShaderDesc {
     pub(crate) io: Vec<DrawShaderDescIo>,
     pub(crate) samplers: Vec<ShaderSampler>,
+    pub(crate) glsl_texture_bindings: Vec<DrawShaderDescGlslTexture>,
     pub(crate) scope_uniforms: Vec<DrawShaderDescScopeUniform>,
     pub(crate) table_consts: Vec<ShaderTableConst>,
     /// Live literals that stayed folded (see `ShaderOutput::folded_sites`).
@@ -93,13 +109,6 @@ impl DrawShaderDesc {
                         }
                         _ => Box::default(),
                     },
-                    sampler: match io.kind().kind() {
-                        crate::shader_output::ShaderIoKindTag::Texture => {
-                            let texture_name = format!("tex_{}", io.name());
-                            output.texture_sampler_index(&texture_name)
-                        }
-                        _ => 0,
-                    },
                 }
             })
             .collect();
@@ -125,6 +134,12 @@ impl DrawShaderDesc {
         DrawShaderDesc {
             io,
             samplers: output.samplers().to_vec(),
+            glsl_texture_bindings: output.glsl_texture_bindings().iter().map(|b| DrawShaderDescGlslTexture {
+                uniform_name: b.uniform_name.as_str().into(),
+                texture_slot: b.texture_slot,
+                sampler_index: b.sampler_index,
+                stages: b.stages,
+            }).collect(),
             scope_uniforms,
             table_consts: output.table_consts().to_vec(),
             folded_sites: output.folded_sites().to_vec(),
@@ -142,12 +157,19 @@ impl DrawShaderDesc {
 pub struct DrawShaderDescView<'a> {
     pub io: &'a [DrawShaderDescIo],
     pub samplers: &'a [ShaderSampler],
+    pub glsl_texture_bindings: &'a [DrawShaderDescGlslTexture],
     pub scope_uniforms: &'a [DrawShaderDescScopeUniform],
     pub table_consts: &'a [ShaderTableConst],
     pub folded_sites: &'a [LiteralSite],
     pub uniform_buffer_bindings: &'a UniformBufferBindings,
     pub uses_time: bool,
     pub return_facts: &'a [FnReturnFacts],
+}
+
+impl<'a> DrawShaderDescView<'a> {
+    pub fn glsl_texture_bindings(&self) -> &'a [DrawShaderDescGlslTexture] {
+        self.glsl_texture_bindings
+    }
 }
 
 #[relax_api(run)]
@@ -160,6 +182,7 @@ impl DrawShaderDesc {
         DrawShaderDescView {
             io: &self.io,
             samplers: &self.samplers,
+            glsl_texture_bindings: &self.glsl_texture_bindings,
             scope_uniforms: &self.scope_uniforms,
             table_consts: &self.table_consts,
             folded_sites: &self.folded_sites,
@@ -175,6 +198,10 @@ impl DrawShaderDesc {
     #[inline(always)]
     pub fn samplers(&self) -> &[ShaderSampler] {
         self.view().samplers
+    }
+    #[inline(always)]
+    pub fn glsl_texture_bindings(&self) -> &[DrawShaderDescGlslTexture] {
+        self.view().glsl_texture_bindings()
     }
     #[inline(always)]
     pub fn scope_uniforms(&self) -> &[DrawShaderDescScopeUniform] {
@@ -222,9 +249,6 @@ impl DrawShaderDescIo {
     }
     pub fn block_name(&self) -> &str {
         &self.block_name
-    }
-    pub fn sampler(&self) -> usize {
-        self.sampler
     }
 }
 impl DrawShaderDescScopeUniform {

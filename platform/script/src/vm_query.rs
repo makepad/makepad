@@ -332,8 +332,8 @@ impl ScriptVmBase {
                     if count >= req.index {
                         break;
                     }
-                    if let Some(ip) = frame.return_ip {
-                        req.out.record(CH_RECORD, &ScriptIp { body: ip.body, index: ip.index.saturating_sub(1) });
+                    if let Some(ip) = frame.call_site() {
+                        req.out.record(CH_RECORD, &ip);
                         count += 1;
                     }
                 }

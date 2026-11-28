@@ -18,10 +18,11 @@ pub struct IrCompileOptions {
 
 impl Default for IrCompileOptions {
     fn default() -> Self {
-        Self::new(Default::default(), false, false, false, false)
+        Self { backend: Default::default(), const_table: false, use_vulkan: false, glsl_webgl2: false, max_sampler_anisotropy: 16, live_literals: None }
     }
 }
 
+#[relax_api::relax_api(loader = "the loader's shader compile reads the live literals: JIT code compiles with the `compile_shader` op")]
 impl IrCompileOptions {
     pub fn new(backend: crate::shader_backend::ShaderBackend, const_table: bool, use_vulkan: bool, glsl_webgl2: bool, live_literals: bool) -> Self {
         Self { backend, const_table, use_vulkan, glsl_webgl2, max_sampler_anisotropy: 16, live_literals: if live_literals { crate::literal::live() } else { None } }
@@ -53,6 +54,10 @@ pub fn compile_draw_shader_ir_with(vm: &mut ScriptVm, io_self: ScriptObject, opt
     }
     output.assign_uniform_buffer_indices(&vm.bx.heap, 3);
     output.ir.refresh_struct_names(&vm.bx.heap);
+    if let Err(error) = output.validate_shader_identifiers(&vm.bx.heap) {
+        output.push_error(error);
+        return output;
+    }
     output.ir.precise = vm.bx.heap.value(io_self, id!(precise_math).into(), NoTrap).as_bool() == Some(true);
     if !output.ir.globals.iter().any(|g| matches!(g.kind, crate::shader_ir::IrGlobalKind::Io(crate::shader_ir::IrIo::Storage(_)))) {
         return output;

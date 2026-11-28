@@ -66,7 +66,7 @@ pub fn hlsl_draw(output: &ShaderOutput, types: &impl crate::shader_types::Shader
                 if k < 32 && tt == TextureType::Texture2d {
                     if let Some(g) = ir.find_global(IrGlobalKind::Io(IrIo::Texture(tt)), io.name) {
                         cx.pick_twins.push((g, k));
-                        twins.push((k, cx.plain_global_name(g)));
+                        twins.push((k, pick_twin_name(&cx.plain_global_name(g))));
                     }
                 }
                 k += 1;
@@ -202,7 +202,7 @@ pub fn hlsl_draw(output: &ShaderOutput, types: &impl crate::shader_types::Shader
     }
     if pick {
         for (k, name) in &twins {
-            writeln!(out, "Texture2D {}__pick : register(t{});", name, ntex as u32 + 1 + k).ok();
+            writeln!(out, "Texture2D {} : register(t{});", name, ntex as u32 + 1 + k).ok();
         }
         out.push_str(HLSL_PICK);
     }

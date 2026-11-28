@@ -2,7 +2,7 @@
 //! borrows themselves: `vm.value(obj, id!(x))` instead of
 //! `vm.bx.heap.value(obj, id!(x).into(), NoTrap)`. Engine code then reaches nothing inside the
 //! VM's state but through methods, which is what lets the VM be a rustc-built part of the
-//! makepad loader with Rapid-compiled apps (local/plans/loader-core.md section 8, step 6).
+//! makepad loader with Rapid-compiled apps.
 //! `*_trap` forms report failures at the current thread's trap (as
 //! `vm.bx.threads.cur().trap.pass()` did); the plain forms report nothing (NoTrap).
 //! `vm.heap()` / `vm.heap_mut()` cover the remaining heap calls.
@@ -18,6 +18,9 @@ use crate::value::*;
 use crate::vm::*;
 use crate::vm_ctl::*;
 use crate::vm_query::*;
+
+// take_call_back constructs this tagged result in the caller from the op's two outputs.
+relax_api::option_layouts! { ([ScriptValue; 4], ScriptValue) }
 
 /// Where a VM call writes text the caller keeps: `{ctx, write}` with a C-ABI `write`, made on
 /// the caller's side ([`ScriptTextOut::new`] is inline) so the caller's own `String` grows; the
@@ -444,9 +447,30 @@ impl ScriptVm<'_> {
         self.bx.vm_stat(&mut ScriptCtlReq::new(STAT_RUN_YIELDED)) != 0
     }
 
-    /// Whether the native running now may [`Self::pause`]: the outermost run called it. A
-    /// native that script called from inside another native (a closure `array.map` runs) must
-    /// not: that native would get nil for the closure's value. It does its work at once instead.
+    /// Run a callback. Return the immediate result for a native callback or a bad call.
+    /// On `None`, return nil from the native: the interpreter runs the script callback
+    /// and re-enters the native at the same instruction. The four kept values remain
+    /// rooted in both cases.
+    #[inline(always)]
+    pub fn call_back(&mut self, f: ScriptValue, args: &[ScriptValue], keep: [ScriptValue; 4]) -> Option<ScriptValue> {
+        let mut ret = NIL;
+        self.request_call_back(f, args, &keep, &mut ret).then_some(ret)
+    }
+
+    /// Take the callback result on re-entry, before doing the native's initial work.
+    #[inline(always)]
+    pub fn take_call_back(&mut self) -> Option<([ScriptValue; 4], ScriptValue)> {
+        let mut keep = [NIL; 4];
+        let mut ret = NIL;
+        self.take_callback_result(&mut keep, &mut ret).then_some((keep, ret))
+    }
+
+    /// Whether the native running now may [`Self::pause`]: the outermost run called it and no
+    /// synchronous native waits below it. A native reached through a callback that another
+    /// native drives with `vm.call` must not pause: that native would get nil for the
+    /// callback's value. It does its work at once instead. Callbacks run through
+    /// [`Self::call_back`] (`array.map` and friends) share the caller's run, so a native
+    /// inside them may pause.
     #[inline(always)]
     pub fn can_pause(&self) -> bool {
         self.bx.vm_stat(&mut ScriptCtlReq::new(STAT_CAN_PAUSE)) != 0

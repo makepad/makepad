@@ -179,6 +179,7 @@ fn find(addr: usize, by_heap: bool) -> Option<Arc<Entry>> {
 }
 
 /// Register a VM base (its address must be stable: it is boxed). A second call is a no-op.
+#[relax_api]
 pub fn register(base: *const ScriptVmBase, label: &'static str) {
     relax_api::process_heap(|| register_here(base, label))
 }
@@ -210,6 +211,7 @@ fn register_here(base: *const ScriptVmBase, label: &'static str) {
     reg.push(Arc::new(e));
 }
 
+#[relax_api]
 pub fn unregister(base: *const ScriptVmBase) {
     if !ENABLED.load(Relaxed) {
         return;
@@ -299,6 +301,7 @@ pub(crate) fn diagnostic(base: &ScriptVmBase, at: Option<(&str, u32)>, text: &st
 }
 
 /// `script errors [vm=V<n>]`: every VM's error sites, the most frequent first, one JSON line each.
+#[relax_api::relax_api(loader = "the loader's inspector reads the VMs' error sites: JIT code has no use for it")]
 pub fn script_errors(vm: Option<u32>) -> Vec<String> {
     let list: Vec<Arc<Entry>> = match REGISTRY.lock() {
         Ok(r) => r.iter().filter(|e| vm.map_or(true, |v| v == e.id)).cloned().collect(),
@@ -332,6 +335,7 @@ pub fn script_errors(vm: Option<u32>) -> Vec<String> {
 
 /// Every uncaught error that is reported or captured is passed to `f` as one formatted line.
 /// Setting it also switches the registry on.
+#[relax_api::relax_api(loader = "the loader's inspect hook of script errors: JIT code has no use for it")]
 pub fn set_error_hook(f: fn(&str)) {
     ERROR_HOOK.store(f as usize, Relaxed);
     ENABLED.store(true, Relaxed);
@@ -356,6 +360,7 @@ pub(crate) fn json_str(s: &str) -> String {
 }
 
 /// One compact JSON object per live VM (atomics only; safe from any thread).
+#[relax_api::relax_api(loader = "the loader's inspector lists the VMs: JIT code has no use for it")]
 pub fn summaries() -> Vec<String> {
     let list: Vec<Arc<Entry>> = match REGISTRY.lock() {
         Ok(r) => r.clone(),
@@ -449,6 +454,7 @@ impl Drop for EvalGuard {
 /// Only valid while that thread is stopped (parked at a panic or breakpoint, or paused): it
 /// reads the VM's call frames and code bodies without any lock. The caller guarantees the
 /// stop. Any panic while reading (a body borrowed mid-edit) gives None.
+#[relax_api::relax_api(loader = "the loader's inspector reads a stopped VM's stack: JIT code has no use for it")]
 pub fn script_stack(thread: u64, max: usize) -> Option<Vec<String>> {
     let base = EVALS.lock().ok()?.iter().find(|e| e.0 == thread)?.1;
     if find(base, false).is_none() {
@@ -463,8 +469,8 @@ pub fn script_stack(thread: u64, max: usize) -> Option<Vec<String>> {
             if ips.len() >= max {
                 break;
             }
-            if let Some(ip) = frame.return_ip {
-                ips.push(crate::value::ScriptIp { body: ip.body, index: ip.index.saturating_sub(1) });
+            if let Some(ip) = frame.call_site() {
+                ips.push(ip);
             }
         }
         ips.iter()
@@ -490,6 +496,7 @@ pub fn script_stack(thread: u64, max: usize) -> Option<Vec<String>> {
 
 /// The names of the modules of VM `vm_id` (the number of its "V<n>" label). Same caveat as
 /// [`script_stack`]: only while the VM is stopped or idle; empty when unknown.
+#[relax_api::relax_api(loader = "the loader's inspector reads a stopped VM's modules: JIT code has no use for it")]
 pub fn modules(vm_id: u32) -> Vec<String> {
     let heap = match REGISTRY.lock() {
         Ok(r) => match r.iter().find(|e| e.id == vm_id) {

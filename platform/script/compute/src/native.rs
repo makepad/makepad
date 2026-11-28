@@ -154,12 +154,14 @@ pub fn compile_words(words: &[u32], writable: u64) -> Option<Code> {
 
 /// Compiles a kernel whose host buffers have write permission `writable` (bit k: buffer
 /// k), passed on to host calls.
+#[relax_api::relax_api(loader = "JIT code compiles with `makepad_script_compute::native::compile_words`")]
 pub fn compile_with(p: &Program, writable: u64) -> Option<Code> {
     compile_with_offset_limit(p, writable, i32::MAX)
 }
 
 /// Compile with a smaller immediate range to exercise wide table addresses.
 #[doc(hidden)]
+#[relax_api::relax_api(loader = "a test hook of the loader's back end: JIT code compiles with `makepad_script_compute::native::compile_words`")]
 pub fn compile_with_offset_limit(p: &Program, writable: u64, offset_limit: i32) -> Option<Code> {
     let flat = crate::ir::flat(p);
     let p = &*flat;
@@ -291,6 +293,7 @@ pub(crate) fn pair_halves(f: &mut Func) {
 }
 
 /// The lowered and optimised RIR of a program (tests, dumps).
+#[relax_api::relax_api(loader = "the loader's back end: JIT code compiles with `makepad_script_compute::native::compile_words`")]
 pub fn rir_of(p: &Program, writable: u64) -> Func {
     assert!(!crate::ir::has_narrow(p), "native RIR requires Word buffers");
     let flat = crate::ir::flat(p);

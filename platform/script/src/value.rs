@@ -1187,7 +1187,7 @@ impl ScriptValue {
 
     #[inline]
     pub const fn from_i32(v: i32) -> Self {
-        Self(v as u64 | Self::TYPE_I32)
+        Self(v as u32 as u64 | Self::TYPE_I32)
     }
 
     #[inline]

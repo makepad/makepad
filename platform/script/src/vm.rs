@@ -25,8 +25,9 @@ use crate::vm_ctl::*;
 use crate::vm_query::*;
 use crate::*;
 use std::cell::{Cell, Ref, RefCell, RefMut};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 #[relax_api(handle, clone, eq, hash, debug, run)]
@@ -114,7 +115,7 @@ impl ScriptStrPin {
 
 /// A script module's source as plain views, what crosses into the VM: `&str`/`&[ScriptValue]`
 /// fat pointers and scalars (C-shaped: in the makepad loader the VM is rustc-built and the
-/// ScriptMod's owner Rapid-built, local/plans/loader-core.md section 8). The VM copies what it
+/// ScriptMod's owner Rapid-built). The VM copies what it
 /// keeps.
 #[relax_api(plain, run)]
 #[repr(C)]
@@ -173,6 +174,12 @@ impl<'a> ScriptModView<'a> {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NativeInvocation {
+    Opcode,
+    Synchronous,
+}
+
 /// `ScriptVm::vm_call`: call `fnobj` with `args` (positional, bound to its parameters in order)
 /// and `me`.
 pub const CALL_ARGS: u32 = 0;
@@ -217,6 +224,8 @@ pub const EVAL_MODULE: u32 = 4;
 pub const EVAL_APPEND: u32 = 5;
 /// `image`: another VM's fn, `scope` its parent; the result is the fn object or nil.
 pub const EVAL_ADOPT: u32 = 6;
+/// A static `script_mod!` block in a Rust source file, used by hot reload and design locate.
+pub const EVAL_SCRIPT_MOD: u32 = 7;
 
 #[relax_api(plain, run)]
 #[repr(C)]
@@ -298,6 +307,8 @@ pub struct ScriptBody {
     /// root, and the body is freed once nothing made from it is alive (no
     /// fn defined in it, no object built by it, no thread running it).
     pub transient: bool,
+    /// Registered by a static `script_mod!` block ([`EVAL_SCRIPT_MOD`]).
+    pub is_script_mod: bool,
     /// The file the body's text is really written in, when it is named
     /// otherwise (an adopted fn's body is named by its hash); empty: the
     /// source's own file. Locations and errors report this file.
@@ -385,6 +396,7 @@ impl ScriptBody {
             source_len: self.source_len,
             content_hash: self.content_hash,
             transient: true,
+            is_script_mod: false,
             real_file: self.real_file.clone(),
             shown: self.shown.clone(),
             first_col: self.first_col,
@@ -406,6 +418,8 @@ pub struct ScriptModuleRead<'a> {
 #[repr(C)]
 pub struct ScriptModuleView<'a> {
     pub exists: bool,
+    /// True when this active body was registered by a static `script_mod!` block.
+    pub is_script_mod: bool,
     /// How many bodies there are.
     pub count: usize,
     /// Number of original source characters retained by the tokenizer.
@@ -426,6 +440,7 @@ fn module_view(bodies: &[ScriptBody], index: usize) -> ScriptModuleView<'_> {
     match bodies.get(index) {
         Some(b) => ScriptModuleView {
             exists: true,
+            is_script_mod: b.is_script_mod && matches!(b.source, ScriptSource::Mod(_)),
             count: bodies.len(),
             source_chars: b.tokenizer.original.len(),
             code: b.effective_code.as_str(),
@@ -438,7 +453,7 @@ fn module_view(bodies: &[ScriptBody], index: usize) -> ScriptModuleView<'_> {
                 _ => std::ptr::null(),
             },
         },
-        None => ScriptModuleView { exists: false, count: bodies.len(), source_chars: 0, code: "", opcodes: &[], source_map: &[], tokens: &[], end_scope: ScriptObject::ZERO, module: std::ptr::null() },
+        None => ScriptModuleView { exists: false, is_script_mod: false, count: bodies.len(), source_chars: 0, code: "", opcodes: &[], source_map: &[], tokens: &[], end_scope: ScriptObject::ZERO, module: std::ptr::null() },
     }
 }
 
@@ -453,6 +468,15 @@ impl ScriptModuleRead<'_> {
 impl ScriptModuleRead<'_> {
     #[inline(always)]
     pub fn exists(&self) -> bool { self.view().exists }
+    #[inline(always)]
+    pub fn is_script_mod(&self) -> bool { self.view().is_script_mod }
+    /// The module only when this body was registered by a static `script_mod!` block.
+    #[inline(always)]
+    pub fn script_mod(&self) -> Option<&ScriptMod> {
+        let view = self.view();
+        // SAFETY: the view's module points into the body table this read borrows
+        view.is_script_mod.then(|| unsafe { view.module.as_ref() }).flatten()
+    }
     /// Number of original source characters retained by the tokenizer.
     #[inline(always)]
     pub fn source_char_count(&self) -> usize { self.view().source_chars }
@@ -492,6 +516,8 @@ impl ScriptModulesMut<'_> {
 impl ScriptModulesMut<'_> {
     #[inline(always)]
     pub fn len(&self) -> usize { self.view(0).count }
+    #[inline(always)]
+    pub fn is_script_mod(&self, index: usize) -> bool { self.view(index).is_script_mod }
     #[inline(always)]
     pub fn module(&self, index: usize) -> Option<&ScriptMod> {
         // SAFETY: the view's module points into the body table this borrow holds
@@ -1676,7 +1702,8 @@ impl ScriptRunBudget {
     /// yield: the caller gets nil, [`ScriptVm::run_yielded`] is true and [`ScriptVm::resume`]
     /// continues it under the budget then installed) and is never cut off: no hard deadline.
     /// Only the outermost run yields; a script call a native makes runs to its end. The clock
-    /// is read every `sample_interval_instructions` and right after a native returns.
+    /// is read every `sample_interval_instructions` and after a native finishes or pauses. A callback request
+    /// leaves the interval running into the callback.
     pub fn slice(soft: Duration, sample_interval_instructions: u32) -> Self {
         Self { hard_deadline: f64::INFINITY, ..Self::from_durations(soft, Duration::ZERO, sample_interval_instructions) }
     }
@@ -1697,6 +1724,7 @@ impl ScriptRunBudget {
 enum ScriptRunBudgetHit {
     Soft,
     Hard,
+    Memory,
 }
 
 #[relax_api(run)]
@@ -1772,9 +1800,24 @@ impl<'a> ScriptVm<'a> {
         f: impl FnOnce(&mut Self) -> R,
     ) -> R {
         let (previous_remaining, applied) = self.instruction_limit_begin(instruction_limit);
-        let result = f(self);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self)));
         self.instruction_limit_end(previous_remaining, applied);
-        result
+        match result { Ok(value) => value, Err(panic) => std::panic::resume_unwind(panic) }
+    }
+
+    /// Sample the interrupt word every 1024 instructions on this thread, without imposing
+    /// an instruction limit. A suspended run keeps sampling on resume. An enclosing or
+    /// nested instruction limit still applies.
+    #[inline(always)]
+    pub fn with_interrupt_sampling<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        let mut req = ScriptCtlReq::new(CTL_INTERRUPT_SAMPLING_BEGIN);
+        if self.bx.vm_ctl(&mut req) == 0 {
+            return f(self); // An enclosing counter already samples the interrupt.
+        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self)));
+        req.op = CTL_INTERRUPT_SAMPLING_END;
+        self.bx.vm_ctl(&mut req);
+        match result { Ok(value) => value, Err(panic) => std::panic::resume_unwind(panic) }
     }
 
     /// The first half of [`Self::with_instruction_limit`]: applies the limit, returns
@@ -1844,6 +1887,7 @@ impl<'a> ScriptVm<'a> {
     pub fn clear_execution_limit_failures(&mut self) {
         self.bx.threads.cur().take_stack_limit_exceeded();
         self.bx.threads.cur().take_call_frame_limit_exceeded();
+        self.bx.threads.cur().take_growth_refusal();
     }
 
     /// Run one untrusted evaluation/callback under a logical heap-allocation
@@ -2049,13 +2093,223 @@ impl<'a> ScriptVm<'a> {
         None
     }
 
-    fn call_with_scope(&mut self, scope: ScriptObject, me: ScriptValue) -> ScriptValue {
-        // Constructing native arguments can itself exhaust the heap. There may be
-        // no interpreter instruction between that allocation and the native call.
-        if self.bx.has_entry_policy() {
-            if let Some(limit) = self.bx.pending_policy_limit() { self.bx.poison_limit(limit); }
-            if let Some(reason) = self.bx.poisoned() { return reason.as_script_error(); }
+    /// Enter a native with an unwind-safe record of what its caller can resume.
+    #[inline(always)]
+    pub(crate) fn invoke_native<R>(&mut self, caller: NativeInvocation, f: impl FnOnce(&mut Self) -> R) -> R {
+        struct Invocation<'a, 'host> {
+            vm: &'a mut ScriptVm<'host>,
+            previous: Option<NativeInvocation>,
         }
+        impl Drop for Invocation<'_, '_> {
+            fn drop(&mut self) { self.vm.bx.native_invocation = self.previous; }
+        }
+        let previous = self.bx.native_invocation;
+        self.bx.native_invocation = Some(if previous.is_some() { NativeInvocation::Synchronous } else { caller });
+        let guard = Invocation { vm: self, previous };
+        f(guard.vm)
+    }
+
+    /// Keep Rust-held values visible to GC across a synchronous callback, below its locals.
+    fn with_native_roots<R>(&mut self, values: &[ScriptValue], f: impl FnOnce(&mut Self) -> R) -> R {
+        struct Roots<'a, 'host> {
+            vm: &'a mut ScriptVm<'host>,
+            thread_index: usize,
+            base: usize,
+        }
+        impl Drop for Roots<'_, '_> {
+            fn drop(&mut self) {
+                if let Some(thread) = self.vm.bx.threads.get_mut(self.thread_index) {
+                    thread.slots.truncate(self.base);
+                }
+            }
+        }
+        let thread_index = self.bx.threads.current();
+        let thread = self.bx.threads.cur();
+        let base = thread.slots.len();
+        thread.slots.extend_from_slice(values);
+        f(Roots { vm: self, thread_index, base }.vm)
+    }
+
+    /// A Rust caller keeps its invocation on the stack until every requested callback returns.
+    #[inline(always)]
+    pub(crate) fn drive_native(&mut self, receiver: ScriptValue, poll: impl Fn(&mut Self) -> ScriptValue + Copy) -> ScriptValue {
+        self.invoke_native(NativeInvocation::Synchronous, |vm| {
+            let first_poll = |vm: &mut Self| {
+                let value = poll(vm);
+                if vm.bx.threads.cur_ref().trap.on_is_none() { return value; }
+                // Only a callback needs the poll in addressable storage for the cold driver.
+                vm.drive_native_tail(value, &mut { poll })
+            };
+            // Match the raw tags once. Keep every receiver outside this immediate set rooted.
+            const SHIFT: u32 = ScriptValue::TYPE_MASK.trailing_zeros();
+            const NUMBER_MAX: u64 = ScriptValue::TYPE_NUMBER_MAX >> SHIFT;
+            const BOOL: u64 = ScriptValue::TYPE_BOOL >> SHIFT;
+            const NIL_TAG: u64 = ScriptValue::TYPE_NIL >> SHIFT;
+            const COLOR: u64 = ScriptValue::TYPE_COLOR >> SHIFT;
+            if matches!(receiver.raw() >> SHIFT, 0..=NUMBER_MAX | BOOL | NIL_TAG | COLOR) {
+                first_poll(vm)
+            } else {
+                vm.with_native_roots(&[receiver], first_poll)
+            }
+        })
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn drive_native_tail(&mut self, mut value: ScriptValue, poll: &mut dyn FnMut(&mut Self) -> ScriptValue) -> ScriptValue {
+        let caller_ip = self.thread().trap.ip;
+        let caller_paused = self.thread().is_paused;
+        while let Some(ScriptTrapOn::CallBack { scope, ip }) = self.thread().trap.get_on() {
+            self.thread().trap.take_on();
+            self.bx.threads.cur().is_paused = false;
+            let depth = self.thread().native_conts.len();
+            if !self.enter_callback(scope, ip, None, OpcodeArgs::NONE) {
+                // With no new frame to unwind, the enclosing interpreter handles its limit.
+                if self.bx.run_depth != 0 { return NIL; }
+                return self.handle_execution_limit_failure().expect("rejected callback frame");
+            }
+            value = self.run_core_inner(caller_ip);
+            let thread = self.bx.threads.cur();
+            thread.trap.ip = caller_ip;
+            thread.is_paused = caller_paused;
+            if !thread.native_conts.get(depth - 1).is_some_and(|c| c.ret.is_some()) {
+                // A hard bail crossed the callback. Hand it on to an enclosing interpreter.
+                if self.bx.run_depth != 0 { self.thread().trap.set_on(Some(ScriptTrapOn::Bail(value))); }
+                return value;
+            }
+            value = poll(self);
+        }
+        value
+    }
+
+    pub(crate) fn enter_callback(&mut self, scope: ScriptObject, ip: ScriptIp, return_ip: Option<ScriptIp>, args: OpcodeArgs) -> bool {
+        let thread = self.bx.threads.cur();
+        let frame = CallFrame {
+            bases: thread.new_bases(),
+            args,
+            return_ip,
+            prev_slot_base: thread.slot_base,
+            body_root: false,
+            native_cont: true,
+        };
+        if !thread.push_call_frame(frame) {
+            thread.native_conts.pop();
+            return false;
+        }
+        // A refused push raises the growth signal: the run fails before its first instruction.
+        thread.push_scope(scope);
+        thread.trap.ip = ip;
+        self.drain_stale_errors();
+        true
+    }
+
+    #[relax_api(run)]
+    pub(crate) fn request_call_back(&mut self, f: ScriptValue, args: &[ScriptValue], keep: &[ScriptValue; 4], out: &mut ScriptValue) -> bool {
+        let scope = match self.callback_scope(f, args) {
+            Ok(scope) => scope,
+            Err(error) => { *out = error; return true; }
+        };
+        if let Some(error) = self.call_admission_error() {
+            *out = error;
+            return true;
+        }
+        if let Some(ScriptFnPtr::Script(ip)) = self.bx.heap.parent_as_fn(scope) {
+            for &v in keep { self.bx.heap.escape_value(v); }
+            let thread = self.bx.threads.cur();
+            if thread.native_conts.len() == thread.native_conts.capacity()
+                && thread.native_conts.try_reserve(1).is_err()
+            {
+                // The native gets NIL; the run ends with the refusal after it returns.
+                thread.refuse_growth(crate::thread::GROWING_THE_CALL_STACK);
+                *out = NIL;
+                return true;
+            }
+            let records = &mut thread.native_conts;
+            let len = records.len();
+            let slot = records.spare_capacity_mut()[0].as_mut_ptr();
+            // Initialise the two fields in their final slot. Capacity is reserved and
+            // both writes finish before the new record is visible to the collector.
+            unsafe {
+                core::ptr::addr_of_mut!((*slot).keep).write(*keep);
+                core::ptr::addr_of_mut!((*slot).ret).write(None);
+                records.set_len(len + 1);
+            }
+            thread.trap.set_on(Some(ScriptTrapOn::CallBack { scope, ip }));
+            false
+        } else {
+            *out = self.with_native_roots(keep, |vm| vm.host_entry(|vm| vm.call_with_scope(scope, NIL)));
+            true
+        }
+    }
+
+    #[relax_api(run)]
+    pub(crate) fn take_callback_result(&mut self, keep: &mut [ScriptValue; 4], out: &mut ScriptValue) -> bool {
+        let thread = self.bx.threads.cur();
+        let Some(record) = thread.native_conts.last() else { return false; };
+        let Some(ret) = record.ret else { return false; };
+        *keep = record.keep;
+        *out = ret;
+        thread.native_conts.pop();
+        true
+    }
+
+    // A nested call leaves its refusal for the dispatching instruction. A host call
+    // or pre-run eval has no such poll, so deliver the refusal here.
+    #[inline]
+    fn pending_allocation_bail_value(&mut self) -> Option<ScriptValue> {
+        if !self.bx.heap.allocation_error_pending { return None; }
+        self.pending_allocation_bail_value_at(ScriptIp::UNKNOWN)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn pending_allocation_bail_value_at(&mut self, memory_ip: ScriptIp) -> Option<ScriptValue> {
+        if self.bx.run_depth > 0 {
+            if self.bx.has_entry_policy() {
+                self.bx.poison_limit(self.bx.heap_limit_reason());
+                return self.bx.poisoned().map(Poison::as_script_error);
+            }
+            return Some(NIL);
+        }
+        let error = self.bx.heap.take_allocation_error()?;
+        self.bx.poison_limit(self.bx.heap_limit_reason());
+        self.bx.threads.cur().trap.err_clear();
+        let value = match error {
+            AllocationError::Memory => {
+                let value = self.bx.heap.memory_error_value(memory_ip);
+                if !self.bx.heap.in_vm_entry() { self.bx.heap.finish_memory_refusal(); }
+                value
+            }
+            AllocationError::Limit(message) => {
+                let value = script_err_limit!(self.bx.threads.cur_ref().trap, "{}", message);
+                self.drain_errors();
+                value
+            }
+        };
+        Some(self.bx.poisoned().map_or(value, Poison::as_script_error))
+    }
+
+    #[inline]
+    fn bail_after_native(&mut self) -> Option<ScriptValue> {
+        let bail = self.pending_allocation_bail_value()?;
+        let thread = self.bx.threads.cur();
+        thread.is_paused = false;
+        if matches!(thread.trap.get_on(), Some(ScriptTrapOn::Pause | ScriptTrapOn::CallBack { .. })) {
+            thread.trap.take_on();
+        }
+        Some(bail)
+    }
+
+    // Constructing the scope can exhaust the heap before the next interpreter instruction.
+    fn call_admission_error(&mut self) -> Option<ScriptValue> {
+        if !self.bx.has_entry_policy() { return None; }
+        if let Some(limit) = self.bx.pending_policy_limit() { self.bx.poison_limit(limit); }
+        self.bx.poisoned().map(Poison::as_script_error)
+    }
+
+    fn call_with_scope(&mut self, scope: ScriptObject, me: ScriptValue) -> ScriptValue {
+        if let Some(bail) = self.pending_allocation_bail_value() { return bail; }
+        if let Some(error) = self.call_admission_error() { return error; }
         if let Some(fnptr) = self.bx.heap.parent_as_fn(scope) {
             match fnptr {
                 ScriptFnPtr::Native(ni) => {
@@ -2064,8 +2318,9 @@ impl<'a> ScriptVm<'a> {
                     // Pause thread before native call so re-entrant calls get a different thread
                     self.bx.threads.cur().is_paused = true;
                     // SAFETY: The function pointer is valid as long as native functions aren't removed during execution
-                    let result = unsafe { func.call(self, scope) };
+                    let result = self.drive_native(scope.into(), |vm| unsafe { func.call(vm, scope) });
                     self.sample_budget_now();
+                    if let Some(bail) = self.bail_after_native() { return bail; }
                     // Only unpause if native didn't explicitly pause (via pause() which sets trap.on to Pause)
                     if !matches!(
                         self.bx.threads.cur().trap.get_on(),
@@ -2088,19 +2343,20 @@ impl<'a> ScriptVm<'a> {
                         return_ip: None,
                         prev_slot_base: self.bx.threads.cur_ref().slot_base,
                         body_root: false,
+                        native_cont: false,
                     };
                     if !self.bx.threads.cur().push_call_frame(call) {
                         return self
                             .handle_execution_limit_failure()
                             .expect("a rejected call frame raises a limit failure");
                     }
-                    self.bx.threads.cur().scopes.push(scope);
+                    self.bx.threads.cur().push_scope(scope);
                     if let Some(me) = self.script_me_from_value(me) {
-                        self.bx.threads.cur().mes.push(me);
+                        self.bx.threads.cur().push_me(me);
                     }
-                    self.bx.threads.cur().trap.ip = sip;
+                    let caller_ip = std::mem::replace(&mut self.bx.threads.cur().trap.ip, sip);
                     self.drain_stale_errors();
-                    return self.run_core_inner();
+                    return self.run_core_inner(caller_ip);
                 }
             }
         } else {
@@ -2176,6 +2432,7 @@ impl<'a> ScriptVm<'a> {
         self.bx.apply_policy_limits();
         if let Some(limit) = self.bx.pending_policy_limit() {
             if self.bx.policy_thread.is_none() { self.bx.policy.last_entry = EntryUsage::default(); }
+            if let Some(bail) = self.pending_allocation_bail_value() { return Some(bail); }
             self.bx.poison_limit(limit);
             return Some(self.bx.poisoned().unwrap().as_script_error());
         }
@@ -2186,7 +2443,7 @@ impl<'a> ScriptVm<'a> {
         let outer = self.bx.policy_thread;
         // Re-entry on the same thread spends the active allowance. Another selected
         // thread inherits the remaining fuel and charges it back on return.
-        let outer_fuel = outer.and_then(|id| self.bx.threads.get(id)?.instruction_limit_remaining);
+        let outer_fuel = outer.and_then(|id| self.bx.threads.get(id)?.real_instruction_remaining());
         let policy = &self.bx.policy;
         let fuel = policy.fuel.unwrap_or(u64::MAX).min(outer_fuel.unwrap_or(u64::MAX));
         let allocation = policy.allocation_bytes.unwrap_or(usize::MAX);
@@ -2194,7 +2451,7 @@ impl<'a> ScriptVm<'a> {
         let stack = policy.stack_values.unwrap_or(usize::MAX);
         let own_budget = outer.is_none() || self.bx.heap.allocation_budget.is_none();
         let prior_budget = own_budget.then(|| self.bx.heap.begin_allocation_budget(allocation));
-        let fuel_scope = self.bx.enter_instruction_limit(fuel);
+        let fuel_scope = self.bx.enter_instruction_limit(fuel, true);
         let selected = self.bx.threads.cur();
         let old_frames = selected.call_frame_limit;
         let old_stack = selected.stack_limit;
@@ -2213,13 +2470,16 @@ impl<'a> ScriptVm<'a> {
         let Some(frame) = self.bx.policy.entries.pop() else { return value.unwrap_or(NIL) };
         let EntryFrame { errors_before, total_before, thread, outer, prior_budget, fuel_scope, old_frames, old_stack } = frame;
         if let Some(limit) = self.bx.pending_policy_limit() { self.bx.poison_limit(limit); }
-        let used = self.bx.leave_instruction_limit(fuel_scope.0, fuel_scope.1);
+        let used = self.bx.leave_instruction_limit(fuel_scope.0, fuel_scope.1, true);
         let selected = self.bx.threads.cur();
         selected.call_frame_limit = old_frames;
         selected.stack_limit = old_stack;
         self.bx.policy_thread = outer;
         if let Some(id) = outer.filter(|id| *id != thread) {
-            if let Some(remaining) = self.bx.threads.get_mut(id).and_then(|t| t.instruction_limit_remaining.as_mut()) {
+            if let Some(remaining) = self.bx.threads.get_mut(id)
+                .filter(|t| t.instruction_limit_depth != 0)
+                .and_then(|t| t.instruction_limit_remaining.as_mut())
+            {
                 *remaining = remaining.saturating_sub(used);
             }
         }
@@ -2251,7 +2511,22 @@ impl<'a> ScriptVm<'a> {
         result
     }
 
+    #[inline]
+    fn with_vm_entry<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        struct VmEntry<'a, 'host>(&'a mut ScriptVm<'host>);
+        impl Drop for VmEntry<'_, '_> {
+            fn drop(&mut self) { self.0.bx.heap.leave_vm_entry(); }
+        }
+        self.bx.heap.enter_vm_entry();
+        f(VmEntry(self).0)
+    }
+
     fn vm_call_inner(&mut self, req: &mut ScriptCallReq) -> ScriptValue {
+        self.with_vm_entry(|vm| vm.dispatch_call(req))
+    }
+
+    fn dispatch_call(&mut self, req: &mut ScriptCallReq) -> ScriptValue {
+        if req.mode != CALL_RESUME { self.begin_nested_run_report(); }
         crate::inspect_query::safe_point(&self.bx);
         match req.mode {
             CALL_ARGS => self.call_with_me_impl(req.fnobj, req.args, req.me),
@@ -2275,14 +2550,16 @@ impl<'a> ScriptVm<'a> {
                 // A run that yielded, or one a native paused under an entry that owes its end.
                 let yielded = std::mem::take(&mut thread.yielded);
                 let finish_entries = yielded || !thread.completions.is_empty();
-                let scope = carried.map(|limit| self.bx.enter_instruction_limit(limit));
+                let scope = carried.map(|(remaining, real)| {
+                    (self.bx.enter_instruction_limit(remaining, real), real)
+                });
                 let value = if finish_entries {
                     self.resume_yielded()
                 } else {
-                    self.run_core_inner()
+                    self.run_core_inner(self.thread().trap.ip)
                 };
-                if let Some((previous, applied)) = scope {
-                    self.bx.leave_instruction_limit(previous, applied);
+                if let Some(((previous, applied), real)) = scope {
+                    self.bx.leave_instruction_limit(previous, applied, real);
                 }
                 value
             }
@@ -2296,22 +2573,23 @@ impl<'a> ScriptVm<'a> {
         args: &[ScriptValue],
         me: ScriptValue,
     ) -> ScriptValue {
-        let scope = self.bx.heap.new_with_proto(fnobj);
+        match self.callback_scope(fnobj, args) {
+            Ok(scope) => self.call_with_scope(scope, me),
+            Err(error) => error,
+        }
+    }
 
+    fn callback_scope(&mut self, f: ScriptValue, args: &[ScriptValue]) -> Result<ScriptObject, ScriptValue> {
+        if f.is_err() { return Err(f); }
+        let scope = self.bx.heap.new_with_proto(f);
+        if let Some(bail) = self.pending_allocation_bail_value() { return Err(bail); }
         self.bx.heap.clear_object_deep(scope);
-        if fnobj.is_err() {
-            return fnobj;
-        }
-
-        let trap = self.bx.threads.cur().trap.pass();
-        let err = self.bx.heap.push_all_fn_args(scope, args, trap);
-        if err.is_err() {
-            return err;
-        }
-
+        let err = self.bx.heap.push_all_fn_args(scope, args, self.bx.threads.cur().trap.pass());
+        if let Some(bail) = self.pending_allocation_bail_value() { return Err(bail); }
+        if err.is_err() { return Err(err); }
         self.bx.heap.set_object_deep(scope);
         self.bx.heap.set_object_storage_auto(scope);
-        self.call_with_scope(scope, me)
+        Ok(scope)
     }
 
     pub fn call_with_args_object(
@@ -2348,14 +2626,15 @@ impl<'a> ScriptVm<'a> {
         }
 
         let scope = self.bx.heap.new_with_proto(fnobj);
+        if let Some(bail) = self.pending_allocation_bail_value() { return bail; }
         self.bx.heap.set_object_storage_vec2(scope);
         self.bx.heap.clear_object_deep(scope);
 
-        let trap = self.bx.threads.cur().trap.pass();
         // Map positional (unnamed) vec args to named function parameters,
         // and merge named map args directly.
         let vec_len = self.bx.heap.vec_len(args_obj);
         for i in 0..vec_len {
+            let trap = self.bx.threads.cur().trap.pass();
             let kv = self.bx.heap.vec_key_value(args_obj, i, trap);
             if kv.key.is_nil() {
                 // Unnamed positional arg — map to named parameter via unnamed_fn_arg
@@ -2364,17 +2643,31 @@ impl<'a> ScriptVm<'a> {
                 // Named arg — insert directly
                 self.bx.heap.vec_push(scope, kv.key, kv.value, trap);
             }
+            if let Some(bail) = self.pending_allocation_bail_value() { return bail; }
         }
-        // Copy map entries (like `self`, `ui`) from args_obj to scope
-        let map_entries: Vec<_> = self
-            .bx
-            .heap
-            .map_ref(args_obj)
-            .iter()
-            .map(|(k, v)| (*k, v.value))
-            .collect();
-        for (k, v) in map_entries {
+        // Snapshot receiver bindings before mutating the heap. Small maps fit on the stack.
+        let map_len = self.bx.heap.map_len(args_obj);
+        let mut inline;
+        let mut overflow;
+        let entries = if map_len <= 4 {
+            inline = [(NIL, NIL); 4];
+            for (slot, (k, v)) in inline.iter_mut().zip(self.bx.heap.map_ref(args_obj)) {
+                *slot = (*k, v.value);
+            }
+            &inline[..map_len]
+        } else {
+            overflow = Vec::new();
+            if !self.bx.heap.reserve_for("out of memory while adding an object property", NoTrap,
+                |_| overflow.try_reserve_exact(map_len))
+            {
+                return self.pending_allocation_bail_value().unwrap_or(NIL);
+            }
+            overflow.extend(self.bx.heap.map_ref(args_obj).iter().map(|(k, v)| (*k, v.value)));
+            overflow.as_slice()
+        };
+        for &(k, v) in entries {
             self.bx.heap.force_value_in_map(scope, k, v);
+            if let Some(bail) = self.pending_allocation_bail_value() { return bail; }
         }
 
         self.bx.heap.set_object_deep(scope);
@@ -2440,7 +2733,7 @@ impl<'a> ScriptVm<'a> {
 
     #[inline(never)]
     #[cold]
-    fn handle_errors(&mut self) {
+    pub(crate) fn handle_errors(&mut self) {
         if self.bx.threads.cur_ref().call_stack_has_try() {
             // Discard younger script calls until the active frame owns a try
             // frame, restoring that frame's instruction body. Hard VM bails
@@ -2507,11 +2800,8 @@ impl<'a> ScriptVm<'a> {
                 .map(|e| e.value);
             self.drain_errors();
             if let Some(error) = error {
-                self.bx
-                    .threads
-                    .cur()
-                    .trap
-                    .set_on(Some(ScriptTrapOn::Bail(error)));
+                let trap = if self.bx.is_poisoned() { ScriptTrapOn::Bail(error) } else { ScriptTrapOn::Uncaught(error) };
+                self.bx.threads.cur().trap.set_on(Some(trap));
             }
         }
     }
@@ -2520,9 +2810,19 @@ impl<'a> ScriptVm<'a> {
     /// one long native call ends a sliced run's slice.
     #[inline(always)]
     pub(crate) fn sample_budget_now(&mut self) {
+        self.propagate_native_failure();
+        self.force_budget_sample();
+    }
+
+    #[inline(always)]
+    pub(crate) fn propagate_native_failure(&mut self) {
         if let Some(error) = self.bx.poisoned().map(Poison::as_script_error).or(self.bx.reentry_failure) {
             self.bx.threads.cur().trap.set_on(Some(ScriptTrapOn::Bail(error)));
         }
+    }
+
+    #[inline(always)]
+    pub(crate) fn force_budget_sample(&mut self) {
         if let Some(budget) = self.bx.run_budget.as_mut() {
             budget.instructions_until_sample = 1;
         }
@@ -2536,6 +2836,13 @@ impl<'a> ScriptVm<'a> {
         }
         budget.instructions_until_sample = budget.sample_interval_instructions;
 
+        if let Some((counter, since)) = self.bx.low_memory {
+            // SAFETY: watch_low_memory_at requires live atomic storage until the watch ends.
+            if unsafe { (*counter).load(Ordering::Relaxed) } != since {
+                self.bx.heap.refuse_memory(RAN_LOW_ON_MEMORY, self.bx.threads.cur_ref().trap.pass());
+                return Some(ScriptRunBudgetHit::Memory);
+            }
+        }
         let now = crate::clock::monotonic_now();
         if now >= budget.hard_deadline {
             return Some(ScriptRunBudgetHit::Hard);
@@ -2574,9 +2881,53 @@ impl<'a> ScriptVm<'a> {
         }
     }
 
+    /// A pending heap refusal (physical memory, or a logical allocation limit) as the
+    /// uncatchable Bail that ends this run; None when nothing is pending.
+    #[inline(always)]
+    fn bail_allocation_error(&mut self, ip: ScriptIp) -> Option<ScriptValue> {
+        let error = self.bx.heap.take_allocation_error()?;
+        let prev_ip = self.bx.threads.cur_ref().trap.ip;
+        if ip != ScriptIp::UNKNOWN {
+            self.bx.threads.cur().trap.ip = ip;
+        }
+        self.bx.poison_limit(self.bx.heap_limit_reason());
+        // Errors raised by the remainder of the refusing opcode are secondary.
+        self.bx.threads.cur().trap.err_clear();
+        let err = match error {
+            AllocationError::Memory => {
+                self.bx.threads.cur().trap.ip = prev_ip;
+                self.bx.heap.memory_error_value(ip)
+            }
+            AllocationError::Limit(message) => {
+                let err = script_err_limit!(self.bx.threads.cur_ref().trap, "{}", message);
+                self.bx.threads.cur().trap.ip = prev_ip;
+                self.drain_errors();
+                err
+            }
+        };
+        self.bx
+            .threads
+            .cur()
+            .trap
+            .set_on(Some(ScriptTrapOn::Bail(err)));
+        self.handle_trap_on()
+    }
+
     #[inline(never)]
     #[cold]
     fn handle_execution_limit_failure(&mut self) -> Option<ScriptValue> {
+        if let Some(reason) = self.bx.threads.cur().take_growth_refusal() {
+            // One failure per run: a refused grow wins over a limit raised beside it.
+            self.bx.threads.cur().take_stack_limit_exceeded();
+            self.bx.threads.cur().take_call_frame_limit_exceeded();
+            self.bx.heap.refuse_memory(reason, NoTrap);
+            let ip = self.bx.threads.cur_ref().trap.ip;
+            if let Some(value) = self.bail_allocation_error(ip) {
+                return Some(value);
+            }
+            // No interpreter runs: the host call that grew the thread has the refusal.
+            return Some(self.bx.heap.memory_error_value(ip));
+        }
         let stack_limit_exceeded = self.bx.threads.cur().take_stack_limit_exceeded();
         let call_frame_limit_exceeded = self.bx.threads.cur().take_call_frame_limit_exceeded();
         if stack_limit_exceeded {
@@ -2592,24 +2943,33 @@ impl<'a> ScriptVm<'a> {
         if self.bx.threads.cur().trap.on_is_none() {
             return None;
         }
-        Some(match self.bx.threads.cur().trap.take_on().unwrap() {
+        let trap = self.bx.threads.cur().trap.take_on().unwrap();
+        Some(match trap {
+            ScriptTrapOn::CallBack { .. } => unreachable!("native dispatch handles callback requests"),
             ScriptTrapOn::Pause | ScriptTrapOn::TimeBudgetYield => NIL,
             ScriptTrapOn::Return(value) => {
-                if let Some(rem) = self.bx.threads.cur_ref().instruction_limit_remaining {
+                if let Some(rem) = self.bx.threads.cur_ref().real_instruction_remaining() {
                     self.bx.last_limit_exit_remaining = rem;
                 }
                 value
             }
-            ScriptTrapOn::Bail(value) => {
-                // Stack corruption or hard failure: unwind calls to find our root frame
-                // and truncate all stacks back to clean state.
+            ScriptTrapOn::Bail(value) | ScriptTrapOn::Uncaught(value) => {
+                // A callback-local script error returns to its native. Stop, poison
+                // and hard limits cross marked frames and end the physical run.
                 loop {
                     if let Some(call) = self.bx.threads.cur().calls.pop() {
+                        if call.native_cont && matches!(trap, ScriptTrapOn::Uncaught(_)) {
+                            self.return_to_native(call, value);
+                            return None;
+                        }
                         self.bx.threads.cur().slot_base = call.prev_slot_base;
                         self.bx
                             .threads
                             .cur()
                             .truncate_bases(call.bases, &mut self.bx.heap);
+                        if call.native_cont {
+                            self.thread_mut().native_conts.pop();
+                        }
                         if call.return_ip.is_none() {
                             break;
                         }
@@ -2617,7 +2977,7 @@ impl<'a> ScriptVm<'a> {
                         break;
                     }
                 }
-                if let Some(rem) = self.bx.threads.cur_ref().instruction_limit_remaining {
+                if let Some(rem) = self.bx.threads.cur_ref().real_instruction_remaining() {
                     self.bx.last_limit_exit_remaining = rem;
                 }
                 value
@@ -2625,11 +2985,46 @@ impl<'a> ScriptVm<'a> {
         })
     }
 
+    #[relax_api(run)]
     pub fn run_core(&mut self) -> ScriptValue {
-        self.host_entry(Self::run_core_inner)
+        self.begin_nested_run_report();
+        self.host_entry(|vm| vm.run_core_inner(vm.thread().trap.ip))
     }
 
-    fn run_core_inner(&mut self) -> ScriptValue {
+    // A new outer run, including a host calling a native directly. Resuming an
+    // existing run (or a native re-entering script) keeps that run's first report.
+    fn begin_nested_run_report(&mut self) {
+        if self.bx.run_depth == 0 && self.bx.native_invocation.is_none() {
+            self.bx.outer_run_thread = self.bx.threads.current();
+            if !self.bx.reported_nested_runs.is_empty() {
+                self.bx.reported_nested_runs.remove(&self.bx.outer_run_thread);
+            }
+        }
+    }
+
+    #[cold]
+    fn note_nested_script_run(&mut self, caller_ip: ScriptIp) {
+        self.bx.nested_script_runs += 1;
+        let outer = self.bx.outer_run_thread;
+        if !self.bx.reported_nested_runs.insert(outer) { return; }
+        if self.bx.run_depth == 0 {
+            crate::makepad_error_log::log!("sliced script run entered under a waiting native (host call)");
+        } else {
+            // A native can select a different script thread before it calls back.
+            let ip = if outer == self.bx.threads.current() { caller_ip } else { self.bx.threads.get(outer).map_or(caller_ip, |t| t.trap.ip) };
+            if let Some(loc) = self.bx.code.ip_to_loc_plain(ip) {
+                // A standalone text at line zero has zero-based VM locations.
+                let origin = self.bx.code.bodies.borrow().get(ip.body as usize)
+                    .and_then(|body| body.source.written()).map_or(0, |m| m.line);
+                let line = loc.line.saturating_add(u32::from(origin == 0));
+                crate::makepad_error_log::log!("sliced script run entered under a waiting native at {}:{}", loc.file, line);
+            } else {
+                crate::makepad_error_log::log!("sliced script run entered under a waiting native at {:?}", ip);
+            }
+        }
+    }
+
+    fn run_core_inner(&mut self, caller_ip: ScriptIp) -> ScriptValue {
         if let Some(error) = self.bx.poisoned().map(Poison::as_script_error).or(self.bx.reentry_failure) {
             self.bx.threads.cur().trap.set_on(Some(ScriptTrapOn::Bail(error)));
             return self.handle_trap_on().unwrap();
@@ -2637,6 +3032,11 @@ impl<'a> ScriptVm<'a> {
         let marker = 0u8;
         let here = std::hint::black_box(&marker) as *const u8 as usize;
         if self.bx.run_depth == 0 {
+            // A resumed run may be on another script thread. A direct host native
+            // keeps its original thread even when it selects a callback thread.
+            if self.bx.native_invocation.is_none() {
+                self.bx.outer_run_thread = self.bx.threads.current();
+            }
             self.bx.run_stack_origin = here;
             self.bx.run_stack_budget = native_stack_budget(here);
         }
@@ -2653,11 +3053,44 @@ impl<'a> ScriptVm<'a> {
         impl Drop for Entry<'_, '_> {
             fn drop(&mut self) {
                 self.0.bx.run_depth -= 1;
-                if self.0.bx.run_depth == 0 { self.0.bx.reentry_failure = None; }
+                self.0.bx.heap.leave_vm_entry();
+                if self.0.bx.run_depth == 0 {
+                    self.0.bx.reentry_failure = None;
+                }
             }
         }
+        if self.bx.run_budget.is_some() && self.bx.native_invocation.is_some() {
+            self.note_nested_script_run(caller_ip);
+        }
+        self.bx.heap.enter_vm_entry();
         self.bx.run_depth += 1;
         Entry(self).0.run_core_loop()
+    }
+
+    #[cold]
+    fn handle_instruction_counter_hit(&mut self) -> Option<ScriptValue> {
+        let value = if self.bx.interrupt.is_stop() {
+            // The host ended the run. Bail silently, including through script try frames.
+            NIL
+        } else {
+            let interrupted = self.bx.interrupt.is_set();
+            if !interrupted && self.bx.threads.cur_ref().instruction_limit_depth == 0 {
+                // An exhausted sample counter wraps. A sample cleared concurrently also resumes.
+                let counter = &mut self.bx.threads.cur().instruction_limit_remaining;
+                if *counter == Some(0) { *counter = Some(u64::MAX); }
+                return None;
+            }
+            self.bx.poison_limit(if interrupted { Limit::Interrupted } else { Limit::Fuel });
+            let err = if interrupted {
+                script_err_limit!(self.bx.threads.cur_ref().trap, "script interrupted")
+            } else {
+                script_err_limit!(self.bx.threads.cur_ref().trap, "script instruction limit exceeded")
+            };
+            self.drain_errors();
+            err
+        };
+        self.bx.threads.cur().trap.set_on(Some(ScriptTrapOn::Bail(value)));
+        self.handle_trap_on()
     }
 
     fn run_core_loop(&mut self) -> ScriptValue {
@@ -2669,6 +3102,10 @@ impl<'a> ScriptVm<'a> {
         let mut opcodes_ptr: *const ScriptValue = std::ptr::null();
         let mut opcodes_len: usize = 0;
 
+        if matches!(self.thread().trap.get_on(), Some(ScriptTrapOn::Bail(_))) {
+            return self.handle_trap_on().unwrap();
+        }
+
         // A limit signal raised before this run started (a rejected frame, a
         // stale flag) fails it before the first instruction.
         if self.bx.threads.cur_ref().has_execution_limit_exceeded() {
@@ -2677,30 +3114,20 @@ impl<'a> ScriptVm<'a> {
             }
         }
 
+        let mut dispatched_ip = ScriptIp::UNKNOWN;
         loop {
             // Heap growth paths cannot own the interpreter trap (many are
             // shared with parsers/native bindings), so they record one hard
             // refusal on the heap. Turn it into the same uncatchable Bail as
             // the instruction ceiling before executing another opcode.
-            if let Some(message) = self.bx.heap.take_allocation_error() {
-                self.bx.poison_limit(self.bx.heap_limit_reason());
-                let err = script_err_limit!(
-                    self.bx.threads.cur_ref().trap,
-                    "{}",
-                    message
-                );
-                self.drain_errors();
-                self.bx
-                    .threads
-                    .cur()
-                    .trap
-                    .set_on(Some(ScriptTrapOn::Bail(err)));
-                if let Some(value) = self.handle_trap_on() {
-                    return value;
-                }
+            if let Some(value) = self.bail_allocation_error(dispatched_ip) {
+                return value;
             }
-            // The interrupt is sampled here, every 1024 instructions of a limited run: one load.
-            let instruction_limit_exceeded = if let Some(remaining) =
+            // A heap-only operation (such as concat) need not receive a trap.
+            // Its opcode may already have advanced the thread's IP at the next poll.
+            dispatched_ip = self.bx.threads.cur_ref().trap.ip;
+            // Both sampling and limited runs read the interrupt word once per 1024 instructions.
+            let counter_hit = if let Some(remaining) =
                 self.bx.threads.cur().instruction_limit_remaining.as_mut()
             {
                 if *remaining == 0 {
@@ -2712,44 +3139,30 @@ impl<'a> ScriptVm<'a> {
             } else {
                 false
             };
-            if instruction_limit_exceeded && self.bx.interrupt.is_stop() {
-                // (the host's own end of the run: the same bail, and no error of the script's)
-                self.bx.threads.cur().trap.set_on(Some(ScriptTrapOn::Bail(NIL)));
-                if let Some(value) = self.handle_trap_on() {
-                    return value;
-                }
-            } else if instruction_limit_exceeded {
-                self.bx.poison_limit(if self.bx.interrupt.is_set() { Limit::Interrupted } else { Limit::Fuel });
-                let err = if self.bx.interrupt.is_set() {
-                    script_err_limit!(self.bx.threads.cur_ref().trap, "script interrupted")
-                } else {
-                    script_err_limit!(
-                        self.bx.threads.cur_ref().trap,
-                        "script instruction limit exceeded"
-                    )
-                };
-                // drain_errors routes to the captured-error sink, the log, or
-                // the void depending on host configuration.
-                self.drain_errors();
-                self.bx
-                    .threads
-                    .cur()
-                    .trap
-                    .set_on(Some(ScriptTrapOn::Bail(err)));
-                if let Some(value) = self.handle_trap_on() {
+            if counter_hit {
+                if let Some(value) = self.handle_instruction_counter_hit() {
                     return value;
                 }
             }
 
             if let Some(hit) = self.check_run_budget() {
                 match hit {
-                    // Only the outermost run yields: a deeper one is a script call a native made
-                    // (on this thread, `array.retain(fn)`), and the native needs its real value.
+                    ScriptRunBudgetHit::Memory => {
+                        return self.bail_allocation_error(dispatched_ip).expect("sample recorded a memory refusal");
+                    }
+                    // A synchronous native needs the actual value, even when the host called
+                    // it directly and this callback is the outermost interpreter.
                     // The outer run samples again as soon as the native returns.
-                    ScriptRunBudgetHit::Soft if self.bx.run_depth != 1 => {}
+                    ScriptRunBudgetHit::Soft if self.bx.run_depth != 1 || self.bx.native_invocation.is_some() => {}
                     ScriptRunBudgetHit::Soft => {
                         let thread = self.bx.threads.cur();
-                        thread.paused_instruction_limit = thread.instruction_limit_remaining;
+                        // Resume retries this IP. Charge its opcode only on the poll that dispatches it.
+                        if thread.instruction_limit_depth != 0 {
+                            if let Some(remaining) = thread.instruction_limit_remaining.as_mut() {
+                                *remaining += 1;
+                            }
+                        }
+                        thread.save_instruction_counter();
                         thread.is_paused = true;
                         thread.yielded = true;
                         thread.trap.set_on(Some(ScriptTrapOn::TimeBudgetYield));
@@ -2822,14 +3235,24 @@ impl<'a> ScriptVm<'a> {
 
             if let Some((opcode, args)) = opcode.as_opcode() {
                 self.opcode(opcode, args);
-                if self.bx.threads.cur_ref().has_execution_limit_exceeded() {
-                    if let Some(value) = self.handle_execution_limit_failure() {
-                        return value;
+                // Returning an uncaught callback error polls its native. Process a pause,
+                // fresh error or frame refusal from that poll before fetching another opcode.
+                loop {
+                    if self.bx.threads.cur_ref().has_execution_limit_exceeded() {
+                        if let Some(value) = self.handle_execution_limit_failure() {
+                            return value;
+                        }
                     }
-                }
-                // single-load poll for both interrupt sources (errors + traps)
-                let pending = self.bx.threads.cur().trap.pending();
-                if pending != 0 {
+                    // single-load poll for both interrupt sources (errors + traps)
+                    let pending = self.bx.threads.cur().trap.pending();
+                    if pending == 0 { break; }
+                    // The first policy poison wins. Otherwise process a refusal before
+                    // a secondary error from this opcode can unwind a try frame.
+                    if self.bx.heap.allocation_error_pending && self.bx.poisoned().is_none() {
+                        if let Some(value) = self.bail_allocation_error(dispatched_ip) {
+                            return value;
+                        }
+                    }
                     if let Some(error) = self.bx.poisoned().map(Poison::as_script_error).or(self.bx.reentry_failure) {
                         self.bx.threads.cur().trap.set_on(Some(ScriptTrapOn::Bail(error)));
                         return self.handle_trap_on().unwrap();
@@ -2859,11 +3282,17 @@ impl<'a> ScriptVm<'a> {
         }
     }
 
+    #[relax_api(run)]
     pub fn run_root(&mut self, body_id: u16) -> ScriptValue {
         self.host_entry(|vm| vm.run_root_inner(body_id))
     }
 
     fn run_root_inner(&mut self, body_id: u16) -> ScriptValue {
+        self.with_vm_entry(|vm| vm.run_root_body(body_id))
+    }
+
+    fn run_root_body(&mut self, body_id: u16) -> ScriptValue {
+        self.begin_nested_run_report();
         // Extract values from bodies before modifying thread state
         let (scope, me) = {
             let bodies = self.bx.code.bodies.borrow();
@@ -2883,6 +3312,7 @@ impl<'a> ScriptVm<'a> {
 
         let root_slots = self.bx.threads.cur_ref().slots.len();
         let root_slot_base = self.bx.threads.cur_ref().slot_base;
+        let root_native_conts = self.bx.threads.cur_ref().native_conts.len();
         if !self.bx.threads.cur().push_call_frame(CallFrame {
             bases: StackBases {
                 tries: 0,
@@ -2893,26 +3323,27 @@ impl<'a> ScriptVm<'a> {
                 // unlike the other zeroed bases, never truncate slots below
                 // what an enclosing (paused/re-entrant) frame allocated
                 slots: root_slots,
+                native_conts: root_native_conts,
             },
             args: Default::default(),
             return_ip: None,
             prev_slot_base: root_slot_base,
             body_root: true,
+            native_cont: false,
         }) {
             return self
                 .handle_execution_limit_failure()
                 .expect("a rejected root frame raises a limit failure");
         }
 
-        self.bx.threads.cur().scopes.push(scope);
-        self.bx.threads.cur().mes.push(ScriptMe::Object(me));
+        self.bx.threads.cur().push_scope(scope);
+        self.bx.threads.cur().push_me(ScriptMe::Object(me));
 
-        self.bx.threads.cur().trap.ip.body = body_id;
-        self.bx.threads.cur().trap.ip.index = 0;
+        let caller_ip = std::mem::replace(&mut self.bx.threads.cur().trap.ip, ScriptIp { body: body_id, index: 0 });
 
         // the main interpreter loop
         self.drain_stale_errors();
-        let value = self.run_core_inner();
+        let value = self.run_core_inner(caller_ip);
         if self.bx.is_poisoned() { return value; }
         if self.bx.threads.cur_ref().run_unfinished() {
             self.bx.threads.cur().completions.push(RunCompletion::RootEnd { body_id });
@@ -2961,7 +3392,7 @@ impl<'a> ScriptVm<'a> {
         if let Some(budget) = self.bx.run_budget.as_mut() {
             budget.instructions_until_sample = budget.instructions_until_sample.max(2);
         }
-        let value = self.run_core_inner();
+        let value = self.run_core_inner(self.thread().trap.ip);
         if streaming {
             self.bx.silence_errors = false;
         }
@@ -2991,11 +3422,13 @@ impl<'a> ScriptVm<'a> {
     fn call_apply_transform_impl(&mut self, value: ScriptValue) -> Option<ScriptValue> {
         if let Some(obj) = value.as_object() {
             if let Some(ni) = self.bx.heap.objects[obj].tag.as_apply_transform() {
+                if let Some(bail) = self.pending_allocation_bail_value() { return Some(bail); }
                 let func = self.bx.code.native.borrow().functions[ni.index as usize].view();
                 // Pause thread before native call so re-entrant calls get a different thread
                 self.bx.threads.cur().is_paused = true;
-                let result = unsafe { func.call(self, obj) };
+                let result = self.drive_native(obj.into(), |vm| unsafe { func.call(vm, obj) });
                 self.sample_budget_now();
+                if let Some(bail) = self.bail_after_native() { return Some(bail); }
                 // Only unpause if native didn't explicitly pause
                 if !matches!(
                     self.bx.threads.cur().trap.get_on(),
@@ -3007,16 +3440,20 @@ impl<'a> ScriptVm<'a> {
             }
         } else if let Some(arr) = value.as_array() {
             if let Some(ni) = self.bx.heap.arrays[arr].tag.as_apply_transform() {
+                if let Some(bail) = self.pending_allocation_bail_value() { return Some(bail); }
                 // For arrays, we need to create a temporary args object
                 let args_obj = self.bx.heap.new_object();
+                if let Some(bail) = self.pending_allocation_bail_value() { return Some(bail); }
                 self.bx
                     .heap
                     .set_value_def(args_obj, id!(self).into(), value);
+                if let Some(bail) = self.pending_allocation_bail_value() { return Some(bail); }
                 let func = self.bx.code.native.borrow().functions[ni.index as usize].view();
                 // Pause thread before native call so re-entrant calls get a different thread
                 self.bx.threads.cur().is_paused = true;
-                let result = unsafe { func.call(self, args_obj) };
+                let result = self.drive_native(args_obj.into(), |vm| unsafe { func.call(vm, args_obj) });
                 self.sample_budget_now();
+                if let Some(bail) = self.bail_after_native() { return Some(bail); }
                 // Only unpause if native didn't explicitly pause
                 if !matches!(
                     self.bx.threads.cur().trap.get_on(),
@@ -3324,7 +3761,7 @@ impl<'a> ScriptVm<'a> {
         req.body
     }
 
-    fn add_script_mod_with(&mut self, new_mod: ScriptMod, transient: bool) -> u16 {
+    fn add_script_mod_with(&mut self, new_mod: ScriptMod, transient: bool, is_script_mod: bool) -> u16 {
         // Register this crate's manifest path for crate path resolution
         let crate_name = new_mod.module_path.split("::").next().unwrap_or("");
         if !crate_name.is_empty() {
@@ -3340,16 +3777,25 @@ impl<'a> ScriptVm<'a> {
             .heap
             .set_value_def(scope_obj, id!(mod).into(), self.bx.heap.modules.into());
         self.bx.apply_injected_globals_to_scope(scope_obj);
-        let me_obj = self.bx.heap.new_with_proto(id!(root_me).into());
+        let me_obj = if self.bx.heap.is_allocation_poison_object(scope_obj) || self.bx.heap.allocation_error_pending {
+            self.bx.heap.allocation_poison_object
+        } else {
+            self.bx.heap.new_with_proto(id!(root_me).into())
+        };
         // A transient body's scope and `me` are kept by the body only while
         // it is alive (see `ScriptHeap::mark_transient_bodies`), not as roots.
-        let (scope, me) = if transient {
-            self.bx.heap.set_reffed(scope_obj);
-            self.bx.heap.set_reffed(me_obj);
-            (ScriptObjectRef::unrooted(scope_obj), ScriptObjectRef::unrooted(me_obj))
-        } else {
-            (self.bx.heap.new_object_ref(scope_obj), self.bx.heap.new_object_ref(me_obj))
+        let mut body_ref = |obj| {
+            if self.bx.heap.is_allocation_poison_object(obj) {
+                ScriptObjectRef::unrooted(obj)
+            } else if transient {
+                self.bx.heap.set_reffed(obj);
+                ScriptObjectRef::unrooted(obj)
+            } else {
+                self.bx.heap.new_object_ref(obj)
+            }
         };
+        let scope = body_ref(scope_obj);
+        let me = body_ref(me_obj);
         let key = ScriptModKey::from_script_mod(&new_mod);
         let override_code = self
             .bx
@@ -3374,6 +3820,7 @@ impl<'a> ScriptVm<'a> {
             source_len: 0,
             content_hash: 0,
             transient,
+            is_script_mod,
             real_file: String::new(),
             shown: None,
             first_col: 0,
@@ -3398,6 +3845,7 @@ impl<'a> ScriptVm<'a> {
             body.scope = new_body.scope;
             body.me = new_body.me;
             body.transient = transient;
+            body.is_script_mod = is_script_mod;
             body.real_file = String::new();
             body.shown = None;
             body.first_col = 0;
@@ -3435,6 +3883,16 @@ impl<'a> ScriptVm<'a> {
     #[inline(always)]
     pub fn eval(&mut self, script_mod: ScriptMod) -> ScriptValue {
         self.eval_with_source_view(&script_mod.view(), ScriptObject::ZERO)
+    }
+
+    #[inline(always)]
+    pub fn eval_script_mod(&mut self, script_mod: ScriptMod) -> ScriptValue {
+        self.eval_script_mod_view(&script_mod.view())
+    }
+
+    #[inline(always)]
+    pub fn eval_script_mod_view(&mut self, script_mod: &ScriptModView) -> ScriptValue {
+        self.vm_eval(&mut ScriptEvalReq::new(EVAL_SCRIPT_MOD, *script_mod))
     }
 
     /// [`Self::eval`] for source made at runtime (a generated shader, a
@@ -3569,6 +4027,7 @@ impl<'a> ScriptVm<'a> {
             let mut tokens = d.tokens.clone();
             for (k, text) in &d.strings {
                 tokens[*k].token = ScriptToken::String(heap.new_string_from_str(text));
+                if heap.allocation_error_pending { break; }
             }
             ScriptTokenizer::adopted(&d.text, tokens)
         };
@@ -3585,6 +4044,7 @@ impl<'a> ScriptVm<'a> {
                 AdmittedSource::from_tokens(&d.text, &[], tokenizer(&mut self.bx.heap), None, site, limits, self.bx.keep_numbers)
             });
             match candidate {
+                _ if self.bx.heap.allocation_error_pending => return None,
                 Ok(parsed) => admitted = Some(parsed),
                 Err(record) => {
                     if self.bx.has_entry_policy() { self.bx.poison(Poison::Error(record.message.clone())); }
@@ -3594,7 +4054,8 @@ impl<'a> ScriptVm<'a> {
             }
         }
         let script_mod = ScriptMod { cargo_manifest_path: String::new(), module_path: String::new(), file: file.clone(), line: site.line, column: site.column, code: d.text.clone(), values: Vec::new() };
-        let body_id = self.add_script_mod_with(script_mod, false);
+        let body_id = self.add_script_mod_with(script_mod, false, false);
+        if self.bx.heap.allocation_error_pending { return None; }
         {
             let mut bodies = self.bx.code.bodies.borrow_mut();
             let body = &mut bodies[body_id as usize];
@@ -3603,6 +4064,7 @@ impl<'a> ScriptVm<'a> {
                 parsed.install(body);
             } else if body.source_len == 0 {
                 body.tokenizer = tokenizer(&mut self.bx.heap);
+                if self.bx.heap.allocation_error_pending { return None; }
                 body.parser = ScriptParser::keeping_numbers(self.bx.keep_numbers);
                 if self.bx.has_entry_policy() && !self.bx.allow_debug_output { body.parser.set_emit_errors(false); }
                 body.parser.parse(&body.tokenizer, &file, (ScriptBody::line0_of(site.line), site.column), &[]);
@@ -3611,8 +4073,10 @@ impl<'a> ScriptVm<'a> {
             }
         }
         let scope = self.bx.code.bodies.borrow()[body_id as usize].scope.obj;
-        self.bx.heap.objects[scope].proto = parent.into();
-        self.ref_reparented_scope(scope);
+        if !self.bx.heap.is_allocation_poison_object(scope) {
+            self.bx.heap.objects[scope].proto = parent.into();
+            self.ref_reparented_scope(scope);
+        }
         let v = self.eval_body(body_id, ScriptObject::ZERO);
         v.as_object().filter(|o| self.bx.heap.as_fn(*o).is_some())
     }
@@ -3657,6 +4121,10 @@ impl<'a> ScriptVm<'a> {
     }
 
     fn vm_eval_inner(&mut self, req: &mut ScriptEvalReq) -> ScriptValue {
+        self.with_vm_entry(|vm| vm.dispatch_eval(req))
+    }
+
+    fn dispatch_eval(&mut self, req: &mut ScriptEvalReq) -> ScriptValue {
         let limits = self.bx.admission;
         let module = req.module;
         let line = if req.mode == EVAL_MODULE { module.line.max(1) } else { module.line };
@@ -3666,6 +4134,10 @@ impl<'a> ScriptVm<'a> {
             // source. Reject an unaffordable input while every view is borrowed.
             let input = if req.mode == EVAL_APPEND && req.code.len() > module.code.len() { req.code } else { module.code };
             if let Err(record) = limits.for_text(input, site) {
+                if let Some(bail) = self.pending_allocation_bail_value() {
+                    req.body = u16::MAX;
+                    return bail;
+                }
                 return self.refuse_source(req, record);
             }
         }
@@ -3675,25 +4147,39 @@ impl<'a> ScriptVm<'a> {
         let module = ScriptModView { file: module_name.as_deref().unwrap_or(module.file), line, ..module };
         let admitted = if limits != AdmissionLimits::UNLIMITED && req.mode != EVAL_ADOPT {
             match self.admit_source(req, &module, site) {
+                _ if self.bx.heap.allocation_error_pending => {
+                    req.body = u16::MAX;
+                    return self.pending_allocation_bail_value().unwrap_or(NIL);
+                }
                 Ok(source) => Some(source),
                 Err(record) => return self.refuse_source(req, record),
             }
         } else { None };
         match req.mode {
-            EVAL_ADD | EVAL_SOURCE | EVAL_TRANSIENT | EVAL_IN_SCOPE | EVAL_MODULE => {
-                req.body = self.add_script_mod_with(module.to_owned(), matches!(req.mode, EVAL_TRANSIENT | EVAL_MODULE));
+            EVAL_ADD | EVAL_SOURCE | EVAL_SCRIPT_MOD | EVAL_TRANSIENT | EVAL_IN_SCOPE | EVAL_MODULE => {
+                req.body = self.add_script_mod_with(
+                    module.to_owned(),
+                    matches!(req.mode, EVAL_TRANSIENT | EVAL_MODULE),
+                    req.mode == EVAL_SCRIPT_MOD,
+                );
+                if let Some(bail) = self.bail_eval_allocation(req.body) { return bail; }
                 if let Some(parsed) = admitted {
                     parsed.install(&mut self.bx.code.bodies.borrow_mut()[req.body as usize]);
                 }
                 if req.mode == EVAL_ADD { return NIL; }
                 if req.mode == EVAL_MODULE {
                     self.bx.set_body_shown(req.body, req.module.file, 0);
-                    for from in req.uses { self.bx.body_use_all(req.body, *from); }
+                    for from in req.uses {
+                        self.bx.body_use_all(req.body, *from);
+                        if self.bx.heap.allocation_error_pending { break; }
+                    }
                 }
                 if req.mode == EVAL_IN_SCOPE {
                     let scope = self.bx.code.bodies.borrow()[req.body as usize].scope.obj;
-                    self.bx.heap.objects[scope].proto = req.scope.into();
-                    self.ref_reparented_scope(scope);
+                    if !self.bx.heap.is_allocation_poison_object(scope) {
+                        self.bx.heap.objects[scope].proto = req.scope.into();
+                        self.ref_reparented_scope(scope);
+                    }
                 }
                 let source = if req.mode == EVAL_SOURCE { req.scope } else { ScriptObject::ZERO };
                 self.eval_body(req.body, source)
@@ -3704,7 +4190,7 @@ impl<'a> ScriptVm<'a> {
                 let image = unsafe { &*req.image };
                 match self.adopt_fn_impl(image, req.scope) {
                     Some(obj) => obj.into(),
-                    None => NIL,
+                    None => self.pending_allocation_bail_value().unwrap_or(NIL),
                 }
             }
             mode => panic!("vm_eval: unknown mode {mode}"),
@@ -3718,7 +4204,20 @@ impl<'a> ScriptVm<'a> {
         ScriptValue::script_err_unexpected(self.bx.threads.cur_ref().trap.ip)
     }
 
+    // Before execution starts, anchor a setup refusal in the body being loaded.
+    // A nested eval leaves the enclosing instruction and its unwind alone.
+    fn bail_eval_allocation(&mut self, body_id: u16) -> Option<ScriptValue> {
+        if !self.bx.heap.allocation_error_pending { return None; }
+        if self.bx.run_depth != 0 { return self.pending_allocation_bail_value(); }
+        let ip = ScriptIp { body: body_id, index: 0 };
+        let prev = std::mem::replace(&mut self.bx.threads.cur().trap.ip, ip);
+        let value = self.pending_allocation_bail_value_at(ip);
+        self.bx.threads.cur().trap.ip = prev;
+        value
+    }
+
     fn eval_body(&mut self, body_id: u16, source: ScriptObject) -> ScriptValue {
+        if let Some(bail) = self.bail_eval_allocation(body_id) { return bail; }
         let _inspect_eval = crate::inspect_registry::eval_guard(&self.bx);
 
         // Set __script_source__ on the scope if source is provided
@@ -3738,6 +4237,7 @@ impl<'a> ScriptVm<'a> {
             self.bx
                 .heap
                 .set_value_def(scope, id!(__script_source__).into(), actual_source.into());
+            if let Some(bail) = self.bail_eval_allocation(body_id) { return bail; }
         }
 
         let mut bodies = self.bx.code.bodies.borrow_mut();
@@ -3751,6 +4251,10 @@ impl<'a> ScriptVm<'a> {
                 body.tokenizer
                     .tokenize(&body.effective_code, &mut self.bx.heap);
                 body.tokenizer.finish(&mut self.bx.heap);
+                if self.bx.heap.allocation_error_pending {
+                    drop(bodies);
+                    return self.bail_eval_allocation(body_id).unwrap_or(NIL);
+                }
                 let (file, offsets) = body.parse_site(script_mod);
                 body.parser.first_col = body.first_col;
                 body.parser.parse(&body.tokenizer, &file, offsets, &script_mod.values);
@@ -3832,9 +4336,10 @@ impl<'a> ScriptVm<'a> {
         };
 
         let body_id = match existing_body_id {
-            Some(id) => id,
-            None => self.add_script_mod_with(script_mod, false),
+            Some(id) if !self.bx.heap.is_allocation_poison_object(self.bx.code.bodies.borrow()[id as usize].me.obj) => id,
+            _ => self.add_script_mod_with(script_mod, false, false),
         };
+        if let Some(bail) = self.bail_eval_allocation(body_id) { return bail; }
 
         // Set __script_source__ on the scope if source is provided
         if source != ScriptObject::ZERO {
@@ -3851,6 +4356,7 @@ impl<'a> ScriptVm<'a> {
             self.bx
                 .heap
                 .set_value_def(scope, id!(__script_source__).into(), actual_source.into());
+            if let Some(bail) = self.bail_eval_allocation(body_id) { return bail; }
         }
 
         let mut bodies = self.bx.code.bodies.borrow_mut();
@@ -3874,8 +4380,8 @@ impl<'a> ScriptVm<'a> {
                 && (code.len() < prev_len
                     || code.as_bytes()[..prev_len] != body.tokenizer.original.as_bytes()[..prev_len]);
 
-            if content_changed {
-                // Content changed entirely — reset and re-tokenize from scratch
+            if content_changed || (prev_len == 0 && existing_body_id.is_some()) {
+                // Replaced text or an existing body with no accepted prefix.
                 body.tokenizer = ScriptTokenizer::with_units(self.bx.units.clone());
                 body.parser = ScriptParser::keeping_numbers(self.bx.keep_numbers);
                 if self.bx.has_entry_policy() && !self.bx.allow_debug_output { body.parser.set_emit_errors(false); }
@@ -3897,6 +4403,16 @@ impl<'a> ScriptVm<'a> {
             // the tokenizer: parse it provisionally (the parser checkpoints
             // before it), the next append re-lexes it.
             let provisional = body.tokenizer.push_pending_token(&mut self.bx.heap);
+            if self.bx.heap.allocation_error_pending {
+                // Reset without allocating. The next attempt rebuilds the parser.
+                body.tokenizer.clear();
+                body.parser = ScriptParser::vacant();
+                body.checkpoint = None;
+                body.source_len = 0;
+                body.content_hash = 0;
+                drop(bodies);
+                return self.bail_eval_allocation(body_id).unwrap_or(NIL);
+            }
 
             // Incremental parse: continue from checkpoint, auto-close for execution
             errors_before = body.parser.parse_errors.len();
@@ -4043,8 +4559,15 @@ pub struct ScriptVmBase {
     /// the captures capture_errors_nested put aside
     pub captured_stash: Vec<Option<Vec<ScriptErrorRecord>>>,
     pub run_budget: Option<ScriptRunBudget>,
+    low_memory: Option<(*const AtomicUsize, usize)>,
     /// Interpreter loops live on the Rust stack (`run_core`): a sliced run yields only at 1.
     pub(crate) run_depth: u32,
+    pub(crate) nested_script_runs: u64,
+    // A paused outer run keeps its log suppression across resumes on its script thread.
+    reported_nested_runs: HashSet<usize>,
+    outer_run_thread: usize,
+    /// The innermost native is re-executable only when no older native awaits it.
+    pub(crate) native_invocation: Option<NativeInvocation>,
     pub(crate) native_depth_limit: u32,
     // Natives may ignore a callback's result. Carry the bail through every live interpreter.
     reentry_failure: Option<ScriptValue>,
@@ -4054,6 +4577,8 @@ pub struct ScriptVmBase {
     /// Instructions charged by the most recent with_instruction_limit call
     /// (see ScriptVm::last_limit_consumed).
     pub last_limit_consumed: u64,
+    // Independent of sticky policy poisoning: ordinary limited runs also report their cause.
+    last_limit_hit: Option<(Limit, ScriptIp)>,
     /// The most recent limited run's remaining allowance at Return/Bail, seeded on entry.
     pub last_limit_exit_remaining: u64,
     /// Arithmetic on host objects (none by default): a host whose values
@@ -4134,7 +4659,15 @@ impl ScriptVmBase {
         if self.has_entry_policy() { self.policy.poisoned.get_or_insert(reason); }
     }
 
-    pub(crate) fn poison_limit(&mut self, limit: Limit) { self.poison(Poison::Limit(limit)); }
+    /// Take the most recent hard limit and the instruction where it was raised.
+    /// A host observing one run can drain any prior hit before entering it.
+    #[relax_api(run)]
+    pub fn take_limit_hit(&mut self) -> Option<(Limit, ScriptIp)> { self.last_limit_hit.take() }
+
+    pub(crate) fn poison_limit(&mut self, limit: Limit) {
+        self.last_limit_hit = Some((limit, self.threads.cur_ref().trap.ip));
+        self.poison(Poison::Limit(limit));
+    }
 
     fn heap_limit_reason(&self) -> Limit {
         if self.heap.heap_limit_exceeded { Limit::RetainedHeap }
@@ -4163,9 +4696,34 @@ impl ScriptVmBase {
     pub fn select_thread(&mut self, id: ScriptThreadId) { self.threads.set_current_thread_id(id); }
     #[inline(always)]
     pub fn gc_if_needed(&mut self) { self.vm_ctl(&mut ScriptCtlReq::new(CTL_GC_IF_NEEDED)); }
-    /// A handle another thread uses to stop this VM's runs ([`crate::interrupt`]).
+    /// A handle another thread uses to stop runs under [`ScriptVm::with_interrupt_sampling`]
+    /// or [`ScriptVm::with_instruction_limit`].
     #[relax_api(run)]
     pub fn interrupt_handle(&self) -> crate::interrupt::ScriptInterrupt { self.interrupt.clone() }
+    /// Watch the host allocator's refusal counter. A budget sample that differs from `since`
+    /// ends the run with a memory refusal.
+    #[inline(always)]
+    pub fn watch_low_memory(&mut self, counter: &'static AtomicUsize, since: usize) {
+        // SAFETY: a static atomic is valid for the VM's whole life and is only accessed atomically.
+        unsafe { self.watch_low_memory_at(counter.as_ptr(), since) }
+    }
+
+    /// Install the watch using the address of the host allocator's counter.
+    ///
+    /// # Safety
+    /// `counter` must point to an `AtomicUsize` that stays valid for as long as the watch is
+    /// set. Every other access to that storage must also be atomic.
+    #[relax_api(run)]
+    pub unsafe fn watch_low_memory_at(&mut self, counter: *const usize, since: usize) {
+        self.low_memory = Some((counter.cast(), since));
+    }
+
+    /// End the host allocator watch before reusing the VM for another run.
+    #[relax_api(run)]
+    pub fn unwatch_low_memory(&mut self) {
+        self.low_memory = None;
+    }
+
     /// The host's own end of the run, from a native it is in: the VM is stopped
     /// ([`crate::interrupt::ScriptInterrupt::stop`]) and the running thread bails here with nil,
     /// uncatchably and with no error. One call across the API: a host built by another compiler
@@ -4226,13 +4784,19 @@ impl ScriptVmBase {
             captured_warnings: Vec::new(),
             captured_stash: Vec::new(),
             run_budget: None,
+            low_memory: None,
             run_depth: 0,
+            nested_script_runs: 0,
+            reported_nested_runs: HashSet::new(),
+            outer_run_thread: 0,
+            native_invocation: None,
             native_depth_limit: u32::MAX,
             reentry_failure: None,
             run_stack_origin: 0,
             run_stack_budget: 0,
             admission: AdmissionLimits::UNLIMITED,
             last_limit_consumed: 0,
+            last_limit_hit: None,
             last_limit_exit_remaining: 0,
             object_op_hook: None,
             let_hook: None,
@@ -4289,13 +4853,19 @@ impl ScriptVmBase {
             captured_warnings: Vec::new(),
             captured_stash: Vec::new(),
             run_budget: None,
+            low_memory: None,
             run_depth: 0,
+            nested_script_runs: 0,
+            reported_nested_runs: HashSet::new(),
+            outer_run_thread: 0,
+            native_invocation: None,
             native_depth_limit: u32::MAX,
             reentry_failure: None,
             run_stack_origin: 0,
             run_stack_budget: 0,
             admission: AdmissionLimits::UNLIMITED,
             last_limit_consumed: 0,
+            last_limit_hit: None,
             last_limit_exit_remaining: 0,
             object_op_hook: None,
             let_hook: None,
@@ -4362,6 +4932,7 @@ impl ScriptVmBase {
     /// `use <from>.*` does. A name already there is replaced; a module's
     /// private keys (`__forms`, `__tag`) stay behind.
     pub(crate) fn body_use_all(&mut self, body: u16, from: ScriptObject) {
+        if self.heap.allocation_error_pending { return; }
         let scope = self.code.bodies.borrow()[body as usize].scope.obj;
         for (key, value) in self.object_entries(from) {
             let Some(id) = key.as_id() else { continue };
@@ -4369,6 +4940,7 @@ impl ScriptVmBase {
                 continue;
             }
             self.heap.set_value_def(scope, key, value);
+            if self.heap.allocation_error_pending { break; }
         }
     }
 
@@ -4516,17 +5088,12 @@ impl ScriptVmBase {
     }
 
     pub(crate) fn apply_injected_globals_to_scope(&mut self, scope_obj: ScriptObject) {
-        if self.injected_globals.is_empty() {
+        if self.heap.allocation_error_pending || self.heap.is_allocation_poison_object(scope_obj) {
             return;
         }
-        let globals: Vec<(LiveId, ScriptValue)> = self
-            .injected_globals
-            .iter()
-            .map(|(key, value)| (*key, *value))
-            .collect();
-        for (key, value) in globals {
-            self.heap
-                .force_value_in_map(scope_obj, key.into(), value);
+        for (&key, &value) in self.injected_globals.iter() {
+            self.heap.force_value_in_map(scope_obj, key.into(), value);
+            if self.heap.allocation_error_pending { break; }
         }
     }
 
@@ -4923,6 +5490,7 @@ mod tests {
                 return_ip: None,
                 prev_slot_base: 0,
                 body_root: false,
+                native_cont: false,
             }));
             assert!(thread.push_call_frame(CallFrame {
                 bases: StackBases {
@@ -4934,6 +5502,7 @@ mod tests {
                 return_ip: Some(ScriptIp::default()),
                 prev_slot_base: 0,
                 body_root: false,
+                native_cont: false,
             }));
         }
 

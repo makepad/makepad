@@ -526,7 +526,7 @@ fn install_lowered(lowered: kl::KernelLowered, source: &str, #[cfg(not(target_ar
     }
     #[cfg(not(target_arch = "wasm32"))]
     if RECORDING.load(Ordering::Relaxed) {
-        let modules = modules.iter().map(|m| (m.path.to_string(), m.source.to_string())).collect();
+        let modules = modules.iter().map(|m| KernelModule { path: m.path.to_string(), text: m.source.to_string() }).collect();
         recorded().0.send(Recorded { kernel: KernelRef::from_arc(kernel.clone()), source: source.to_string(), layouts: layouts.to_vec(), modules }).ok();
     }
     #[cfg(target_arch = "wasm32")]
@@ -600,15 +600,22 @@ pub(crate) fn end_run() {
 
 /// A kernel compiled while recording, with what it was compiled from (so
 /// a tool can compile it again elsewhere: its source, host layouts and the
-/// modules its `use` items named).
+/// modules its `use` items named). Built by the caller in its own memory
+/// ([`take_recorded`]).
 pub struct Recorded {
     pub kernel: KernelRef,
     /// Its text; empty for a kernel built from Splash values (the kernel's
     /// program is what a build tool compiles).
     pub source: String,
     pub layouts: Vec<Layout>,
-    /// (path, source) of each module.
-    pub modules: Vec<(String, String)>,
+    /// The modules used to compile this kernel.
+    pub modules: Vec<KernelModule>,
+}
+
+/// The path and source text of a module used by a recorded kernel.
+pub struct KernelModule {
+    pub path: String,
+    pub text: String,
 }
 
 fn recorded() -> &'static (std::sync::mpsc::Sender<Recorded>, relax_api::sync::Mutex<std::sync::mpsc::Receiver<Recorded>>) {
@@ -623,15 +630,93 @@ fn recorded() -> &'static (std::sync::mpsc::Sender<Recorded>, relax_api::sync::M
 /// for [`take_recorded`], or stops keeping them: how a build tool learns
 /// which kernels a document compiles while it evaluates it (desktop hosts;
 /// a wasm host links its kernels instead).
+#[relax_api]
 pub fn record_compiled(on: bool) {
     RECORDING.store(on, Ordering::Relaxed);
 }
 
 /// The kernels compiled while recording, since the last call (a build
 /// tool's thread; sending never waits).
+#[inline(always)]
 pub fn take_recorded() -> Vec<Recorded> {
-    let Ok(rx) = recorded().1.lock() else { return Vec::new() };
-    rx.try_iter().collect()
+    let mut out = Vec::new();
+    take_recorded_into(&mut RecordedOut::new(&mut out));
+    out
+}
+
+/// Where [`take_recorded_into`] writes the recorded kernels, into a
+/// caller-owned `Vec<Recorded>`: each kernel, then its layouts (each
+/// followed by its fields), then its modules. The callbacks build every
+/// `String` and `Vec` in the caller's memory and clone the kernel through
+/// its handle.
+#[relax_api(plain)]
+#[repr(C)]
+pub struct RecordedOut<'a> {
+    ctx: *mut u8,
+    push_kernel: unsafe extern "C-unwind" fn(*mut u8, *const KernelRef, *const u8, usize),
+    push_layout: unsafe extern "C-unwind" fn(*mut u8, *const u8, usize, u32),
+    push_layout_field: unsafe extern "C-unwind" fn(*mut u8, *const u8, usize, FieldTy, u32),
+    push_module: unsafe extern "C-unwind" fn(*mut u8, *const u8, usize, *const u8, usize),
+    _out: std::marker::PhantomData<&'a mut u8>,
+}
+
+impl<'a> RecordedOut<'a> {
+    #[inline(always)]
+    pub fn new(out: &'a mut Vec<Recorded>) -> Self {
+        unsafe fn text(ptr: *const u8, len: usize) -> String {
+            std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len)).to_string()
+        }
+        unsafe extern "C-unwind" fn push_kernel(ctx: *mut u8, kernel: *const KernelRef, source: *const u8, source_len: usize) {
+            let out = &mut *(ctx as *mut Vec<Recorded>);
+            out.push(Recorded { kernel: (*kernel).clone(), source: text(source, source_len), layouts: Vec::new(), modules: Vec::new() });
+        }
+        unsafe extern "C-unwind" fn push_layout(ctx: *mut u8, name: *const u8, name_len: usize, stride: u32) {
+            let out = &mut *(ctx as *mut Vec<Recorded>);
+            if let Some(r) = out.last_mut() {
+                r.layouts.push(Layout { name: text(name, name_len), stride, fields: Vec::new() });
+            }
+        }
+        unsafe extern "C-unwind" fn push_layout_field(ctx: *mut u8, name: *const u8, name_len: usize, ty: FieldTy, offset: u32) {
+            let out = &mut *(ctx as *mut Vec<Recorded>);
+            if let Some(layout) = out.last_mut().and_then(|r| r.layouts.last_mut()) {
+                layout.fields.push(LayoutField { name: text(name, name_len), ty, offset });
+            }
+        }
+        unsafe extern "C-unwind" fn push_module(ctx: *mut u8, path: *const u8, path_len: usize, source: *const u8, source_len: usize) {
+            let out = &mut *(ctx as *mut Vec<Recorded>);
+            if let Some(r) = out.last_mut() {
+                r.modules.push(KernelModule { path: text(path, path_len), text: text(source, source_len) });
+            }
+        }
+        Self { ctx: out as *mut Vec<Recorded> as *mut u8, push_kernel, push_layout, push_layout_field, push_module, _out: std::marker::PhantomData }
+    }
+
+    fn kernel(&mut self, r: &Recorded) {
+        unsafe { (self.push_kernel)(self.ctx, &r.kernel, r.source.as_ptr(), r.source.len()) }
+        for layout in &r.layouts {
+            unsafe { (self.push_layout)(self.ctx, layout.name.as_ptr(), layout.name.len(), layout.stride) }
+            for field in &layout.fields {
+                unsafe { (self.push_layout_field)(self.ctx, field.name.as_ptr(), field.name.len(), field.ty, field.offset) }
+            }
+        }
+        for m in &r.modules {
+            unsafe { (self.push_module)(self.ctx, m.path.as_ptr(), m.path.len(), m.text.as_ptr(), m.text.len()) }
+        }
+    }
+}
+
+/// Drains the recorded kernels into `out`, in recording order.
+#[relax_api]
+pub fn take_recorded_into(out: &mut RecordedOut<'_>) {
+    // The guard drops at the end of this statement: `out` runs the caller's
+    // code, which never runs under the lock.
+    let kernels: Vec<Recorded> = match recorded().1.lock() {
+        Ok(rx) => rx.try_iter().collect(),
+        Err(_) => Vec::new(),
+    };
+    for r in &kernels {
+        out.kernel(r);
+    }
 }
 
 /// A kernel program's identity across hosts: the same program has the
@@ -684,6 +769,7 @@ pub fn mark_wasm_link_thread() {
     wasm_link_thread::mark();
 }
 
+#[relax_api::relax_api(loader = "the loader's precompiled kernels: JIT code has no use for it")]
 pub fn register_precompiled(entries: &[Precompiled]) -> bool {
     #[cfg(target_arch = "wasm32")]
     wasm_link_thread::mark();
@@ -706,6 +792,7 @@ fn precompiled(p: &Program) -> Option<(u32, u32)> {
 
 /// Compiles that found their precompiled code, and compiles that did not
 /// (and were linked at run time), since start.
+#[relax_api::relax_api(loader = "the loader's precompiled kernels: JIT code has no use for it")]
 pub fn precompiled_stats() -> (u32, u32) {
     (PRECOMPILED_HITS.load(Ordering::Relaxed), PRECOMPILED_MISSES.load(Ordering::Relaxed))
 }
@@ -1210,10 +1297,58 @@ pub enum Mode {
 /// entry is four wide (element-local kernels the backend vectorizes) or
 /// scalar. After linking, the host calls [`Kernel::set_wasm_slots`] on
 /// each (`(0, slot)` for a four-wide entry, `(slot, 0)` for a scalar one).
+#[inline(always)]
 pub fn wasm_module(kernels: &[&Kernel], target: crate::wasm::Target) -> Option<(Vec<u8>, Vec<bool>)> {
-    let simd: Vec<bool> = kernels.iter().map(|k| k.parallel_safe && crate::wasm::simd_supported(&k.program)).collect();
-    let entries: Vec<crate::wasm::Entry> = kernels.iter().zip(&simd).map(|(k, s)| crate::wasm::Entry { program: &k.program, simd: *s }).collect();
-    crate::wasm::module(&entries, target).map(|m| (m, simd))
+    let mut out = None;
+    wasm_module_into(kernels, target, true, &mut WasmModuleOut::new(&mut out));
+    out
+}
+
+/// The same kernels as [`wasm_module`] without four-wide code, for a build tool to compare module sizes.
+#[inline(always)]
+pub fn wasm_module_scalar(kernels: &[&Kernel], target: crate::wasm::Target) -> Option<Vec<u8>> {
+    let mut out = None;
+    wasm_module_into(kernels, target, false, &mut WasmModuleOut::new(&mut out));
+    out.map(|(module, _)| module)
+}
+
+/// Where [`wasm_module_into`] writes the module: its bytes and per kernel
+/// whether its entry is four wide, copied into vectors the caller's memory
+/// holds (`None` stays when the kernels do not compile).
+#[relax_api(plain)]
+#[repr(C)]
+pub struct WasmModuleOut<'a> {
+    ctx: *mut u8,
+    write: unsafe extern "C-unwind" fn(*mut u8, *const u8, usize, *const bool, usize),
+    _out: std::marker::PhantomData<&'a mut u8>,
+}
+
+impl<'a> WasmModuleOut<'a> {
+    #[inline(always)]
+    pub fn new(out: &'a mut Option<(Vec<u8>, Vec<bool>)>) -> Self {
+        unsafe extern "C-unwind" fn write(ctx: *mut u8, module: *const u8, module_len: usize, simd: *const bool, simd_len: usize) {
+            let out = &mut *(ctx as *mut Option<(Vec<u8>, Vec<bool>)>);
+            *out = Some((std::slice::from_raw_parts(module, module_len).to_vec(), std::slice::from_raw_parts(simd, simd_len).to_vec()));
+        }
+        Self { ctx: out as *mut Option<(Vec<u8>, Vec<bool>)> as *mut u8, write, _out: std::marker::PhantomData }
+    }
+
+    fn write(&mut self, module: &[u8], simd: &[bool]) {
+        unsafe { (self.write)(self.ctx, module.as_ptr(), module.len(), simd.as_ptr(), simd.len()) }
+    }
+}
+
+/// Compiles the kernels in order, using four-wide entries where supported
+/// if `simd`, and writes the module to `out` (the flags empty without `simd`).
+#[relax_api]
+pub fn wasm_module_into(kernels: &[&Kernel], target: crate::wasm::Target, simd: bool, out: &mut WasmModuleOut<'_>) {
+    let entries: Vec<_> = kernels.iter().map(|k| crate::wasm::Entry {
+        program: &k.program,
+        simd: simd && k.parallel_safe && crate::wasm::simd_supported(&k.program),
+    }).collect();
+    let Some(module) = crate::wasm::module(&entries, target) else { return };
+    let flags: Vec<bool> = if simd { entries.iter().map(|entry| entry.simd).collect() } else { Vec::new() };
+    out.write(&module, &flags);
 }
 
 /// A four-lane install's way to eight lanes: the vector elements run so far (u64::MAX: no

@@ -14,7 +14,7 @@ use crate::vm::ScriptVm;
 
 impl<'a> ScriptVm<'a> {
     #[inline]
-    pub fn opcode(&mut self, opcode: Opcode, opargs: OpcodeArgs) {
+    pub(crate) fn opcode(&mut self, opcode: Opcode, opargs: OpcodeArgs) {
         match opcode {
             // NOP placeholder emitted by parser rewrite passes (for markers / unary +).
             // It intentionally performs no stack mutation and just advances IP.
@@ -25,7 +25,7 @@ impl<'a> ScriptVm<'a> {
             Opcode::NEG => self.handle_neg(),
             Opcode::MUL => self.handle_mul(opargs),
             Opcode::DIV => self.handle_div(opargs),
-            Opcode::MOD => self.handle_f64_op(opargs, |a, b| a % b),
+            Opcode::MOD => self.handle_mod(opargs),
             Opcode::ADD => self.handle_add(opargs),
             Opcode::SUB => self.handle_sub(opargs),
             Opcode::SHL => self.handle_fu64_op(opargs, |a, b| a << b),
@@ -39,8 +39,8 @@ impl<'a> ScriptVm<'a> {
             Opcode::ASSIGN_ADD => self.handle_assign_add(),
             Opcode::ASSIGN_SUB => self.handle_f64_scope_assign_op(|a, b| a - b),
             Opcode::ASSIGN_MUL => self.handle_f64_scope_assign_op(|a, b| a * b),
-            Opcode::ASSIGN_DIV => self.handle_f64_scope_assign_op(|a, b| a / b),
-            Opcode::ASSIGN_MOD => self.handle_f64_scope_assign_op(|a, b| a % b),
+            Opcode::ASSIGN_DIV => self.handle_f64_scope_assign_op_int(Some(false), |a, b| a / b),
+            Opcode::ASSIGN_MOD => self.handle_f64_scope_assign_op_int(Some(true), |a, b| a % b),
             Opcode::ASSIGN_AND => self.handle_fu64_scope_assign_op(|a, b| a & b),
             Opcode::ASSIGN_OR => self.handle_fu64_scope_assign_op(|a, b| a | b),
             Opcode::ASSIGN_XOR => self.handle_fu64_scope_assign_op(|a, b| a ^ b),
@@ -53,8 +53,8 @@ impl<'a> ScriptVm<'a> {
             Opcode::ASSIGN_FIELD_ADD => self.handle_assign_field_add(),
             Opcode::ASSIGN_FIELD_SUB => self.handle_f64_field_assign_op(|a, b| a - b),
             Opcode::ASSIGN_FIELD_MUL => self.handle_f64_field_assign_op(|a, b| a * b),
-            Opcode::ASSIGN_FIELD_DIV => self.handle_f64_field_assign_op(|a, b| a / b),
-            Opcode::ASSIGN_FIELD_MOD => self.handle_f64_field_assign_op(|a, b| a % b),
+            Opcode::ASSIGN_FIELD_DIV => self.handle_f64_field_assign_op_int(Some(false), |a, b| a / b),
+            Opcode::ASSIGN_FIELD_MOD => self.handle_f64_field_assign_op_int(Some(true), |a, b| a % b),
             Opcode::ASSIGN_FIELD_AND => self.handle_fu64_field_assign_op(|a, b| a & b),
             Opcode::ASSIGN_FIELD_OR => self.handle_fu64_field_assign_op(|a, b| a | b),
             Opcode::ASSIGN_FIELD_XOR => self.handle_fu64_field_assign_op(|a, b| a ^ b),
@@ -66,8 +66,8 @@ impl<'a> ScriptVm<'a> {
             Opcode::ASSIGN_INDEX_ADD => self.handle_assign_index_add(),
             Opcode::ASSIGN_INDEX_SUB => self.handle_f64_index_assign_op(|a, b| a - b),
             Opcode::ASSIGN_INDEX_MUL => self.handle_f64_index_assign_op(|a, b| a * b),
-            Opcode::ASSIGN_INDEX_DIV => self.handle_f64_index_assign_op(|a, b| a / b),
-            Opcode::ASSIGN_INDEX_MOD => self.handle_f64_index_assign_op(|a, b| a % b),
+            Opcode::ASSIGN_INDEX_DIV => self.handle_f64_index_assign_op_int(Some(false), |a, b| a / b),
+            Opcode::ASSIGN_INDEX_MOD => self.handle_f64_index_assign_op_int(Some(true), |a, b| a % b),
             Opcode::ASSIGN_INDEX_AND => self.handle_fu64_index_assign_op(|a, b| a & b),
             Opcode::ASSIGN_INDEX_OR => self.handle_fu64_index_assign_op(|a, b| a | b),
             Opcode::ASSIGN_INDEX_XOR => self.handle_fu64_index_assign_op(|a, b| a ^ b),
@@ -122,7 +122,9 @@ impl<'a> ScriptVm<'a> {
             Opcode::CALL_ARGS => self.handle_call_args(),
             Opcode::CALL_EXEC | Opcode::METHOD_CALL_EXEC => {
                 let should_pop_to_me = self.handle_call_exec(opargs);
-                if self.bx.threads.cur_ref().has_execution_limit_exceeded() {
+                if self.bx.threads.cur_ref().has_execution_limit_exceeded()
+                    || self.bx.heap.allocation_error_pending
+                {
                     return;
                 }
                 if should_pop_to_me && opargs.is_pop_to_me() {
@@ -145,28 +147,18 @@ impl<'a> ScriptVm<'a> {
             Opcode::FN_ARG_TYPED => self.handle_fn_arg_typed(opargs),
             Opcode::FN_BODY_DYN => self.handle_fn_body_dyn(opargs),
             Opcode::FN_BODY_TYPED => self.handle_fn_body_typed(opargs),
-            Opcode::RETURN => {
-                self.handle_return(opargs);
-                if self.bx.threads.cur_ref().has_execution_limit_exceeded() {
-                    return;
-                }
-                if opargs.is_pop_to_me() {
+            Opcode::RETURN | Opcode::RETURN_IF_ERR => {
+                let pop = if opcode == Opcode::RETURN {
+                    self.handle_return(opargs)
+                } else {
+                    self.handle_return_if_err(opargs)
+                };
+                if pop && opargs.is_pop_to_me() && !self.bx.threads.cur_ref().has_execution_limit_exceeded()
+                    && !self.bx.heap.allocation_error_pending
+                {
                     self.pop_to_me();
                 }
                 return;
-            }
-            Opcode::RETURN_IF_ERR => {
-                if self.handle_return_if_err(opargs) {
-                    // Error case: original fell through to end-of-function check
-                    if self.bx.threads.cur_ref().has_execution_limit_exceeded() {
-                        return;
-                    }
-                    if opargs.is_pop_to_me() {
-                        self.pop_to_me();
-                    }
-                    return;
-                }
-                // Non-error case: falls through to end-of-function pop_to_me check
             }
 
             // IF
@@ -240,8 +232,8 @@ impl<'a> ScriptVm<'a> {
             Opcode::ASSIGN_SLOT_ADD => self.handle_assign_slot_add(opargs),
             Opcode::ASSIGN_SLOT_SUB => self.handle_slot_num_assign_op(opargs, |a, b| a - b),
             Opcode::ASSIGN_SLOT_MUL => self.handle_slot_num_assign_op(opargs, |a, b| a * b),
-            Opcode::ASSIGN_SLOT_DIV => self.handle_slot_num_assign_op(opargs, |a, b| a / b),
-            Opcode::ASSIGN_SLOT_MOD => self.handle_slot_num_assign_op(opargs, |a, b| a % b),
+            Opcode::ASSIGN_SLOT_DIV => self.handle_slot_num_assign_op_int(opargs, Some(false), |a, b| a / b),
+            Opcode::ASSIGN_SLOT_MOD => self.handle_slot_num_assign_op_int(opargs, Some(true), |a, b| a % b),
 
             Opcode::NIL_ARM => self.handle_nil_arm(),
 
@@ -254,7 +246,9 @@ impl<'a> ScriptVm<'a> {
             _ => self.bail("undefined VM opcode"),
         }
         // A limit failure leaves the operand stack short; never pop to me then.
-        if opargs.is_pop_to_me() && !self.bx.threads.cur_ref().has_execution_limit_exceeded() {
+        if opargs.is_pop_to_me() && !self.bx.threads.cur_ref().has_execution_limit_exceeded()
+            && !self.bx.heap.allocation_error_pending
+        {
             self.pop_to_me();
         }
     }

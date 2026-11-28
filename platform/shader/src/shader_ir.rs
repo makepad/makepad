@@ -4,8 +4,6 @@
 //! type (abstract numbers are resolved during lowering), control flow is
 //! if / for / loop with break and continue, and IO is named globals whose
 //! kind says what they are (an instance field, a uniform, a varying ...).
-//!
-//! The design is in local/plans/shader-ir.md.
 use relax_api::relax_api;
 
 use crate::shader_ids::*;

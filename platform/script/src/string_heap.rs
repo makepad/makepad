@@ -68,8 +68,10 @@ impl ScriptStringSink for crate::vm_api::ScriptTextOut<'_> {
 enum ScriptStringLimitHit {
     /// The per-string ceiling (`ScriptHeap::set_max_string_bytes`).
     String,
-    /// The remaining allocation budget, or the allocator itself.
+    /// The remaining logical allocation budget.
     Heap,
+    /// The requested backing storage cannot be reserved.
+    Memory,
 }
 
 /// A string builder that records a limit hit without allocating beyond its
@@ -112,7 +114,7 @@ impl ScriptStringBuffer {
             return Err(fmt::Error);
         }
         let Some(next_len) = self.value.len().checked_add(additional_bytes) else {
-            self.hit = Some(ScriptStringLimitHit::Heap);
+            self.hit = Some(ScriptStringLimitHit::Memory);
             return Err(fmt::Error);
         };
         if self
@@ -130,7 +132,7 @@ impl ScriptStringBuffer {
             return Err(fmt::Error);
         }
         if self.value.try_reserve(additional_bytes).is_err() {
-            self.hit = Some(ScriptStringLimitHit::Heap);
+            self.hit = Some(ScriptStringLimitHit::Memory);
             return Err(fmt::Error);
         }
         Ok(())
@@ -230,6 +232,10 @@ impl ScriptHeap {
         cb(self, &mut out);
         let (out, hit) = out.into_parts();
         match hit {
+            Some(ScriptStringLimitHit::Memory) => {
+                self.refuse_memory("out of memory while building a bounded string", crate::trap::NoTrap);
+                NIL
+            }
             Some(ScriptStringLimitHit::String) => {
                 self.note_string_limit_exceeded(out.len(), OPERATION);
                 NIL
@@ -254,6 +260,9 @@ impl ScriptHeap {
         let r = cb(self, &mut out);
         let (out, hit) = out.into_parts();
         match hit {
+            Some(ScriptStringLimitHit::Memory) => {
+                self.refuse_memory("out of memory while building a temporary bounded string", crate::trap::NoTrap);
+            }
             Some(ScriptStringLimitHit::String) => {
                 self.note_string_limit_exceeded(out.len(), OPERATION);
             }
@@ -276,9 +285,15 @@ impl ScriptHeap {
         ScriptStringBuffer::new(out, self.max_string_bytes, max_heap_bytes)
     }
 
-    fn recycle_string(&mut self, mut out: String) {
+    /// Keep a spent buffer for reuse. The pool is only a cache: when it
+    /// cannot grow, the buffer is dropped instead.
+    pub(crate) fn recycle_string(&mut self, mut out: String) {
         out.clear();
-        self.strings_reuse.push(out);
+        if self.strings_reuse.len() < self.strings_reuse.capacity()
+            || (!self.memory_refusal_pending() && self.strings_reuse.try_reserve(1).is_ok())
+        {
+            self.strings_reuse.push(out);
+        }
     }
 
     pub fn string_mut_self_with<R, F: FnOnce(&mut Self, &str) -> R>(
@@ -395,7 +410,12 @@ impl ScriptHeap {
         if !self.charge_string_payload(value.len(), "creating a string") {
             return NIL;
         }
-        self.store_unique_string(value.to_owned()).into()
+        let mut owned = String::new();
+        if !self.reserve_for("out of memory while creating a string", crate::trap::NoTrap, |_| owned.try_reserve_exact(value.len())) {
+            return NIL;
+        }
+        owned.push_str(value);
+        self.store_unique_string(owned)
     }
 
     pub fn temp_string_with<R, F: FnOnce(&mut Self, &mut String) -> R>(&mut self, cb: F) -> R {
@@ -405,8 +425,7 @@ impl ScriptHeap {
             String::new()
         };
         let r = cb(self, &mut out);
-        out.clear();
-        self.strings_reuse.push(out);
+        self.recycle_string(out);
         r
     }
 
@@ -486,8 +505,7 @@ impl ScriptHeap {
         }
         let result = cb(self, &mut out);
         debug_assert!(out.len() <= max_len);
-        out.clear();
-        self.strings_reuse.push(out);
+        self.recycle_string(out);
         Some(result)
     }
 
@@ -512,10 +530,10 @@ impl ScriptHeap {
             String::new()
         };
         out.clear();
-        // The budget check bounds `len`, making this reserve safe even for a
-        // hostile sparse/overflow-derived input length.
-        if out.capacity() < len {
-            out.reserve_exact(len);
+        if !self.reserve_for("out of memory while concatenating strings", crate::trap::NoTrap,
+            |_| out.try_reserve_exact(len))
+        {
+            return NIL;
         }
         self.cast_to_string(a, &mut out);
         self.cast_to_string(b, &mut out);
@@ -524,22 +542,20 @@ impl ScriptHeap {
 
     /// Takes an owned String and either interns it, reuses an existing interned value, or stores it as a new string.
     /// The String is consumed and may be returned to the reuse pool.
-    pub fn intern_or_store_string(&mut self, mut out: String) -> ScriptValue {
+    pub fn intern_or_store_string(&mut self, out: String) -> ScriptValue {
         if self.exceeds_string_limit(out.len()) {
             self.note_string_limit_exceeded(out.len(), "storing a string");
             return NIL;
         }
         if let Some(v) = ScriptValue::from_inline_string(&out) {
-            out.clear();
-            self.strings_reuse.push(out);
+            self.recycle_string(out);
             return v;
         }
 
         // check intern table
-        if let Some(index) = self.string_intern.get(&out) {
-            out.clear();
-            self.strings_reuse.push(out);
-            return (*index).into();
+        if let Some(index) = self.string_intern.get(&out).copied() {
+            self.recycle_string(out);
+            return index.into();
         }
 
         if !self.charge_string_payload(out.len(), "interning a string") {
@@ -547,7 +563,7 @@ impl ScriptHeap {
             // untrusted execution must release its transient allocation.
             return NIL;
         }
-        self.store_unique_string(out).into()
+        self.store_unique_string(out)
     }
 
     #[inline]
@@ -566,25 +582,33 @@ impl ScriptHeap {
     /// intern hits are still handled because concat preflights before it has
     /// materialized the bytes. The per-string ceiling is checked on the exact
     /// length here because preflights only know an upper bound.
-    fn intern_or_store_string_charged(&mut self, mut out: String) -> ScriptValue {
+    fn intern_or_store_string_charged(&mut self, out: String) -> ScriptValue {
         if self.exceeds_string_limit(out.len()) {
             self.note_string_limit_exceeded(out.len(), "storing a string");
             return NIL;
         }
         if let Some(v) = ScriptValue::from_inline_string(&out) {
-            out.clear();
-            self.strings_reuse.push(out);
+            self.recycle_string(out);
             return v;
         }
-        if let Some(index) = self.string_intern.get(&out) {
-            out.clear();
-            self.strings_reuse.push(out);
-            return (*index).into();
+        if let Some(index) = self.string_intern.get(&out).copied() {
+            self.recycle_string(out);
+            return index.into();
         }
-        self.store_unique_string(out).into()
+        self.store_unique_string(out)
     }
 
-    fn store_unique_string(&mut self, out: String) -> ScriptString {
+    /// NIL when the table or its intern entry cannot be reserved (the
+    /// refusal is recorded); the buffer is then released.
+    fn store_unique_string(&mut self, out: String) -> ScriptValue {
+        let reserved = if self.strings_free.is_empty() {
+            self.reserve_string_slot()
+        } else {
+            self.reserve_string_intern()
+        };
+        if !reserved {
+            return NIL;
+        }
         // fetch a free string
         if let Some(str) = self.strings_free.pop() {
             // str already has the correct generation from gc.rs sweep
@@ -594,7 +618,7 @@ impl ScriptHeap {
                 string: out.clone(),
             });
             self.string_intern.insert(out, str);
-            str
+            str.into()
         } else {
             let out = ScriptRcString::new(out);
             let (index, generation) = self.strings.push(Some(ScriptStringData {
@@ -603,7 +627,7 @@ impl ScriptHeap {
             }));
             let ret = ScriptString::new(index, generation);
             self.string_intern.insert(out, ret);
-            ret
+            ret.into()
         }
     }
 
@@ -857,9 +881,8 @@ mod tests {
             assert!(out.len() <= 5);
         });
         assert!(value.is_nil());
-        assert!(heap
-            .take_allocation_error()
-            .is_some_and(|error| error.contains("script string allocation limit exceeded")));
+        assert!(matches!(heap.take_allocation_error(),
+            Some(AllocationError::Limit(error)) if error.contains("script string allocation limit exceeded")));
         assert!(heap.take_string_limit_exceeded());
         assert!(heap.take_allocation_error().is_none());
 
@@ -883,9 +906,8 @@ mod tests {
         });
         assert!(value.is_nil());
         assert!(!heap.take_string_limit_exceeded());
-        assert!(heap
-            .take_allocation_error()
-            .is_some_and(|error| error.contains("script heap allocation limit exceeded")));
+        assert!(matches!(heap.take_allocation_error(),
+            Some(AllocationError::Limit(error)) if error.contains("script heap allocation limit exceeded")));
         assert!(heap.take_heap_limit_exceeded());
         assert!(heap.take_allocation_error().is_none());
     }

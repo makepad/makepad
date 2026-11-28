@@ -89,7 +89,7 @@ pub struct RouteInfo<'a> {
 /// name and parameters) whose body is the dispatch over `routes` (by slot;
 /// `None`: that slot has no GPU route): slot k calls kernel k's function.
 /// `key` is the body's identity. None: `stub` is no script fn.
-#[relax_api]
+#[relax_api(run)]
 pub fn dispatch_fn(vm: &mut ScriptVm, stub: ScriptObject, key: u64, routes: &[Option<&ShaderRoute>]) -> Option<ScriptObject> {
     let ptr = vm.heap().as_fn(stub)?;
     let proto = vm.heap().proto(stub);
@@ -102,7 +102,7 @@ pub fn dispatch_fn(vm: &mut ScriptVm, stub: ScriptObject, key: u64, routes: &[Op
 }
 
 /// Takes the dispatch body [`dispatch_fn`] gave `f` away again (the variant is released).
-#[relax_api]
+#[relax_api(run)]
 pub fn release_dispatch(vm: &mut ScriptVm, f: ScriptObject) {
     vm.set_shader_ir_fn(f, None);
 }

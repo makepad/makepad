@@ -1,6 +1,5 @@
 //! AIR, the audio IR: a small typed **structured** IR between the audio
-//! shader front end and the backends (see
-//! local/agent_state/edits/design/AUDIO-SHADERS.md).
+//! shader front end and the backends.
 //!
 //! - Values: SSA temporaries ([`Val`], defined once by [`Stmt::Def`]) and
 //!   typed mutable locals ([`Var`], like wasm locals) for everything that

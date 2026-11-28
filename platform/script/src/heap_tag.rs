@@ -17,7 +17,7 @@ pub(crate) fn end_run() {
 
 /// A heap's tag.
 #[derive(Default)]
-pub struct HeapTag(u8);
+pub(crate) struct HeapTag(u8);
 
 impl HeapTag {
     pub(crate) fn alloc() -> Self {
@@ -33,7 +33,7 @@ impl HeapTag {
         HeapTag(tag)
     }
 
-    pub fn get(&self) -> u8 {
+    pub(crate) fn get(&self) -> u8 {
         self.0
     }
 }

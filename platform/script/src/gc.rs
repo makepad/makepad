@@ -2,6 +2,7 @@ use relax_attr::relax;
 use relax_api::relax_api;
 use crate::array::*;
 use crate::function::*;
+use crate::gen_index::{GenRef, GenVec};
 use crate::handle::*;
 use crate::heap::*;
 use crate::makepad_error_log::*;
@@ -10,6 +11,7 @@ use crate::object::*;
 use crate::object_heap::*;
 use crate::pod::*;
 use crate::regex::*;
+use crate::string::ScriptStringData;
 use crate::thread::*;
 use crate::trap::*;
 use crate::value::*;
@@ -30,85 +32,16 @@ pub struct ScriptHeapGcLast {
     pub regexes: usize,
 }
 
-/// Lightweight mark item for GC work list - just the reference, no debug info
-#[derive(Copy, Clone)]
-pub enum ScriptGcMark {
-    Object(ScriptObject),
-    Array(ScriptArray),
-}
+// Heap indices occupy 24 bits. Only objects and arrays have worklist entries.
+const ARRAY_SLOT: u32 = 1 << 31;
+const _: () = assert!(HEAP_INDEX_BITS < 32);
 
-// Queue values for static marking - used inside map_iter closures where we can't check is_static
-macro_rules! queue_static_val {
-    ($self:ident, $val:expr) => {
-        if let Some(ptr) = $val.as_object() {
-            $self.mark_vec.push(ScriptGcMark::Object(ptr));
-        } else if let Some(ptr) = $val.as_string() {
-            if let Some(str_data) = $self.strings[ptr].as_mut() {
-                str_data.tag.set_static();
-            }
-        } else if let Some(ptr) = $val.as_array() {
-            $self.mark_vec.push(ScriptGcMark::Array(ptr));
-        } else if let Some(ptr) = $val.as_pod() {
-            let pod = &mut $self.pods[ptr];
-            pod.tag.set_static();
-            for pt in [Some(pod.ty), pod.tag.as_array_builder()].into_iter().flatten() {
-                if let Some(owner) = pod_type_owner(&$self.pod_types, pt) {
-                    $self.mark_vec.push(ScriptGcMark::Object(owner));
-                }
-            }
-        } else if let Some(ptr) = $val.as_handle() {
-            if let Some(handle_data) = $self.handles[ptr].as_mut() {
-                handle_data.tag.set_static();
-            }
-        } else if let Some(ptr) = $val.as_regex() {
-            if let Some(regex_data) = $self.regexes[ptr].as_mut() {
-                regex_data.tag.set_static();
-            }
-        } else if let Some(pt) = $val.as_pod_type() {
-            if let Some(owner) = pod_type_owner(&$self.pod_types, pt) {
-                $self.mark_vec.push(ScriptGcMark::Object(owner));
-            }
-        }
-    };
-}
-
-// Set static with check - used outside closures where we can check is_static
-macro_rules! set_static_val {
-    ($self:ident, $val:expr) => {
-        if let Some(ptr) = $val.as_object() {
-            if !$self.objects[ptr].tag.is_static() {
-                $self.mark_vec.push(ScriptGcMark::Object(ptr));
-            }
-        } else if let Some(ptr) = $val.as_string() {
-            if let Some(str_data) = $self.strings[ptr].as_mut() {
-                str_data.tag.set_static();
-            }
-        } else if let Some(ptr) = $val.as_array() {
-            if !$self.arrays[ptr].tag.is_static() {
-                $self.mark_vec.push(ScriptGcMark::Array(ptr));
-            }
-        } else if let Some(ptr) = $val.as_pod() {
-            let pod = &mut $self.pods[ptr];
-            pod.tag.set_static();
-            for pt in [Some(pod.ty), pod.tag.as_array_builder()].into_iter().flatten() {
-                if let Some(owner) = pod_type_owner(&$self.pod_types, pt) {
-                    $self.mark_vec.push(ScriptGcMark::Object(owner));
-                }
-            }
-        } else if let Some(ptr) = $val.as_handle() {
-            if let Some(handle_data) = $self.handles[ptr].as_mut() {
-                handle_data.tag.set_static();
-            }
-        } else if let Some(ptr) = $val.as_regex() {
-            if let Some(regex_data) = $self.regexes[ptr].as_mut() {
-                regex_data.tag.set_static();
-            }
-        } else if let Some(pt) = $val.as_pod_type() {
-            if let Some(owner) = pod_type_owner(&$self.pod_types, pt) {
-                $self.mark_vec.push(ScriptGcMark::Object(owner));
-            }
-        }
-    };
+#[derive(Default, PartialEq, Eq)]
+pub(crate) enum GcPhase {
+    #[default]
+    Idle,
+    Marked,
+    Skipped,
 }
 
 /// A mark-walk value whose index is beyond its table came from ANOTHER heap.
@@ -159,87 +92,183 @@ fn pod_type_refs(pod_types: &[ScriptPodTypeData], pt: ScriptPodType, value: &mut
     }
 }
 
-// Queue the owner of pod type `pt` for marking (a stale owner is skipped: its type is freed)
-macro_rules! mark_pod_type_owner {
-    ($objects:expr, $pod_types:expr, $mark_vec:expr, $pt:expr) => {
-        if let Some(owner) = pod_type_owner($pod_types, $pt) {
-            if let Some(object) = $objects.get_checked(owner) {
-                if !object.tag.is_static() && !object.tag.is_marked() && object.tag.is_alloced() {
-                    $mark_vec.push(ScriptGcMark::Object(owner));
-                }
-            }
+// References are checked while their generation is still in hand. The tables
+// cannot recycle a slot between queueing its index and tracing its children.
+// The mark helpers are always inlined: a call per traced value made a collection about a fifth slower.
+#[inline(always)]
+fn push_mark<T, R: GenRef>(
+    table: &GenVec<T>, ptr: R, kind: u32, name: &str, trace: impl FnOnce(&T) -> bool,
+    marks: &mut [u64], work: &mut Vec<u32>,
+) {
+    let Some(slot) = table.get_checked(ptr) else {
+        foreign_value_skip(name, ptr.index(), table.len());
+        return;
+    };
+    if !trace(slot) { return; }
+    let _ = &table[ptr]; // Preserve the generation check even on a duplicate edge.
+    let index = ptr.index();
+    let word = &mut marks[index as usize / 64];
+    let bit = 1u64 << (index % 64);
+    if *word & bit == 0 {
+        *word |= bit;
+        debug_assert!(work.len() < work.capacity());
+        work.push(kind | index);
+    }
+}
+
+#[inline]
+fn is_marked(marks: &[u64], index: usize) -> bool {
+    // A standalone sweep on a fresh heap has no preceding mark.
+    marks.get(index / 64).is_some_and(|word| word & (1u64 << (index % 64)) != 0)
+}
+
+/// Borrow the traced tables separately from the leaf tags and worklist, so
+/// map keys, array elements and pod defaults can be visited in place.
+struct Marker<'a, const STATIC: bool> {
+    objects: &'a GenVec<ScriptObjectData>,
+    arrays: &'a GenVec<ScriptArrayData>,
+    pod_types: &'a [ScriptPodTypeData],
+    glob_sources: &'a std::collections::HashMap<ScriptObject, Vec<ScriptObject>>,
+    strings: &'a mut GenVec<Option<ScriptStringData>>,
+    pods: &'a mut GenVec<ScriptPodData>,
+    handles: &'a mut GenVec<Option<ScriptHandleData>>,
+    regexes: &'a mut GenVec<Option<ScriptRegexData>>,
+    object_marks: &'a mut [u64],
+    array_marks: &'a mut [u64],
+    work: &'a mut Vec<u32>,
+}
+
+// Split these borrows so roots and body scratch can still be visited in place.
+macro_rules! marker {
+    ($heap:ident, $static:literal) => {
+        Marker::<$static> {
+            objects: &$heap.objects,
+            arrays: &$heap.arrays,
+            strings: &mut $heap.strings,
+            pods: &mut $heap.pods,
+            handles: &mut $heap.handles,
+            regexes: &mut $heap.regexes,
+            pod_types: &$heap.pod_types,
+            glob_sources: &$heap.glob_sources,
+            object_marks: &mut $heap.object_marks,
+            array_marks: &mut $heap.array_marks,
+            work: &mut $heap.mark_vec,
         }
     };
 }
 
-// Mark a value using split field borrows (so callers can iterate maps without snapshot Vecs)
-macro_rules! mark_value_fields {
-    ($objects:expr, $arrays:expr, $strings:expr, $pods:expr, $handles:expr, $regexes:expr, $pod_types:expr, $mark_vec:expr, $val:expr) => {
-        if let Some(ptr) = $val.as_object() {
-            if let Some(object) = $objects.get_checked(ptr) {
-                if !object.tag.is_static() && object.tag.is_alloced() {
-                    $mark_vec.push(ScriptGcMark::Object(ptr));
-                }
-            } else {
-                foreign_value_skip("object", ptr.index, $objects.len());
-            }
-        } else if let Some(ptr) = $val.as_string() {
-            if let Some(slot) = $strings.get_checked_mut(ptr) {
-                if let Some(str_data) = slot.as_mut() {
-                    if !str_data.tag.is_static() {
-                        str_data.tag.set_mark();
+impl<const STATIC: bool> Marker<'_, STATIC> {
+    #[inline(always)]
+    fn object(&mut self, ptr: ScriptObject) {
+        push_mark(self.objects, ptr, 0, "object", |o| !o.tag.is_static() && o.tag.is_alloced(),
+            self.object_marks, self.work);
+    }
+
+    #[inline(always)]
+    fn array(&mut self, ptr: ScriptArray) {
+        push_mark(self.arrays, ptr, ARRAY_SLOT, "array", |a| !a.tag.is_static() && a.tag.is_alloced(),
+            self.array_marks, self.work);
+    }
+
+    #[inline(always)]
+    fn pod_owner(&mut self, pt: ScriptPodType) {
+        if let Some(owner) = pod_type_owner(self.pod_types, pt) { self.object(owner); }
+    }
+
+    /// A root, outside the trace loop: one call each keeps `mark` small.
+    #[inline(never)]
+    fn mark_root(&mut self, value: ScriptValue) {
+        self.mark_value(value);
+    }
+
+    #[inline(always)]
+    fn mark_value(&mut self, value: ScriptValue) {
+        if let Some(ptr) = value.as_object() {
+            self.object(ptr);
+        } else if let Some(ptr) = value.as_string() {
+            if let Some(slot) = self.strings.get_checked_mut(ptr) {
+                if let Some(data) = slot.as_mut() {
+                    if !data.tag.is_static() {
+                        if STATIC { data.tag.set_static(); } else { data.tag.set_mark(); }
                     }
                 }
             } else {
-                foreign_value_skip("string", ptr.index, $strings.len());
+                foreign_value_skip("string", ptr.index, self.strings.len());
             }
-        } else if let Some(ptr) = $val.as_array() {
-            if let Some(array) = $arrays.get_checked(ptr) {
-                if !array.tag.is_static() && array.tag.is_alloced() {
-                    $mark_vec.push(ScriptGcMark::Array(ptr));
+        } else if let Some(ptr) = value.as_array() {
+            self.array(ptr);
+        } else if let Some(ptr) = value.as_pod() {
+            if let Some(pod) = self.pods.get_checked_mut(ptr) {
+                if !pod.tag.is_static() && pod.tag.is_alloced() {
+                    if STATIC { pod.tag.set_static(); } else { pod.tag.set_mark(); }
+                    let ty = pod.ty;
+                    let elem = pod.tag.as_array_builder();
+                    self.pod_owner(ty);
+                    if let Some(elem) = elem { self.pod_owner(elem); }
                 }
             } else {
-                foreign_value_skip("array", ptr.index, $arrays.len());
+                foreign_value_skip("pod", ptr.index, self.pods.len());
             }
-        } else if let Some(ptr) = $val.as_pod() {
-            if let Some(pod) = $pods.get_checked_mut(ptr) {
-                if !pod.tag.is_static() && pod.tag.is_alloced() && !pod.tag.is_marked() {
-                    pod.tag.set_mark();
-                    mark_pod_type_owner!($objects, $pod_types, $mark_vec, pod.ty);
-                    if let Some(elem) = pod.tag.as_array_builder() {
-                        mark_pod_type_owner!($objects, $pod_types, $mark_vec, elem);
-                    }
-                }
-            } else {
-                foreign_value_skip("pod", ptr.index, $pods.len());
-            }
-        } else if let Some(ptr) = $val.as_handle() {
-            // Skip handle index 0 - it's the "null" handle (ScriptHandle::ZERO)
+        } else if let Some(ptr) = value.as_handle() {
             if ptr.index != 0 {
-                if let Some(slot) = $handles.get_checked_mut(ptr) {
-                    if let Some(handle_data) = slot.as_mut() {
-                        if !handle_data.tag.is_static() {
-                            handle_data.tag.set_mark();
-                        }
+                if let Some(slot) = self.handles.get_checked_mut(ptr) {
+                    if let Some(data) = slot.as_mut() {
+                        if !data.tag.is_static() {
+                        if STATIC { data.tag.set_static(); } else { data.tag.set_mark(); }
+                    }
                     }
                 } else {
-                    foreign_value_skip("handle", ptr.index, $handles.len());
+                    foreign_value_skip("handle", ptr.index, self.handles.len());
                 }
             }
-        } else if let Some(ptr) = $val.as_regex() {
-            if let Some(slot) = $regexes.get_checked_mut(ptr) {
-                if let Some(regex_data) = slot.as_mut() {
-                    if !regex_data.tag.is_static() {
-                        regex_data.tag.set_mark();
+        } else if let Some(ptr) = value.as_regex() {
+            if let Some(slot) = self.regexes.get_checked_mut(ptr) {
+                if let Some(data) = slot.as_mut() {
+                    if !data.tag.is_static() {
+                        if STATIC { data.tag.set_static(); } else { data.tag.set_mark(); }
                     }
                 }
             } else {
-                foreign_value_skip("regex", ptr.index, $regexes.len());
+                foreign_value_skip("regex", ptr.index, self.regexes.len());
             }
-        } else if let Some(pt) = $val.as_pod_type() {
-            mark_pod_type_owner!($objects, $pod_types, $mark_vec, pt);
+        } else if let Some(pt) = value.as_pod_type() {
+            self.pod_owner(pt);
         }
-    };
+    }
+
+    fn mark_inner(&mut self, entry: u32) {
+        if entry & ARRAY_SLOT != 0 {
+            let array = self.arrays.get_at((entry & !ARRAY_SLOT) as usize);
+            if let ScriptArrayStorage::ScriptValue(values) = &array.storage {
+                for value in values { self.mark_value(*value); }
+            }
+            return;
+        }
+        let index = entry as usize;
+        let object = self.objects.get_at(index);
+        self.mark_value(object.proto);
+        for (key, val) in object.map.iter() {
+            self.mark_value(*key);
+            self.mark_value(val.value);
+        }
+        for kv in &object.vec {
+            self.mark_value(kv.key);
+            self.mark_value(kv.value);
+        }
+        let obj = ScriptObject::new(entry, self.objects.generation(index));
+        if object.tag.has_globs() {
+            if let Some(sources) = self.glob_sources.get(&obj) {
+                for src in sources { self.object(*src); }
+            }
+        }
+        if let Some(pt) = object.tag.as_pod_type() {
+            if pod_type_owner(self.pod_types, pt) == Some(obj) {
+                pod_type_refs(self.pod_types, pt, &mut |v| self.mark_value(v));
+            } else {
+                self.pod_owner(pt);
+            }
+        }
+    }
 }
 
 #[relax_api(run)]
@@ -247,75 +276,34 @@ impl ScriptHeap {
     /// Recursively mark a value and all reachable values as static (permanent).
     /// This walks the object graph similar to GC marking but sets the static flag instead.
     pub fn set_static(&mut self, value: ScriptValue) {
+        // Borrowing the bitmaps abandons a host's pending mark. Only a new mark can authorize its sweep.
+        let was_idle = self.gc_phase == GcPhase::Idle;
+        self.gc_phase = GcPhase::Skipped;
+        if !was_idle {
+            self.object_marks.fill(0);
+            self.array_marks.fill(0);
+        }
         self.mark_vec.clear();
-
-        // Initial value
-        set_static_val!(self, value);
-
-        // Process the work list - use while loop since set_static_inner adds to mark_vec
+        let mut walk = marker!(self, true);
+        walk.mark_value(value);
         let mut i = 0;
-        while i < self.mark_vec.len() {
-            let mark = self.mark_vec[i];
-            self.set_static_inner(mark);
+        while i < walk.work.len() {
+            walk.mark_inner(walk.work[i]);
             i += 1;
         }
-    }
-
-    fn set_static_inner(&mut self, value: ScriptGcMark) {
-        match value {
-            ScriptGcMark::Object(obj) => {
-                let object = &mut self.objects[obj];
-                // Skip if already static or not allocated
-                if object.tag.is_static() || !object.tag.is_alloced() {
-                    return;
-                }
-                object.tag.set_static();
-
-                // Queue all referenced values using macro (no is_static check inside closure)
-                // Also queues proto chain
-                let proto = object.proto;
-                queue_static_val!(self, proto);
-                object.map_iter(|key, val| {
-                    queue_static_val!(self, key);
-                    queue_static_val!(self, val);
-                });
-                let len = object.vec.len();
-                for j in 0..len {
-                    let object = &self.objects[obj];
-                    let key = object.vec[j].key;
-                    let val = object.vec[j].value;
-                    set_static_val!(self, key);
-                    set_static_val!(self, val);
-                }
-                // A static pod type keeps what it holds; an object carrying one keeps its owner
-                if let Some(pt) = self.objects[obj].tag.as_pod_type() {
-                    if pod_type_owner(&self.pod_types, pt) == Some(obj) {
-                        let mut held = Vec::new();
-                        pod_type_refs(&self.pod_types, pt, &mut |v| held.push(v));
-                        for v in held {
-                            set_static_val!(self, v);
-                        }
-                    } else if let Some(owner) = pod_type_owner(&self.pod_types, pt) {
-                        self.mark_vec.push(ScriptGcMark::Object(owner));
-                    }
-                }
-            }
-            ScriptGcMark::Array(arr) => {
-                let array = &mut self.arrays[arr];
-                // Skip if already static or not allocated
-                if array.tag.is_static() || !array.tag.is_alloced() {
-                    return;
-                }
-                array.tag.set_static();
-
-                // Queue all referenced values
-                if let ScriptArrayStorage::ScriptValue(values) = &self.arrays[arr].storage {
-                    for v in values {
-                        set_static_val!(self, v);
-                    }
-                }
-            }
+        for entry in self.mark_vec.drain(..) {
+            let i = (entry & !ARRAY_SLOT) as usize;
+            let marks = if entry & ARRAY_SLOT == 0 {
+                self.objects.get_at_mut(i).tag.set_static();
+                &mut self.object_marks
+            } else {
+                self.arrays.get_at_mut(i).tag.set_static();
+                &mut self.array_marks
+            };
+            marks[i / 64] &= !(1 << (i % 64));
         }
+        // A walk that unwinds leaves Skipped, so its partial visit bits are cleared before reuse.
+        if was_idle { self.gc_phase = GcPhase::Idle; }
     }
 
     #[inline]
@@ -343,101 +331,6 @@ impl ScriptHeap {
         let roots = self.heap_key() as *const crate::roots::ScriptRoots;
         crate::roots::script_root_retain(roots, crate::roots::ROOT_HANDLE, handle.index);
         ScriptHandleRef { roots, handle }
-    }
-
-    pub fn mark_inner(&mut self, mark: ScriptGcMark) {
-        match mark {
-            ScriptGcMark::Object(obj) => {
-                // Check flags and set mark
-                let object = &mut self.objects[obj];
-                // Static objects are assumed to only reference static values, so
-                // they do not need traversal during normal GC marking.
-                if object.tag.is_static() || object.tag.is_marked() || !object.tag.is_alloced() {
-                    return;
-                }
-                object.tag.set_mark();
-
-                // Mark proto/map/vec entries directly without temporary Vec snapshots.
-                let (objects, arrays, strings, pods, handles, regexes, pod_types, glob_sources, mark_vec) = (
-                    &self.objects,
-                    &self.arrays,
-                    &mut self.strings,
-                    &mut self.pods,
-                    &mut self.handles,
-                    &mut self.regexes,
-                    &self.pod_types,
-                    &self.glob_sources,
-                    &mut self.mark_vec,
-                );
-                let object = &objects[obj];
-                mark_value_fields!(objects, arrays, strings, pods, handles, regexes, pod_types, mark_vec, object.proto);
-                for (key, val) in object.map.iter() {
-                    mark_value_fields!(objects, arrays, strings, pods, handles, regexes, pod_types, mark_vec, *key);
-                    mark_value_fields!(objects, arrays, strings, pods, handles, regexes, pod_types, mark_vec, val.value);
-                }
-                for kv in object.vec.iter() {
-                    mark_value_fields!(objects, arrays, strings, pods, handles, regexes, pod_types, mark_vec, kv.key);
-                    mark_value_fields!(objects, arrays, strings, pods, handles, regexes, pod_types, mark_vec, kv.value);
-                }
-                if object.tag.has_globs() {
-                    if let Some(sources) = glob_sources.get(&obj) {
-                        for src in sources {
-                            mark_value_fields!(objects, arrays, strings, pods, handles, regexes, pod_types, mark_vec, ScriptValue::from(*src));
-                        }
-                    }
-                }
-                // A pod type lives while its owner object does: the owner keeps what the type
-                // holds, and an object made from the owner (which carries its type) keeps the owner.
-                if let Some(pt) = object.tag.as_pod_type() {
-                    if pod_type_owner(pod_types, pt) == Some(obj) {
-                        pod_type_refs(pod_types, pt, &mut |v| {
-                            mark_value_fields!(objects, arrays, strings, pods, handles, regexes, pod_types, mark_vec, v);
-                        });
-                    } else {
-                        mark_pod_type_owner!(objects, pod_types, mark_vec, pt);
-                    }
-                }
-            }
-            ScriptGcMark::Array(arr) => {
-                let tag = &self.arrays[arr].tag;
-                if tag.is_static() || tag.is_marked() || !tag.is_alloced() {
-                    return;
-                }
-                self.arrays[arr].tag.set_mark();
-
-                if let ScriptArrayStorage::ScriptValue(values) = &self.arrays[arr].storage {
-                    let (objects, arrays, strings, pods, handles, regexes, pod_types, mark_vec) = (
-                        &self.objects,
-                        &self.arrays,
-                        &mut self.strings,
-                        &mut self.pods,
-                        &mut self.handles,
-                        &mut self.regexes,
-                        &self.pod_types,
-                        &mut self.mark_vec,
-                    );
-                    for v in values.iter() {
-                        mark_value_fields!(objects, arrays, strings, pods, handles, regexes, pod_types, mark_vec, *v);
-                    }
-                }
-            }
-        }
-    }
-
-    /// Mark a single value - adds objects/arrays to work list, marks primitives directly
-    #[inline]
-    fn mark_value(&mut self, val: ScriptValue) {
-        let (objects, arrays, strings, pods, handles, regexes, pod_types, mark_vec) = (
-            &self.objects,
-            &self.arrays,
-            &mut self.strings,
-            &mut self.pods,
-            &mut self.handles,
-            &mut self.regexes,
-            &self.pod_types,
-            &mut self.mark_vec,
-        );
-        mark_value_fields!(objects, arrays, strings, pods, handles, regexes, pod_types, mark_vec, val);
     }
 
     /// How many objects the given seeds reach, following what the marker
@@ -577,36 +470,40 @@ impl ScriptHeap {
     #[relax_api(run)]
     #[relax(keep_reachable)]
     pub fn mark(&mut self, threads: &ScriptThreads, code: &ScriptCode) {
+        if !self.preflight_gc(code) {
+            self.gc_phase = GcPhase::Skipped;
+            return;
+        }
+        self.gc_phase = GcPhase::Marked;
         self.mark_vec.clear();
+        self.object_marks.fill(0);
+        self.array_marks.fill(0);
+        let mut marker = marker!(self, false);
 
         // Mark type_check protos
         for i in 0..self.type_check.len() {
             if let Some(object) = &self.type_check[i].object {
-                self.mark_value(object.proto);
+                marker.mark_root(object.proto);
             }
         }
 
         // Mark type_defaults objects
-        {
-            let (type_defaults, mark_vec) = (&self.type_defaults, &mut self.mark_vec);
-            for obj in type_defaults.values().copied() {
-                mark_vec.push(ScriptGcMark::Object(obj));
-            }
+        for obj in self.type_defaults.values().copied() {
+            marker.object(obj);
         }
 
         // Mark the Rust-held refs' roots (roots.rs): slot indices, at their current generation
         {
             let roots = self.roots.get();
-            let mark_vec = &mut self.mark_vec;
             for index in roots.rooted_slots(crate::roots::ROOT_OBJECT) {
                 let generation = self.objects.generation(index as usize);
-                mark_vec.push(ScriptGcMark::Object(ScriptObject::new(index, generation)));
+                marker.object(ScriptObject::new(index, generation));
             }
             for index in roots.rooted_slots(crate::roots::ROOT_ARRAY) {
                 let generation = self.arrays.generation(index as usize);
-                mark_vec.push(ScriptGcMark::Array(ScriptArray::new(index, generation)));
+                marker.array(ScriptArray::new(index, generation));
             }
-            let handles = &mut self.handles;
+            let handles = &mut marker.handles;
             for index in roots.rooted_slots(crate::roots::ROOT_HANDLE) {
                 if let Some(handle_data) = handles.get_at_mut(index as usize).as_mut() {
                     handle_data.tag.set_mark();
@@ -619,50 +516,54 @@ impl ScriptHeap {
             if let Some(thread) = threads.get(thread_idx) {
                 // Stack values
                 for value in thread.stack.iter() {
-                    self.mark_value(*value);
+                    marker.mark_root(*value);
                 }
                 // Frame-local slot values
                 for value in thread.slots.iter() {
-                    self.mark_value(*value);
+                    marker.mark_root(*value);
                 }
                 // Scopes
                 for scope in thread.scopes.iter() {
-                    self.mark_value((*scope).into());
+                    marker.mark_root((*scope).into());
                 }
                 // Method call contexts
                 for me in thread.mes.iter() {
                     match me {
                         ScriptMe::Object(obj) => {
-                            self.mark_value((*obj).into());
+                            marker.mark_root((*obj).into());
                         }
                         ScriptMe::Call { sself, args, .. } => {
                             if let Some(s) = sself {
-                                self.mark_value(*s);
+                                marker.mark_root(*s);
                             }
-                            self.mark_value((*args).into());
+                            marker.mark_root((*args).into());
                         }
                         ScriptMe::Pod { pod, .. } => {
-                            self.mark_value((*pod).into());
+                            marker.mark_root((*pod).into());
                         }
                         ScriptMe::Array(arr) => {
-                            self.mark_value((*arr).into());
+                            marker.mark_root((*arr).into());
                         }
                     }
                 }
                 // Loop sources
                 for loop_frame in thread.loops.iter() {
                     if let Some(loop_values) = &loop_frame.values {
-                        self.mark_value(loop_values.source);
+                        marker.mark_root(loop_values.source);
                     }
+                }
+                for value in thread.continuation_roots() {
+                    marker.mark_root(value);
                 }
                 // Trap error values
                 for err in thread.trap.err_borrow().iter() {
-                    self.mark_value(err.value);
+                    marker.mark_root(err.value);
                 }
                 // Trap return/bail values
                 match thread.trap.get_on() {
-                    Some(ScriptTrapOn::Return(v)) | Some(ScriptTrapOn::Bail(v)) => {
-                        self.mark_value(v);
+                    Some(ScriptTrapOn::CallBack { scope, .. }) => marker.mark_root(scope.into()),
+                    Some(ScriptTrapOn::Return(v) | ScriptTrapOn::Uncaught(v) | ScriptTrapOn::Bail(v)) => {
+                        marker.mark_root(v);
                     }
                     _ => {}
                 }
@@ -672,19 +573,19 @@ impl ScriptHeap {
         // Mark ScriptBody scope and me objects (a transient body's only
         // while it is alive: `mark_transient_bodies`)
         for body in code.bodies.borrow().iter() {
-            if body.transient {
+            if body.transient || matches!(body.source, ScriptSource::Free) {
                 continue;
             }
             if let ScriptSource::Mod(script_mod) = &body.source {
                 for v in script_mod.values.iter() {
-                    self.mark_value(*v);
+                    marker.mark_root(*v);
                 }
             }
 
             // Mark tokenizer string literals as roots
             for str_val in body.tokenizer.iter_strings() {
                 if let Some(ptr) = str_val.as_string() {
-                    if let Some(str_data) = self.strings[ptr].as_mut() {
+                    if let Some(str_data) = marker.strings[ptr].as_mut() {
                         if !str_data.tag.is_static() {
                             str_data.tag.set_mark();
                         }
@@ -696,23 +597,26 @@ impl ScriptHeap {
         // Mark ScriptNative type_table objects
         for type_map in code.native.borrow().type_table.iter() {
             for (_, obj) in type_map.iter() {
-                self.mark_value((*obj).into());
+                marker.mark_root((*obj).into());
             }
         }
 
         // Process the work list - use while loop since mark_inner adds to mark_vec
-        self.drain_mark_vec();
-        self.mark_transient_bodies(threads, code);
+        marker.drain_mark_vec();
+        marker.mark_transient_bodies(threads, code, &mut self.transient_bodies,
+            &mut self.live_bodies, &mut self.newly_live_bodies);
     }
+}
 
+impl<const STATIC: bool> Marker<'_, STATIC> {
     fn drain_mark_vec(&mut self) {
         let mut i = 0;
-        while i < self.mark_vec.len() {
-            let mark = self.mark_vec[i];
+        while i < self.work.len() {
+            let mark = self.work[i];
             self.mark_inner(mark);
             i += 1;
         }
-        self.mark_vec.clear();
+        self.work.clear();
     }
 
     /// Transient bodies ([`crate::vm::ScriptVm::eval_transient`]) live while
@@ -721,13 +625,17 @@ impl ScriptHeap {
     /// string literals, which can make more bodies live (to a fixpoint).
     /// The rest are freed here: their objects are unmarked, and the sweep
     /// that follows takes them.
-    fn mark_transient_bodies(&mut self, threads: &ScriptThreads, code: &ScriptCode) {
-        let transient: Vec<bool> = code.bodies.borrow().iter().map(|b| b.transient).collect();
+    fn mark_transient_bodies(&mut self, threads: &ScriptThreads, code: &ScriptCode,
+        transient: &mut Vec<bool>, live: &mut Vec<bool>, newly: &mut Vec<usize>,
+    ) {
+        transient.clear();
+        transient.extend(code.bodies.borrow().iter().map(|b| b.transient));
         if !transient.contains(&true) {
             return;
         }
-        let mut live = vec![false; transient.len()];
-        let mut newly = Vec::new();
+        live.clear();
+        live.resize(transient.len(), false);
+        newly.clear();
         let note = |ip: ScriptIp, live: &mut Vec<bool>, newly: &mut Vec<usize>| {
             let b = ip.body as usize;
             if !ip.is_unknown() && transient.get(b) == Some(&true) && !live[b] {
@@ -737,10 +645,10 @@ impl ScriptHeap {
         };
         for thread_idx in 0..threads.len() {
             if let Some(thread) = threads.get(thread_idx) {
-                note(thread.trap.ip, &mut live, &mut newly);
+                note(thread.trap.ip, live, newly);
                 for call in thread.calls.iter() {
                     if let Some(ip) = call.return_ip {
-                        note(ip, &mut live, &mut newly);
+                        note(ip, live, newly);
                     }
                 }
             }
@@ -748,13 +656,13 @@ impl ScriptHeap {
         loop {
             for i in 1..self.objects.len() {
                 let obj = self.objects.get_at(i);
-                if !obj.tag.is_alloced() || !(obj.tag.is_marked() || obj.tag.is_static()) {
+                if !obj.tag.is_alloced() || !(is_marked(self.object_marks, i) || obj.tag.is_static()) {
                     continue;
                 }
                 if let Some(ScriptFnPtr::Script(ip)) = obj.tag.as_fn() {
-                    note(ip, &mut live, &mut newly);
+                    note(ip, live, newly);
                 }
-                note(obj.made_at, &mut live, &mut newly);
+                note(obj.made_at, live, newly);
             }
             if newly.is_empty() {
                 break;
@@ -763,10 +671,10 @@ impl ScriptHeap {
                 let bodies = code.bodies.borrow();
                 for b in newly.drain(..) {
                     let body = &bodies[b];
-                    self.mark_vec.push(ScriptGcMark::Object(body.scope.as_object()));
-                    self.mark_vec.push(ScriptGcMark::Object(body.me.as_object()));
+                    self.object(body.scope.as_object());
+                    self.object(body.me.as_object());
                     if let Some(end) = &body.end_scope {
-                        self.mark_vec.push(ScriptGcMark::Object(end.as_object()));
+                        self.object(end.as_object());
                     }
                     if let Some(script_mod) = body.source.written() {
                         for v in script_mod.values.iter() {
@@ -793,8 +701,8 @@ impl ScriptHeap {
                 *body = ScriptBody {
                     source: ScriptSource::Free,
                     effective_code: String::new(),
-                    tokenizer: Default::default(),
-                    parser: Default::default(),
+                    tokenizer: crate::tokenizer::ScriptTokenizer::vacant(),
+                    parser: crate::parser::ScriptParser::vacant(),
                     scope: Default::default(),
                     me: Default::default(),
                     end_scope: None,
@@ -802,6 +710,7 @@ impl ScriptHeap {
                     source_len: 0,
                     content_hash: 0,
                     transient: false,
+                    is_script_mod: false,
                     real_file: String::new(),
                     shown: None,
                     first_col: 0,
@@ -810,10 +719,14 @@ impl ScriptHeap {
             }
         }
     }
+}
 
+#[relax_api(run)]
+impl ScriptHeap {
     #[relax_api(run)]
     #[relax(keep_reachable)]
     pub fn sweep(&mut self, log_stats: bool) {
+        if self.gc_phase == GcPhase::Skipped { return; }
         let start = crate::clock::monotonic_now();
 
         // GC stats: (static, alive, removed)
@@ -829,10 +742,9 @@ impl ScriptHeap {
             // Skip static objects - they are permanent
             if obj.tag.is_static() {
                 obj_static += 1;
-                obj.tag.clear_mark();
                 continue;
             }
-            if !obj.tag.is_marked() && obj.tag.is_alloced() {
+            if !is_marked(&self.object_marks, i) && obj.tag.is_alloced() {
                 let pod_ty = obj.tag.as_pod_type();
                 let has_globs = obj.tag.has_globs();
                 obj.clear();
@@ -852,7 +764,6 @@ impl ScriptHeap {
                 if obj.tag.is_alloced() {
                     obj_alive += 1;
                 }
-                obj.tag.clear_mark();
             }
         }
         if obj_removed != 0 {
@@ -863,10 +774,9 @@ impl ScriptHeap {
             // Skip static arrays - they are permanent
             if array.tag.is_static() {
                 arr_static += 1;
-                array.tag.clear_mark();
                 continue;
             }
-            if !array.tag.is_marked() && array.tag.is_alloced() {
+            if !is_marked(&self.array_marks, i) && array.tag.is_alloced() {
                 array.clear();
                 // Increment generation, then push ref with new generation
                 self.arrays.free_slot(i as u32);
@@ -877,7 +787,6 @@ impl ScriptHeap {
                 if array.tag.is_alloced() {
                     arr_alive += 1;
                 }
-                array.tag.clear_mark();
             }
         }
         // always leave the empty null string at 0
@@ -891,9 +800,12 @@ impl ScriptHeap {
                 if !str.tag.is_marked() {
                     if let Some((k, _)) = self.string_intern.remove_entry(&str.string) {
                         self.strings.set_at(i, None);
-                        if let Some(mut s) = Arc::into_inner(k.0) {
-                            s.clear();
-                            self.strings_reuse.push(s);
+                        // Normal string construction may grow the reuse pool. A sweep only
+                        // returns buffers that fit the pool's existing capacity.
+                        if self.strings_reuse.len() < self.strings_reuse.capacity() {
+                            if let Some(s) = Arc::into_inner(k.0) {
+                                self.recycle_string(s);
+                            }
                         }
                         // Increment generation, then push ref with new generation
                         self.strings.free_slot(i as u32);
@@ -964,7 +876,7 @@ impl ScriptHeap {
                 if !re.tag.is_marked() {
                     // Build the intern key to remove from intern table
                     let key = RegexInternKey {
-                        pattern: re.pattern.clone(),
+                        pattern: std::mem::take(&mut re.pattern),
                         flags: re.flags,
                     };
                     self.regex_intern.remove(&key);
@@ -980,18 +892,9 @@ impl ScriptHeap {
             }
         }
 
-        // Print compact GC stats: S=static A=alive R=removed
-        let elapsed_us = ((crate::clock::monotonic_now() - start) * 1_000_000.0) as u128;
-        if log_stats {
-            log!("GC {}us: obj[S:{} A:{} R:{}] arr[S:{} A:{} R:{}] str[S:{} A:{} R:{}] hdl[S:{} A:{} R:{}] pod[S:{} A:{} R:{}] rex[S:{} A:{} R:{}]",
-                elapsed_us,
-                obj_static, obj_alive, obj_removed,
-                arr_static, arr_alive, arr_removed,
-                str_static, str_alive, str_removed,
-                hdl_static, hdl_alive, hdl_removed,
-                pod_static, pod_alive, pod_removed,
-                rex_static, rex_alive, rex_removed);
-        }
+        self.object_marks.fill(0);
+        self.array_marks.fill(0);
+        self.gc_phase = GcPhase::Idle;
 
         // Record heap statistics after GC for triggering next cycle
         self.gc_last = ScriptHeapGcLast {
@@ -1006,8 +909,33 @@ impl ScriptHeap {
         // re-derive the retained-heap cap's headroom from the swept state.
         self.reconcile_heap_bytes_if_limited();
         let gc_ns = ((crate::clock::monotonic_now() - start) * 1e9) as u64;
+        // Print compact GC stats: S=static A=alive R=removed
+        let elapsed_us = ((crate::clock::monotonic_now() - start) * 1_000_000.0) as u128;
+        if log_stats {
+            log!("GC {}us: obj[S:{} A:{} R:{}] arr[S:{} A:{} R:{}] str[S:{} A:{} R:{}] hdl[S:{} A:{} R:{}] pod[S:{} A:{} R:{}] rex[S:{} A:{} R:{}]",
+                elapsed_us,
+                obj_static, obj_alive, obj_removed,
+                arr_static, arr_alive, arr_removed,
+                str_static, str_alive, str_removed,
+                hdl_static, hdl_alive, hdl_removed,
+                pod_static, pod_alive, pod_removed,
+                rex_static, rex_alive, rex_removed);
+        }
+
         // the flight recorder's trace of the script VM's collections (makepad run)
-        makepad_error_log::flight_mark!("script.gc", gc_ns, obj_removed + arr_removed + str_removed, "GC {} us: objects {} alive {} removed, arrays {} / {}, strings {} / {}", gc_ns / 1000, obj_alive, obj_removed, arr_alive, arr_removed, str_alive, str_removed);
+        if makepad_error_log::flight::on() {
+            use std::io::Write;
+            // Seven integer fields, each at most 20 digits, plus the literal text.
+            const SIZE: usize = 224;
+            let mut buf = [0u8; SIZE];
+            let mut out = &mut buf[..];
+            write!(out, "GC {} us: objects {} alive {} removed, arrays {} / {}, strings {} / {}",
+                gc_ns / 1000, obj_alive, obj_removed, arr_alive, arr_removed, str_alive, str_removed)
+                .expect("the collection statistics fit the stack buffer");
+            let len = SIZE - out.len();
+            let message = std::str::from_utf8(&buf[..len]).unwrap();
+            makepad_error_log::flight::mark_ab("script.gc", message, gc_ns, (obj_removed + arr_removed + str_removed) as u64);
+        }
         crate::inspect_registry::gc_done(self, gc_ns);
     }
 
@@ -1164,13 +1092,16 @@ impl ScriptHeap {
     }
 
     pub fn free_object_if_unreffed(&mut self, ptr: ScriptObject) {
+        // Free lists can grow. A physical refusal drops the scope roots during
+        // the bail and leaves their slots to the next ordinary collection.
+        if self.memory_refusal_pending() || self.is_allocation_poison_object(ptr) { return; }
         // Check if reference is still valid (may have been freed by GC)
         if !self.objects.is_valid(ptr) {
             return;
         }
         let obj = &mut self.objects[ptr];
         // Must check is_alloced to avoid double-freeing
-        if obj.tag.is_alloced() && !obj.tag.is_reffed() {
+        if obj.tag.is_alloced() && !obj.tag.is_reffed() && !obj.tag.is_static() {
             let pod_ty = obj.tag.as_pod_type();
             if obj.tag.has_globs() {
                 self.glob_sources.remove(&ptr);
@@ -1206,6 +1137,66 @@ impl ScriptHeap {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_collection_after_an_abandoned_mark_traces_the_current_graph() {
+        use crate::makepad_live_id::*;
+        let mut heap = ScriptHeap::empty();
+        let threads = ScriptThreads::empty();
+        let code = ScriptCode::default();
+        let parent = heap.new_object();
+        let _parent_root = heap.new_object_ref(parent);
+        let array = heap.new_array();
+        heap.set_value_def(parent, id!(items).into(), array.into());
+        let removed = heap.new_object();
+        let root = heap.new_object_ref(removed);
+        heap.mark(&threads, &code); // Abandon this collection before its sweep.
+
+        let child = heap.new_object();
+        heap.set_value_def(parent, id!(child).into(), child.into());
+        let element = heap.new_object();
+        heap.array_push(array, element.into(), NoTrap);
+        drop(root);
+        heap.mark(&threads, &code);
+        heap.sweep(false);
+        assert!(heap.object_alive(child), "the marked parent was retraced after gaining a child");
+        assert!(heap.object_alive(element), "the marked array was retraced after gaining an element");
+        assert!(!heap.object_alive(removed), "the abandoned mark did not keep the dropped root alive");
+    }
+
+    /// The mark never traces a static object or array, so nothing may store a collectable
+    /// value into one: every store path refuses, and a collection leaves the static graph whole.
+    #[test]
+    fn a_store_into_a_static_value_is_refused_so_collection_loses_nothing() {
+        use crate::makepad_live_id::*;
+        use crate::vm::{ScriptMod, ScriptVm, ScriptVmBase, ScriptVmHost};
+        let eval = |vm: &mut ScriptVm, code: &str| {
+            vm.eval(ScriptMod { file: "static_store".to_owned(), code: format!("{code}\n;"), ..Default::default() })
+        };
+        let mut host = ScriptVmHost::new((), ());
+        let mut vm = ScriptVm { host: host.host_context(), bx: Box::new(ScriptVmBase::new()) };
+        let api = vm.new_module(id!(api));
+        vm.capture_errors();
+        eval(&mut vm, "mod.api.store = {list: [1], items: {}}");
+        vm.bx.heap.set_static(api.into());
+        let store = eval(&mut vm, "mod.api.store").as_object().expect("the store object");
+        assert!(vm.bx.heap.objects[store].tag.is_static(), "set_static reaches the store");
+        for (case, write, read) in [
+            ("property", "mod.api.store.cache = {x: 41}", "mod.api.store.cache"),
+            ("local property", "let s = mod.api.store\ns.cache = {x: 41}", "mod.api.store.cache"),
+            ("array push", "mod.api.store.list.push({x: 41})", "mod.api.store.list[1]"),
+            ("array index", "mod.api.store.list[0] = {x: 41}", "mod.api.store.list[0]"),
+            ("vector index", "mod.api.store.items[0] = {x: 41}", "mod.api.store.items[0]"),
+            ("vector push", "mod.api.store.items.push({x: 41})", "mod.api.store.items[0]"),
+        ] {
+            eval(&mut vm, write);
+            assert!(!eval(&mut vm, read).is_object(), "{case}: the store was refused");
+            vm.gc();
+            assert!(!eval(&mut vm, read).is_object(), "{case}: still nothing there after a collection");
+            assert_eq!(eval(&mut vm, "mod.api.store.list[0]").as_number(), Some(1.0), "{case}: the static graph is whole");
+        }
+        vm.take_errors();
+    }
 
     /// A stale handle -- an object collected, its slot taken by a new one --
     /// reports dead and resolves to nothing; it never aliases the newcomer.
@@ -1282,8 +1273,10 @@ pub(crate) fn end_run() {
     GC_STRESS.store(false, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// Collect at every safepoint from now on (`on`), or by the growth rule again.
-pub fn set_gc_stress(on: bool) {
+/// Collect at every safepoint from now on (`on`), or by the growth rule again. The trace host's
+/// switch below is its one caller.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn set_gc_stress(on: bool) {
     GC_STRESS.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 

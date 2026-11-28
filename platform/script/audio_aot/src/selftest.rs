@@ -43,6 +43,7 @@ impl SelftestReport {
 
 /// Render the shader on the host and interpret the supplied predicate on its stereo output.
 /// Diagnostics use byte offsets into the shader, a newline, then the test.
+#[relax_api::relax_api(loader = "a check the loader runs on its own back end: JIT code has no use for it")]
 pub fn selftest(shader: &str, test: &str, bindings: &AudioBindings<'_>) -> Result<SelftestReport, Vec<ShaderError>> {
     let render = compile_audition(shader, false, bindings)?;
     let check = match render.kind {

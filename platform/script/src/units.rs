@@ -59,6 +59,9 @@ pub struct UnitIx(pub u16);
 
 #[relax_api(run)]
 impl UnitTable {
+    /// A vacant body's placeholder, never used for tokenizing; `place_body` overwrites the slot before reuse.
+    pub(crate) fn vacant() -> Self { Self { entries: Vec::new() } }
+
     /// Today's units with today's values: s, rad, px and m are base units; ms 1/1000, deg and °
     /// PI/180, cm 1/100, mm 1/1000.
     pub fn standard() -> UnitTable {

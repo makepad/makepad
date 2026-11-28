@@ -640,14 +640,26 @@ Every digit/operator handler is **inline** (no helper `fn`), so `ui.display` is 
 
 ## Embedding untrusted mini-apps with host-mediated I/O
 
-A host that enforces per-request permissions should call
-`Splash::set_host_io_only(true)` **before** the first `set_text`. The selection
-is host-owned, cannot be relaxed for that Splash, and is inherited by nested
-Splashes. `CxSplashVmExt::alloc_splash_vm_with_host_io()` provides the same mode
-for hosts allocating isolates directly, which must dispatch and draw the guest's
-widgets inside `with_isolate`, as Splash does. `allow_net: true` cannot override it.
+A new `Splash` requests `HostGrants::NONE`. To let a panel's text fields copy
+and cut, for example, its Rust host calls `splash.set_grants(HostGrants::CLIPBOARD)`
+before the first `set_text` or `set_vm_policy`. A host can repeat the same grant
+on later mounts. Changing the grant requires a fresh isolate.
 
-In this mode scripts use the existing `host.request` bridge for external I/O:
+Without a host override, `allow_net: true` requests `NETWORK`. An explicit
+`set_grants` overrides `allow_net`, including when the host chooses `NONE`.
+At allocation the VM intersects that request with the parent VM's persistent
+grants. This rule also applies to nested Splashes created during an event or
+draw, and during a host's temporary resource-loading scope.
+
+Rust hosts allocating VMs directly use `cx.alloc_splash_vm()` for the same
+default, `alloc_splash_vm_with_grants` for explicit grants and optional UI
+registration, or `alloc_splash_vm_with_config` to select the widget set or
+theme. Dispatch events and draw guest widgets inside `with_isolate`, as
+`Splash` does. To check guest source before mounting it, call
+`validate_splash_body(cx, body, false)` for an offline dry run. Passing
+`true` requests `NETWORK` under the same parent grant limit.
+
+A guest can ask its host to perform I/O through `host.request`.
 
 ```text
 host.request("network.http", {url: "https://example.com/data"}, fn(result) {
@@ -672,18 +684,20 @@ credential isolation, DNS/private-network checks, response limits, cancellation,
 and rechecking policy immediately before transmission and response delivery.
 Granting one request must never enable a native networking runtime for the guest.
 
-Direct HTTP, WebSockets, raw sockets, and listeners are rejected. Resource
-constructors are checked at the native entrypoint, including aliases retained in
-the widget prelude. Native browser launch, media playback, clipboard export,
-file pickers, drag export, and menu bar changes are suppressed while the isolate
-is installed, and `Html`/`Markdown` links don't emit their URLs as actions.
-Browser, MapView, ScreenCap, Window, WindowMenu, and CachedWidget constructors
-are not registered in the restricted isolate. Script callbacks run within the
-same per-call budget as other entries into an isolate. Splash installs its own context while dispatching/drawing
-children, so native widget behavior cannot accidentally borrow host authority.
-Per-Splash stylesheet re-evaluation is disabled in this mode; restricted
-isolates take the trusted theme chosen with `set_splash_theme` (and the host's
-`set_splash_theme_script`), and restyle when the host changes it.
+Platform calls and widget actions check the installed isolate's grants. Direct
+HTTP, WebSockets, raw sockets, and listeners require `NETWORK`. Local resource
+loaders require `LOCAL_RESOURCES` even when called through an alias in the
+prelude. Markdown can display inline data and host-supplied textures with
+`NONE`. Loading an HTTP image also requires the widget's `load_http_images`
+setting. Opening a link or emitting its URL as an HTML or Markdown link action
+requires `OPEN_URL`. A click or keypress grants no extra capabilities.
+
+The widget library registers `ScreenCap`, `Window`, `WindowMenu`, and
+`CachedWidget` only with `DESKTOP_SHELL`. Native layers, media devices, file
+pickers, and outbound drags have their own grants. Isolates inherit the host's
+stylesheet and can restyle when it changes. Trusted registration code loads
+the stylesheet's resources in a scoped loader while the guest keeps its own
+persistent grants.
 
 The host may still explicitly supply a private jailed filesystem through
 `set_sandbox_dir`. For information-flow enforcement, either label all data in
@@ -694,7 +708,6 @@ ones and propagate source restrictions through their results. Network denial
 alone is not an information-flow policy; the host must track private sources
 and authorize every outgoing sink, including model inference and IPC.
 
-This is an API-level confinement boundary for script code, not process isolation:
-it does not address native memory-safety bugs, resource exhaustion, or covert
-channels such as rendering and timing. Default Splash behavior remains unchanged
-unless the host selects this mode.
+These grants govern the script and widget APIs within the host process. Native
+memory safety, resource exhaustion, and covert channels such as rendering and
+timing remain outside that boundary.

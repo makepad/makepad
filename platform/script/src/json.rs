@@ -18,7 +18,7 @@ pub(crate) enum State {
 #[relax_api(handle, run)]
 #[derive(Default)]
 pub struct JsonParser {
-    index: u32,
+    pub(crate) index: u32,
     pub root: ScriptValue,
     pub(crate) state: Vec<State>,
     pub errors: Vec<(u32, String)>,
@@ -54,6 +54,10 @@ impl JsonParser {
             State::RootMaybeObject => {
                 let key = self.root;
                 let new_obj = heap.new_object();
+                if heap.allocation_error_pending {
+                    self.root = NIL;
+                    return;
+                }
                 heap.set_string_keys(new_obj);
                 self.root = new_obj.into();
                 match tok {
@@ -115,6 +119,10 @@ impl JsonParser {
                     ScriptToken::OpenCurly => {
                         // object
                         let new_obj = heap.new_object();
+                        if heap.allocation_error_pending {
+                            self.root = NIL;
+                            return;
+                        }
                         heap.set_string_keys(new_obj);
                         self.root = new_obj.into();
                         self.state.push(State::ObjectKey(new_obj));
@@ -122,6 +130,10 @@ impl JsonParser {
                     ScriptToken::OpenSquare => {
                         //
                         let new_arr = heap.new_array();
+                        if heap.allocation_error_pending {
+                            self.root = NIL;
+                            return;
+                        }
                         self.root = new_arr.into();
                         self.state.push(State::Array(new_arr));
                     }
@@ -160,6 +172,9 @@ impl JsonParser {
                     ScriptToken::OpenCurly => {
                         // object
                         let new_obj = heap.new_object();
+                        if heap.allocation_error_pending {
+                            return;
+                        }
                         heap.set_string_keys(new_obj);
                         self.state.push(State::ObjectColon(obj, new_obj.into()));
                         self.state.push(State::ObjectKey(new_obj));
@@ -167,6 +182,9 @@ impl JsonParser {
                     ScriptToken::OpenSquare => {
                         //
                         let new_arr = heap.new_array();
+                        if heap.allocation_error_pending {
+                            return;
+                        }
                         self.state.push(State::ObjectColon(obj, new_arr.into()));
                         self.state.push(State::Array(new_arr));
                     }
@@ -257,6 +275,9 @@ impl JsonParser {
                     ScriptToken::OpenCurly => {
                         // object
                         let new_obj = heap.new_object();
+                        if heap.allocation_error_pending {
+                            return;
+                        }
                         heap.set_string_keys(new_obj);
                         heap.set_value_def(obj, key, new_obj.into());
                         self.state.push(State::ObjectKey(new_obj));
@@ -264,6 +285,9 @@ impl JsonParser {
                     ScriptToken::OpenSquare => {
                         //
                         let new_arr = heap.new_array();
+                        if heap.allocation_error_pending {
+                            return;
+                        }
                         heap.set_value_def(obj, key, new_arr.into());
                         self.state.push(State::Array(new_arr));
                     }
@@ -329,6 +353,9 @@ impl JsonParser {
                     ScriptToken::OpenCurly => {
                         // object
                         let new_obj = heap.new_object();
+                        if heap.allocation_error_pending {
+                            return;
+                        }
                         heap.set_string_keys(new_obj);
                         heap.array_push_unchecked(arr, new_obj.into());
                         self.state.push(State::ObjectKey(new_obj));
@@ -336,6 +363,9 @@ impl JsonParser {
                     ScriptToken::OpenSquare => {
                         //
                         let new_arr = heap.new_array();
+                        if heap.allocation_error_pending {
+                            return;
+                        }
                         heap.array_push_unchecked(arr, new_arr.into());
                         self.state.push(State::Array(new_arr));
                     }
@@ -367,7 +397,7 @@ impl JsonParser {
     }
 
     pub fn parse(&mut self, tokens: &[ScriptTokenPos], heap: &mut ScriptHeap) {
-        while self.index < tokens.len() as u32 && self.state.len() > 0 {
+        while self.index < tokens.len() as u32 && !self.state.is_empty() && !heap.allocation_error_pending {
             let tok = if let Some(tok) = tokens.get(self.index as usize) {
                 tok.token.clone()
             } else {
@@ -375,6 +405,9 @@ impl JsonParser {
             };
             self.parse_step(tok, heap);
             self.index += 1;
+        }
+        if heap.allocation_error_pending {
+            self.root = NIL;
         }
     }
 }
@@ -393,8 +426,11 @@ impl JsonParserThread {
         self.tokenizer.clear();
         self.parser.clear();
         self.tokenizer.tokenize(json, heap);
+        if heap.allocation_error_pending { return NIL; }
         self.tokenizer.finish(heap);
+        if heap.allocation_error_pending { return NIL; }
         self.parser.parse(&self.tokenizer.tokens, heap);
+        if heap.allocation_error_pending { return NIL; }
         return self.parser.root;
     }
 }

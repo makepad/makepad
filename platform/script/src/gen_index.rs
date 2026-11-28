@@ -91,6 +91,21 @@ impl<T> GenVec<T> {
         if index == 0 { 0 } else { self.tag }
     }
 
+    /// Room for one more slot, so the next `push` neither grows past the
+    /// index width nor aborts on a refused allocation. A compare in the
+    /// common case; the backing storage grows (fallibly) only when full.
+    #[inline]
+    pub fn try_reserve_slot(&mut self) -> Result<(), SlotRefusal> {
+        let len = self.slots.len();
+        if len >= slot_limit() {
+            return Err(SlotRefusal::Full);
+        }
+        if len < self.slots.capacity() {
+            return Ok(());
+        }
+        self.slots.try_reserve(1).map_err(|_| SlotRefusal::Memory)
+    }
+
     /// Push a new item and return (index, generation)
     pub fn push(&mut self, data: T) -> (u32, Generation) {
         let index = self.slots.len();
@@ -235,6 +250,33 @@ fn use_after_free_panic(slots_gen: Generation, ref_gen: Generation, index: u32, 
         "GenVec<{}> use-after-free detected! index={} ref_gen={} slot_gen={}",
         type_name, index, ref_gen, slots_gen
     );
+}
+
+/// Why a table could not take one more slot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SlotRefusal {
+    /// The table holds as many slots as a value's index can name.
+    Full,
+    /// The allocator refused the table's backing storage.
+    Memory,
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn slot_limit() -> usize {
+    1 << crate::value::HEAP_INDEX_BITS
+}
+
+// A full table holds 16.7 M slots; the unit tests reach the same refusal
+// through a smaller limit on their own thread.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static TEST_SLOT_LIMIT: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn slot_limit() -> usize {
+    TEST_SLOT_LIMIT.with(|limit| limit.get()).unwrap_or(1 << crate::value::HEAP_INDEX_BITS)
 }
 
 /// A heap table holds at most 2^24 slots: the index's bits in a `ScriptValue`.

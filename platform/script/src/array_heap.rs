@@ -174,6 +174,9 @@ impl ScriptHeap {
             ) {
                 return self.allocation_poison_array;
             }
+            if !self.reserve_array_slot() {
+                return self.allocation_poison_array;
+            }
             let mut array = ScriptArrayData::default();
             array.tag.set_alloced();
             let (index, generation) = self.arrays.push(array);
@@ -192,12 +195,17 @@ impl ScriptHeap {
     }
 
     fn array_push_impl(&mut self, array: ScriptArray, value: ScriptValue, trap: ScriptTrap) {
-        if self.is_allocation_poison_array(array) || self.arrays[array].tag.is_immutable() {
+        if self.is_allocation_poison_array(array) { return; }
+        if self.arrays[array].tag.is_immutable() {
             script_err_immutable!(trap, "array is immutable");
             return;
         }
         let bytes = self.arrays[array].storage.allocation_element_bytes();
-        if !self.charge_allocation(bytes, "pushing an array element") {
+        if !self.charge_allocation(bytes, "pushing an array element")
+            || !self.reserve_for("out of memory while pushing an array element", trap, |heap| {
+                heap.arrays[array].storage.try_reserve(1)
+            })
+        {
             return;
         }
         self.escape_value(value);
@@ -217,7 +225,8 @@ impl ScriptHeap {
     }
 
     pub fn array_push_vec(&mut self, array: ScriptArray, object: ScriptObject, trap: ScriptTrap) {
-        if self.is_allocation_poison_array(array) || self.arrays[array].tag.is_immutable() {
+        if self.is_allocation_poison_array(array) { return; }
+        if self.arrays[array].tag.is_immutable() {
             script_err_immutable!(trap, "array is immutable");
             return;
         }
@@ -225,7 +234,11 @@ impl ScriptHeap {
         let bytes = vec_len
             .checked_mul(self.arrays[array].storage.allocation_element_bytes())
             .unwrap_or(usize::MAX);
-        if !self.charge_allocation(bytes, "extending an array") {
+        if !self.charge_allocation(bytes, "extending an array")
+            || !self.reserve_for("out of memory while extending an array", trap, |heap| {
+                heap.arrays[array].storage.try_reserve(vec_len)
+            })
+        {
             return;
         }
         // escape barrier: the object's vec values become reachable from the array
@@ -244,7 +257,8 @@ impl ScriptHeap {
     /// Merges all elements from source array into target array.
     /// Used by the splat operator (..) to spread one array into another.
     pub fn merge_array(&mut self, target: ScriptArray, source: ScriptArray, trap: ScriptTrap) {
-        if self.is_allocation_poison_array(target) || self.arrays[target].tag.is_immutable() {
+        if self.is_allocation_poison_array(target) { return; }
+        if self.arrays[target].tag.is_immutable() {
             script_err_immutable!(trap, "array is immutable");
             return;
         }
@@ -257,23 +271,13 @@ impl ScriptHeap {
         if !self.charge_allocation(bytes, "merging arrays") {
             return;
         }
-        // Get the storage from source first
-        let source_storage = &self.arrays[source].storage;
-        let values: Vec<ScriptValue> = match source_storage {
-            ScriptArrayStorage::ScriptValue(v) => v.iter().copied().collect(),
-            ScriptArrayStorage::U8(v) => {
-                v.iter().map(|x| ScriptValue::from_f64(*x as f64)).collect()
-            }
-            ScriptArrayStorage::U16(v) => {
-                v.iter().map(|x| ScriptValue::from_f64(*x as f64)).collect()
-            }
-            ScriptArrayStorage::U32(v) => {
-                v.iter().map(|x| ScriptValue::from_f64(*x as f64)).collect()
-            }
-            ScriptArrayStorage::F32(v) => {
-                v.iter().map(|x| ScriptValue::from_f64(*x as f64)).collect()
-            }
-        };
+        let mut values = Vec::new();
+        if !self.reserve_for("out of memory while merging arrays", trap, |heap| {
+            values.try_reserve_exact(source_len)?;
+            heap.arrays[target].storage.try_reserve(source_len)
+        }) { return; }
+        let source_view = self.arr_view(source);
+        values.extend((0..source_len).map(|i| source_view.index(i).unwrap()));
 
         // escape barrier: source values become reachable from target
         for v in &values {
@@ -296,7 +300,11 @@ impl ScriptHeap {
             return;
         }
         let bytes = self.arrays[array].storage.allocation_element_bytes();
-        if !self.charge_allocation(bytes, "pushing an array element") {
+        if !self.charge_allocation(bytes, "pushing an array element")
+            || !self.reserve_for("out of memory while pushing an array element", NoTrap, |heap| {
+                heap.arrays[array].storage.try_reserve(1)
+            })
+        {
             return;
         }
         let array = &mut self.arrays[array];
@@ -577,19 +585,27 @@ impl ScriptHeap {
         value: ScriptValue,
         trap: ScriptTrap,
     ) -> ScriptValue {
-        if self.is_allocation_poison_array(array) || self.arrays[array].tag.is_immutable() {
+        if self.is_allocation_poison_array(array) { return NIL; }
+        if self.arrays[array].tag.is_immutable() {
             return script_err_immutable!(trap, "array is immutable");
         }
         let len = self.arrays[array].storage.len();
         if index >= len {
-            let additional = index
-                .checked_add(1)
-                .and_then(|target| target.checked_sub(len))
-                .and_then(|elements| {
-                    elements.checked_mul(self.arrays[array].storage.allocation_element_bytes())
-                })
+            let target = index.checked_add(1);
+            let width = self.arrays[array].storage.allocation_element_bytes();
+            let additional = target.and_then(|n| (n - len).checked_mul(width))
                 .unwrap_or(usize::MAX);
             if !self.charge_allocation(additional, "growing a sparse array index") {
+                return NIL;
+            }
+            const REASON: &str = "out of memory while growing a sparse array index";
+            let Some(target) = target.filter(|n| *n <= isize::MAX as usize / width) else {
+                self.refuse_memory(REASON, trap);
+                return NIL;
+            };
+            if !self.reserve_for(REASON, trap, |heap| {
+                heap.arrays[array].storage.try_reserve(target - len)
+            }) {
                 return NIL;
             }
         }

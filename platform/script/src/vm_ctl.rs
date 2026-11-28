@@ -79,6 +79,10 @@ pub const STAT_CAPTURING: u32 = 14;
 pub const STAT_RUN_YIELDED: u32 = 15;
 /// Whether a native running now may pause its thread: it was called by the outermost run.
 pub const STAT_CAN_PAUSE: u32 = 16;
+/// Number of native callback records on the selected thread.
+pub const STAT_NATIVE_CONTINUATIONS: u32 = 17;
+/// Script runs entered under a waiting native with a slice budget, over this VM's lifetime.
+pub const STAT_NESTED_SCRIPT_RUNS: u32 = 18;
 
 // ---- vm_ctl
 
@@ -126,6 +130,10 @@ pub const CTL_STRING_UNPIN: u32 = 22;
 pub const CTL_NATIVE_STRING_PREFLIGHT: u32 = 23;
 /// `text`: a host native's text, stored (charged on its real length under a budget) into `value`.
 pub const CTL_STORE_NATIVE_STRING: u32 = 24;
+/// Install an interrupt counter if absent. Returns 1 if installed, with its thread in `a`.
+pub(crate) const CTL_INTERRUPT_SAMPLING_BEGIN: u32 = 25;
+/// Remove the counter installed by [`CTL_INTERRUPT_SAMPLING_BEGIN`] on thread `a`.
+pub(crate) const CTL_INTERRUPT_SAMPLING_END: u32 = 26;
 
 #[relax_api(plain, run)]
 #[repr(C)]
@@ -345,21 +353,44 @@ impl<'a> ScriptRegReq<'a> {
 #[relax_api(run)]
 impl ScriptVmBase {
     #[inline]
-    pub(crate) fn enter_instruction_limit(&mut self, limit: u64) -> (Option<u64>, u64) {
+    pub(crate) fn enter_instruction_limit(&mut self, limit: u64, real: bool) -> (Option<u64>, u64) {
         let thread = self.threads.cur();
         let previous = thread.instruction_limit_remaining;
-        let applied = previous.unwrap_or(limit).min(limit);
+        // Only real limits narrow each other. A sampling-only resume keeps its saved phase
+        // unless it resumes inside a real allowance.
+        let applied = match thread.real_instruction_remaining() {
+            Some(outer) if real => outer.min(limit),
+            Some(outer) => outer,
+            None => limit,
+        };
         thread.instruction_limit_remaining = Some(applied);
-        self.last_limit_exit_remaining = applied;
+        if real {
+            thread.instruction_limit_depth += 1;
+            self.last_limit_exit_remaining = applied;
+        }
         (previous, applied)
     }
 
     #[inline]
-    pub(crate) fn leave_instruction_limit(&mut self, previous: Option<u64>, applied: u64) -> u64 {
+    pub(crate) fn leave_instruction_limit(&mut self, previous: Option<u64>, applied: u64, real: bool) -> u64 {
         let thread = self.threads.cur();
         let remaining = thread.instruction_limit_remaining.unwrap_or(applied);
-        let consumed = applied.saturating_sub(remaining);
-        thread.instruction_limit_remaining = previous.map(|outer| outer.saturating_sub(consumed));
+        // A sampling counter is a phase and can wrap; real allowances only count down to zero.
+        let consumed = if thread.instruction_limit_depth == 0 {
+            applied.wrapping_sub(remaining)
+        } else {
+            applied.saturating_sub(remaining)
+        };
+        if real {
+            thread.instruction_limit_depth -= 1;
+        }
+        thread.instruction_limit_remaining = previous.map(|outer| {
+            if thread.instruction_limit_depth == 0 {
+                outer.wrapping_sub(consumed)
+            } else {
+                outer.saturating_sub(consumed)
+            }
+        });
         consumed
     }
 
@@ -397,8 +428,8 @@ impl ScriptVmBase {
             }
             STAT_LIMIT_REMAINING => {
                 let thread = self.threads.cur_ref();
-                thread.instruction_limit_remaining.unwrap_or(u64::MAX)
-                    .min(thread.paused_instruction_limit.unwrap_or(u64::MAX))
+                let paused = thread.paused_instruction_limit.and_then(|(remaining, real)| real.then_some(remaining));
+                thread.real_instruction_remaining().unwrap_or(u64::MAX).min(paused.unwrap_or(u64::MAX))
             }
             STAT_HANDLE_TYPE => self.code.native.borrow().handle_type.get(&LiveId(req.a)).unwrap().0 as u64,
             STAT_BODY_COUNT => self.code.bodies.borrow().len() as u64,
@@ -413,7 +444,9 @@ impl ScriptVmBase {
             STAT_HAS_LET_HOOK => self.let_hook.is_some() as u64,
             STAT_CAPTURING => self.captured_errors.is_some() as u64,
             STAT_RUN_YIELDED => self.threads.cur_ref().yielded as u64,
-            STAT_CAN_PAUSE => (self.run_depth == 1) as u64,
+            STAT_CAN_PAUSE => (self.run_depth == 1 && self.native_invocation != Some(crate::vm::NativeInvocation::Synchronous)) as u64,
+            STAT_NESTED_SCRIPT_RUNS => self.nested_script_runs,
+            STAT_NATIVE_CONTINUATIONS => self.threads.cur_ref().native_conts.len() as u64,
             op => panic!("vm_stat: unknown op {op}"),
         }
     }
@@ -450,7 +483,7 @@ impl ScriptVmBase {
             }
             CTL_SET_SILENCE_ERRORS => std::mem::replace(&mut self.silence_errors, req.a != 0) as u64,
             CTL_LIMIT_SET => {
-                let (previous, applied) = self.enter_instruction_limit(req.a);
+                let (previous, applied) = self.enter_instruction_limit(req.a, true);
                 req.a = applied;
                 req.b = previous.unwrap_or(u64::MAX);
                 req.value = previous.is_some().into();
@@ -458,7 +491,22 @@ impl ScriptVmBase {
             }
             CTL_LIMIT_END => {
                 let previous = (req.a != u64::MAX || req.value == TRUE).then_some(req.a);
-                self.last_limit_consumed = self.leave_instruction_limit(previous, req.b);
+                self.last_limit_consumed = self.leave_instruction_limit(previous, req.b, true);
+                0
+            }
+            CTL_INTERRUPT_SAMPLING_BEGIN => {
+                req.a = self.threads.current() as u64;
+                let counter = &mut self.threads.cur().instruction_limit_remaining;
+                if counter.is_some() { return 0; }
+                // At a billion instructions per second u64::MAX lasts over 580 years.
+                // The counter can wrap in sampling mode. Only a real limit can exhaust it.
+                *counter = Some(u64::MAX);
+                1
+            }
+            CTL_INTERRUPT_SAMPLING_END => {
+                if let Some(thread) = self.threads.get_mut(req.a as usize) {
+                    thread.instruction_limit_remaining = None;
+                }
                 0
             }
             CTL_SET_CURRENT_THREAD => {
@@ -486,9 +534,13 @@ impl ScriptVmBase {
             CTL_ALLOC_END => {
                 // Parser/native work can be the last action in the limited code, with no
                 // following opcode for run_core's poll. Surface that pending refusal here too.
-                if let Some(message) = self.heap.take_allocation_error() {
-                    let _ = script_err_limit!(self.threads.cur_ref().trap, "{}", message);
-                    self.drain_errors();
+                match self.heap.take_allocation_error() {
+                    Some(AllocationError::Memory) => {} // Only an active interpreter can have a pending memory bail.
+                    Some(AllocationError::Limit(message)) => {
+                        let _ = script_err_limit!(self.threads.cur_ref().trap, "{}", message);
+                        self.drain_errors();
+                    }
+                    None => {}
                 }
                 let previous = self.alloc_budgets.pop().flatten();
                 let report = self.heap.end_allocation_budget(previous);

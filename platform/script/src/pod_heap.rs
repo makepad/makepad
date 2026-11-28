@@ -66,6 +66,7 @@ impl ScriptHeap {
             let ptr = ScriptPodType {
                 index: self.pod_types.len() as u32,
             };
+            reserve_free_list(&mut self.pod_types_free, self.pod_types.len() + 1);
             self.shader_types.push(Default::default());
             self.pod_types.push(ScriptPodTypeData {
                 name,
@@ -547,6 +548,7 @@ impl ScriptHeap {
             pod.data.fill(0);
             ptr
         } else {
+            reserve_free_list(&mut self.pods_free, self.pods.len() + 1);
             let (index, generation) = self.pods.push(ScriptPodData {
                 ty,
                 ..Default::default()
@@ -876,6 +878,23 @@ impl ScriptHeap {
         value: ScriptValue,
         trap: ScriptTrap,
     ) -> usize {
+        // A scalar pod (`i32(x)`, `f32(x)`, ...) is one component, as in shader source:
+        // `vec3i(i32(a), i32(b), i32(c))`.
+        if let Some(scalar) = value.as_pod() {
+            let pod = &self.pods[scalar];
+            let word = pod.data.first().copied().unwrap_or(0);
+            let plain = match self.pod_types[pod.ty.index as usize].ty {
+                ScriptPodTy::F32 => Some(ScriptValue::from_f64(f32::from_bits(word) as f64)),
+                ScriptPodTy::F16 => Some(ScriptValue::from_f64(f16_to_f32(word as u16) as f64)),
+                ScriptPodTy::U32 => Some(ScriptValue::from_f64(word as f64)),
+                ScriptPodTy::I32 => Some(ScriptValue::from_f64(word as i32 as f64)),
+                ScriptPodTy::Bool => Some(ScriptValue::from_bool(word != 0)),
+                _ => None,
+            };
+            if let Some(plain) = plain {
+                return self.pod_write_vec(ot, offset_of, out_data, plain, trap);
+            }
+        }
         if let Some(value) = value.as_number() {
             if offset_of >= ot.elem_size() * ot.dims() {
                 script_err_pod!(

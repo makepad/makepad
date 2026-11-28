@@ -11,8 +11,8 @@
 //!
 //! The plate kernels are the kernel text Motion's lower_document builds
 //! for a `Kernel{}` block (the document's helpers and tables it reaches,
-//! then its declarations and functions), read from `$KC1_KERNELS` or
-//! `local/agent_state/edits/scratch/KC1/kernels`:
+//! then its declarations and functions), read from the directory
+//! `$KC1_KERNELS` names (required):
 //!   sk_lines.splash  stack.motion.splash's sk_lines (341712 segments)
 //!   k_myc.splash     room.motion.splash's k_myc (20007 hairlines, 8 sin per warp)
 //!   k_room.splash    room.motion.splash's k_room (8162 elements, no Rust twin)
@@ -1047,7 +1047,7 @@ use makepad_script_compute_sched::kernel::KernelExt;
     }
 
     pub fn main() {
-        let dir = std::env::var("KC1_KERNELS").unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../../local/agent_state/edits/scratch/KC1/kernels").to_string());
+        let dir = std::env::var("KC1_KERNELS").unwrap_or_else(|_| panic!("KC1_KERNELS must name the directory of the plate kernels (sk_lines.splash, k_myc.splash, k_room.splash)"));
         let reps: usize = std::env::var("KC1_REPS").ok().and_then(|x| x.parse().ok()).unwrap_or(7);
         let only = std::env::var("KC1_ONLY").ok();
         let want = |n: &str| only.as_deref().is_none_or(|o| o.split(',').any(|x| x == n));

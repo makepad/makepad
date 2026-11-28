@@ -1237,6 +1237,10 @@ pub const GLSL_MAX_VERTEX_ATTRIBS: usize = 16;
 pub const WEBGL_MAX_ATTRIB_STRIDE: usize = 255;
 /// GL ES 3.0's minimum MAX_VERTEX_ATTRIB_STRIDE, in bytes.
 pub const GLES_MAX_ATTRIB_STRIDE: usize = 2048;
+/// The instance data texture's row, as a shift: 2048 words, GL ES 3.0's minimum
+/// MAX_TEXTURE_SIZE. A layer of the array texture is 2048 such rows, one window of 4M words.
+/// The GL backend's `WORD_ROW` and the web page's `MAKEPAD_INSTANCE_WORD_ROW` are the same row.
+pub const INSTANCE_WORD_ROW_SHIFT: u32 = 11;
 
 /// What the GL printer needs beyond the IR.
 #[relax_api(plain)]

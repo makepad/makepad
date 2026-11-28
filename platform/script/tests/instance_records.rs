@@ -105,9 +105,11 @@ fn spirv_reads_the_record_from_a_storage_buffer_and_validates() {
 fn glsl_keeps_attributes_and_reads_the_rest_from_the_instance_texture() {
     let src = compile("glsl");
     // 650 words is wider than GL ES's 2048-byte stride: all of it is fetched.
-    assert!(src.contains("uniform highp usampler2D mp_inst_data;"), "{src}");
+    assert!(src.contains("uniform highp usampler2DArray mp_inst_data;"), "{src}");
     assert!(!src.contains("in vec4 packed_instance_"), "{src}");
     assert!(src.contains("(gl_InstanceID + mp_inst_base) * 650 + slot"), "{src}");
+    // 2048-word rows, 2048-row layers: shifts and masks, no divide
+    assert!(src.contains("ivec3(i & 2047, (i >> 11) & 2047, i >> 22)"), "{src}");
 }
 
 /// A pixel stage that reads an integer (an enum's record word) and a float

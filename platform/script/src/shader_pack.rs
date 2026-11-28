@@ -55,7 +55,7 @@ use makepad_live_id::*;
 use std::collections::{HashMap, HashSet};
 /// Bumped whenever the key's recipe or the pack's layout changes; a pack of
 /// another version is refused.
-const SHADER_PACK_VERSION: u32 = 4;
+const SHADER_PACK_VERSION: u32 = 5;
 const SHADER_PACK_MAGIC: &[u8; 4] = b"MPSP";
 
 /// One draw shader of a pack: its GLSL ES 3.0 code and reflection.
@@ -73,6 +73,7 @@ pub struct ShaderPackEntry {
     /// The io in the compiler's order.
     pub io: Vec<PackIo>,
     pub samplers: Vec<ShaderSampler>,
+    pub glsl_texture_bindings: Vec<DrawShaderDescGlslTexture>,
     /// In io order.
     pub scope_uniforms: Vec<PackScopeUniform>,
     pub table_consts: Vec<PackTableConst>,
@@ -92,8 +93,6 @@ pub struct PackIo {
     pub buffer_index: Option<u32>,
     /// Uniform buffers: the block name the code declares.
     pub block_name: String,
-    /// Textures: the sampler the code samples it with.
-    pub sampler: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -610,7 +609,6 @@ impl ShaderPackEntry {
                     pod_type,
                     buffer_index: io.buffer_index.map(|i| i as usize),
                     block_name: io.block_name.as_str().into(),
-                    sampler: io.sampler as usize,
                 }
             })
             .collect();
@@ -636,6 +634,7 @@ impl ShaderPackEntry {
         DrawShaderDesc {
             io,
             samplers: self.samplers.clone(),
+            glsl_texture_bindings: self.glsl_texture_bindings.clone(),
             scope_uniforms,
             table_consts: self
                 .table_consts
@@ -790,7 +789,6 @@ pub(crate) fn pack_entry_from_desc(
             ty,
             buffer_index: d.buffer_index.map(|i| i as u32),
             block_name: d.block_name.to_string(),
-            sampler: d.sampler as u32,
         });
     }
     let mut paths = ScopePaths::new(&vm.bx, io_self, fns);
@@ -826,6 +824,7 @@ pub(crate) fn pack_entry_from_desc(
         pod_types,
         io,
         samplers: desc.samplers.clone(),
+        glsl_texture_bindings: desc.glsl_texture_bindings.clone(),
         scope_uniforms,
         table_consts: desc
             .table_consts
@@ -1106,7 +1105,6 @@ impl PackWriter {
             self.u32(io.ty);
             self.opt(io.buffer_index);
             self.str(&io.block_name);
-            self.u32(io.sampler);
         }
         self.len(e.samplers.len());
         for s in &e.samplers {
@@ -1116,6 +1114,13 @@ impl PackWriter {
             self.u8(s.is_video as u8);
             self.u8(s.compare as u8);
             self.u8(s.anisotropy);
+        }
+        self.len(e.glsl_texture_bindings.len());
+        for b in &e.glsl_texture_bindings {
+            self.str(&b.uniform_name);
+            self.u32(b.texture_slot);
+            self.u32(b.sampler_index);
+            self.u8(b.stages);
         }
         self.len(e.scope_uniforms.len());
         for su in &e.scope_uniforms {
@@ -1336,7 +1341,6 @@ impl<'a> PackReader<'a> {
                 ty: self.u32()?,
                 buffer_index: self.opt()?,
                 block_name: self.str()?.to_string(),
-                sampler: self.u32()?,
             });
         }
         let n = self.len()?;
@@ -1350,6 +1354,22 @@ impl<'a> PackReader<'a> {
                 compare: self.u8()? != 0,
                 anisotropy: self.u8()?,
             });
+        }
+        let n = self.len()?;
+        let texture_slots = io.iter().filter(|row| matches!(row.kind, PackIoKind::Texture(_))).count();
+        let mut glsl_texture_bindings = Vec::new();
+        for _ in 0..n {
+            let binding = DrawShaderDescGlslTexture {
+                uniform_name: self.str()?.into(),
+                texture_slot: self.u32()?,
+                sampler_index: self.u32()?,
+                stages: self.u8()?,
+            };
+            if binding.texture_slot as usize >= texture_slots || binding.sampler_index as usize >= samplers.len()
+                || !(1..=3).contains(&binding.stages) {
+                return Err("invalid GLSL texture binding in shader pack".into());
+            }
+            glsl_texture_bindings.push(binding);
         }
         let n = self.len()?;
         let mut scope_uniforms = Vec::with_capacity(n.min(1024));
@@ -1395,6 +1415,7 @@ impl<'a> PackReader<'a> {
             pod_types,
             io,
             samplers,
+            glsl_texture_bindings,
             scope_uniforms,
             table_consts,
             uniform_buffer_bindings,
@@ -1679,6 +1700,45 @@ impl ShaderPackContents {
 }
 #[relax_api(run)]
 pub fn inspect_shader_pack(bytes: &[u8]) -> ShaderPackContents { ShaderPackContents(read_pack(bytes)) }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use makepad_shader::shader_output::{GLSL_STAGE_FRAGMENT, GLSL_STAGE_VERTEX};
+
+    #[test]
+    fn shader_pack_v5_round_trips_glsl_texture_bindings() {
+        let repeat = ShaderSampler { address: SamplerAddress::Repeat, ..ShaderSampler::default() };
+        let entry = ShaderPackEntry {
+            key: 1,
+            name: "two_samplers".into(),
+            vertex: "uniform sampler2D tex_img; void main() { gl_Position = textureLod(tex_img, vec2(0.5), 0.0); }".into(),
+            fragment: "uniform sampler2D tex_img, mp_s1_img; out vec4 color; void main() { color = texture(tex_img, vec2(0.5)) + texture(mp_s1_img, vec2(0.5)); }".into(),
+            pod_types: vec![PackPodType { name: 0, kind: PackPodKind::Void }],
+            io: vec![PackIo {
+                kind: PackIoKind::Texture(TextureType::Texture2d), name: id!(img).0, ty: 0,
+                buffer_index: None, block_name: String::new(),
+            }],
+            samplers: vec![ShaderSampler { anisotropy: 16, ..repeat }, repeat],
+            glsl_texture_bindings: vec![
+                DrawShaderDescGlslTexture {
+                    uniform_name: "tex_img".into(), texture_slot: 0, sampler_index: 0,
+                    stages: GLSL_STAGE_VERTEX | GLSL_STAGE_FRAGMENT,
+                },
+                DrawShaderDescGlslTexture {
+                    uniform_name: "mp_s1_img".into(), texture_slot: 0, sampler_index: 1, stages: GLSL_STAGE_FRAGMENT,
+                },
+            ],
+            scope_uniforms: vec![], table_consts: vec![], uniform_buffer_bindings: vec![],
+            scope_uniform_buffer_index: None, uses_time: false,
+        };
+        let mut bytes = write_shader_pack(std::slice::from_ref(&entry));
+        assert_eq!(&bytes[4..8], &5u32.to_le_bytes());
+        assert_eq!(read_shader_pack(&bytes).unwrap(), vec![entry]);
+        bytes[4..8].copy_from_slice(&4u32.to_le_bytes());
+        assert_eq!(read_shader_pack(&bytes).unwrap_err(), "shader pack version 4 (this build reads 5)");
+    }
+}
 
 #[cfg(not(all(target_arch = "wasm32", makepad_precompiled_shaders)))]
 fn write_value_to_f32_slots(

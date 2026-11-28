@@ -18,7 +18,8 @@ impl<'a> ScriptVm<'a> {
         let thread = self.bx.threads.cur();
         thread.slot_base = thread.slots.len();
         let new_len = thread.slot_base + n;
-        thread.slots.resize(new_len, NIL);
+        // A refused grow raises the growth signal; the run ends before the next instruction.
+        thread.grow_slots(new_len);
         thread.trap.goto_next();
     }
 
@@ -94,6 +95,7 @@ impl<'a> ScriptVm<'a> {
             self.bx.threads.cur().push_stack_unchecked(old);
         } else if old.is_string_like() || value.is_string_like() {
             let str = self.bx.heap.new_string_concat(old, value);
+            if self.bx.heap.allocation_error_pending { return; }
             self.bx.threads.cur().set_slot(slot, str);
             self.bx.threads.cur().push_stack_unchecked(NIL);
         } else {
@@ -115,6 +117,14 @@ impl<'a> ScriptVm<'a> {
     where
         F: FnOnce(f64, f64) -> f64,
     {
+        self.handle_slot_num_assign_op_int(opargs, None, f)
+    }
+
+    /// `handle_slot_num_assign_op` with `int = Some(is_rem)` for `/=` and `%=`.
+    pub(crate) fn handle_slot_num_assign_op_int<F>(&mut self, opargs: OpcodeArgs, int: Option<bool>, f: F)
+    where
+        F: FnOnce(f64, f64) -> f64,
+    {
         let value = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
         let _id = self.bx.threads.cur().pop_stack_value();
         let slot = opargs.to_u32();
@@ -123,12 +133,8 @@ impl<'a> ScriptVm<'a> {
             self.bx.threads.cur().push_stack_unchecked(old);
         } else {
             let ip = self.bx.threads.cur_ref().trap.ip;
-            let fa = self.bx.heap.cast_to_f64(old, ip);
-            let fb = self.bx.heap.cast_to_f64(value, ip);
-            self.bx
-                .threads
-                .cur()
-                .set_slot(slot, ScriptValue::from_f64_traced_nan(f(fa, fb), ip));
+            let new = self.compound_numeric(old, value, int, f, ip);
+            self.bx.threads.cur().set_slot(slot, new);
             self.bx.threads.cur().push_stack_unchecked(NIL);
         }
         self.bx.threads.cur().trap.goto_next();

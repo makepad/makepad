@@ -44,7 +44,7 @@ impl<'a> ScriptVm<'a> {
 
     // RETURN handlers
 
-    pub(crate) fn handle_return(&mut self, opargs: OpcodeArgs) {
+    pub(crate) fn handle_return(&mut self, opargs: OpcodeArgs) -> bool {
         let value = if opargs.is_nil() {
             NIL
         } else {
@@ -52,8 +52,12 @@ impl<'a> ScriptVm<'a> {
         };
         let Some(call) = self.bx.threads.cur().calls.pop() else {
             self.bail("calls empty in handle_return");
-            return;
+            return false;
         };
+        if call.native_cont {
+            self.return_to_native(call, value);
+            return false;
+        }
         // A fn that ended on a `for` statement: the fn (its args scope's proto, read before
         // the frame frees that scope) and where its loop is.
         let after_for = match opargs.after_for() {
@@ -85,6 +89,7 @@ impl<'a> ScriptVm<'a> {
                 self.after_for_result(f, loop_at, ret, call.args.is_pop_to_me());
             }
             if !self.bx.threads.cur_ref().has_execution_limit_exceeded() && call.args.is_pop_to_me()
+                && !self.bx.heap.allocation_error_pending
             {
                 self.pop_to_me();
             }
@@ -94,6 +99,33 @@ impl<'a> ScriptVm<'a> {
                 .cur()
                 .trap
                 .set_on(Some(ScriptTrapOn::Return(value)));
+        }
+        true
+    }
+
+    pub(crate) fn return_to_native(&mut self, call: CallFrame, value: ScriptValue) {
+        self.bx.heap.escape_value(value);
+        let thread = self.bx.threads.cur();
+        thread.slot_base = call.prev_slot_base;
+        thread.truncate_bases(call.bases, &mut self.bx.heap);
+        thread.native_conts.last_mut().unwrap().ret = Some(value);
+        if let Some(ip) = call.return_ip {
+            thread.trap.ip = ip;
+            // Resolving the operand of RETURN or '?' can itself raise a diagnostic.
+            // Its catch may unwind this builder before the native observes the result.
+            if thread.trap.has_err() {
+                let depth = thread.native_conts.len();
+                self.handle_errors();
+                let thread = self.bx.threads.cur_ref();
+                if thread.native_conts.len() != depth || !thread.trap.on_is_none() { return; }
+            }
+            let Some(&ScriptMe::Call { args, target: CallTarget::Admitted(native), .. }) = self.bx.threads.cur_ref().mes.last() else {
+                self.bail("callback returned without its admitted native");
+                return;
+            };
+            self.poll_opcode_native(args, native, call.args);
+        } else {
+            thread.trap.set_on(Some(ScriptTrapOn::Return(value)));
         }
     }
 
@@ -144,6 +176,7 @@ impl<'a> ScriptVm<'a> {
                 Some((Opcode::RETURN, _)) => {
                     // The frame returns it; to the host, the host decides.
                     let frame = thread.calls.get(level.checked_sub(1)?)?;
+                    if frame.native_cont { return None; }
                     ret = frame.return_ip?;
                     pops = frame.args.is_pop_to_me();
                     call_at = ScriptIp { body: ret.body, index: ret.index - 1 };
@@ -180,6 +213,10 @@ impl<'a> ScriptVm<'a> {
                 self.bail("calls empty in handle_return_if_err");
                 return true;
             };
+            if call.native_cont {
+                self.return_to_native(call, value);
+                return false;
+            }
             self.bx.threads.cur().slot_base = call.prev_slot_base;
             self.bx
                 .threads
@@ -190,6 +227,7 @@ impl<'a> ScriptVm<'a> {
                 self.bx.threads.cur().push_stack_unchecked(value);
                 if !self.bx.threads.cur_ref().has_execution_limit_exceeded()
                     && call.args.is_pop_to_me()
+                    && !self.bx.heap.allocation_error_pending
                 {
                     self.pop_to_me();
                 }
@@ -203,7 +241,7 @@ impl<'a> ScriptVm<'a> {
             true
         } else {
             self.bx.threads.cur().trap.goto_next();
-            false
+            true
         }
     }
 
@@ -418,7 +456,7 @@ impl<'a> ScriptVm<'a> {
     pub(crate) fn handle_ok_test(&mut self, opargs: OpcodeArgs) {
         let ip = self.bx.threads.cur_ref().trap.ip();
         let bases = self.bx.threads.cur_ref().new_bases();
-        self.bx.threads.cur().tries.push(TryFrame {
+        self.bx.threads.cur().push_try(TryFrame {
             push_nil: true,
             start_ip: ip,
             jump: opargs.to_u32() + 1,
@@ -438,7 +476,7 @@ impl<'a> ScriptVm<'a> {
     pub(crate) fn handle_try_test(&mut self, opargs: OpcodeArgs) {
         let ip = self.bx.threads.cur_ref().trap.ip();
         let bases = self.bx.threads.cur_ref().new_bases();
-        self.bx.threads.cur().tries.push(TryFrame {
+        self.bx.threads.cur().push_try(TryFrame {
             push_nil: false,
             start_ip: ip,
             jump: opargs.to_u32() + 1,

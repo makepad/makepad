@@ -24,6 +24,7 @@ pub struct Hook {
 static HOOK: OnceLock<Hook> = OnceLock::new();
 
 /// Installs the store (once per process); false when one is installed already.
+#[relax_api::relax_api(loader = "the loader installs the kernel cache: JIT code has no use for it")]
 pub fn install(hook: Hook) -> bool {
     HOOK.set(hook).is_ok()
 }
@@ -176,6 +177,7 @@ static HOST_OVERRIDE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU6
 /// Tests: stored code is re-targeted at `addr` (0: the real trampoline), as when the loader
 /// is mapped elsewhere in the next run.
 #[doc(hidden)]
+#[relax_api::relax_api(loader = "a test hook of the loader's kernel cache: JIT code has no use for it")]
 pub fn override_host_addr(addr: u64) {
     HOST_OVERRIDE.store(addr, std::sync::atomic::Ordering::Relaxed);
 }

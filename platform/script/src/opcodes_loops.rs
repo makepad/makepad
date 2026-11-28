@@ -37,7 +37,7 @@ impl<'a> ScriptVm<'a> {
         // (scope_value / def_scope_value), the proto vec copy is dead weight
         let scope = self.bx.heap.new_loop_scope(parent);
         self.bx.heap.clear_object_deep(scope);
-        self.bx.threads.cur().scopes.push(scope);
+        self.bx.threads.cur().push_scope(scope);
         true
     }
 
@@ -56,7 +56,7 @@ impl<'a> ScriptVm<'a> {
         self.bx.threads.cur().trap.goto_next();
         let bases = self.bx.threads.cur_ref().new_bases();
         let start_ip = self.bx.threads.cur_ref().trap.ip();
-        self.bx.threads.cur().loops.push(LoopFrame {
+        self.bx.threads.cur().push_loop(LoopFrame {
             bases,
             start_ip,
             values: Some(LoopValues {
@@ -77,7 +77,7 @@ impl<'a> ScriptVm<'a> {
         let new_scope = self.bx.heap.new_loop_scope(scope);
         self.bx.heap.clear_object_deep(new_scope);
 
-        self.bx.threads.cur().scopes.push(new_scope);
+        self.bx.threads.cur().push_scope(new_scope);
         self.bx
             .heap
             .set_loop_binding(new_scope, value_id.into(), first_value);
@@ -104,7 +104,7 @@ impl<'a> ScriptVm<'a> {
         self.bx.threads.cur().trap.goto_next();
         let bases = self.bx.threads.cur_ref().new_bases();
         let start_ip = self.bx.threads.cur_ref().trap.ip.index;
-        self.bx.threads.cur().loops.push(LoopFrame {
+        self.bx.threads.cur().push_loop(LoopFrame {
             bases,
             start_ip,
             values: None,
@@ -116,7 +116,7 @@ impl<'a> ScriptVm<'a> {
         };
         let new_scope = self.bx.heap.new_loop_scope(scope);
         self.bx.heap.clear_object_deep(new_scope);
-        self.bx.threads.cur().scopes.push(new_scope);
+        self.bx.threads.cur().push_scope(new_scope);
     }
 
     /// Whether the `for` at the current ip takes its source straight from a
@@ -214,13 +214,17 @@ impl<'a> ScriptVm<'a> {
             } else {
                 if self.bx.heap.iter_len(obj) > 0 {
                     let threads = &self.bx.threads;
-                    let cursor = self.bx.heap.objects[obj].map.open_cursor(
+                    let Some(cursor) = self.bx.heap.objects[obj].map.open_cursor(
                         threads.current(), threads.cur_ref().loops.len(), |thread, frame, id| {
                             threads.get(thread).and_then(|t| t.loops.get(frame))
                                 .and_then(|f| f.values.as_ref())
                                 .is_some_and(|v| v.source.as_object() == Some(obj) && v.index == id as f64)
                         },
-                    );
+                    ) else {
+                        let trap = self.bx.threads.cur_ref().trap.pass();
+                        self.bx.heap.refuse_memory(STARTING_A_LOOP, trap);
+                        return;
+                    };
                     let kv = self.bx.heap.next_object_entry(obj, cursor, 0).unwrap();
                     self.begin_for_loop_inner(
                         jump, source, value_id, index_id, key_id, kv.value, 0.0, kv.key, None,

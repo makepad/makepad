@@ -282,6 +282,9 @@ pub fn script_mod(vm: &mut ScriptVm) {
                             }
                         };
                         vm.array_push_trap(queue, value);
+                        if vm.heap().allocation_error_pending() {
+                            return NIL;
+                        }
                         if end_on_send {
                             task.ended = true;
                         }
@@ -350,13 +353,16 @@ pub fn script_mod(vm: &mut ScriptVm) {
         start_task: Option<ScriptFnRef>,
         max_depth: usize,
     ) -> ScriptValue {
+        let array = vm.heap_mut().new_array();
+        if vm.heap().allocation_error_pending() {
+            return NIL;
+        }
         let tasks = vm.std_ref::<ScriptStd>().data.tasks.tasks.clone();
         let handle_gc = ScriptTaskGc {
             tasks: tasks.clone(),
             handle: ScriptHandle::ZERO,
         };
         let handle = vm.heap_mut().new_handle(handle_type, Box::new(handle_gc));
-        let array = vm.heap_mut().new_array();
         let queue = vm.heap_mut().new_array_ref(array);
         tasks.borrow_mut().push(ScriptTask {
             max_depth,
@@ -421,4 +427,60 @@ pub fn script_mod(vm: &mut ScriptVm) {
             create_task_handle(vm, promise_type, start_task, 1)
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn task_handle_and_send_stop_cleanly_on_refusal() {
+        let mut host = ScriptVmHost::new((), ScriptStd::default());
+        let tasks = host.std.data.tasks.tasks.clone();
+        let mut vm = ScriptVm { host: host.host_context(), bx: Box::new(ScriptVmBase::new()) };
+        script_mod(&mut vm);
+        vm.capture_errors();
+        let constructor = vm.value(vm.heap().module(id!(std)), id!(task));
+        while !vm.with_heap_allocation_limit(0, |vm| vm.heap_mut().new_array()).1.exceeded {}
+        vm.take_errors();
+        vm.capture_errors();
+        // The no-arg host call can reuse this scope under a zero-byte budget.
+        let scope = vm.new_object();
+        vm.release_transient(scope.into());
+        let before = vm.heap().root_counts()[4];
+        let (_, report) = vm.with_heap_allocation_limit(0, |vm| vm.call(constructor, &[]));
+        let registered = tasks.borrow().len();
+        let pinned = vm.heap().root_counts()[4] - before;
+        assert!(report.exceeded, "the task queue must reach the zero-byte budget");
+        let create_errors = vm.take_errors();
+        vm.capture_errors();
+
+        let probe = vm.call(constructor, &[]);
+        let task = vm.call(constructor, &[]);
+        let handle = task.as_handle().expect("the unlimited constructor must return a task handle");
+        let end = vm.eval(script! { fn(x) { x.end(1) } });
+        assert!(end.is_object(), "the end call must compile before metering");
+        let drain_objects = |vm: &mut ScriptVm| {
+            let free = vm.heap().objects_len() - vm.heap().gc_live_counts().objects;
+            for _ in 0..free { vm.new_object(); }
+        };
+        drain_objects(&mut vm);
+        let (sent, baseline) = vm.with_heap_allocation_limit(usize::MAX, |vm| vm.call(end, &[probe]));
+        assert_eq!(sent.as_f64(), Some(1.0), "the baseline end call must push one item");
+        assert!(!baseline.exceeded && baseline.allocated_bytes > 0, "the baseline end call must measure call and queue-push cost");
+        assert!(vm.take_errors().is_empty(), "the baseline end call must produce no errors");
+        vm.capture_errors();
+
+        drain_objects(&mut vm);
+        let (_, report) = vm.with_heap_allocation_limit(baseline.allocated_bytes - 1, |vm| vm.call(end, &[task]));
+        assert!(report.exceeded, "the end call must hit the budget at the queue push");
+        let end_errors = vm.take_errors();
+        let tasks = tasks.borrow();
+        let task = tasks.iter().find(|task| task.handle == handle).expect("the unlimited task must stay registered");
+        let queue_len = vm.heap().array_len(task.queue.as_array());
+        let at_queue = |errors: &[String], operation: &str| errors.len() == 1 && errors[0].contains(operation);
+        assert_eq!((registered, pinned, task.ended, queue_len, at_queue(&create_errors, "while creating an array"), at_queue(&end_errors, "while pushing an array element")),
+            (0, 0, false, 0, true, true),
+            "a refused queue must skip task registration and rooting, and a refused queue push must leave the task open with an empty queue: create={create_errors:?}, end={end_errors:?}");
+    }
 }

@@ -24,6 +24,7 @@ pub trait ScriptCensus {
 
 /// Called for registrations in a VM that records no census (a document's
 /// own VM) while another VM records one: set once by the census.
+#[relax_api::relax_api(loader = "the census (native code) sets it: JIT code has no use for it")]
 pub static CENSUS_OTHER_VM: OnceLock<fn(&'static str)> = OnceLock::new();
 
 impl ScriptVm<'_> {

@@ -80,6 +80,9 @@ fn int_values_index_arrays() {
     assert_eq!(number("cmp", &format!("{PRELUDE}if int(2.5) < 3 {{ 1 }} else {{ 0 }}")), 1.0);
     assert_eq!(number("loop", &format!("{PRELUDE}let a = [1, 2, 3]\nvar s = 0\nfor k in 0..3 {{ s += a[int(k)] }}\ns")), 6.0);
     assert_eq!(number("assign", &format!("{a}a[int(1)] = 9\na[1]")), 9.0);
+    // Scalar pods are vector components, as in shader source.
+    assert_eq!(number("vec3i", &format!("{PRELUDE}let q = vec3f(1.7, 2.0, 3.2)\nlet v = vec3i(i32(q.x), i32(q.y), i32(q.z))\nv.x + v.y * 10 + v.z * 100")), 321.0);
+    assert_eq!(number("vec2f", &format!("{PRELUDE}let v = vec2f(f32(0.5), u32(2))\nv.x + v.y")), 2.5);
     // Still only whole, non-negative, in-range indices.
     fails("negative", &format!("{a}a[int(-1)]"));
     fails("fraction", &format!("{a}a[f32(0.5)]"));
@@ -202,4 +205,70 @@ mod shader_ln {
             assert!(!source.contains("ln("), "{backend}: ln reached the backend:\n{source}");
         }
     }
+}
+
+/// Integer `/` and `%` truncate toward zero like the GPU backends; the VM
+/// used to divide integer vectors and typed integers as floats (3i / 4i was
+/// 0.75) and read signed integer lanes as unsigned in arithmetic, so a test
+/// mirroring a shader on the CPU disagreed with the GPU.
+#[test]
+fn integer_division_truncates_like_the_gpu() {
+    // `==` on pods is identity, so vectors compare by lane.
+    let same = |name: &str, expr: &str, want: &str, lanes: &str| {
+        let cmp = lanes.chars().map(|l| format!("r.{l} == w.{l}")).collect::<Vec<_>>().join(" && ");
+        let (value, errs, _vm) = run(name, &format!("{PRELUDE}let r = {expr}\nlet w = {want}\n{cmp}"));
+        assert!(errs.is_empty(), "{name}: eval errors: {errs:?}");
+        assert_eq!(value.as_bool(), Some(true), "{name}: `{expr}` is not `{want}`");
+    };
+    let truth = |name: &str, expr: &str| {
+        let (value, errs, _vm) = run(name, &format!("{PRELUDE}{expr}"));
+        assert!(errs.is_empty(), "{name}: eval errors: {errs:?}");
+        assert_eq!(value.as_bool(), Some(true), "{name}: `{expr}` was {value:?}");
+    };
+    same("ivec_div", "vec3i(3i) / vec3i(4i)", "vec3i(0i)", "xyz");
+    same("ivec_div_negative", "vec3i(-7i) / vec3i(2i)", "vec3i(-3i)", "xyz");
+    same("ivec_div_mixed_lanes", "vec3i(7i, -9i, 100i) / vec3i(2i, 4i, 7i)", "vec3i(3i, -2i, 14i)", "xyz");
+    same("ivec_div_scalar", "vec3i(7i, -7i, 9i) / 2i", "vec3i(3i, -3i, 4i)", "xyz");
+    same("ivec_div_literal", "vec3i(7i, -7i, 9i) / 2", "vec3i(3i, -3i, 4i)", "xyz");
+    same("ivec_div_zero", "vec3i(7i) / vec3i(0i)", "vec3i(0i)", "xyz");
+    same("uvec_div", "vec3u(7u, 9u, 3u) / vec3u(2u, 4u, 4u)", "vec3u(3u, 2u, 0u)", "xyz");
+    same("uvec_div_scalar", "vec2u(9u, 5u) / 2u", "vec2u(4u, 2u)", "xy");
+    same("ivec_rem", "vec3i(-7i, 7i, 9i) % vec3i(2i, 2i, 4i)", "vec3i(-1i, 1i, 1i)", "xyz");
+    // Float-path arithmetic on ivecs yields float lanes: -1, not 4294967295.
+    truth("ivec_negative_lanes_in_float_math", "let r = vec3i(-1i) + vec3i(0i)\nr.x == -1 && r.y == -1 && r.z == -1");
+    same("float_vec_div", "vec3f(3.0) / vec3f(4.0)", "vec3f(0.75)", "xyz");
+    truth("int_scalar_div", "7i / 2i == 3i");
+    truth("int_scalar_div_negative", "let n = 0i - 7i\nlet q = n / 2i\nq + 0 == 0 - 3");
+    truth("int_scalar_div_zero", "7i / 0i == 0i");
+    truth("uint_scalar_div", "7u / 2u == 3u");
+    truth("int_scalar_rem", "let n = 0i - 7i\nlet q = n % 2i\nq + 0 == 0 - 1");
+    truth("float_scalar_div", "3.0 / 4.0 == 0.75");
+    truth("untyped_div", "7 / 2 == 3.5");
+}
+
+/// `/=` and `%=` take the same integer path as binary `/` and `%`, for scope
+/// variables, slots (inside a fn), object fields and array indices.
+#[test]
+fn integer_compound_division_matches_the_binary_operators() {
+    let truth = |name: &str, body: &str| {
+        let (value, errs, _vm) = run(name, &format!("{PRELUDE}{body}"));
+        assert!(errs.is_empty(), "{name}: eval errors: {errs:?}");
+        assert_eq!(value.as_bool(), Some(true), "{name}: `{body}` was {value:?}");
+    };
+    let xyz = "q.x == 3 && q.y == 0 - 3 && q.z == 4";
+    for (name, setup, op, read) in [
+        ("scope_div", "var r = vec3i(7i, -7i, 9i)", "r /= vec3i(2i)", "r"),
+        ("scope_div_scalar", "var r = vec3i(7i, -7i, 9i)", "r /= 2i", "r"),
+        ("field_div", "let o = {r: vec3i(7i, -7i, 9i)}", "o.r /= 2i", "o.r"),
+        ("index_div", "let a = [vec3i(7i, -7i, 9i)]", "a[0] /= 2i", "a[0]"),
+    ] {
+        truth(name, &format!("{setup}\n{op}\nlet q = {read}\n{xyz}"));
+    }
+    truth("slot_div", &format!("let f = fn() {{\n    var r = vec3i(7i, -7i, 9i)\n    r /= vec3i(2i)\n    let q = r\n    return {xyz}\n}}\nf()"));
+    truth("scope_div_unsigned", "var r = vec2u(9u, 5u)\nr /= 2u\nr.x == 4 && r.y == 2");
+    truth("scope_rem", "var r = vec3i(-7i, 7i, 9i)\nr %= vec3i(2i, 2i, 4i)\nr.x == 0 - 1 && r.y == 1 && r.z == 1");
+    truth("slot_rem", "let f = fn() {\n    var r = vec3i(-7i, 7i, 9i)\n    r %= 4i\n    return r.x == 0 - 3 && r.y == 3 && r.z == 1\n}\nf()");
+    truth("scope_div_zero", "var r = vec3i(7i)\nr /= vec3i(0i)\nr.x == 0 && r.y == 0 && r.z == 0");
+    truth("scope_float_unchanged", "var r = 3.0\nr /= 4.0\nr == 0.75");
+    truth("scope_int_scalar", "var r = 7i\nr /= 2i\nr == 3i");
 }

@@ -5,9 +5,29 @@
 
 use makepad_script_compute_sched::kernel::KernelExt;
 use makepad_script::*;
-use makepad_script_compute::kernel::MathMode;
+use makepad_script_compute::kernel::{self, MathMode};
 use makepad_script_compute::vm_kernel::{self, Decl, Entry, Record, VmKernel};
 use makepad_script_compute::Backend;
+
+static RECORD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+struct Recording {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+impl Recording {
+    fn start() -> Self {
+        let lock = RECORD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        kernel::record_compiled(true);
+        Self { _lock: lock }
+    }
+}
+
+impl Drop for Recording {
+    fn drop(&mut self) {
+        kernel::record_compiled(false);
+    }
+}
 
 fn doc(code: &str) -> (ScriptVm<'static>, ScriptObject) {
     let host = Box::leak(Box::new(ScriptVmHost::new(0i32, ())));
@@ -146,11 +166,61 @@ fn a_kernel_made_from_values_is_recorded_for_build_tools() {
         uses: Vec::new(),
         bind: Vec::new(),
     };
-    makepad_script_compute::kernel::record_compiled(true);
+    let _recording = Recording::start();
     let compiled = vm_kernel::compile(&vm, &kernel, &[], Backend::Interp, &[]).unwrap_or_else(|e| panic!("{e:?}"));
     let recorded = makepad_script_compute::kernel::take_recorded();
     let key = makepad_script_compute::kernel::program_key(compiled.program());
-    assert!(recorded.iter().any(|r| makepad_script_compute::kernel::program_key(r.kernel.program()) == key && r.source.is_empty()));
+    assert!(recorded.iter().any(|r| makepad_script_compute::kernel::program_key(r.kernel.program()) == key && r.source.is_empty()),
+        "the value-built kernel was recorded with empty source");
+}
+
+#[test]
+fn take_recorded_and_wasm_module_round_trip() {
+    use makepad_script_compute::boundary::{LayoutFieldView, LayoutView};
+    use makepad_script_compute::kernel::{FieldTy, LayoutField};
+    use makepad_script_compute::module::Module;
+
+    let layout = LayoutView { name: "Sample", stride: 4, fields: &[
+        LayoutFieldView { name: "pos", ty: FieldTy::Vec3, offset: 0 },
+        LayoutFieldView { name: "weight", ty: FieldTy::F32, offset: 3 },
+    ] };
+    let module = Module { path: "lib:weights@1", source: "fn weight(x) { x * 0.25 }" };
+    let source = "use lib(\"weights\", \"1\") as w\nlet out = output(Sample)\nfn element(i) { out[i].weight = w.weight(float(i)) }";
+    let mut record = {
+        let _recording = Recording::start();
+        let compiled = kernel::compile_with_modules(source, &[layout], Backend::Interp, std::slice::from_ref(&module))
+            .expect("the kernel using the module and record layout compiles");
+        let key = kernel::program_key(compiled.program());
+        kernel::take_recorded().into_iter().find(|r| kernel::program_key(r.kernel.program()) == key)
+            .expect("the compiled kernel was recorded")
+    };
+    assert_eq!(record.source, source, "the recorded kernel retains its exact source");
+    assert_eq!(record.modules.len(), 1, "one module was recorded");
+    assert_eq!(record.modules[0].path, module.path, "the module keeps its import path");
+    assert_eq!(record.modules[0].text, module.source, "the module keeps its source");
+    assert_eq!(record.layouts.len(), 1, "one layout was recorded");
+    let saved = &mut record.layouts[0];
+    assert_eq!(saved.name, layout.name, "the layout keeps its name");
+    assert_eq!(saved.stride, layout.stride, "the layout keeps its stride");
+    assert_eq!(saved.fields.len(), layout.fields.len(), "all fields were copied");
+    for (field, expected) in saved.fields.iter().zip(layout.fields) {
+        assert_eq!((field.name.as_str(), field.ty, field.offset), (expected.name, expected.ty, expected.offset),
+            "the recorded field keeps its name, type, offset and position");
+    }
+    let copy = saved.clone();
+    saved.fields.push(LayoutField { name: "extra".into(), ty: FieldTy::I32, offset: 4 });
+    assert_eq!(copy.fields.len(), 2, "the cloned layout owns its fields independently");
+    record.layouts.push(copy);
+    drop(record.layouts);
+
+    let kernels = [record.kernel.as_ref()];
+    let (vectorized, flags) = kernel::wasm_module(&kernels, Default::default()).expect("emit the kernel module");
+    assert_eq!(flags.len(), 1, "the module reports a SIMD flag for its kernel");
+    let scalar = kernel::wasm_module_scalar(&kernels, Default::default()).expect("emit the scalar module");
+    for mut bytes in [vectorized, scalar] {
+        bytes.resize(bytes.capacity() + 1, 0xff);
+        assert!(bytes.starts_with(b"\0asm"), "the wasm magic survives growing the returned buffer");
+    }
 }
 
 #[test]

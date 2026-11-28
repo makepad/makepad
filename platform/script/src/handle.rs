@@ -128,6 +128,7 @@ impl ScriptHeap {
             handle
         } else {
             // a new slot starts at the heap's tag; the data is set once the handle is known
+            crate::heap::reserve_free_list(&mut self.handles_free, self.handles.len() + 1);
             let (index, generation) = self.handles.push(None);
             let handle = ScriptHandle::new(ty, index, generation);
             hgc.set_handle(handle);
@@ -202,7 +203,7 @@ pub trait ScriptHandleGc: Any {
 }
 
 /// The C-ABI table of one handle type: the VM calls a handle object only through it (the
-/// object may come from code another compiler built: local/plans/loader-core.md section 8).
+/// object may come from code another compiler built).
 #[relax_api(plain, run)]
 #[repr(C)]
 pub struct ScriptHandleVtable {

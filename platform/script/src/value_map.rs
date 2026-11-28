@@ -2,6 +2,7 @@ use relax_api::relax_api;
 use crate::makepad_live_id::LiveId;
 
 use std::{
+    collections::TryReserveError,
     hash::BuildHasher,
     ops::{Index, IndexMut},
     sync::OnceLock,
@@ -139,7 +140,39 @@ impl MapCursor {
     }
 }
 
+#[cold]
+fn try_reserve_overflow() -> TryReserveError {
+    // Stable Rust has no public constructor. Capacity overflow needs no allocation.
+    Vec::<u8>::new().try_reserve_exact(usize::MAX).unwrap_err()
+}
+
 impl SpillIndex {
+    #[cold]
+    fn try_box(index: Self) -> Result<Box<Self>, TryReserveError> {
+        const { assert!(std::mem::size_of::<Self>() > 0); }
+        // SAFETY: the global allocator supplies the nonzero Box<Self> layout. On
+        // success we initialize it before transferring sole ownership to the Box.
+        unsafe {
+            let ptr = std::alloc::alloc(std::alloc::Layout::new::<Self>()).cast::<Self>();
+            if ptr.is_null() { return Err(try_reserve_overflow()); }
+            ptr.write(index);
+            Ok(Box::from_raw(ptr))
+        }
+    }
+
+    // A small map's first loop needs both a spill index and its first cursor slot.
+    fn try_for_cursor() -> Option<Box<Self>> {
+        let mut index = Self::default();
+        index.cursors.try_reserve(1).ok()?;
+        Self::try_box(index).ok()
+    }
+
+    fn try_bucket_count(len: usize) -> Result<usize, TryReserveError> {
+        len.checked_add(len.div_ceil(3))
+            .and_then(usize::checked_next_power_of_two)
+            .ok_or_else(try_reserve_overflow)
+    }
+
     fn bucket_count(len: usize) -> usize {
         // Keep a quarter of the buckets empty for linear probing.
         (len + len.div_ceil(3)).next_power_of_two()
@@ -178,6 +211,14 @@ impl SpillIndex {
         }
         self.buckets[bucket] = pos;
     }
+}
+
+/// A bucket table of `len` empty buckets, or the refusal of its allocation.
+fn empty_buckets(len: usize) -> Result<Vec<usize>, TryReserveError> {
+    let mut buckets = Vec::new();
+    buckets.try_reserve_exact(len)?;
+    buckets.resize(len, EMPTY);
+    Ok(buckets)
 }
 
 impl<K, V> Default for ValueMap<K, V> {
@@ -270,15 +311,14 @@ impl<K: Eq + std::hash::Hash + Copy, V> ValueMap<K, V> {
 
     pub fn get_index(&self, rank: usize) -> Option<&(K, V)> {
         let pos = if let Some(index) = self.spill.as_ref().filter(|index| index.holes != 0) {
-            *index.ranks.get_or_init(|| {
-                let mut ranks = Vec::with_capacity(self.len());
-                let mut from = 0;
-                while let Some((pos, _)) = self.live_at_or_after(from) {
-                    ranks.push(pos);
-                    from = pos + 1;
-                }
-                ranks
-            }).get(rank)?
+            match index.ranks.get() {
+                Some(ranks) => *ranks.get(rank)?,
+                None => match self.live_ranks() {
+                    Some(ranks) => *index.ranks.get_or_init(|| ranks).get(rank)?,
+                    // No room to keep the ranks: walk to this one.
+                    None => self.nth_live(rank)?,
+                },
+            }
         } else {
             rank
         };
@@ -288,19 +328,48 @@ impl<K: Eq + std::hash::Hash + Copy, V> ValueMap<K, V> {
         }
     }
 
+    /// The positions of the live entries, or None when there is no room for them.
+    fn live_ranks(&self) -> Option<Vec<usize>> {
+        let mut ranks = Vec::new();
+        ranks.try_reserve_exact(self.len()).ok()?;
+        let mut from = 0;
+        while let Some((pos, _)) = self.live_at_or_after(from) {
+            ranks.push(pos);
+            from = pos + 1;
+        }
+        Some(ranks)
+    }
+
+    fn nth_live(&self, rank: usize) -> Option<usize> {
+        let mut from = 0;
+        let mut seen = 0;
+        while let Some((pos, _)) = self.live_at_or_after(from) {
+            if seen == rank {
+                return Some(pos);
+            }
+            seen += 1;
+            from = pos + 1;
+        }
+        None
+    }
+
     /// The frame holds the slot number. Reuse slots of loops unwound by a return or
     /// exception as well as those closed by the normal end/break opcode.
-    pub(crate) fn open_cursor(&mut self, thread: usize, frame: usize, active: impl Fn(usize, usize, usize) -> bool) -> usize {
-        let index = self.spill.get_or_insert_with(Default::default);
+    pub(crate) fn open_cursor(&mut self, thread: usize, frame: usize, active: impl Fn(usize, usize, usize) -> bool) -> Option<usize> {
+        let index = match &mut self.spill {
+            Some(index) => index,
+            None => self.spill.insert(SpillIndex::try_for_cursor()?),
+        };
         let cursor = MapCursor { thread, frame, position: 0, visited: 0, generation: index.generation };
         if let Some((id, slot)) = index.cursors.iter_mut().enumerate().find(|(id, slot)| {
             slot.as_ref().is_none_or(|old| !active(old.thread, old.frame, *id))
         }) {
             *slot = Some(cursor);
-            id
+            Some(id)
         } else {
+            index.cursors.try_reserve(1).ok()?;
             index.cursors.push(Some(cursor));
-            index.cursors.len() - 1
+            Some(index.cursors.len() - 1)
         }
     }
 
@@ -364,21 +433,25 @@ impl<K: Eq + std::hash::Hash + Copy, V> ValueMap<K, V> {
 
     // Rebuild with the insertion's required capacity. Counting the surviving prefix at
     // every old boundary also remaps any number of active loops in O(slots + cursors).
-    fn compact_for_insert(&mut self, live: usize) {
+    // Both allocations come first, so a refused one leaves the map as it was.
+    #[cold]
+    fn try_compact(&mut self, live: usize, want: usize) -> Result<(), TryReserveError> {
+        debug_assert!(want > live);
         let index = self.spill.as_mut().unwrap();
         let mut prefix = if index.cursors.iter().all(Option::is_none) {
             None
         } else {
-            Some(Vec::with_capacity(self.entries.len() + 1))
+            let mut prefix = Vec::new();
+            prefix.try_reserve_exact(self.entries.len() + 1)?;
+            Some(prefix)
         };
-        let want = live + 1;
-        let buckets = if want <= SPILL_AT { 0 } else { SpillIndex::bucket_count(want) };
+        let buckets = if want <= SPILL_AT { 0 } else { SpillIndex::try_bucket_count(want)? };
         if buckets == index.buckets.len() {
             index.buckets.fill(EMPTY);
         } else {
             // A previously large table must not be cleared at its old size on every
             // subsequent compaction of a now-small map.
-            index.buckets = vec![EMPTY; buckets];
+            index.buckets = empty_buckets(buckets)?;
         }
         let mut pos = 0;
         self.entries.retain(|slot| {
@@ -401,22 +474,92 @@ impl<K: Eq + std::hash::Hash + Copy, V> ValueMap<K, V> {
         index.generation = index.generation.wrapping_add(1);
         index.holes = 0;
         index.ranks.take();
+        Ok(())
     }
 
     pub fn reserve(&mut self, additional: usize) {
-        // If the next append will compact, its capacity can include the reclaimed slots.
-        let holes = self.spill.as_ref().map_or(0, |index| index.holes);
-        self.entries.reserve(if holes > self.len() { additional.saturating_sub(holes) } else { additional });
+        self.entries.reserve(self.entries_for(additional));
         let want = self.len() + additional;
-        if want > SPILL_AT {
-            let index = self.spill.get_or_insert_with(Default::default);
-            if !index.fits(want) {
-                index.buckets = vec![EMPTY; SpillIndex::bucket_count(want)];
-                for (pos, slot) in self.entries.iter().enumerate() {
-                    if let Slot::Live((key, _)) = slot {
-                        index.insert_absent(key, pos);
-                    }
-                }
+        if self.index_due(want) {
+            self.rebuild_index(vec![EMPTY; SpillIndex::bucket_count(want)]);
+        }
+    }
+
+    /// Reserve a batch of insertions. With no intervening removes or index reads,
+    /// those insertions allocate nothing. A refusal preserves the map's contents.
+    pub fn try_reserve(&mut self, additional: usize) -> Result<(), TryReserveError> {
+        if additional == 0 { return Ok(()); }
+        let live = self.len();
+        let want = live.checked_add(additional).ok_or_else(try_reserve_overflow)?;
+        self.entries.try_reserve(self.entries_for(additional))?;
+        if self.entries.len() - live > live {
+            self.try_compact(live, want)?;
+        }
+        if self.index_due(want) {
+            self.try_rebuild_index(want)?;
+        }
+        if let Some(ranks) = self.spill.as_mut().and_then(|index| index.ranks.get_mut()) {
+            ranks.try_reserve(additional)?;
+        }
+        Ok(())
+    }
+
+    /// Room for one more key: once this succeeds, the next `insert` or `insert_absent`
+    /// allocates nothing. A due compaction runs here, and a refusal leaves the map as it
+    /// was. In the common case this is a few compares.
+    #[inline]
+    pub fn try_reserve_insert(&mut self) -> Result<(), TryReserveError> {
+        let live = self.len();
+        if self.entries.len() - live > live {
+            self.try_compact(live, live + 1)?;
+        }
+        if self.entries.len() == self.entries.capacity() {
+            self.entries.try_reserve(1)?;
+        }
+        if self.index_due(live + 1) {
+            self.try_rebuild_index(live + 1)?;
+        }
+        if let Some(ranks) = self.spill.as_mut().and_then(|index| index.ranks.get_mut()) {
+            if ranks.len() == ranks.capacity() {
+                ranks.try_reserve(1)?;
+            }
+        }
+        Ok(())
+    }
+
+    // If the next append will compact, its capacity can include the reclaimed slots.
+    fn entries_for(&self, additional: usize) -> usize {
+        let holes = self.spill.as_ref().map_or(0, |index| index.holes);
+        if holes > self.len() { additional.saturating_sub(holes) } else { additional }
+    }
+
+    fn index_due(&self, want: usize) -> bool {
+        want > SPILL_AT && !self.spill.as_ref().is_some_and(|index| index.fits(want))
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn try_rebuild_index(&mut self, want: usize) -> Result<(), TryReserveError> {
+        let buckets = empty_buckets(SpillIndex::try_bucket_count(want)?)?;
+        let index = match &mut self.spill {
+            Some(index) => {
+                index.buckets = buckets;
+                index
+            }
+            None => self.spill.insert(SpillIndex::try_box(SpillIndex { buckets, ..Default::default() })?),
+        };
+        for (pos, slot) in self.entries.iter().enumerate() {
+            if let Slot::Live((key, _)) = slot { index.insert_absent(key, pos); }
+        }
+        Ok(())
+    }
+
+    fn rebuild_index(&mut self, buckets: Vec<usize>) {
+        let index = self.spill.get_or_insert_with(Default::default);
+        index.buckets = buckets;
+        for (pos, slot) in self.entries.iter().enumerate() {
+            if let Slot::Live((key, _)) = slot {
+                index.insert_absent(key, pos);
             }
         }
     }
@@ -427,7 +570,8 @@ impl<K: Eq + std::hash::Hash + Copy, V> ValueMap<K, V> {
         let live = self.len();
         if self.entries.len() - live > live {
             // Appending would exceed the logical slot budget, even if the allocation has room.
-            self.compact_for_insert(live);
+            // A refused compaction keeps the holes: the map stays correct, a later insert retries.
+            let _ = self.try_compact(live, live + 1);
         }
         if live >= SPILL_AT && !self.spill.as_ref().is_some_and(|index| index.fits(live + 1)) {
             self.reserve(1);
@@ -582,5 +726,56 @@ where
     #[inline]
     fn index_mut(&mut self, index: K) -> &mut Self::Output {
         self.get_mut(&index).unwrap()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_bulk_reserve_compacts_and_remaps_active_cursors() {
+        let mut map: ValueMap<u64, u64> = ValueMap::default();
+        for k in 0..64 { map.insert(k, k); }
+        let cursor = map.open_cursor(0, 0, |_, _, _| true).expect("open the cursor");
+        for k in 0..50 {
+            assert_eq!(map.cursor_next(cursor), Some(&(k, k)), "the cursor must visit the original prefix in order");
+        }
+        for k in 0..48 { map.remove(&k); }
+        map.try_reserve(32).expect("reserve the batch while the cursor is active");
+        assert_eq!(map.hole_count(), 0, "bulk reserve must compact before insertion");
+        let capacities = |map: &ValueMap<u64, u64>| {
+            (map.entries.capacity(), map.spill.as_ref().unwrap().buckets.capacity())
+        };
+        let before = capacities(&map);
+        for k in 1000..1032 { map.insert(k, k); }
+        assert_eq!(capacities(&map), before, "the reserved batch must preserve both capacities");
+        for k in (50..64).chain(1000..1032) {
+            assert_eq!(map.cursor_next(cursor), Some(&(k, k)), "the remapped cursor must resume in order at {k}");
+        }
+        assert!(map.cursor_next(cursor).is_none(), "the cursor must exhaust the old and new entries exactly once");
+    }
+
+    #[test]
+    fn a_reserved_insert_compacts_first_and_then_grows_nothing() {
+        let mut map: ValueMap<u64, u64> = ValueMap::default();
+        for k in 0..64 {
+            map.insert(k, k);
+        }
+        for k in 0..48 {
+            map.remove(&k);
+        }
+        assert!(map.hole_count() > map.len(), "more holes than keys: the next insert is due a compaction");
+        map.try_reserve_insert().expect("room for one more key");
+        assert_eq!(map.hole_count(), 0, "the due compaction ran in the reserve");
+        let capacities = |map: &ValueMap<u64, u64>| {
+            (map.entries.capacity(), map.spill.as_ref().map_or(0, |index| index.buckets.capacity()))
+        };
+        let before = capacities(&map);
+        map.insert(1000, 1);
+        assert_eq!(capacities(&map), before, "the reserved insert grew neither the entries nor the index");
+        assert_eq!(map.get(&1000), Some(&1), "the new key is found");
+        assert!((48..64).all(|k| map.get(&k) == Some(&k)), "the compaction kept every live key");
+        assert!((0..48).all(|k| map.get(&k).is_none()), "the removed keys stay removed");
     }
 }

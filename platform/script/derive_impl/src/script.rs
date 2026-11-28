@@ -15,7 +15,7 @@ pub fn script_mod_impl(input: TokenStream) -> TokenStream {
     tb.add("#[inline(never)] pub fn script_mod(vm:&mut ScriptVm)->ScriptValue{");
     tb.add("    vm.census_begin(module_path!());");
     tb.add("    let sb=").stream(Some(ts)).add(";");
-    tb.add("    let value=vm.eval(sb);");
+    tb.add("    let value=vm.eval_script_mod(sb);");
     tb.add("    vm.census_end();");
     tb.add("    value");
     tb.add("}");

@@ -85,7 +85,21 @@ fn admission_preserves_the_installed_program_and_bounds_native_callbacks() {
     let callbacks = "fn visit(n) { if n > 0 { [n - 1].map(visit) }\nreturn 1 }\ntry visit(5) catch 99\n;";
     let run = |vm: &mut ScriptVm| vm.eval_with_source_view(&source("callbacks.splash", callbacks), ScriptObject::ZERO);
     assert_eq!(run(&mut vm).as_number(), Some(1.0), "the ordinary finite map chain finishes under the default");
-    let (result, report) = vm.eval_bounded(&EvalLimits { native_depth: 3, ..EvalLimits::DOC_LOAD }, run);
+    // Map callbacks use script call frames. The call-frame limit bounds their nesting.
+    let limits = EvalLimits { native_depth: 3, ..EvalLimits::DOC_LOAD };
+    assert_eq!(vm.eval_bounded(&limits, run).0.as_number(), Some(1.0), "nested maps spend no native re-entry depth");
+
+    let probe = vm.new_module(id!(probe));
+    vm.add_method(probe, id_lut!(invoke), script_args_def!(cb = NIL, n = NIL), |vm, args| {
+        let cb = vm.value(args, id!(cb));
+        let n = vm.value(args, id!(n));
+        let _ = vm.call(cb, &[n]);
+        NIL
+    });
+    let synchronous = "fn visit(n) { if n > 0 { mod.probe.invoke(visit, n - 1) }\nreturn 1 }\ntry visit(5) catch 99\n;";
+    let (result, report) = vm.eval_bounded(&limits, |vm| {
+        vm.eval_with_source_view(&source("synchronous.splash", synchronous), ScriptObject::ZERO)
+    });
     assert!(result.is_err(), "catch and a native caller cannot swallow the re-entry bail");
     assert!(report.limit().is_some_and(|e| e.contains("native re-entry limit")), "report identifies the failed guard: {report:?}");
     let fresh = vm.eval_with_source_view(&source("fresh.splash", "6 * 7"), ScriptObject::ZERO);

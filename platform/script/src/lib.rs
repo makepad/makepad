@@ -6,6 +6,8 @@
 #[macro_use(thread_local)]
 extern crate makepad_thread_local;
 
+use relax_api::relax_api;
+
 // Options JIT code reaches in this crate's unmarked items; the binding refuses a tagged Option with no entry.
 relax_api::option_layouts! {
     (),
@@ -40,6 +42,7 @@ relax_api::option_layouts! {
 
 /// A run of this process's app ended in place (`makepad run`): what this crate holds of it goes, as
 /// a fresh process has it. Its VMs went with the run's heap without dropping.
+#[relax_api]
 pub fn end_run() {
     inspect_query::end_run();
     inspect_registry::end_run();
@@ -49,11 +52,12 @@ pub fn end_run() {
     touch::end_run();
 }
 
-/// A domain's heap goes while the process and other programs go on: what the crate's statics hold
-/// of that program's VMs goes first. (The rest of those statics is in the process's heap.)
-pub fn end_domain(heap: std::ops::Range<usize>) {
-    inspect_registry::end_domain(heap.clone());
-    literal::end_domain(heap);
+/// Before a domain's heap at `start..end` goes away, clear what the crate's statics hold of
+/// that program's VMs. The rest of those statics stays in the process's heap.
+#[relax_api]
+pub fn end_domain(start: usize, end: usize) {
+    inspect_registry::end_domain(start..end);
+    literal::end_domain(start..end);
 }
 
 pub use makepad_error_log;
@@ -160,6 +164,7 @@ pub mod test;
 pub mod thread;
 pub mod traits;
 pub mod trap;
+pub mod typed_value;
 pub mod value;
 pub mod value_map;
 pub mod vec_prims;
@@ -187,6 +192,7 @@ pub use thread::*;
 pub use traits::*;
 pub use units::*;
 pub use trap::*;
+pub use typed_value::TypedRefusal;
 pub use value::*;
 pub use vm::*;
 pub use vm_api::{ScriptCrateManifests, ScriptModOverrides};

@@ -32,5 +32,10 @@ makepad-regex = {path = "../../libs/regex", version = "0.1.0" }
 makepad-html = {path = "../../libs/html", version = "1.0.0" }
 makepad-key-code = {path = "../key_code", version = "0.1.0" }
 
+[dev-dependencies]
+# tests/growth_guard.rs reads the VM's own source with the workspace's Rust lexer.
+# Path only, so publishing drops it.
+relax-lex = { path = "../../libs/relax/lex" }
+
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(makepad_precompiled_shaders)"] }

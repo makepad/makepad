@@ -84,7 +84,6 @@ impl Drop for ScriptArrayRef {
 pub struct ScriptArrayTag(u64);
 
 impl ScriptArrayTag {
-    pub const MARK: u64 = 0x1 << 40;
     pub const ALLOCED: u64 = 0x2 << 40;
     pub const STATIC: u64 = 0x4 << 40;
     pub const DIRTY: u64 = 0x40 << 40;
@@ -125,18 +124,6 @@ impl ScriptArrayTag {
 
     pub fn clear(&mut self) {
         self.0 = 0;
-    }
-
-    pub fn is_marked(&self) -> bool {
-        self.0 & Self::MARK != 0
-    }
-
-    pub fn set_mark(&mut self) {
-        self.0 |= Self::MARK
-    }
-
-    pub fn clear_mark(&mut self) {
-        self.0 &= !Self::MARK
     }
 
     pub fn freeze(&mut self) {
@@ -209,6 +196,16 @@ impl ScriptArrayStorage {
             Self::F32(_) | Self::U32(_) => 4,
             Self::U16(_) => 2,
             Self::U8(_) => 1,
+        }
+    }
+
+    pub(crate) fn try_reserve(&mut self, additional: usize) -> Result<(), std::collections::TryReserveError> {
+        match self {
+            Self::ScriptValue(v) => v.try_reserve(additional),
+            Self::F32(v) => v.try_reserve(additional),
+            Self::U32(v) => v.try_reserve(additional),
+            Self::U16(v) => v.try_reserve(additional),
+            Self::U8(v) => v.try_reserve(additional),
         }
     }
 
@@ -714,28 +711,33 @@ impl ScriptArrayData {
             id!(retain),
             script_args!(cb = NIL),
             |vm, args| {
-                if let Some(sself) = script_value!(vm, args.self).as_array() {
-                    let fnptr = script_value!(vm, args.cb);
-                    let mut i = 0;
-                    while i < vm.bx.heap.array_len(sself) {
-                        let value = script_array_index!(vm, sself[i]);
-                        let ret = vm.call(fnptr, &[value]);
-                        if ret.is_err() {
-                            return ret;
-                        }
-                        if !vm.bx.heap.cast_to_bool(ret) {
-                            let trap = vm.bx.threads.cur().trap.pass();
-                            vm.bx.heap.array_remove(sself, i, trap);
-                        } else {
-                            i += 1
-                        }
+                let (mut i, sself, cb, mut returned) = match vm.take_call_back() {
+                    Some(([index, receiver, cb, _], ret)) => (usize::from(index), receiver.as_array().unwrap(), cb, Some(ret)),
+                    None => {
+                        let Some(sself) = script_value!(vm, args.self).as_array() else {
+                            return script_err_not_impl!(vm.bx.threads.cur_ref().trap, "retain called on non-array value");
+                        };
+                        (0, sself, script_value!(vm, args.cb), None)
                     }
-                    return NIL;
+                };
+                loop {
+                    let ret = if let Some(ret) = returned.take() {
+                        ret
+                    } else {
+                        if i >= vm.bx.heap.array_len(sself) { return NIL; }
+                        let item = script_array_index!(vm, sself[i]);
+                        let Some(ret) = vm.call_back(cb, &[item], [i.into(), sself.into(), cb, NIL]) else { return NIL };
+                        ret
+                    };
+                    if vm.bx.heap.allocation_error_pending { return NIL; }
+                    if ret.is_err() { return ret; }
+                    if vm.bx.heap.cast_to_bool(ret) {
+                        i += 1;
+                    } else {
+                        let trap = vm.bx.threads.cur().trap.pass();
+                        vm.bx.heap.array_remove(sself, i, trap);
+                    }
                 }
-                script_err_not_impl!(
-                    vm.bx.threads.cur_ref().trap,
-                    "retain called on non-array value"
-                )
             },
         );
 
@@ -751,20 +753,54 @@ impl ScriptArrayData {
             (id!(all), IterKind::All),
         ] {
             native.add_type_method(heap, ScriptValueType::REDUX_ARRAY, name, script_args!(f = NIL), move |vm, args| {
-                let Some(sself) = script_value!(vm, args.self).as_array() else {
-                    return script_err_unexpected!(vm.bx.threads.cur_ref().trap, "{} called on non-array value", name);
+                let (mut i, out, sself, f, mut returned) = match vm.take_call_back() {
+                    Some(([index, saved, receiver, last], ret)) => {
+                        // Find keeps the original item in place of an output array.
+                        // Filter needs both, so only filter reads f again.
+                        let (item, f) = match kind {
+                            IterKind::Find => (saved, last),
+                            IterKind::Filter => (last, script_value!(vm, args.f)),
+                            _ => (NIL, last),
+                        };
+                        let out = match kind {
+                            IterKind::Map | IterKind::Filter => saved.as_array(),
+                            _ => None,
+                        };
+                        (usize::from(index), out, receiver.as_array().unwrap(), f, Some((item, ret)))
+                    }
+                    None => {
+                        let Some(sself) = script_value!(vm, args.self).as_array() else {
+                            return script_err_unexpected!(vm.bx.threads.cur_ref().trap, "{} called on non-array value", name);
+                        };
+                        let f = script_value!(vm, args.f);
+                        let out = match kind {
+                            IterKind::Map | IterKind::Filter => {
+                                let out = vm.bx.heap.new_array();
+                                if vm.bx.heap.allocation_error_pending { return NIL; }
+                                Some(out)
+                            }
+                            _ => None,
+                        };
+                        (0, out, sself, f, None)
+                    }
                 };
-                let f = script_value!(vm, args.f);
-                // The result is held while `f` runs (a collection may run in it).
-                let out = match kind {
-                    IterKind::Map | IterKind::Filter => Some(vm.bx.heap.new_array()),
-                    _ => None,
-                };
-                let _hold = out.map(|o| vm.bx.heap.new_array_ref(o));
-                let mut i = 0;
-                while i < vm.bx.heap.array_len(sself) {
-                    let value = script_array_index!(vm, sself[i]);
-                    let ret = vm.call(f, &[value]);
+                loop {
+                    let (value, ret) = if let Some(pair) = returned.take() {
+                        pair
+                    } else {
+                        if i >= vm.bx.heap.array_len(sself) { break; }
+                        let value = script_array_index!(vm, sself[i]);
+                        // The callback can mutate the input. Filter and find use the item it received.
+                        let (saved, last) = match kind {
+                            IterKind::Find => (value, f),
+                            IterKind::Filter => (out.unwrap().into(), value),
+                            _ => (out.map_or(NIL, Into::into), f),
+                        };
+                        let keep = [i.into(), saved, sself.into(), last];
+                        let Some(ret) = vm.call_back(f, &[value], keep) else { return NIL };
+                        (value, ret)
+                    };
+                    if vm.bx.heap.allocation_error_pending { return NIL; }
                     if ret.is_err() {
                         return ret;
                     }
@@ -792,6 +828,7 @@ impl ScriptArrayData {
                             }
                         }
                     }
+                    if vm.bx.heap.memory_refusal_pending() { return NIL; }
                     i += 1;
                 }
                 match kind {

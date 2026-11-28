@@ -193,6 +193,52 @@ fn an_unbounded_evaluation_compares_past_the_work_ceiling() {
 
     assert_eq!(result.as_bool(), Some(true), "{:#?}", vm.take_errors());
     assert!(vm.take_errors().is_empty());
+
+    vm.with_interrupt_sampling(|vm| {
+        vm.capture_errors();
+        let bounded = vm.with_instruction_limit(u64::MAX, |vm| vm.eval(script("nested_limit", "left == right")));
+        assert!(bounded.is_err(), "even the largest real instruction limit enables the equality ceiling");
+        let errors = vm.take_errors();
+        assert!(errors.iter().any(|e| e.contains("script equality work, instruction, or time limit exceeded")),
+            "the nested limit reported equality exhaustion: {errors:?}");
+
+        // Give the same comparison exactly what it charged before its work ceiling fired.
+        let charged = vm.last_limit_consumed();
+        assert_eq!(vm.bx.take_limit_hit().map(|(limit, _)| limit), Some(Limit::EqualityWork),
+            "the first comparison hit the work ceiling with fuel to spare");
+        vm.capture_errors();
+        let at_zero = vm.with_instruction_limit(charged, |vm| vm.eval(script("ceiling_at_zero", "left == right")));
+        assert!(at_zero.is_err(), "the equality ceiling still bails with exact fuel");
+        assert_eq!(vm.bx.last_limit_exit_remaining, 0, "the comparison spent the last fuel unit");
+        assert_eq!(vm.bx.take_limit_hit().map(|(limit, _)| limit), Some(Limit::EqualityWork),
+            "the work ceiling fired before another unit of fuel was requested");
+        assert!(vm.take_errors().iter().any(|e| e.contains("script equality work, instruction, or time limit exceeded")),
+            "the equality ceiling keeps its diagnostic at zero remaining fuel");
+
+        vm.capture_errors();
+        let sampled = vm.eval(script("sampling_only", "left == right"));
+        assert_eq!(sampled.as_bool(), Some(true), "after the real limit ends the full comparison succeeds");
+        assert!(vm.take_errors().is_empty(), "sampling alone produces no equality diagnostic");
+
+        vm.capture_errors();
+        vm.set_run_budget(Some(ScriptRunBudget::slice(Duration::ZERO, 1)));
+        let mut sliced = vm.eval(script("soft_slice", "left == right"));
+        assert!(vm.run_yielded(), "the zero-length slice yields before the comparison");
+        while vm.run_yielded() {
+            sliced = vm.resume();
+        }
+        assert_eq!(sliced.as_bool(), Some(true), "a soft slice allows the full comparison");
+        assert!(vm.take_errors().is_empty(), "sliced equality produces no diagnostic");
+
+        // The hard deadline is finite and far in the future, so only the work ceiling can fire.
+        vm.capture_errors();
+        vm.set_run_budget(Some(ScriptRunBudget::from_durations(Duration::MAX, Duration::MAX, 1)));
+        let bounded = vm.eval(script("finite_deadline", "left == right"));
+        assert!(bounded.is_err(), "a finite hard deadline enables the equality work ceiling");
+        let errors = vm.take_errors();
+        assert!(errors.iter().any(|e| e.contains("script equality work, instruction, or time limit exceeded")),
+            "the bounded comparison reports equality exhaustion: {errors:?}");
+    });
 }
 
 #[test]

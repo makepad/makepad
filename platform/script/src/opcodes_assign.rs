@@ -50,6 +50,7 @@ impl<'a> ScriptVm<'a> {
                         self.bx.threads.cur().push_stack_unchecked(old_value);
                     } else if old_value.is_string_like() || value.is_string_like() {
                         let str = self.bx.heap.new_string_concat(old_value, value);
+                        if self.bx.heap.allocation_error_pending { return; }
                         self.bx.heap.scope_write_in_map(
                             owner,
                             key,
@@ -77,6 +78,7 @@ impl<'a> ScriptVm<'a> {
                         self.bx.threads.cur().push_stack_unchecked(old_value);
                     } else if old_value.is_string_like() || value.is_string_like() {
                         let str = self.bx.heap.new_string_concat(old_value, value);
+                        if self.bx.heap.allocation_error_pending { return; }
                         self.bx
                             .threads
                             .cur()
@@ -183,6 +185,7 @@ impl<'a> ScriptVm<'a> {
                 .value(obj, field, self.bx.threads.cur().trap.pass());
             if old_value.is_string_like() || value.is_string_like() {
                 let str = self.bx.heap.new_string_concat(old_value, value);
+                if self.bx.heap.allocation_error_pending { return; }
                 let value = self.bx.heap.set_value(
                     obj,
                     field,
@@ -293,6 +296,7 @@ impl<'a> ScriptVm<'a> {
                 .value(obj, index, self.bx.threads.cur().trap.pass());
             if old_value.is_string_like() || value.is_string_like() {
                 let str = self.bx.heap.new_string_concat(old_value, value);
+                if self.bx.heap.allocation_error_pending { return; }
                 let value = self.bx.heap.set_value(
                     obj,
                     index,
@@ -322,6 +326,7 @@ impl<'a> ScriptVm<'a> {
                 .array_index(arr, index, self.bx.threads.cur().trap.pass());
             if old_value.is_string_like() || value.is_string_like() {
                 let str = self.bx.heap.new_string_concat(old_value, value);
+                if self.bx.heap.allocation_error_pending { return; }
                 let value = self.bx.heap.set_array_index(
                     arr,
                     index,
@@ -620,10 +625,27 @@ impl<'a> ScriptVm<'a> {
 
     // Generic assignment operation handlers
 
+    /// The value of a numeric compound assign `old op= value`: integer
+    /// `/` and `%` (`int` is `Some(is_rem)`) follow the binary operators on
+    /// typed integers and integer vectors; everything else is `f` on floats.
+    pub(crate) fn compound_numeric<F>(&mut self, old: ScriptValue, value: ScriptValue, int: Option<bool>, f: F, ip: ScriptIp) -> ScriptValue
+    where
+        F: FnOnce(f64, f64) -> f64,
+    {
+        if let Some(rem) = int {
+            if let Some(v) = self.int_div_rem(old, value, rem) {
+                return v;
+            }
+        }
+        let fa = self.bx.heap.cast_to_f64(old, ip);
+        let fb = self.bx.heap.cast_to_f64(value, ip);
+        ScriptValue::from_f64_traced_nan(f(fa, fb), ip)
+    }
+
     /// Shared fused read-modify-write for numeric compound scope assigns.
     /// One chain walk locates the slot; the old two-walk path remains as
     /// fallback for vec2-vec visibility and produces identical errors.
-    fn scope_rmw_numeric<F>(&mut self, value: ScriptValue, id: crate::makepad_live_id::LiveId, f: F)
+    fn scope_rmw_numeric<F>(&mut self, value: ScriptValue, id: crate::makepad_live_id::LiveId, int: Option<bool>, f: F)
     where
         F: FnOnce(f64, f64) -> f64,
     {
@@ -638,12 +660,11 @@ impl<'a> ScriptVm<'a> {
                     self.bx.threads.cur().push_stack_unchecked(va);
                 } else {
                     let ip = self.bx.threads.cur_ref().trap.ip;
-                    let fa = self.bx.heap.cast_to_f64(va, ip);
-                    let fb = self.bx.heap.cast_to_f64(value, ip);
+                    let new = self.compound_numeric(va, value, int, f, ip);
                     let value = self.bx.heap.scope_write_in_map(
                         owner,
                         key,
-                        ScriptValue::from_f64_traced_nan(f(fa, fb), ip),
+                        new,
                         self.bx.threads.cur().trap.pass(),
                     );
                     self.bx.threads.cur().push_stack_unchecked(value);
@@ -655,13 +676,8 @@ impl<'a> ScriptVm<'a> {
                     self.bx.threads.cur().push_stack_unchecked(va);
                 } else {
                     let ip = self.bx.threads.cur_ref().trap.ip;
-                    let fa = self.bx.heap.cast_to_f64(va, ip);
-                    let fb = self.bx.heap.cast_to_f64(value, ip);
-                    let value = self.bx.threads.cur().set_scope_value(
-                        &mut self.bx.heap,
-                        id,
-                        ScriptValue::from_f64_traced_nan(f(fa, fb), ip),
-                    );
+                    let new = self.compound_numeric(va, value, int, f, ip);
+                    let value = self.bx.threads.cur().set_scope_value(&mut self.bx.heap, id, new);
                     self.bx.threads.cur().push_stack_unchecked(value);
                 }
             }
@@ -681,10 +697,18 @@ impl<'a> ScriptVm<'a> {
     where
         F: FnOnce(f64, f64) -> f64,
     {
+        self.handle_f64_scope_assign_op_int(None, f)
+    }
+
+    /// `handle_f64_scope_assign_op` with `int = Some(is_rem)` for `/=` and `%=`.
+    pub fn handle_f64_scope_assign_op_int<F>(&mut self, int: Option<bool>, f: F)
+    where
+        F: FnOnce(f64, f64) -> f64,
+    {
         let value = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
         let id = self.bx.threads.cur().pop_stack_value();
         if let Some(id) = id.as_id() {
-            self.scope_rmw_numeric(value, id, f);
+            self.scope_rmw_numeric(value, id, int, f);
         } else {
             let value = script_err_immutable!(
                 self.bx.threads.cur_ref().trap,
@@ -703,7 +727,7 @@ impl<'a> ScriptVm<'a> {
         let value = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
         let id = self.bx.threads.cur().pop_stack_value();
         if let Some(id) = id.as_id() {
-            self.scope_rmw_numeric(value, id, |a, b| f(a as u64, b as u64) as f64);
+            self.scope_rmw_numeric(value, id, None, |a, b| f(a as u64, b as u64) as f64);
         } else {
             let value = script_err_immutable!(
                 self.bx.threads.cur_ref().trap,
@@ -719,6 +743,14 @@ impl<'a> ScriptVm<'a> {
     where
         F: FnOnce(f64, f64) -> f64,
     {
+        self.handle_f64_field_assign_op_int(None, f)
+    }
+
+    /// `handle_f64_field_assign_op` with `int = Some(is_rem)` for `/=` and `%=`.
+    pub fn handle_f64_field_assign_op_int<F>(&mut self, int: Option<bool>, f: F)
+    where
+        F: FnOnce(f64, f64) -> f64,
+    {
         let value = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
         let field = self.bx.threads.cur().pop_stack_value();
         let object = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
@@ -728,12 +760,11 @@ impl<'a> ScriptVm<'a> {
                 .heap
                 .value(obj, field, self.bx.threads.cur().trap.pass());
             let ip = self.bx.threads.cur_ref().trap.ip;
-            let fa = self.bx.heap.cast_to_f64(old_value, ip);
-            let fb = self.bx.heap.cast_to_f64(value, ip);
+            let new = self.compound_numeric(old_value, value, int, f, ip);
             let value = self.bx.heap.set_value(
                 obj,
                 field,
-                ScriptValue::from_f64_traced_nan(f(fa, fb), ip),
+                new,
                 self.bx.threads.cur().trap.pass(),
             );
             self.bx.threads.cur().push_stack_unchecked(value);
@@ -785,6 +816,14 @@ impl<'a> ScriptVm<'a> {
     where
         F: FnOnce(f64, f64) -> f64,
     {
+        self.handle_f64_index_assign_op_int(None, f)
+    }
+
+    /// `handle_f64_index_assign_op` with `int = Some(is_rem)` for `/=` and `%=`.
+    pub fn handle_f64_index_assign_op_int<F>(&mut self, int: Option<bool>, f: F)
+    where
+        F: FnOnce(f64, f64) -> f64,
+    {
         let value = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
         let index = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
         let object = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
@@ -794,12 +833,11 @@ impl<'a> ScriptVm<'a> {
                 .heap
                 .value(obj, index, self.bx.threads.cur().trap.pass());
             let ip = self.bx.threads.cur_ref().trap.ip;
-            let fa = self.bx.heap.cast_to_f64(old_value, ip);
-            let fb = self.bx.heap.cast_to_f64(value, ip);
+            let new = self.compound_numeric(old_value, value, int, f, ip);
             let value = self.bx.heap.set_value(
                 obj,
                 index,
-                ScriptValue::from_f64_traced_nan(f(fa, fb), ip),
+                new,
                 self.bx.threads.cur().trap.pass(),
             );
             self.bx.threads.cur().push_stack_unchecked(value);
@@ -812,12 +850,11 @@ impl<'a> ScriptVm<'a> {
                 .heap
                 .array_index(arr, index, self.bx.threads.cur().trap.pass());
             let ip = self.bx.threads.cur_ref().trap.ip;
-            let fa = self.bx.heap.cast_to_f64(old_value, ip);
-            let fb = self.bx.heap.cast_to_f64(value, ip);
+            let new = self.compound_numeric(old_value, value, int, f, ip);
             let value = self.bx.heap.set_array_index(
                 arr,
                 index,
-                ScriptValue::from_f64_traced_nan(f(fa, fb), ip),
+                new,
                 self.bx.threads.cur().trap.pass(),
             );
             self.bx.threads.cur().push_stack_unchecked(value);

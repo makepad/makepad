@@ -25,6 +25,7 @@ impl ScriptHeap {
             self.regexes[re] = Some(data);
             re
         } else {
+            crate::heap::reserve_free_list(&mut self.regexes_free, self.regexes.len() + 1);
             let (index, generation) = self.regexes.push(Some(data));
             ScriptRegex::new(index, generation)
         };

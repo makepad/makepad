@@ -15,13 +15,23 @@ pub fn define_gc_module(heap: &mut ScriptHeap, native: &mut ScriptNative) {
         script_args!(value = NIL),
         |vm, args| {
             let value = script_value!(vm, args.value);
-            vm.bx.heap.set_static(value);
+            // A static value is never collected, so under an entry policy (a guest) it would
+            // hold memory past every collection: the value is answered as it is.
+            if !vm.bx.has_entry_policy() {
+                vm.bx.heap.set_static(value);
+            }
             value
         },
     );
 
+    // A collection costs in proportion to the heap. A guest under an entry policy only asks for
+    // one; the host that pumps its VM collects at most once per turn (`take_gc_request`).
     native.add_method(heap, gc, id_lut!(run), script_args!(), |vm, _args| {
-        vm.gc();
+        if vm.bx.has_entry_policy() {
+            vm.bx.heap.gc_requested = true;
+        } else {
+            vm.gc();
+        }
         ScriptValue::NIL
     });
 
@@ -31,7 +41,11 @@ pub fn define_gc_module(heap: &mut ScriptHeap, native: &mut ScriptNative) {
         id_lut!(run_status),
         script_args!(),
         |vm, _args| {
-            vm.gc_with_status();
+            if vm.bx.has_entry_policy() {
+                vm.bx.heap.gc_requested = true;
+            } else {
+                vm.gc_with_status();
+            }
             ScriptValue::NIL
         },
     );

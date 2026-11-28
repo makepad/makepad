@@ -791,15 +791,18 @@ where
     }
     fn script_to_value(&self, vm: &mut ScriptVm) -> ScriptValue {
         let obj = vm.heap_mut().new_object();
+        if vm.heap().allocation_error_pending() { return obj.into(); }
         for (key, value) in self.iter() {
             let key = key.script_to_value(vm);
+            if vm.heap().allocation_error_pending() { break; }
             let value = value.script_to_value(vm);
+            if vm.heap().allocation_error_pending() { break; }
             if !vm.heap_mut().charge_object_map_entry(
                 obj,
                 key,
                 "converting a Rust map to a script object",
             ) {
-                continue;
+                break;
             }
             vm.heap_mut().map_insert_own(obj, key, value);
         }

@@ -3,6 +3,37 @@
 //! are checked, and a value that has no Splash spelling (a NaN) is an error
 //! instead of text that parses as something else.
 
+/// The color spelling of the destination document.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ColorStyle {
+    Hash,
+    MacroHashX,
+}
+
+impl ColorStyle {
+    fn prefix(self) -> &'static str {
+        match self {
+            Self::Hash => "#",
+            Self::MacroHashX => "#x",
+        }
+    }
+
+    pub(super) fn rewrite(self, text: &str, node: &super::Node) -> String {
+        let mut result = String::with_capacity(text.len());
+        let mut end = 0;
+        node.walk(&super::Loc::default(), &mut |_, child| {
+            if let super::Kind::Color(hex) = &child.kind {
+                result.push_str(&text[end..child.span.start]);
+                result.push_str(self.prefix());
+                result.push_str(hex);
+                end = child.span.end;
+            }
+        });
+        result.push_str(&text[end..]);
+        result
+    }
+}
+
 /// A value to write.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
@@ -159,12 +190,12 @@ pub fn number_f32(v: f32) -> Result<String, String> {
     Ok(s)
 }
 
-fn is_ident(s: &str) -> bool {
+pub(super) fn is_ident(s: &str) -> bool {
     let mut chars = s.chars();
     matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_') && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-fn is_path(s: &str) -> bool {
+pub(super) fn is_path(s: &str) -> bool {
     !s.is_empty() && s.split('.').all(is_ident)
 }
 
@@ -180,7 +211,7 @@ pub fn key(name: &str) -> Result<String, String> {
     }
 }
 
-fn is_reserved(name: &str) -> bool {
+pub(super) fn is_reserved(name: &str) -> bool {
     matches!(name, "let" | "var" | "fn" | "use" | "if" | "else" | "elif" | "for" | "while" | "loop" | "match" | "try" | "ok" | "return" | "break" | "continue" | "true" | "false" | "nil" | "me" | "scope" | "in")
 }
 
@@ -189,20 +220,28 @@ pub const WIDTH: usize = 100;
 
 /// Write `value` compactly on one line.
 pub fn write(value: &Value) -> Result<String, String> {
+    write_with(value, ColorStyle::Hash)
+}
+
+pub fn write_with(value: &Value, colors: ColorStyle) -> Result<String, String> {
     let mut out = String::new();
-    compact(value, &mut out)?;
+    compact_with(value, colors, &mut out)?;
     Ok(out)
 }
 
 /// Write `value`; containers that would pass [`WIDTH`] break into one entry
 /// per line, indented by four spaces per level from `indent`.
 pub fn write_indented(value: &Value, indent: &str) -> Result<String, String> {
+    write_indented_with(value, indent, ColorStyle::Hash)
+}
+
+pub fn write_indented_with(value: &Value, indent: &str, colors: ColorStyle) -> Result<String, String> {
     let mut out = String::new();
-    pretty(value, indent, &mut out)?;
+    pretty_with(value, indent, colors, &mut out)?;
     Ok(out)
 }
 
-fn compact(value: &Value, out: &mut String) -> Result<(), String> {
+fn compact_with(value: &Value, colors: ColorStyle, out: &mut String) -> Result<(), String> {
     match value {
         Value::Nil => out.push_str("nil"),
         Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
@@ -221,7 +260,7 @@ fn compact(value: &Value, out: &mut String) -> Result<(), String> {
             if !matches!(c.len(), 3 | 4 | 6 | 8) || !c.bytes().all(|b| b.is_ascii_hexdigit()) {
                 return Err(format!("`#{c}` is not a colour (3, 4, 6 or 8 hex digits)"));
             }
-            out.push('#');
+            out.push_str(colors.prefix());
             out.push_str(c);
         }
         Value::Ident(i) => {
@@ -253,7 +292,7 @@ fn compact(value: &Value, out: &mut String) -> Result<(), String> {
                 if i > 0 {
                     out.push_str(", ");
                 }
-                compact(a, out)?;
+                compact_with(a, colors, out)?;
             }
             out.push(')');
         }
@@ -271,7 +310,7 @@ fn compact(value: &Value, out: &mut String) -> Result<(), String> {
                 }
                 out.push_str(&key(k)?);
                 out.push_str(": ");
-                compact(v, out)?;
+                compact_with(v, colors, out)?;
             }
             out.push('}');
         }
@@ -281,7 +320,7 @@ fn compact(value: &Value, out: &mut String) -> Result<(), String> {
                 if i > 0 {
                     out.push_str(", ");
                 }
-                compact(v, out)?;
+                compact_with(v, colors, out)?;
             }
             out.push(']');
         }
@@ -293,18 +332,22 @@ fn compact(value: &Value, out: &mut String) -> Result<(), String> {
             out.push(' ');
             out.push_str(name);
             out.push_str(" = ");
-            compact(value, out)?;
+            compact_with(value, colors, out)?;
         }
         Value::Verbatim(text) => {
-            super::parse_value(text).map_err(|e| format!("verbatim text does not parse: {e}"))?;
-            out.push_str(text);
+            let node = super::parse_value(text).map_err(|e| format!("verbatim text does not parse: {e}"))?;
+            if colors == ColorStyle::MacroHashX {
+                out.push_str(&colors.rewrite(text, &node));
+            } else {
+                out.push_str(text);
+            }
         }
     }
     Ok(())
 }
 
-fn pretty(value: &Value, indent: &str, out: &mut String) -> Result<(), String> {
-    let flat = write(value)?;
+fn pretty_with(value: &Value, indent: &str, colors: ColorStyle, out: &mut String) -> Result<(), String> {
+    let flat = write_with(value, colors)?;
     let multi = |s: &str| s.contains('\n');
     let fits = indent.len() + flat.len() <= WIDTH && !multi(&flat);
     let inner = format!("{indent}    ");
@@ -318,7 +361,7 @@ fn pretty(value: &Value, indent: &str, out: &mut String) -> Result<(), String> {
                 out.push_str(&inner);
                 out.push_str(&key(k)?);
                 out.push_str(": ");
-                pretty(v, &inner, out)?;
+                pretty_with(v, &inner, colors, out)?;
                 out.push('\n');
             }
             out.push_str(indent);
@@ -328,7 +371,7 @@ fn pretty(value: &Value, indent: &str, out: &mut String) -> Result<(), String> {
             out.push_str("[\n");
             for v in items {
                 out.push_str(&inner);
-                pretty(v, &inner, out)?;
+                pretty_with(v, &inner, colors, out)?;
                 out.push_str(",\n");
             }
             out.push_str(indent);
@@ -340,12 +383,12 @@ fn pretty(value: &Value, indent: &str, out: &mut String) -> Result<(), String> {
             out.push('(');
             // A single object / array argument stays on the call's line.
             if args.len() == 1 && matches!(args[0], Value::Object(..) | Value::Array(_)) {
-                pretty(&args[0], indent, out)?;
+                pretty_with(&args[0], indent, colors, out)?;
             } else {
                 out.push('\n');
                 for (i, a) in args.iter().enumerate() {
                     out.push_str(&inner);
-                    pretty(a, &inner, out)?;
+                    pretty_with(a, &inner, colors, out)?;
                     if i + 1 < args.len() {
                         out.push(',');
                     }
@@ -360,7 +403,7 @@ fn pretty(value: &Value, indent: &str, out: &mut String) -> Result<(), String> {
             out.push(' ');
             out.push_str(name);
             out.push_str(" = ");
-            pretty(value, indent, out)?;
+            pretty_with(value, indent, colors, out)?;
         }
         _ => out.push_str(&flat),
     }

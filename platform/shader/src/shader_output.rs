@@ -177,6 +177,28 @@ pub enum ShaderMode {
     Compute,
 }
 
+pub const GLSL_STAGE_VERTEX: u8 = 1;
+pub const GLSL_STAGE_FRAGMENT: u8 = 2;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GlslTextureBinding {
+    pub uniform_name: String,
+    /// Index among the declared texture IO entries.
+    pub texture_slot: u32,
+    /// Index in the shader's sampler table.
+    pub sampler_index: u32,
+    /// Bitmask of the GLSL stages that use this binding.
+    pub stages: u8,
+}
+
+pub fn glsl_texture_uniform_name(name: LiveId, pair: usize) -> String {
+    if pair == 0 { format!("tex_{name}") } else { format!("mp_s{pair}_{name}") }
+}
+
+pub fn pick_twin_name(plain_global_name: &str) -> String {
+    format!("mp_pick_{plain_global_name}")
+}
+
 /// Backend input and reflection, independent of frontend provenance.
 #[derive(Default, Debug)]
 pub struct ShaderOutput {
@@ -188,7 +210,7 @@ pub struct ShaderOutput {
     pub io: Vec<ShaderIo>,
     pub samplers: Vec<ShaderSampler>,
     pub pick: bool,
-    pub texture_sampler_bindings: Vec<(String, usize)>,
+    pub glsl_texture_bindings: Vec<GlslTextureBinding>,
     pub has_errors: bool,
     pub errors: Vec<String>,
     pub uses_derivatives: bool,
@@ -408,9 +430,6 @@ impl ShaderOutput {
     pub fn set_pick(&mut self, pick: bool) { self.pick = pick; }
     pub fn io(&self) -> &[ShaderIo] { &self.io }
     pub fn samplers(&self) -> &[ShaderSampler] { &self.samplers }
-    pub fn texture_sampler_index(&self, name: &str) -> usize {
-        self.texture_sampler_bindings.iter().find(|(bound, _)| bound == name).map(|(_, index)| *index).unwrap_or(0)
-    }
     pub fn push_error(&mut self, msg: String) {
         self.has_errors = true;
         self.errors.push(msg);

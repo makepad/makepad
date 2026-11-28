@@ -653,6 +653,31 @@ pub fn drain_network_runtime(std: &mut ScriptStd) -> Vec<NetworkResponse> {
     responses
 }
 
+/// Authorize an HTTP URL before consulting any resource cache. Both script HTTP
+/// entry points start new requests on this runtime, which also enforces LAN policy.
+pub fn http_runtime(vm: &mut ScriptVm, url: &str) -> Result<crate::makepad_network::NetworkRuntimeHandle, ScriptValue> {
+    let std = vm.std_ref::<ScriptStd>();
+    if !std.network_allowed() {
+        return Err(script_err_io!(vm.trap(), "network access requires a host request"));
+    }
+    let Some(runtime) = std.net.clone() else {
+        return Err(script_err_io!(vm.trap(), "script net runtime is not configured"));
+    };
+    // The native platform URL handler and resource cache also know local files.
+    // A network grant only admits HTTP(S) URLs, even on a cache hit.
+    if !std.grants().contains(crate::HostGrants::LOCAL_RESOURCES)
+        && !url.split_once("://").is_some_and(|(scheme, rest)| {
+            (scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https"))
+                && !rest.is_empty() && !rest.starts_with(['/', '?', '#'])
+        })
+    {
+        return Err(script_err_io!(vm.trap(), "network access requires an HTTP(S) URL"));
+    }
+    crate::makepad_network::lan::check_url("http request", url)
+        .map_err(|err| script_err_io!(vm.trap(), "http request failed: {err}"))?;
+    Ok(runtime)
+}
+
 pub fn script_mod(vm: &mut ScriptVm) {
     let net = vm.new_module(id_lut!(net));
 
@@ -669,7 +694,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
         id_lut!(http_server),
         script_args_def!(options = NIL, events = NIL),
         move |vm, args| {
-            if vm.std_ref::<ScriptStd>().host_io_only() {
+            if !vm.std_ref::<ScriptStd>().network_allowed() {
                 return script_err_io!(vm.trap(), "network access requires a host request");
             }
             let options = script_value!(vm, args.options);
@@ -725,9 +750,6 @@ pub fn script_mod(vm: &mut ScriptVm) {
         id_lut!(http_request),
         script_args_def!(request = NIL, events = NIL),
         move |vm, args| {
-            if vm.std_ref::<ScriptStd>().host_io_only() {
-                return script_err_io!(vm.trap(), "network access requires a host request");
-            }
             let request = script_value!(vm, args.request);
             let events = script_value!(vm, args.events);
             if !script_has_proto!(vm, request, net.HttpRequest)
@@ -738,15 +760,15 @@ pub fn script_mod(vm: &mut ScriptVm) {
             let request = HttpRequest::script_from_value(vm, request);
             let events = HttpEvents::script_from_value(vm, events);
 
-            let std = vm.std_mut::<ScriptStd>();
-            let Some(runtime) = std.net.as_ref() else {
-                return script_err_io!(vm.trap(), "script net runtime is not configured");
+            let runtime = match http_runtime(vm, &request.url) {
+                Ok(runtime) => runtime,
+                Err(error) => return error,
             };
             let id = LiveId::unique();
             if let Err(err) = runtime.http_start(id, request.into()) {
                 return script_err_io!(vm.trap(), "http request failed: {err}");
             }
-            std.data.http_requests.push(ScriptHttp { id, events });
+            vm.std_mut::<ScriptStd>().data.http_requests.push(ScriptHttp { id, events });
             id.escape()
         },
     );
@@ -986,7 +1008,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
         id_lut!(web_socket),
         script_args_def!(request = NIL, events = NIL),
         move |vm, args| {
-            if vm.std_ref::<ScriptStd>().host_io_only() {
+            if !vm.std_ref::<ScriptStd>().network_allowed() {
                 return script_err_io!(vm.trap(), "network access requires a host request");
             }
             let request = script_value!(vm, args.request);
@@ -1032,7 +1054,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
         id_lut!(socket_stream),
         script_args_def!(options = NIL),
         move |vm, args| {
-            if vm.std_ref::<ScriptStd>().host_io_only() {
+            if !vm.std_ref::<ScriptStd>().network_allowed() {
                 return script_err_io!(vm.trap(), "network access requires a host request");
             }
             let options = script_value!(vm, args.options);

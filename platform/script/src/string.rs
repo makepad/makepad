@@ -257,6 +257,7 @@ impl ScriptStringData {
                     let result = vm.bx.heap.string_mut_self_with(sself, |heap, sself| {
                         regex_split(heap, sself, re_ptr)
                     });
+                    if vm.bx.heap.allocation_error_pending { return NIL; }
                     if let Some(arr) = result {
                         return arr.into();
                     }
@@ -270,14 +271,17 @@ impl ScriptStringData {
                 if let Some(Some(s)) = vm.bx.heap.string_mut_self_with(sself, |heap, sself| {
                     heap.string_mut_self_with(pat, |heap, pat| {
                         let array = heap.new_array();
+                        if heap.allocation_error_pending { return NIL; }
                         for value in sself.split(pat) {
                             let value = heap.new_string_from_str(value);
+                            if heap.allocation_error_pending { return NIL; }
                             heap.array_push_unchecked(array, value);
+                            if heap.allocation_error_pending { return NIL; }
                         }
-                        array
+                        array.into()
                     })
                 }) {
-                    return s.into();
+                    return s;
                 }
 
                 script_err_unexpected!(
@@ -357,6 +361,7 @@ impl ScriptStringData {
                         let result = vm.bx.heap.string_mut_self_with(sself, |heap, s| {
                             regex_match_all_strings(heap, s, re_ptr)
                         });
+                        if vm.bx.heap.allocation_error_pending { return NIL; }
                         if let Some(arr) = result {
                             return arr.into();
                         }
@@ -378,13 +383,17 @@ impl ScriptStringData {
                     heap.string_mut_self_with(pat, |heap, pat| {
                         if let Some(idx) = sself.find(pat) {
                             let obj = heap.new_with_proto(NIL);
+                            if heap.allocation_error_pending { return NIL; }
                             let value_sv = heap.new_string_from_str(pat);
+                            if heap.allocation_error_pending { return NIL; }
                             heap.set_value_def(obj, id!(value).into(), value_sv);
+                            if heap.allocation_error_pending { return NIL; }
                             heap.set_value_def(
                                 obj,
                                 id!(index).into(),
                                 ScriptValue::from_f64(idx as f64),
                             );
+                            if heap.allocation_error_pending { return NIL; }
                             obj.into()
                         } else {
                             NIL
@@ -417,6 +426,7 @@ impl ScriptStringData {
                     let result = vm.bx.heap.string_mut_self_with(sself, |heap, s| {
                         regex_match_all_detail(heap, s, re_ptr, num_captures)
                     });
+                    if vm.bx.heap.allocation_error_pending { return NIL; }
                     if let Some(arr) = result {
                         return arr.into();
                     }
@@ -656,6 +666,16 @@ fn replace_first(
 
 // ---- Regex helper functions ----
 
+/// Charge the scratch space for the start/end offsets of every capture, including group zero.
+pub(crate) fn charge_regex_slots(heap: &mut ScriptHeap, captures: usize, operation: &'static str) -> Option<usize> {
+    let slots = captures.checked_add(1).and_then(|n| n.checked_mul(2));
+    let Some((slots, bytes)) = slots.and_then(|n| n.checked_mul(size_of::<Option<usize>>()).map(|bytes| (n, bytes))) else {
+        heap.refuse_memory("out of memory while running a regex", NoTrap);
+        return None;
+    };
+    heap.charge_allocation(bytes, operation).then_some(slots)
+}
+
 /// Find all non-overlapping matches and return their byte ranges
 fn regex_find_all(
     heap: &mut ScriptHeap,
@@ -664,16 +684,9 @@ fn regex_find_all(
     num_captures: usize,
 ) -> Vec<(usize, usize, Vec<Option<(usize, usize)>>)> {
     let mut results = Vec::new();
-    let num_slots = num_captures
-        .checked_add(1)
-        .and_then(|slots| slots.checked_mul(2))
-        .unwrap_or(usize::MAX);
-    let slot_bytes = num_slots
-        .checked_mul(std::mem::size_of::<Option<usize>>())
-        .unwrap_or(usize::MAX);
-    if !heap.charge_allocation(slot_bytes, "allocating regex capture slots") {
+    let Some(num_slots) = charge_regex_slots(heap, num_captures, "allocating regex capture slots") else {
         return results;
-    }
+    };
     let mut slots = vec![None; num_slots];
     let mut search_from = 0;
 
@@ -739,24 +752,32 @@ fn next_char_boundary(s: &str, pos: usize) -> usize {
 fn regex_split(heap: &mut ScriptHeap, input: &str, re_ptr: ScriptRegex) -> ScriptArray {
     let num_captures = heap.regex(re_ptr).map(|r| r.num_captures).unwrap_or(0);
     let matches = regex_find_all(heap, input, re_ptr, num_captures);
+    if heap.allocation_error_pending { return heap.allocation_poison_array; }
 
     let array = heap.new_array();
+    if heap.allocation_error_pending { return heap.allocation_poison_array; }
     let mut last_end = 0;
     for (start, end, caps) in &matches {
         let value = heap.new_string_from_str(&input[last_end..*start]);
+        if heap.allocation_error_pending { return heap.allocation_poison_array; }
         heap.array_push_unchecked(array, value);
+        if heap.allocation_error_pending { return heap.allocation_poison_array; }
         // JS behavior: include capture groups in split result
         for cap in caps {
             let value = match cap {
                 Some((s, e)) => heap.new_string_from_str(&input[*s..*e]),
                 None => NIL,
             };
+            if heap.allocation_error_pending { return heap.allocation_poison_array; }
             heap.array_push_unchecked(array, value);
+            if heap.allocation_error_pending { return heap.allocation_poison_array; }
         }
         last_end = *end;
     }
     let value = heap.new_string_from_str(&input[last_end..]);
+    if heap.allocation_error_pending { return heap.allocation_poison_array; }
     heap.array_push_unchecked(array, value);
+    if heap.allocation_error_pending { return heap.allocation_poison_array; }
     array
 }
 
@@ -764,13 +785,57 @@ fn regex_split(heap: &mut ScriptHeap, input: &str, re_ptr: ScriptRegex) -> Scrip
 fn regex_match_all_strings(heap: &mut ScriptHeap, input: &str, re_ptr: ScriptRegex) -> ScriptArray {
     let num_captures = heap.regex(re_ptr).map(|r| r.num_captures).unwrap_or(0);
     let matches = regex_find_all(heap, input, re_ptr, num_captures);
+    if heap.allocation_error_pending { return heap.allocation_poison_array; }
 
     let array = heap.new_array();
+    if heap.allocation_error_pending { return heap.allocation_poison_array; }
     for (start, end, _) in &matches {
         let value = heap.new_string_from_str(&input[*start..*end]);
+        if heap.allocation_error_pending { return heap.allocation_poison_array; }
         heap.array_push_unchecked(array, value);
+        if heap.allocation_error_pending { return heap.allocation_poison_array; }
     }
     array
+}
+
+/// Build the same match object for string methods and regex.exec, using the caller's trap.
+fn regex_match_object(
+    heap: &mut ScriptHeap,
+    input: &str,
+    start: usize,
+    end: usize,
+    groups: impl Iterator<Item = Option<(usize, usize)>>,
+    trap: ScriptTrap,
+) -> ScriptValue {
+    let obj = heap.new_with_proto(NIL);
+    if heap.allocation_error_pending { return NIL; }
+    let value = heap.new_string_from_str(&input[start..end]);
+    if heap.allocation_error_pending { return NIL; }
+    heap.set_value(obj, id!(value).into(), value, trap);
+    if heap.allocation_error_pending { return NIL; }
+    heap.set_value(obj, id!(index).into(), ScriptValue::from_f64(start as f64), trap);
+    if heap.allocation_error_pending { return NIL; }
+
+    let captures = heap.new_array();
+    if heap.allocation_error_pending { return NIL; }
+    heap.array_push_unchecked(captures, value);
+    if heap.allocation_error_pending { return NIL; }
+    for group in groups {
+        let capture = group.map_or(NIL, |(s, e)| heap.new_string_from_str(&input[s..e]));
+        if heap.allocation_error_pending { return NIL; }
+        heap.array_push_unchecked(captures, capture);
+        if heap.allocation_error_pending { return NIL; }
+    }
+    heap.set_value(obj, id!(captures).into(), captures.into(), trap);
+    if heap.allocation_error_pending { return NIL; }
+    obj.into()
+}
+
+pub(crate) fn regex_match_from_slots(
+    heap: &mut ScriptHeap, input: &str, slots: &[Option<usize>], trap: ScriptTrap,
+) -> ScriptValue {
+    let groups = slots[2..].chunks_exact(2).map(|pair| pair[0].zip(pair[1]));
+    regex_match_object(heap, input, slots[0].unwrap_or(0), slots[1].unwrap_or(0), groups, trap)
 }
 
 /// Execute regex and return first match as a script object
@@ -780,47 +845,13 @@ fn regex_exec_first(
     re_ptr: ScriptRegex,
     num_captures: usize,
 ) -> ScriptValue {
-    let num_slots = (num_captures + 1) * 2;
+    let Some(num_slots) = charge_regex_slots(heap, num_captures, "running a regex") else { return NIL };
     let mut slots = vec![None; num_slots];
-
-    let matched = if let Some(re) = heap.regex(re_ptr) {
-        re.inner.run(input, &mut slots)
+    if heap.regex(re_ptr).is_some_and(|re| re.inner.run(input, &mut slots)) {
+        regex_match_from_slots(heap, input, &slots, NoTrap)
     } else {
-        return NIL;
-    };
-
-    if !matched {
-        return NIL;
+        NIL
     }
-
-    let match_start = slots[0].unwrap_or(0);
-    let match_end = slots[1].unwrap_or(0);
-    let value = &input[match_start..match_end];
-
-    let obj = heap.new_with_proto(NIL);
-    let value_sv = heap.new_string_from_str(value);
-    heap.set_value_def(obj, id!(value).into(), value_sv);
-    heap.set_value_def(
-        obj,
-        id!(index).into(),
-        ScriptValue::from_f64(match_start as f64),
-    );
-
-    // Build captures array
-    let captures = heap.new_array();
-    let value = heap.new_string_from_str(value);
-    heap.array_push_unchecked(captures, value);
-    for i in 1..=num_captures {
-        let s = slots.get(i * 2).copied().flatten();
-        let e = slots.get(i * 2 + 1).copied().flatten();
-        let value = match (s, e) {
-            (Some(s), Some(e)) => heap.new_string_from_str(&input[s..e]),
-            _ => NIL,
-        };
-        heap.array_push_unchecked(captures, value);
-    }
-    heap.set_value_def(obj, id!(captures).into(), captures.into());
-    obj.into()
 }
 
 /// Return array of all match detail objects
@@ -831,27 +862,14 @@ fn regex_match_all_detail(
     num_captures: usize,
 ) -> ScriptArray {
     let matches = regex_find_all(heap, input, re_ptr, num_captures);
-
+    if heap.allocation_error_pending { return heap.allocation_poison_array; }
     let array = heap.new_array();
-    for (start, end, caps) in &matches {
-        let value = &input[*start..*end];
-        let obj = heap.new_with_proto(NIL);
-        let value_sv = heap.new_string_from_str(value);
-        heap.set_value_def(obj, id!(value).into(), value_sv);
-        heap.set_value_def(obj, id!(index).into(), ScriptValue::from_f64(*start as f64));
-
-        let cap_arr = heap.new_array();
-        let value_sv = heap.new_string_from_str(value);
-        heap.array_push_unchecked(cap_arr, value_sv);
-        for cap in caps {
-            let value = match cap {
-                Some((s, e)) => heap.new_string_from_str(&input[*s..*e]),
-                None => NIL,
-            };
-            heap.array_push_unchecked(cap_arr, value);
-        }
-        heap.set_value_def(obj, id!(captures).into(), cap_arr.into());
-        heap.array_push_unchecked(array, obj.into());
+    if heap.allocation_error_pending { return heap.allocation_poison_array; }
+    for (start, end, groups) in matches {
+        let obj = regex_match_object(heap, input, start, end, groups.into_iter(), NoTrap);
+        if heap.allocation_error_pending { return heap.allocation_poison_array; }
+        heap.array_push_unchecked(array, obj);
+        if heap.allocation_error_pending { return heap.allocation_poison_array; }
     }
     array
 }
@@ -867,17 +885,9 @@ fn regex_replace(
     let is_global = heap.regex(re_ptr).map(|r| r.flags.global).unwrap_or(false);
     let num_captures = heap.regex(re_ptr).map(|r| r.num_captures).unwrap_or(0);
 
-    let matches = if is_global {
-        regex_find_all(heap, input, re_ptr, num_captures)
-    } else {
-        // Just get the first match
-        let all = regex_find_all(heap, input, re_ptr, num_captures);
-        if all.is_empty() {
-            vec![]
-        } else {
-            vec![all.into_iter().next().unwrap()]
-        }
-    };
+    let mut matches = regex_find_all(heap, input, re_ptr, num_captures);
+    if heap.allocation_error_pending { return NIL; }
+    if !is_global { matches.truncate(1); }
 
     if matches.is_empty() {
         return heap.new_string_from_str(input);
