@@ -300,6 +300,7 @@ value VkCompositeAlphaFlagsKHR OPAQUE
 value VkCompositeAlphaFlagsKHR POST_MULTIPLIED
 value VkCompositeAlphaFlagsKHR PRE_MULTIPLIED
 value VkCullModeFlags BACK
+value VkCullModeFlags FRONT
 value VkCullModeFlags NONE
 value VkDebugUtilsMessageSeverityFlagsEXT ERROR
 value VkDebugUtilsMessageSeverityFlagsEXT INFO

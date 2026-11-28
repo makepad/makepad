@@ -1546,6 +1546,7 @@ impl ::core::ops::BitXor for D3D11_CREATE_DEVICE_FLAG { type Output = Self; fn b
 impl ::core::ops::Not for D3D11_CREATE_DEVICE_FLAG { type Output = Self; fn not(self) -> Self { Self(!self.0) } }
 pub const D3D11_CREATE_DEVICE_VIDEO_SUPPORT: crate::Win32::Graphics::Direct3D11::D3D11_CREATE_DEVICE_FLAG = crate::Win32::Graphics::Direct3D11::D3D11_CREATE_DEVICE_FLAG(2048u64 as _);
 pub const D3D11_CULL_BACK: crate::Win32::Graphics::Direct3D11::D3D11_CULL_MODE = crate::Win32::Graphics::Direct3D11::D3D11_CULL_MODE(3i64 as _);
+pub const D3D11_CULL_FRONT: crate::Win32::Graphics::Direct3D11::D3D11_CULL_MODE = crate::Win32::Graphics::Direct3D11::D3D11_CULL_MODE(2i64 as _);
 #[repr(transparent)]
 #[derive(Clone, Copy)]
 pub struct D3D11_CULL_MODE(pub i32);

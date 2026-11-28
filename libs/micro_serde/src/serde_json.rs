@@ -905,36 +905,30 @@ impl DeJson for bool {
 
 impl SerJson for str {
     fn ser_json(&self, _d: usize, s: &mut SerJsonState) {
+        const CTRL: [&str; 32] = [
+            "\\u0000", "\\u0001", "\\u0002", "\\u0003", "\\u0004", "\\u0005", "\\u0006", "\\u0007",
+            "\\u0008", "\\t",     "\\n",     "\\u000b", "\\u000c", "\\r",     "\\u000e", "\\u000f",
+            "\\u0010", "\\u0011", "\\u0012", "\\u0013", "\\u0014", "\\u0015", "\\u0016", "\\u0017",
+            "\\u0018", "\\u0019", "\\u001a", "\\u001b", "\\u001c", "\\u001d", "\\u001e", "\\u001f",
+        ];
+        s.out.reserve(self.len() + 2);
         s.out.push('"');
-        for c in self.chars() {
-            match c {
-                '\n' => {
-                    s.out.push('\\');
-                    s.out.push('n');
-                }
-                '\r' => {
-                    s.out.push('\\');
-                    s.out.push('r');
-                }
-                '\t' => {
-                    s.out.push('\\');
-                    s.out.push('t');
-                }
-                '\\' => {
-                    s.out.push('\\');
-                    s.out.push('\\');
-                }
-                '"' => {
-                    s.out.push('\\');
-                    s.out.push('"');
-                }
-                // The remaining control characters (NUL included) have no
-                // short escape in JSON.
-                c if (c as u32) < 0x20 => {
-                    s.out.push_str(&format!("\\u{:04x}", c as u32));
-                }
-                _ => s.out.push(c),
+        let mut start = 0;
+        for (i, &b) in self.as_bytes().iter().enumerate() {
+            let esc = match b {
+                0x00..=0x1f => CTRL[b as usize],
+                b'\\' => "\\\\",
+                b'"' => "\\\"",
+                _ => continue,
+            };
+            if start < i {
+                s.out.push_str(&self[start..i]);
             }
+            s.out.push_str(esc);
+            start = i + 1;
+        }
+        if start < self.len() {
+            s.out.push_str(&self[start..]);
         }
         s.out.push('"');
     }
@@ -1637,6 +1631,28 @@ mod tests {
         // The short escapes JSON defines, and the legacy `\0`.
         let back: String = DeJson::deserialize_json(r#""\b\f\/\0""#).unwrap();
         assert_eq!(back, "\u{8}\u{c}/\0");
+
+        for b in 0u8..=0x1f {
+            let s = format!("é{}—", b as char);
+            let expected = match b {
+                b'\t' => "\"é\\t—\"".to_string(),
+                b'\n' => "\"é\\n—\"".to_string(),
+                b'\r' => "\"é\\r—\"".to_string(),
+                _ => format!("\"é\\u{:04x}—\"", b),
+            };
+            let json = s.serialize_json();
+            assert_eq!(json, expected, "exact escape for control byte 0x{b:02x}");
+            assert_eq!(String::deserialize_json(&json).unwrap(), s, "round-trip for control byte 0x{b:02x}");
+        }
+
+        // Byte-identical on mixed input. 2-, 3- and 4-byte chars pass through untouched beside
+        // escapes; DEL and U+2028 are not escaped; an escape at the very start and very end
+        // exercises both slice boundaries.
+        let mixed = "\"é€𝄞\u{7f}\u{2028}\u{1}z\\";
+        let json = mixed.serialize_json();
+        assert_eq!(json, "\"\\\"é€𝄞\u{7f}\u{2028}\\u0001z\\\\\"", "mixed escapes and non-ASCII serialize byte-identically");
+        assert_eq!(String::deserialize_json(&json).unwrap(), mixed, "the mixed string round-trips");
+        assert_eq!("".serialize_json(), "\"\"", "the empty string serializes as two quotes");
     }
 
     #[test]

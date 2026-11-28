@@ -128,6 +128,7 @@ Windows.Win32.Graphics.Direct3D11.D3D11_CPU_ACCESS_READ
 Windows.Win32.Graphics.Direct3D11.D3D11_CPU_ACCESS_WRITE
 Windows.Win32.Graphics.Direct3D11.D3D11_CREATE_DEVICE_FLAG
 Windows.Win32.Graphics.Direct3D11.D3D11_CULL_BACK
+Windows.Win32.Graphics.Direct3D11.D3D11_CULL_FRONT
 Windows.Win32.Graphics.Direct3D11.D3D11_CULL_NONE
 Windows.Win32.Graphics.Direct3D11.D3D11_DEPTH_STENCILOP_DESC
 Windows.Win32.Graphics.Direct3D11.D3D11_DEPTH_STENCIL_DESC

@@ -782,6 +782,8 @@ extern "C" {
     pub static kVTCompressionPropertyKey_MaximizePowerEfficiency: CFStringRef;
     /// A CFArray of byte count, seconds pairs: hard limits on the stream's rate over those windows.
     pub static kVTCompressionPropertyKey_DataRateLimits: CFStringRef;
+    /// macOS 12+: a CFNumber: the highest frame QP; the encoder drops pictures rather than exceed it.
+    pub static kVTCompressionPropertyKey_MaxAllowedFrameQP: CFStringRef;
     /// The dictionary of codec atoms hung off a format description, keyed by
     /// atom name (`hvcC` for HEVC).
     pub static kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms: CFStringRef;
@@ -1238,6 +1240,7 @@ pub struct MTLClearColor {
 #[allow(non_camel_case_types)]
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
 pub enum MTLPixelFormat {
+    Invalid = 0,
     R8Unorm = 10,
     R16Float = 25,
     RG8Unorm = 30,

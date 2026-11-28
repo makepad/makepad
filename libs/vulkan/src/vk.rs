@@ -4397,6 +4397,7 @@ impl CullModeFlags {
     pub const fn from_raw(value: u32) -> Self { Self(value) }
     pub const fn as_raw(self) -> u32 { self.0 }
     pub const BACK: Self = Self(2 as u32);
+    pub const FRONT: Self = Self(1 as u32);
     pub const NONE: Self = Self(0 as u32);
     #[inline]
     pub const fn from_bits_retain(value: u32) -> Self { Self(value) }

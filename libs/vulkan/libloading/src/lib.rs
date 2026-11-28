@@ -49,6 +49,7 @@ mod error;
 pub mod os;
 #[cfg(any(unix, windows, libloading_docs))]
 mod safe;
+#[cfg(any(unix, windows, libloading_docs))]
 mod util;
 
 pub use self::error::Error;
